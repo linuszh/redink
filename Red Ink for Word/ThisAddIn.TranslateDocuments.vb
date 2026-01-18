@@ -115,11 +115,13 @@ Partial Public Class ThisAddIn
     Private _correctPromptOverride As String = Nothing
     Private _correctSuffixOverride As String = Nothing
     Private _useSecondAPI As Boolean = False
+    Private _isFreestyle As Boolean = False
 
     ''' <summary>
     ''' Entry point for correction (default prompt/suffix).
     ''' </summary>
     Public Async Sub CorrectWordDocuments()
+        _isFreestyle = False
         Await CorrectWordDocuments(Nothing, Nothing)
     End Sub
 
@@ -132,8 +134,10 @@ Partial Public Class ThisAddIn
     Public Async Function CorrectWordDocuments(Optional promptOverride As String = Nothing,
                                           Optional correctedSuffixOverride As String = Nothing,
                                           Optional UseSecondAPI As Boolean = False) As System.Threading.Tasks.Task
+
         _correctPromptOverride = If(String.IsNullOrWhiteSpace(promptOverride), Nothing, promptOverride)
         _useSecondAPI = UseSecondAPI
+        _isFreestyle = True
 
         If String.IsNullOrWhiteSpace(correctedSuffixOverride) Then
             _correctSuffixOverride = Nothing
@@ -149,6 +153,7 @@ Partial Public Class ThisAddIn
         _correctPromptOverride = Nothing
         _correctSuffixOverride = Nothing
         _useSecondAPI = False
+        _isFreestyle = False
 
         If UseSecondAPI And originalConfigLoaded Then
             RestoreDefaults(_context, originalConfig)
@@ -165,10 +170,10 @@ Partial Public Class ThisAddIn
     ''' <param name="mode">The processing mode (Translate or Correct).</param>
     Private Async Function ProcessWordDocuments(mode As DocumentProcessMode) As System.Threading.Tasks.Task
         Dim selectedPath As String = ""
-        Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", "correct")
-        Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", "corrected")
-        Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", "Correcting")
-        Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", "Correction")
+        Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", If(_isFreestyle, "adapt", "correct"))
+        Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", If(_isFreestyle, "adapted", "corrected"))
+        Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", If(_isFreestyle, "Adapting", "Correcting"))
+        Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", If(_isFreestyle, "Adaption", "Correction"))
 
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
@@ -1058,9 +1063,18 @@ Partial Public Class ThisAddIn
             End If
 
             ' Call LLM with pure text only
-            Dim response As String = Await SharedMethods.LLM(
-            _context, systemPrompt, promptBuilder.ToString(),
-            "", "", 0, _useSecondAPI, True)
+
+            Dim Response As String
+            If _isFreestyle Then
+                Response = Await SharedMethods.LLM(
+                _context, systemPrompt, promptBuilder.ToString(),
+                "", "", 0, _useSecondAPI, True, AddUserPrompt:=OtherPromptUnfilled)
+            Else
+                Response = Await SharedMethods.LLM(
+                _context, systemPrompt, promptBuilder.ToString(),
+                "", "", 0, _useSecondAPI, True)
+            End If
+            _isFreestyle = False
 
             If String.IsNullOrWhiteSpace(response) Then
                 Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", "Correction")

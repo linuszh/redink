@@ -1023,14 +1023,14 @@ Partial Public Class ThisAddIn
                         AddDocs,
                         InsertDocs,
                         SlideInsert,
-                        OtherPrompt, DoChart:=DoChart)
+                        OtherPromptUnfilled, DoChart:=DoChart)
                 Else
 
                     ' Other LLM calls w/o Tooling
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart, " " & SP_Add_Chart, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart, " " & SP_Add_Chart, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
 
                     Else
 
@@ -1038,7 +1038,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
 
                         Next
 
@@ -1046,6 +1046,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 OtherPrompt = ""
+                OtherPromptUnfilled = ""
 
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
@@ -1759,7 +1760,7 @@ Partial Public Class ThisAddIn
                 Timeout:=0,
                 UseSecondAPI:=useSecondApi,
                 Hidesplash:=False,
-                AddUserPrompt:=OtherPrompt,
+                AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
             )
 

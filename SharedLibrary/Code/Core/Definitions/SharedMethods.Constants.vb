@@ -372,6 +372,7 @@ Namespace SharedLibrary
         Public Const BetaEndDate As Date = #12/31/2025#
         Public Const GracePeriodDays As Integer = 5  ' Days after license expiry where add-in still works 
         Public Const GracePeriodWarningIntervals As Integer = 5 ' Show warning every X startup during grace period
+        Public Const SK As String = NewHomeURL
 
         ' Warning day thresholds (descending order for checking)
         Public Shared ReadOnly LicenseWarningDays As Integer() = {30, 15, 10, 5, 3, 2, 1}
