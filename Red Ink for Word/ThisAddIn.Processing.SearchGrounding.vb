@@ -431,12 +431,14 @@ Partial Public Class ThisAddIn
                 Dim result As String = ""
                 Dim form As Form = Nothing
                 Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
+                Dim userDataFolder As String
 
                 Try
                     Debug.WriteLine($"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())})")
 
                     ' Create a temporary user data folder
-                    Dim userDataFolder As String = Path.Combine(Path.GetTempPath(), "RedInkWebView2")
+                    Dim uniqueID As String = Guid.NewGuid().ToString()
+                    userDataFolder = Path.Combine(Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
                     Directory.CreateDirectory(userDataFolder)
 
                     ' Create the form - larger size to trigger more content loading
@@ -462,15 +464,58 @@ Partial Public Class ThisAddIn
 
                     ' Set up event handlers
                     AddHandler webView.CoreWebView2InitializationCompleted,
-                        Sub(s, e)
-                            If e.IsSuccess Then
-                                Debug.WriteLine("[WebView2] CoreWebView2 initialized, navigating...")
-                                webView.CoreWebView2.Navigate(baseUrl)
-                            Else
-                                Debug.WriteLine($"[WebView2] Initialization failed: {e.InitializationException?.Message}")
-                                navigationCompleted = True
-                            End If
-                        End Sub
+                            Sub(s, e)
+                                If e.IsSuccess Then
+                                    Debug.WriteLine("[WebView2] CoreWebView2 initialized")
+
+                                    ' 1. Validate Input URL before navigating
+                                    If Not IsSafeWebUrl(baseUrl) Then
+                                        Debug.WriteLine($"[WebView2] Blocked unsafe URL: {baseUrl}")
+                                        navigationCompleted = True
+                                        Return
+                                    End If
+
+                                    ' 2. Lockdown Settings
+                                    With webView.CoreWebView2.Settings
+                                        .AreDefaultScriptDialogsEnabled = False
+                                        .AreDefaultContextMenusEnabled = False
+                                        .AreDevToolsEnabled = False
+                                        .IsStatusBarEnabled = False
+                                        .IsScriptEnabled = True
+                                        .IsBuiltInErrorPageEnabled = False
+                                        .IsWebMessageEnabled = False
+                                    End With
+
+                                    ' 3. Block New Windows / Popups
+                                    AddHandler webView.CoreWebView2.NewWindowRequested,
+                                        Sub(sender, args)
+                                            args.Handled = True
+                                        End Sub
+
+                                    ' 4. Block Permission Requests
+                                    AddHandler webView.CoreWebView2.PermissionRequested,
+                                        Sub(sender, args)
+                                            args.State = CoreWebView2PermissionState.Deny
+                                        End Sub
+
+                                    ' 5. Block Navigation to non-http schemes
+                                    AddHandler webView.CoreWebView2.NavigationStarting,
+                                        Sub(sender, args)
+                                            Dim uriStart As Uri = Nothing
+                                            If Uri.TryCreate(args.Uri, UriKind.Absolute, uriStart) Then
+                                                If uriStart.Scheme <> Uri.UriSchemeHttp AndAlso uriStart.Scheme <> Uri.UriSchemeHttps Then
+                                                    args.Cancel = True
+                                                End If
+                                            End If
+                                        End Sub
+
+                                    Debug.WriteLine("[WebView2] Navigating...")
+                                    webView.CoreWebView2.Navigate(baseUrl)
+                                Else
+                                    Debug.WriteLine($"[WebView2] Initialization failed: {e.InitializationException?.Message}")
+                                    navigationCompleted = True
+                                End If
+                            End Sub
 
                     AddHandler webView.NavigationCompleted,
                         Sub(s, e)
@@ -488,47 +533,47 @@ Partial Public Class ThisAddIn
                                         Try
                                             ' Scroll to trigger lazy loading
                                             Dim scrollScript As String = "
-(async function() {
-    var totalHeight = document.body.scrollHeight;
-    var viewportHeight = window.innerHeight || 1000;
-    var currentPosition = 0;
+                                                            (async function() {
+                                                                var totalHeight = document.body.scrollHeight;
+                                                                var viewportHeight = window.innerHeight || 1000;
+                                                                var currentPosition = 0;
     
-    while (currentPosition < totalHeight) {
-        window.scrollTo(0, currentPosition);
-        await new Promise(r => setTimeout(r, 200));
-        currentPosition += viewportHeight;
-        totalHeight = document.body.scrollHeight;
-    }
+                                                                while (currentPosition < totalHeight) {
+                                                                    window.scrollTo(0, currentPosition);
+                                                                    await new Promise(r => setTimeout(r, 200));
+                                                                    currentPosition += viewportHeight;
+                                                                    totalHeight = document.body.scrollHeight;
+                                                                }
     
-    window.scrollTo(0, 0);
-    await new Promise(r => setTimeout(r, 300));
-    return 'done';
-})();
-"
+                                                                window.scrollTo(0, 0);
+                                                                await new Promise(r => setTimeout(r, 300));
+                                                                return 'done';
+                                                            })();
+                                                            "
                                             webView.CoreWebView2.ExecuteScriptAsync(scrollScript).ContinueWith(
-                                                Sub(scrollTask)
-                                                    ' Wait after scrolling
-                                                    System.Threading.Thread.Sleep(2000)
+                                                                                                            Sub(scrollTask)
+                                                                                                                ' Wait after scrolling
+                                                                                                                System.Threading.Thread.Sleep(2000)
 
-                                                    form.BeginInvoke(
-                                                        Sub()
-                                                            Try
-                                                                ' Simple extraction - get full body text
-                                                                Dim extractScript As String = "
-(function() {
-    // Remove script/style/noscript to reduce noise
-    var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
-    toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
+                                                                                                                form.BeginInvoke(
+                                                                                                                    Sub()
+                                                                                                                        Try
+                                                                                                                            ' Simple extraction - get full body text
+                                                                                                                            Dim extractScript As String = "
+                                                            (function() {
+                                                                // Remove script/style/noscript to reduce noise
+                                                                var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
+                                                                toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
     
-    // Get body text
-    var text = document.body ? (document.body.innerText || '') : '';
+                                                                // Get body text
+                                                                var text = document.body ? (document.body.innerText || '') : '';
     
-    // Clean up whitespace
-    text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+                                                                // Clean up whitespace
+                                                                text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
     
-    return text;
-})();
-"
+                                                                return text;
+                                                            })();
+                                                            "
                                                                 webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
                                                                     Sub(t)
                                                                         form.BeginInvoke(
@@ -567,17 +612,18 @@ Partial Public Class ThisAddIn
                     ' Initialize WebView2 asynchronously
                     Dim env = CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
                     env.ContinueWith(
-                        Sub(t)
-                            form.BeginInvoke(
-                                Sub()
-                                    If t.IsCompleted AndAlso Not t.IsFaulted Then
-                                        webView.EnsureCoreWebView2Async(t.Result)
-                                    Else
-                                        Debug.WriteLine($"[WebView2] Environment creation failed")
-                                        navigationCompleted = True
-                                    End If
-                                End Sub)
-                        End Sub)
+                            Sub(t)
+                                form.BeginInvoke(
+                                    Sub()
+                                        If t.IsCompleted AndAlso Not t.IsFaulted Then
+                                            webView.EnsureCoreWebView2Async(t.Result)
+                                            ' Don't do anything else here - wait for CoreWebView2InitializationCompleted
+                                        Else
+                                            Debug.WriteLine($"[WebView2] Environment creation failed")
+                                            navigationCompleted = True
+                                        End If
+                                    End Sub)
+                            End Sub)
 
                     ' Run message loop with timeout - 90 seconds
                     Dim startTime As DateTime = DateTime.Now
@@ -593,6 +639,7 @@ Partial Public Class ThisAddIn
                 Catch ex As Exception
                     Debug.WriteLine($"[WebView2] Error: {ex.Message}")
                 Finally
+                    Try : Directory.Delete(userDataFolder, True) : Catch : End Try
                     Try : webView?.Dispose() : Catch : End Try
                     Try : form?.Close() : form?.Dispose() : Catch : End Try
                 End Try
@@ -623,6 +670,34 @@ Partial Public Class ThisAddIn
 
         Return tcs.Task
     End Function
+
+
+    ''' <summary>
+    ''' Validates that a URL is safe to crawl (Http/Https only, no local files/loopback).
+    ''' </summary>
+    Private Function IsSafeWebUrl(url As String) As Boolean
+        Try
+            Dim uriResult As Uri = Nothing
+            If Not Uri.TryCreate(url, UriKind.Absolute, uriResult) Then Return False
+
+            ' 1. Only allow HTTP and HTTPS
+            If uriResult.Scheme <> Uri.UriSchemeHttp AndAlso uriResult.Scheme <> Uri.UriSchemeHttps Then
+                Return False
+            End If
+
+            ' 2. Basic SSRF check: Block localhost / loopback
+            If uriResult.IsLoopback Then Return False
+            If uriResult.Host.ToLower().Equals("localhost") Then Return False
+
+            ' (Optional) Advanced: DNS resolve to check for private IP ranges (192.168.x.x, 10.x.x.x)
+
+            Return True
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+
     ''' <summary>
     ''' Unescapes a JSON string returned by ExecuteScriptAsync.
     ''' </summary>

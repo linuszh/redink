@@ -676,5 +676,327 @@ Partial Public Class ThisAddIn
     Private Const VK_ESCAPE As System.Int32 = &H1B
 
 
+    ' Serial Number Calculator
+
+    ''' <summary>
+    ''' Base date used for serial encoding/decoding. The serial stores the number of days since this date (UTC).
+    ''' </summary>
+    Private Shared ReadOnly BaseDate As DateTime = New DateTime(2000, 1, 1, 0, 0, 0, DateTimeKind.Utc)
+
+    ''' <summary>
+    ''' Number of bits allocated to the date component (days since <see cref="BaseDate"/>).
+    ''' </summary>
+    Private Const DateBits As Integer = 17
+
+    ''' <summary>
+    ''' Number of bits allocated to the numeric payload.
+    ''' </summary>
+    Private Const NumberBits As Integer = 10
+
+    ''' <summary>
+    ''' Number of bits allocated to the signature (integrity check).
+    ''' </summary>
+    Private Const SigBits As Integer = 13
+
+    ''' <summary>
+    ''' Total number of bits stored in the token.
+    ''' </summary>
+    Private Const TokenBits As Integer = DateBits + NumberBits + SigBits '40
+
+    ''' <summary>
+    ''' Fixed token length in Crockford Base32 characters.
+    ''' 40 bits / 5 bits per char = 8 chars.
+    ''' </summary>
+    Private Const TokenChars As Integer = 8
+
+    ''' <summary>
+    ''' Maximum encodable day count (inclusive) based on <see cref="DateBits"/>.
+    ''' </summary>
+    Private Const MaxDays As Integer = (1 << DateBits) - 1           '131071
+
+    ''' <summary>
+    ''' Maximum encodable number value (inclusive) based on <see cref="NumberBits"/>.
+    ''' </summary>
+    Private Const MaxNumber As Integer = (1 << NumberBits) - 1       '1023
+
+    ''' <summary>
+    ''' Bitmask used to extract the signature field from the packed token.
+    ''' </summary>
+    Private Const SigMask As Long = (1L << SigBits) - 1L
+
+    ''' <summary>
+    ''' Prompts user for a date and a number, encodes them into a Base32 token, writes the token to the document,
+    ''' demonstrates decoding, and copies the token to the clipboard.
+    ''' </summary>
+    ''' <param name="Selection">The Word selection used as an insertion point for output.</param>
+    Private Shared Sub EncodeSerial(Selection As Word.Selection)
+
+        Dim dateText As String = ShowCustomInputBox("Enter date (yyyy-MM-dd):", $"{AN} Serial Key Encoder", True)
+
+        Dim inputDate As DateTime
+        If Not DateTime.TryParseExact(dateText, "yyyy-MM-dd",
+                                    System.Globalization.CultureInfo.InvariantCulture,
+                                    DateTimeStyles.None,
+                                    inputDate) Then
+            ShowCustomMessageBox("Invalid date format.")
+            Return
+        End If
+
+        Dim numText As String = ShowCustomInputBox("Enter number (0.." & MaxNumber.ToString(CultureInfo.InvariantCulture) & "):", $"{AN} Serial Key Encoder", True)
+
+        Dim inputNumber As Integer
+        If Not Integer.TryParse(numText, NumberStyles.Integer, CultureInfo.InvariantCulture, inputNumber) Then
+            ShowCustomMessageBox("Invalid number.")
+            Return
+        End If
+
+        If inputNumber < 0 OrElse inputNumber > MaxNumber Then
+            ShowCustomMessageBox("Number out of range.")
+            Return
+        End If
+
+        Dim token As String = EncodeToken(inputDate, inputNumber)
+
+        ' Demonstrate decoding
+        Dim decodedDate As DateTime = DecodeDate(token)
+        Dim decodedNumber As Integer = DecodeNumber(token)
+
+        Selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+        Selection.TypeText(vbCrLf & "Encoded key (also in clipboard):" & vbCrLf & token & vbCrLf)
+
+        Try
+            Selection.TypeText(vbCrLf & "Decoded date: " & decodedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            Selection.TypeText(vbCrLf & "Decoded number: " & decodedNumber.ToString(CultureInfo.InvariantCulture))
+        Catch ex As System.Exception
+            Selection.TypeText(vbCrLf & "Token invalid: " & ex.Message)
+        End Try
+
+        Selection.ParagraphFormat.Hyphenation = CInt(False)
+        SLib.PutInClipboard(token)
+
+    End Sub
+
+    ''' <summary>
+    ''' Prompts for a serial token, decodes it (including signature validation), and writes the decoded date and number
+    ''' to the document using <see cref="Word.Selection.TypeText"/>.
+    ''' </summary>
+    ''' <param name="Selection">The Word selection used as an insertion point for output.</param>
+    Private Shared Sub DecodeSerial(Selection As Word.Selection)
+        Dim token As String = ShowCustomInputBox("Enter serial (8 chars, Crockford Base32):", $"{AN} Serial Key Decoder", True)
+
+        If String.IsNullOrWhiteSpace(token) Then
+            ShowCustomMessageBox("No serial entered.")
+            Return
+        End If
+
+        token = token.Trim()
+
+        Selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+        Selection.TypeText(vbCrLf & "Serial to decode:" & vbCrLf & token & vbCrLf)
+
+        Try
+            Dim decodedDate As DateTime = DecodeDate(token)
+            Dim decodedNumber As Integer = DecodeNumber(token)
+
+            Selection.TypeText(vbCrLf & "Decoded date: " & decodedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture))
+            Selection.TypeText(vbCrLf & "Decoded number: " & decodedNumber.ToString(CultureInfo.InvariantCulture) & vbCrLf)
+        Catch ex As System.Exception
+            Selection.TypeText(vbCrLf & "Token invalid: " & ex.Message & vbCrLf)
+        End Try
+
+        Selection.ParagraphFormat.Hyphenation = CInt(False)
+    End Sub
+
+
+    ''' <summary>
+    ''' Encodes a date and number into an 8-character Crockford Base32 token with an embedded signature.
+    ''' </summary>
+    ''' <param name="inputDate">Date to encode (interpreted at UTC midnight).</param>
+    ''' <param name="number">Number to encode (0..MaxNumber).</param>
+    ''' <returns>8-character Crockford Base32 token.</returns>
+    Private Shared Function EncodeToken(ByVal inputDate As DateTime, ByVal number As Integer) As String
+        ' Normalize date to UTC midnight
+        Dim dUtc As DateTime = New DateTime(inputDate.Year, inputDate.Month, inputDate.Day, 0, 0, 0, DateTimeKind.Utc)
+        Dim days As Integer = CInt((dUtc - BaseDate).TotalDays)
+
+        If days < 0 OrElse days > MaxDays Then
+            Throw New System.Exception("Date out of encodable range.")
+        End If
+        If number < 0 OrElse number > MaxNumber Then
+            Throw New System.Exception("Number out of encodable range.")
+        End If
+
+        Dim signature As Integer = ComputeSignature(days, number)
+
+        ' Pack into 40 bits:
+        ' packed = [days << (NumberBits+SigBits)] | [number << SigBits] | [sig]
+        Dim packed As Long = (CLng(days) << (NumberBits + SigBits)) Or
+                            (CLng(number) << SigBits) Or
+                            CLng(signature)
+
+        Return Base32CrockfordEncode(packed, TokenChars)
+    End Function
+
+    ''' <summary>
+    ''' Decodes the date component from a token (validating the signature).
+    ''' </summary>
+    ''' <param name="token">8-character token.</param>
+    ''' <returns>Date (UTC midnight) represented by the token.</returns>
+    Private Shared Function DecodeDate(ByVal token As String) As DateTime
+        Dim days As Integer = 0
+        Dim number As Integer = 0
+        UnpackAndValidate(token, days, number)
+
+        Dim result As DateTime = BaseDate.AddDays(days)
+        Return New DateTime(result.Year, result.Month, result.Day, 0, 0, 0, DateTimeKind.Utc)
+    End Function
+
+    ''' <summary>
+    ''' Decodes the numeric payload from a token (validating the signature).
+    ''' </summary>
+    ''' <param name="token">8-character token.</param>
+    ''' <returns>Number represented by the token.</returns>
+    Private Shared Function DecodeNumber(ByVal token As String) As Integer
+        Dim days As Integer = 0
+        Dim number As Integer = 0
+        UnpackAndValidate(token, days, number)
+        Return number
+    End Function
+
+    ''' <summary>
+    ''' Unpacks the token into its date-days and number fields and validates the embedded signature.
+    ''' </summary>
+    ''' <param name="token">8-character Crockford Base32 token.</param>
+    ''' <param name="days">Outputs decoded days since <see cref="BaseDate"/>.</param>
+    ''' <param name="number">Outputs decoded numeric payload.</param>
+    Private Shared Sub UnpackAndValidate(ByVal token As String, ByRef days As Integer, ByRef number As Integer)
+        If token Is Nothing Then
+            Throw New System.Exception("Token is null.")
+        End If
+
+        token = token.Trim().ToUpperInvariant()
+        If token.Length <> TokenChars Then
+            Throw New System.Exception("Token must be exactly " & TokenChars.ToString(CultureInfo.InvariantCulture) & " characters.")
+        End If
+
+        Dim packed As Long = Base32CrockfordDecode(token)
+
+        ' Extract fields:
+        Dim sig As Integer = CInt(packed And SigMask)
+        Dim numberVal As Integer = CInt((packed >> SigBits) And ((1L << NumberBits) - 1L))
+        Dim daysVal As Integer = CInt((packed >> (SigBits + NumberBits)) And ((1L << DateBits) - 1L))
+
+        Dim expectedSig As Integer = ComputeSignature(daysVal, numberVal)
+        If sig <> expectedSig Then
+            Throw New System.Exception("Signature mismatch (token manipulated or wrong key).")
+        End If
+
+        days = daysVal
+        number = numberVal
+    End Sub
+
+    ''' <summary>
+    ''' Computes the signature (integrity check) over the date-days and number fields using HMAC-SHA256,
+    ''' truncated to <see cref="SigBits"/> bits.
+    ''' </summary>
+    ''' <param name="days">Days since <see cref="BaseDate"/>.</param>
+    ''' <param name="number">Numeric payload.</param>
+    ''' <returns>Signature value truncated to <see cref="SigBits"/> bits.</returns>
+    Private Shared Function ComputeSignature(ByVal days As Integer, ByVal number As Integer) As Integer
+        ' HMAC(key, days||number) truncated to SigBits
+        Dim keyBytes As Byte() = System.Text.Encoding.UTF8.GetBytes(SK)
+
+        ' 4 bytes days, 2 bytes number
+        Dim msg As Byte() = New Byte(5) {} '6 bytes total
+        Dim dBytes As Byte() = BitConverter.GetBytes(days)
+        If BitConverter.IsLittleEndian Then Array.Reverse(dBytes)
+        Array.Copy(dBytes, 0, msg, 0, 4)
+
+        Dim nBytes As Byte() = BitConverter.GetBytes(CShort(number))
+        If BitConverter.IsLittleEndian Then Array.Reverse(nBytes)
+        Array.Copy(nBytes, 0, msg, 4, 2)
+
+        Dim hash As Byte()
+        Using h As System.Security.Cryptography.HMACSHA256 = New System.Security.Cryptography.HMACSHA256(keyBytes)
+            hash = h.ComputeHash(msg)
+        End Using
+
+        ' Take first 4 bytes as unsigned int, then mask down
+        Dim val As UInteger = CUInt(hash(0)) << 24 Or
+                            CUInt(hash(1)) << 16 Or
+                            CUInt(hash(2)) << 8 Or
+                            CUInt(hash(3))
+
+        Dim sig As Integer = CInt(val And CUInt((1 << SigBits) - 1))
+        Return sig
+    End Function
+
+    ''' <summary>
+    ''' Crockford Base32 alphabet used for token encoding.
+    ''' </summary>
+    Private Const CrockfordAlphabet As String = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+    ''' <summary>
+    ''' Encodes a non-negative integer value to Crockford Base32 with a fixed character length.
+    ''' </summary>
+    ''' <param name="value">Value to encode (must be non-negative).</param>
+    ''' <param name="length">Fixed output length in characters.</param>
+    ''' <returns>Base32 encoded string of exactly <paramref name="length"/> characters.</returns>
+    Private Shared Function Base32CrockfordEncode(ByVal value As Long, ByVal length As Integer) As String
+        If value < 0 Then Throw New System.Exception("Value must be non-negative.")
+
+        Dim chars As Char() = New Char(length - 1) {}
+        Dim v As Long = value
+
+        For i As Integer = length - 1 To 0 Step -1
+            Dim idx As Integer = CInt(v And 31L) ' 5 bits
+            chars(i) = CrockfordAlphabet(idx)
+            v >>= 5
+        Next
+
+        If v <> 0 Then
+            Throw New System.Exception("Value does not fit into " & length.ToString(CultureInfo.InvariantCulture) & " Base32 chars.")
+        End If
+
+        Return New String(chars)
+    End Function
+
+    ''' <summary>
+    ''' Decodes a Crockford Base32 token to its numeric value.
+    ''' </summary>
+    ''' <param name="token">Token to decode.</param>
+    ''' <returns>Decoded numeric value.</returns>
+    Private Shared Function Base32CrockfordDecode(ByVal token As String) As Long
+        Dim v As Long = 0
+
+        For Each ch As Char In token
+            v <<= 5
+            v = v Or CrockfordValue(ch)
+        Next
+
+        Return v
+    End Function
+
+    ''' <summary>
+    ''' Converts a single Crockford Base32 character into a 5-bit value.
+    ''' Applies Crockford normalization rules (O->0, I/L->1; case-insensitive).
+    ''' </summary>
+    ''' <param name="ch">Character to decode.</param>
+    ''' <returns>Value in range 0..31.</returns>
+    Private Shared Function CrockfordValue(ByVal ch As Char) As Integer
+        ' Crockford decoding rules: accept lowercase, treat O as 0, I/L as 1
+        Dim c As Char = Char.ToUpperInvariant(ch)
+
+        If c = "O"c Then c = "0"c
+        If c = "I"c OrElse c = "L"c Then c = "1"c
+
+        Dim idx As Integer = CrockfordAlphabet.IndexOf(c)
+        If idx < 0 Then
+            Throw New System.Exception("Invalid Base32 character: " & ch)
+        End If
+        Return idx
+    End Function
+
+
 
 End Class
