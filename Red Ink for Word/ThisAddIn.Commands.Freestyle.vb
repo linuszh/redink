@@ -847,59 +847,9 @@ Partial Public Class ThisAddIn
                 OtherPrompt = LastPrompt
             End If
 
-            Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
+            'Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
 
             SelectedText = ""
-
-            ' === Special utility commands (executed when text is selected) ===
-
-            If Not NoText Then
-
-                SelectedText = selection.Text
-
-                ' Store selected text as code basis in registry
-                If String.Equals(OtherPrompt.Trim(), "codebasis", StringComparison.OrdinalIgnoreCase) Then
-                    SLib.WriteToRegistry(RemoveCR(RegPath_CodeBasis), RemoveCR(selection.Text))
-                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-                    Return
-                End If
-
-                ' Store selected text as INI path in registry
-                If OtherPrompt.StartsWith("inipath", StringComparison.OrdinalIgnoreCase) Then
-                    SLib.WriteToRegistry(RemoveCR(RegPath_IniPath), RemoveCR(selection.Text))
-                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-                    Return
-                End If
-
-                ' Encode selected text (e.g., API key) and copy to clipboard
-                If String.Equals(OtherPrompt.Trim(), "encode", StringComparison.OrdinalIgnoreCase) Then
-                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text))
-                    SLib.PutInClipboard(Key)
-                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-                    selection.TypeText(vbCrLf & "Encoded key (also in clipboard):" & vbCrLf & Key)
-                    selection.ParagraphFormat.Hyphenation = CInt(False)
-                    SLib.PutInClipboard(Key)
-                    Return
-                End If
-
-                ' Decode selected text and copy to clipboard
-                If String.Equals(OtherPrompt.Trim(), "decode", StringComparison.OrdinalIgnoreCase) Then
-                    Dim Key As String = DeCodeAPIKey(RemoveCR(selection.Text))
-                    SLib.PutInClipboard(Key)
-                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-                    selection.TypeText(vbCrLf & "Decoded key (also in clipboard):" & vbCrLf & Key)
-                    selection.ParagraphFormat.Hyphenation = CInt(False)
-                    Return
-                End If
-
-                ' Convert selected markdown text to formatted Word content
-                If OtherPrompt.StartsWith("convertmarkdown", StringComparison.OrdinalIgnoreCase) Then
-                    Dim trailingCR = (SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbLf) Or SelectedText.EndsWith(vbCr))
-                    InsertTextWithMarkdown(selection, SelectedText, trailingCR, True)
-                    Return
-                End If
-
-            End If
 
             ' === Special utility commands (can execute without text selection) ===
 
@@ -1011,6 +961,66 @@ Partial Public Class ThisAddIn
 
                 OtherPrompt = idToCommand(chosen)
                 ' Continue normal execution: the short-command checks below will now match.
+            End If
+
+            If Not NoText Then
+
+                SelectedText = selection.Text
+
+                ' Store selected text as code basis in registry
+                If String.Equals(OtherPrompt.Trim(), "codebasis", StringComparison.OrdinalIgnoreCase) Then
+                    SLib.WriteToRegistry(RemoveCR(RegPath_CodeBasis), RemoveCR(selection.Text))
+                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                    Return
+                End If
+
+                ' Store selected text as INI path in registry
+                If OtherPrompt.StartsWith("inipath", StringComparison.OrdinalIgnoreCase) Then
+                    SLib.WriteToRegistry(RemoveCR(RegPath_IniPath), RemoveCR(selection.Text))
+                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                    Return
+                End If
+
+                ' Encode selected text (e.g., API key) and copy to clipboard
+                If String.Equals(OtherPrompt.Trim(), "encode", StringComparison.OrdinalIgnoreCase) Then
+                    Dim Key As String = CodeAPIKey(RemoveCR(selection.Text))
+                    SLib.PutInClipboard(Key)
+                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                    selection.TypeText(vbCrLf & "Encoded key (also in clipboard):" & vbCrLf & Key)
+                    selection.ParagraphFormat.Hyphenation = CInt(False)
+                    SLib.PutInClipboard(Key)
+                    Return
+                End If
+
+                ' Decode selected text and copy to clipboard
+                If String.Equals(OtherPrompt.Trim(), "decode", StringComparison.OrdinalIgnoreCase) Then
+                    Dim Key As String = DeCodeAPIKey(RemoveCR(selection.Text))
+                    SLib.PutInClipboard(Key)
+                    selection.Range.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+                    selection.TypeText(vbCrLf & "Decoded key (also in clipboard):" & vbCrLf & Key)
+                    selection.ParagraphFormat.Hyphenation = CInt(False)
+                    Return
+                End If
+
+                ' Convert selected markdown text to formatted Word content
+                If OtherPrompt.StartsWith("convertmarkdown", StringComparison.OrdinalIgnoreCase) Then
+                    Dim trailingCR = (SelectedText.EndsWith(vbCrLf) Or SelectedText.EndsWith(vbLf) Or SelectedText.EndsWith(vbCr))
+                    InsertTextWithMarkdown(selection, SelectedText, trailingCR, True)
+                    Return
+                End If
+
+            End If
+
+            ' Decode serial 
+            If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then
+                DecodeSerial(selection)
+                Return
+            End If
+
+            ' Create serial and copy to clipboard
+            If String.Equals(OtherPrompt.Trim(), "encodeserial", StringComparison.OrdinalIgnoreCase) Then
+                EncodeSerial(selection)
+                Return
             End If
 
             ' Display domain configuration information
@@ -1518,7 +1528,7 @@ Partial Public Class ThisAddIn
 
             ' === In-prompt trigger processing ===
 
-            ' {all} trigger: Select entire document
+            ' (all) trigger: Select entire document
             If OtherPrompt.IndexOf(AllTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(AllTrigger, "").Trim()
                 Dim document As Word.Document = application.ActiveDocument
@@ -1526,7 +1536,7 @@ Partial Public Class ThisAddIn
                 NoText = False
             End If
 
-            ' {lib} trigger: Enable library search
+            ' (lib) trigger: Enable library search
             If OtherPrompt.IndexOf(LibTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(LibTrigger, "").Trim()
                 DoLib = True
@@ -1538,7 +1548,7 @@ Partial Public Class ThisAddIn
                 DoTPMarkup = True
             End If
 
-            ' {chunk} trigger: Enable chunked processing (iterate through paragraphs)
+            ' (interate) trigger: Enable chunked processing (iterate through paragraphs)
             If OtherPrompt.IndexOf(ChunkTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(ChunkTrigger, "").Trim()
                 DoChunks = True
@@ -1597,7 +1607,7 @@ Partial Public Class ThisAddIn
 
             ' === File object triggers ===
 
-            ' {object} trigger: Attach file object to LLM request
+            ' (object) trigger: Attach file object to LLM request
             If DoFileObject AndAlso OtherPrompt.IndexOf(ObjectTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(ObjectTrigger, "(a file object follows)").Trim()
             ElseIf DoFileObject AndAlso OtherPrompt.IndexOf(ObjectTrigger2, StringComparison.OrdinalIgnoreCase) >= 0 Then
@@ -1699,7 +1709,7 @@ Partial Public Class ThisAddIn
                 DoFiles = True
             End If
 
-            ' {net} trigger: Enable internet search
+            ' (net) trigger: Enable internet search
             If OtherPrompt.IndexOf(NetTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(NetTrigger, "").Trim()
                 DoNet = True
@@ -1733,7 +1743,7 @@ Partial Public Class ThisAddIn
 
             ' === Multi-model selection ===
 
-            ' {multimodel} trigger: Prompt for multiple model selection
+            ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
             If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
                 If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso Not DoChart Then
@@ -1748,7 +1758,7 @@ Partial Public Class ThisAddIn
 
             ' === MyStyle prompt integration ===
 
-            ' {mystyle} trigger: Select and apply personal style prompt
+            ' (mystyle) trigger: Select and apply personal style prompt
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) AndAlso OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not IO.File.Exists(StylePath) Then
@@ -1764,8 +1774,8 @@ Partial Public Class ThisAddIn
 
             ' === Additional document integration ===
 
-            ' {adddoc} trigger: Gather content from other open Word documents
-            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not Dofiles Then
+            ' (adddoc) trigger: Gather content from other open Word documents
+            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
 
                 InsertDocs = GatherSelectedDocuments()
                 Debug.WriteLine($"GatherSelectedDocs returned: {Left(InsertDocs, 3000)}")
@@ -1782,20 +1792,22 @@ Partial Public Class ThisAddIn
                 OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(AddDocTrigger), "", RegexOptions.IgnoreCase)
             End If
 
+            OtherPromptUnfilled = OtherPrompt.Trim()
 
             ' === External file/directory embedding ===
 
             ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
-            If Not DoFiles Then
-                Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
-                If Not fileResult.Success Then
-                    Return
-                End If
-                OtherPrompt = fileResult.ModifiedPrompt
+
+            Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+            If Not fileResult.Success Then
+                Return
             End If
+            OtherPrompt = fileResult.ModifiedPrompt
+
+
             ' === File object selection (for LLM APIs that support file attachments) ===
 
-            If DoFileObject And Not Dofiles Then
+            If DoFileObject And Not DoFiles Then
                 If DoFileObjectClip Then
                     ' Use clipboard content as file object
                     FileObject = "clipboard"
@@ -1950,7 +1962,7 @@ Partial Public Class ThisAddIn
 
             If DoFiles Then
                 Try
-                    CorrectWordDocuments(SP_Freestyle_Document, "_freestyle", UseSecondAPI)
+                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI)
                 Catch ex As System.Exception
                     ' Handle any unexpected errors during freestyle execution
                     ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")

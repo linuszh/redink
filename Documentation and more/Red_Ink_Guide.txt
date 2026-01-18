@@ -193,7 +193,7 @@ The secondary and further models are accessed via Freestyle (2nd). Within Freest
 
 Draw.io is also available as a fully locally installable application (https://github.com/jgraph/drawio-desktop/releases). Anyone who wants to access Draw.io after its creation can call up the diagram software via "Word Helpers".
 * With "Reply:" (or "Pushback:", which works identically), Red Ink can be instructed to respond only to the comments in the Word document or the selected text of the document. It is possible to select whether only the comments of a specific author and a specific period should be considered. The responses are inserted as reply comments (example: "Reply: Justify in two sentences each why the objections in the comments are unfounded."). The Word chatbot can also respond to or add comments. With the trigger term "(bubbles)", Word comments can also be specifically analyzed. This trigger term is not necessary when using "Reply:" or "Pushback:".
-* With "File:" it is possible to apply a command to a (non-open) Word document or a series of Word documents in a directory. Red Ink then goes through the document paragraph by paragraph and executes the command, e.g. changing a name or deleting certain statements ("File: Delete all sentences in which we grant the customer a right of termination." or "File: Adjust the date of the announcement to ten days calculated from today."). The triggers (see below) cannot be used, with the exception of "(mystyle)". Cross-paragraph adjustments are also not possible, as Red Ink proceeds paragraph by paragraph. However, an attempt is made to maintain the context by always taking a certain number of preceding and subsequent paragraphs into account. Both individual files and entire directories of Word documents can be processed (including subdirectories). The files are given the extension "_freestyle". Following the adjustment, a document comparison is also created using Word, which in turn bears the additional extension "_compare". The files are saved in the same location as the original file.
+* With "File:" it is possible to apply a command to a (non-open) Word document or a series of Word documents in a directory. Red Ink then goes through the document paragraph by paragraph and executes the command, e.g. changing a name or deleting certain statements ("File: Delete all sentences in which we grant the customer a right of termination." or "File: Adjust the date of the announcement to ten days calculated from today."). In the prompt, the placeholders {doc} and {dir} can be used (e.g., "File: Complete the template based on the information from this document: {doc}"). The triggers (see below) cannot be used, with the exception of "(mystyle)". Cross-paragraph adjustments are also not possible, as Red Ink proceeds paragraph by paragraph. However, an attempt is made to maintain the context by always taking a certain number of preceding and subsequent paragraphs into account. Both individual files and entire directories of Word documents can be processed (including subdirectories). The files are given the extension "_freestyle". Following the adjustment, a document comparison is also created using Word, which in turn bears the additional extension "_compare". The files are saved in the same location as the original file.
 * With "Pure:" Red Ink can be instructed to pass the entered instruction to the language model without additional instructions from Red Ink (except for the instruction to preserve existing formatting, if the corresponding option has been selected). This can be used to pass direct prompts to the AI (functionally as a system prompt, where a distinction is made). Normally, however, this is not needed. No further trigger codes are executed in this case. A marked text, however, is passed as a user prompt (embedded in a <TEXTTOPROCESS> tag).
 45 The prompt itself may contain further functional trigger codes that trigger a function:
 * In certain cases, it can be useful to retrieve additional information from the internet to supplement a text or answer a question. If a search engine is configured, the add-in in Word can be asked before executing the command to perform an internet search for information that is missing but is necessary for the execution of the command and then to use the information from the first hits for the command as well. To do this, "(net)" must be appended to the command. Whether this functionality is available is displayed in the help-text of the prompt box that appears when calling the Freestyle function(this can be configured, as can the search engine). If it is used, Red Ink will, if configured to do so (parameter "ISearch_Approve", see below), display the search commands to be used to perform the search and prompt for confirmation. This ensures that no confidential information is passed on to the search engine. The function also tries to read nested pages, but that will not always work. The add-in can be configured to determine how deeply it enters a website.
@@ -2985,6 +2985,10 @@ W=1.1.13.200
 O=1.1.12.200
 E=1.1.11.200
 Function for comparing Word documents (in Word Helpers) was extended with PDF output and the option to compare two text passages (the latter also in Outlook); on-the-fly translator (Outlook, Word); "Chart:" prefix in Freestyle to have the AI create diagrams; added feature to call Draw.io from within Red Ink (Word Helpers); function in DocStyle to remove empty paragraphs (Word)
+18.1.2026
+
+W=1.1.14.200
+"File:" prefix now also supports {doc} and {dir}; improved security for the Web Retriever (Word); improvement for "promptlog" (prompts without expansion of {doc}/{dir})
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -4069,10 +4073,10 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-14 January 2026	1
+18 January 2026	1
 
 
-	14 January 2026 
+	18 January 2026 
 
 
 
