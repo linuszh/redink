@@ -643,6 +643,8 @@ Public Class frmAIChat
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
         AddHandler btnTools.Click, AddressOf btnTools_Click
 
+        RestoreAlternateModelFromSettings()
+
         ' Update window title with active model name
         UpdateTitle()
 
@@ -1515,6 +1517,7 @@ Public Class frmAIChat
     ''' <summary>
     ''' Handles btnSwitchModel click. Toggles between primary/secondary/alternate models.
     ''' Implements snapshot/restore pattern to keep global context pristine.
+    ''' Persists selection to My.Settings for restoration on next session.
     ''' </summary>
     ''' <remarks>
     ''' Behavior depends on configuration:
@@ -1549,6 +1552,7 @@ Public Class frmAIChat
                 UpdateModelButtonText()
                 UpdateTitle()
                 UpdateDocumentCheckboxesState()
+                PersistAlternateModelToSettings()
                 Return
             End If
 
@@ -1607,6 +1611,7 @@ Public Class frmAIChat
             UpdateModelButtonText()
             UpdateTitle()
             UpdateDocumentCheckboxesState()
+            PersistAlternateModelToSettings()
         Else
             ' ─────────────────────────────────────────────────────────────
             ' Legacy Mode: Simple toggle between primary and secondary
@@ -1618,6 +1623,7 @@ Public Class frmAIChat
             UpdateModelButtonText()
             UpdateTitle()
             UpdateDocumentCheckboxesState()
+            PersistAlternateModelToSettings()
         End If
     End Sub
 
@@ -1636,6 +1642,98 @@ Public Class frmAIChat
         Else
             btnSwitchModel.Text = "Switch Model"
         End If
+    End Sub
+
+
+    ' =========================================================================
+    ' Alternate Model Persistence
+    ' =========================================================================
+
+    ''' <summary>
+    ''' Persists the current alternate model selection to My.Settings.
+    ''' Only saves the display name - config is reloaded from INI on next session.
+    ''' </summary>
+    Private Sub PersistAlternateModelToSettings()
+        Try
+            If _alternateModelSelected AndAlso Not String.IsNullOrWhiteSpace(_alternateModelDisplayName) Then
+                My.Settings.ChatAlternateModelName = _alternateModelDisplayName
+            Else
+                My.Settings.ChatAlternateModelName = ""
+            End If
+            My.Settings.Save()
+        Catch ex As Exception
+            Debug.WriteLine($"PersistAlternateModelToSettings error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Restores the alternate model selection from My.Settings by looking up
+    ''' the saved model name in the alternate models INI file.
+    ''' Falls back to primary model if saved model is no longer available.
+    ''' </summary>
+    Private Sub RestoreAlternateModelFromSettings()
+        Try
+            Dim savedName As String = My.Settings.ChatAlternateModelName
+
+            If String.IsNullOrWhiteSpace(savedName) Then
+                ' No saved alternate model - use primary
+                Return
+            End If
+
+            If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
+                ' No alternate model INI configured - clear saved setting
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Load all available alternate models from INI
+            Dim availableModels As List(Of ModelConfig) = SharedMethods.LoadAlternativeModels(
+                _context.INI_AlternateModelPath,
+                _context,
+                "Chat Alternate Model",
+                includeToolOnly:=False,
+                toolsOnly:=False)
+
+            If availableModels Is Nothing OrElse availableModels.Count = 0 Then
+                ' No models available - clear saved setting and use primary
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Find the saved model by display name (ModelDescription)
+            Dim matchedModel As ModelConfig = availableModels.FirstOrDefault(
+                Function(m) String.Equals(m.ModelDescription, savedName, StringComparison.OrdinalIgnoreCase))
+
+            If matchedModel Is Nothing Then
+                ' Saved model no longer available - clear setting and use primary
+                Debug.WriteLine($"RestoreAlternateModelFromSettings: Model '{savedName}' no longer available, using primary")
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Found the model - apply it
+            _alternateModelSelected = True
+            _alternateModelConfig = matchedModel
+            _alternateModelDisplayName = savedName
+            _useSecondApi = True
+
+            UpdateModelButtonText()
+            UpdateDocumentCheckboxesState()
+
+            Debug.WriteLine($"RestoreAlternateModelFromSettings: Restored alternate model '{savedName}'")
+
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreAlternateModelFromSettings error: {ex.Message}")
+            ' On error, clear the persisted setting and use primary
+            Try
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+            Catch
+            End Try
+        End Try
     End Sub
 
     ''' <summary>
