@@ -1060,6 +1060,18 @@ Namespace My
                 Me("DocStyle_RemoveEmptyLines") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property ChatAlternateModelName() As String
+            Get
+                Return CType(Me("ChatAlternateModelName"),String)
+            End Get
+            Set
+                Me("ChatAlternateModelName") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
