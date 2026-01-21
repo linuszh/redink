@@ -1213,6 +1213,25 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Slides As String
+        Get
+            Return _context.SP_Add_Slides
+        End Get
+        Set(value As String)
+            _context.SP_Add_Slides = value
+        End Set
+    End Property
+
+
+    Public Shared Property SP_Add_Chart As String
+        Get
+            Return _context.SP_Add_Chart
+        End Get
+        Set(value As String)
+            _context.SP_Add_Chart = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_BubblesExcel As String
         Get
