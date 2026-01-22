@@ -248,6 +248,7 @@ Namespace SharedLibrary
             Me.Width = 520
             Me.Height = 460
             Me.MinimumSize = New System.Drawing.Size(520, 460)
+            Me.TopMost = True
 
             Me.outer = New System.Windows.Forms.TableLayoutPanel() With {
                 .Dock = System.Windows.Forms.DockStyle.Fill,
