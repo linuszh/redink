@@ -143,6 +143,7 @@ Namespace SharedLibrary
             Property INI_LocalModelPath As String
             Property INI_TTSEndpoint As String
             Property SP_Translate As String
+            Property SP_Translate_Multi As String
             Property SP_Translate_Document As String
             Property SP_Correct As String
 
@@ -417,6 +418,7 @@ Namespace SharedLibrary
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
         Public Property SP_Translate As String Implements ISharedContext.SP_Translate
+        Public Property SP_Translate_Multi As String Implements ISharedContext.SP_Translate_Multi
         Public Property SP_Translate_Document As String Implements ISharedContext.SP_Translate_Document
         Public Property SP_Correct As String Implements ISharedContext.SP_Correct
         Public Property SP_Correct_Document As String Implements ISharedContext.SP_Correct_Document

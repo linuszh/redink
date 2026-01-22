@@ -1,12 +1,23 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedMethods.FileImporter.vb
-' Purpose: 
+' File: SharedLogger.vb
+' Purpose:
+'   Provides lightweight, privacy-preserving logging to per-user/per-host log files,
+'   and includes an interactive log analysis utility for aggregating usage statistics.
+'
+' Notes:
+'   - Logging is performed asynchronously via a single consumer queue to avoid file
+'     contention and minimize impact on the caller.
+'   - The module is designed to fail silently (no exceptions escape to the caller).
+'   - User identity is represented by a short SHA-256 derived hash.
 '
 ' Architecture:
-'
+'   - `Log`: Enqueues a single append operation.
+'   - Background worker: Single thread drains the queue and writes to disk.
+'   - `AnalyzeLogs`: Reads log files and aggregates counts and unique-user metrics.
 ' =============================================================================
 
 Option Strict On
@@ -27,6 +38,18 @@ Public Module SharedLogger
     Private ReadOnly _logQueue As New System.Collections.Concurrent.BlockingCollection(Of Action)()
     Private _logWorkerStarted As Integer = 0
 
+    ''' <summary>
+    ''' Enqueues a single log entry for asynchronous append to a per-user/per-host log file.
+    ''' </summary>
+    ''' <param name="context">Shared context providing configuration (e.g., log directory path).</param>
+    ''' <param name="RDV">
+    ''' A descriptive runtime identifier (typically contains host info and optionally a version marker like "(Vx.y)").
+    ''' </param>
+    ''' <param name="functionName">The name of the function or handler being logged.</param>
+    ''' <remarks>
+    ''' This routine is intentionally best-effort and must not throw. Log writes are serialized by a dedicated
+    ''' background worker thread.
+    ''' </remarks>
     Public Sub Log(context As ISharedContext, RDV As String, functionName As String)
         Try
             If context Is Nothing Then Return
@@ -56,7 +79,7 @@ Public Module SharedLogger
             Dim line As String =
                 "[" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
                 userHash & " " &
-                Version & " " &
+                version & " " &
                 functionName
 
             Debug.WriteLine($"[SharedLogger] Enqueue write -> dir='{logDir}', file='{fileName}', fn='{functionName}'")
@@ -78,15 +101,12 @@ Public Module SharedLogger
                             End Using
                         End Using
 
-
                         Debug.WriteLine($"[SharedLogger] Wrote line -> '{fullPath}'")
 
-
                     Catch ex As Exception
-
                         Debug.WriteLine($"[SharedLogger] Write failed: {ex.GetType().Name}: {ex.Message}")
                         Try
-                            ' Optional: a separate debug log, only when INI_APIDebug is enabled.
+                            ' Optional diagnostic log written alongside the primary logs.
                             Dim dbgPath As String = System.IO.Path.Combine(logDir, $"{AN2}-logger-debug.log")
                             Dim dbgLine As String =
                                     "[" & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture) & "] " &
@@ -105,6 +125,12 @@ Public Module SharedLogger
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Starts the single background log worker thread if it has not been started yet.
+    ''' </summary>
+    ''' <remarks>
+    ''' Thread creation is guarded by an atomic compare-exchange to ensure only one worker is started.
+    ''' </remarks>
     Private Sub EnsureLogWorker()
         If Interlocked.CompareExchange(_logWorkerStarted, 1, 0) <> 0 Then Return
 
@@ -123,6 +149,20 @@ Public Module SharedLogger
         t.Name = "SharedLoggerWorker"
         t.Start()
     End Sub
+
+    ''' <summary>
+    ''' Reads log files from the configured log directory, aggregates usage statistics, and displays the results.
+    ''' </summary>
+    ''' <param name="context">Shared context providing the log directory path.</param>
+    ''' <remarks>
+    ''' The analysis groups by:
+    ''' - unique users (hashed identifier),
+    ''' - version usage,
+    ''' - invoked function usage,
+    ''' - other log line usage,
+    ''' - invoked usage per day,
+    ''' and also produces per-host (Word/Excel/Outlook/Unknown) breakdowns based on the log file naming convention.
+    ''' </remarks>
     Public Sub AnalyzeLogs(context As ISharedContext)
         Try
             Dim startInput As String = ShowCustomInputBox("Start date (yyyy-MM-dd) or empty", $"{AN} Log Statistics", True)
@@ -142,7 +182,20 @@ Public Module SharedLogger
                 Exit Sub
             End If
 
-            ' --- OVERALL ---
+            Dim files As String() = System.IO.Directory.GetFiles(dir, "redink-*.log")
+            If files.Length = 0 Then
+                ShowCustomMessageBox("No log files found.")
+                Exit Sub
+            End If
+
+            ' Initialize progress bar.
+            SharedLibrary.ProgressBarModule.CancelOperation = False
+            SharedLibrary.ProgressBarModule.GlobalProgressMax = files.Length
+            SharedLibrary.ProgressBarModule.GlobalProgressValue = 0
+            SharedLibrary.ProgressBarModule.GlobalProgressLabel = "Initializing..."
+            SharedLibrary.ProgressBarModule.ShowProgressBarInSeparateThread($"{AN} Log Statistics", "Analyzing log files...")
+
+            ' Overall aggregates.
             Dim allUsers As New HashSet(Of String)()
 
             Dim allInvokedUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
@@ -156,7 +209,7 @@ Public Module SharedLogger
             Dim allVersionUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
             Dim allVersionUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
 
-            ' --- PER APP (by file name suffix: WD / XL / OL / UK) ---
+            ' Per app (by file name suffix: WD / XL / OL / UK).
             Dim appUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.OrdinalIgnoreCase)
 
             Dim appInvokedUsage As New Dictionary(Of String, Dictionary(Of String, Integer))(StringComparer.OrdinalIgnoreCase)
@@ -170,7 +223,20 @@ Public Module SharedLogger
 
             Dim appInvokedUsageByDay As New Dictionary(Of String, Dictionary(Of String, Dictionary(Of Date, HashSet(Of String))))(StringComparer.OrdinalIgnoreCase)
 
-            For Each file As String In System.IO.Directory.GetFiles(dir, "redink-*.log")
+            Dim fileIndex As Integer = 0
+            For Each file As String In files
+                ' Check for cancellation.
+                If SharedLibrary.ProgressBarModule.CancelOperation Then
+                    SharedLibrary.ProgressBarModule.CancelOperation = True
+                    ShowCustomMessageBox("Analysis cancelled by user.")
+                    Exit Sub
+                End If
+
+                ' Update progress.
+                fileIndex += 1
+                SharedLibrary.ProgressBarModule.GlobalProgressValue = fileIndex
+                SharedLibrary.ProgressBarModule.GlobalProgressLabel = $"Processing file {fileIndex} of {files.Length}..."
+
                 Dim appCode As String = ExtractAppCode(file)
 
                 If Not appUsers.ContainsKey(appCode) Then appUsers(appCode) = New HashSet(Of String)()
@@ -198,7 +264,7 @@ Public Module SharedLogger
                     allUsers.Add(parsed.UserHash)
                     appUsers(appCode).Add(parsed.UserHash)
 
-                    ' --- Version stats (overall + per-app) ---
+                    ' Version stats (overall + per-app).
                     If Not String.IsNullOrWhiteSpace(parsed.Version) Then
                         Dim v As String = parsed.Version.Trim()
 
@@ -214,7 +280,7 @@ Public Module SharedLogger
                     End If
 
                     If parsed.IsInvoked Then
-                        ' --- Invoked stats (overall + per-app) ---
+                        ' Invoked stats (overall + per-app).
                         If Not allInvokedUsage.ContainsKey(parsed.Key) Then allInvokedUsage(parsed.Key) = 0
                         allInvokedUsage(parsed.Key) += 1
                         If Not allInvokedUsers.ContainsKey(parsed.Key) Then allInvokedUsers(parsed.Key) = New HashSet(Of String)()
@@ -225,7 +291,7 @@ Public Module SharedLogger
                         If Not appInvokedUsers(appCode).ContainsKey(parsed.Key) Then appInvokedUsers(appCode)(parsed.Key) = New HashSet(Of String)()
                         appInvokedUsers(appCode)(parsed.Key).Add(parsed.UserHash)
 
-                        ' per-day (overall)
+                        ' Per-day (overall).
                         Dim day As Date = parsed.Time.Date
                         If Not allInvokedUsageByDay.ContainsKey(parsed.Key) Then
                             allInvokedUsageByDay(parsed.Key) = New Dictionary(Of Date, HashSet(Of String))()
@@ -235,7 +301,7 @@ Public Module SharedLogger
                         End If
                         allInvokedUsageByDay(parsed.Key)(day).Add(parsed.UserHash)
 
-                        ' per-day (per app)
+                        ' Per-day (per app).
                         If Not appInvokedUsageByDay(appCode).ContainsKey(parsed.Key) Then
                             appInvokedUsageByDay(appCode)(parsed.Key) = New Dictionary(Of Date, HashSet(Of String))()
                         End If
@@ -245,7 +311,7 @@ Public Module SharedLogger
                         appInvokedUsageByDay(appCode)(parsed.Key)(day).Add(parsed.UserHash)
 
                     Else
-                        ' --- Other lines (overall + per-app) ---
+                        ' Other lines (overall + per-app).
                         If Not allOtherUsage.ContainsKey(parsed.Key) Then allOtherUsage(parsed.Key) = 0
                         allOtherUsage(parsed.Key) += 1
                         If Not allOtherUsers.ContainsKey(parsed.Key) Then allOtherUsers(parsed.Key) = New HashSet(Of String)()
@@ -258,6 +324,9 @@ Public Module SharedLogger
                     End If
                 Next
             Next
+
+            ' Close progress bar.
+            SharedLibrary.ProgressBarModule.CancelOperation = True
 
             Dim sb As New StringBuilder()
 
@@ -352,6 +421,7 @@ Public Module SharedLogger
             ShowCustomWindow($"The following log statistics were compiled based on the content found in {context.INI_LogPath}", sb.ToString(), "", $"{AN} Log Statistics")
 
         Catch ex As System.Exception
+            SharedLibrary.ProgressBarModule.CancelOperation = True
             ShowCustomMessageBox("Error in AnalyzeLogs: " & ex.Message)
         End Try
     End Sub
@@ -360,6 +430,11 @@ Public Module SharedLogger
     ' INTERNAL HELPERS
     '==============================
 
+    ''' <summary>
+    ''' Determines a short application code (WD/XL/OL/UK) from a host descriptor string.
+    ''' </summary>
+    ''' <param name="name">A host descriptor string that may include "word", "excel", or "outlook".</param>
+    ''' <returns>A two-letter application code.</returns>
     Private Function GetOfficeHostCode(name As String) As String
         If String.IsNullOrWhiteSpace(name) Then Return "UK"
 
@@ -371,16 +446,31 @@ Public Module SharedLogger
         Return "UK"
     End Function
 
+    ''' <summary>
+    ''' Produces a stable short hash used to partition log files per user and host application.
+    ''' </summary>
+    ''' <param name="appCode">The application code (WD/XL/OL/UK).</param>
+    ''' <returns>An uppercase hexadecimal hash string.</returns>
     Private Function GetFileHash(appCode As String) As String
         Return ComputeHash(Environment.UserName & "|" &
                            Environment.MachineName & "|" &
                            appCode, 8)
     End Function
 
+    ''' <summary>
+    ''' Produces a privacy-preserving short hash for the current user.
+    ''' </summary>
+    ''' <returns>An uppercase hexadecimal hash string.</returns>
     Private Function GetUserHash() As String
         Return ComputeHash(Environment.UserName, 8)
     End Function
 
+    ''' <summary>
+    ''' Computes a short uppercase hexadecimal SHA-256 prefix for the provided input.
+    ''' </summary>
+    ''' <param name="input">Input value to hash.</param>
+    ''' <param name="length">Number of bytes to include from the SHA-256 digest.</param>
+    ''' <returns>An uppercase hexadecimal string of <paramref name="length"/> bytes.</returns>
     Private Function ComputeHash(input As String, length As Integer) As String
         Using sha As SHA256 = SHA256.Create()
             Dim bytes As Byte() = sha.ComputeHash(Encoding.UTF8.GetBytes(input))
@@ -392,13 +482,22 @@ Public Module SharedLogger
         End Using
     End Function
 
-
+    ''' <summary>
+    ''' Extracts the application code from a log file name generated by this module.
+    ''' </summary>
+    ''' <param name="filePath">Full path to the log file.</param>
+    ''' <returns>The application code suffix (e.g., WD, XL, OL, UK).</returns>
     Private Function ExtractAppCode(filePath As String) As String
         Dim name As String = System.IO.Path.GetFileNameWithoutExtension(filePath)
         Dim parts As String() = name.Split("-"c)
         Return parts(parts.Length - 1)
     End Function
 
+    ''' <summary>
+    ''' Parses a date in <c>yyyy-MM-dd</c> format.
+    ''' </summary>
+    ''' <param name="input">User-provided input.</param>
+    ''' <returns>A parsed <see cref="DateTime"/> value, or <see langword="Nothing"/> if empty/invalid.</returns>
     Private Function ParseDate(input As String) As Nullable(Of DateTime)
         If String.IsNullOrWhiteSpace(input) Then Return Nothing
         Dim dt As DateTime
@@ -409,19 +508,41 @@ Public Module SharedLogger
         Return Nothing
     End Function
 
+    ''' <summary>
+    ''' Parsed representation of a single log line.
+    ''' </summary>
     Private Class ParsedLine
+        ''' <summary>
+        ''' Timestamp of the log entry.
+        ''' </summary>
         Public Time As DateTime
+
+        ''' <summary>
+        ''' Privacy-preserving user identifier.
+        ''' </summary>
         Public UserHash As String
+
+        ''' <summary>
+        ''' Version field extracted from the log line (trimmed from a fixed-width field).
+        ''' </summary>
         Public Version As String
 
-        ' Group key:
-        '   - invoked lines: function handler name (e.g. RI_PrimLang2_Click)
-        '   - other lines: first token after version field (best-effort grouping)
+        ''' <summary>
+        ''' Grouping key; for "invoked" lines this is the function name, otherwise the first token after the version field.
+        ''' </summary>
         Public Key As String
 
+        ''' <summary>
+        ''' Indicates whether the log line represents an invoked function event.
+        ''' </summary>
         Public IsInvoked As Boolean
     End Class
 
+    ''' <summary>
+    ''' Parses a log line written by <see cref="Log"/> into a structured representation.
+    ''' </summary>
+    ''' <param name="line">A raw log file line.</param>
+    ''' <returns>A <see cref="ParsedLine"/> instance, or <see langword="Nothing"/> if parsing fails.</returns>
     Private Function ParseLogLine(line As String) As ParsedLine
         Try
             Dim endBracket As Integer = line.IndexOf("]")
@@ -459,10 +580,8 @@ Public Module SharedLogger
 
             Dim key As String
             If isInvoked Then
-                ' Typical: "<FunctionName> invoked"
                 key = tokens(0)
             Else
-                ' Best-effort grouping for non-invoked lines
                 key = tokens(0)
             End If
 
