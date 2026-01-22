@@ -951,7 +951,7 @@ Partial Public Class ThisAddIn
             _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
             Async Function(text, lang, token)
                 TranslateLanguage = lang
-                Return Await LLM(InterpolateAtRuntime(SP_Translate),
+                Return Await LLM(InterpolateAtRuntime(SP_Translate_Multi),
                                 "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
                                 "", "", 0,
                                 UseSecondAPI:=False,

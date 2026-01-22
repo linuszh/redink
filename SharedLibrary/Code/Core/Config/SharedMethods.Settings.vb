@@ -1672,6 +1672,7 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LotoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
+                    {"SP_Translate_Multi", context.SP_Translate_Multi},
                     {"SP_Translate_Document", context.SP_Translate_Document},
                     {"SP_Correct", context.SP_Correct},
                     {"SP_Correct_Document", context.SP_Correct_Document},
@@ -1766,6 +1767,7 @@ Namespace SharedLibrary
                     {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
                     {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
                     {"SP_Translate", Default_SP_Translate},
+                    {"SP_Translate_Multi", Default_SP_Translate_Multi},
                     {"SP_Translate_Document", Default_SP_Translate_Document},
                     {"SP_Correct", Default_SP_Correct},
                     {"SP_Correct_Document", Default_SP_Correct_Document},
@@ -2781,6 +2783,7 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
             variableValues.Add("SP_Translate", context.SP_Translate)
+            variableValues.Add("SP_Translate_Multi", context.SP_Translate_Multi)
             variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
             variableValues.Add("SP_Correct", context.SP_Correct)
             variableValues.Add("SP_Correct_Document", context.SP_Correct_Document)
@@ -2947,6 +2950,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
+                If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))
                 If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
                 If updatedValues.ContainsKey("SP_Correct_Document") Then context.SP_Correct_Document = CStr(updatedValues("SP_Correct_Document"))

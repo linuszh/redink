@@ -147,13 +147,13 @@ Public Class Ribbon1
         Globals.ThisAddIn.ShowSettings()
     End Sub
 
-    Private Sub Sumup_Click(sender As Object, e As RibbonControlEventArgs) Handles Sumup.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Sumup_Click invoked")
+    Private Sub RI_Sumup_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Sumup.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Sumup_Click invoked")
         Globals.ThisAddIn.MainMenu("Sumup")
     End Sub
 
-    Private Sub Sumup2_Click(sender As Object, e As RibbonControlEventArgs) Handles Sumup2.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Sumup2_Click invoked")
+    Private Sub RI_Sumup2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Sumup2.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Sumup2_Click invoked")
         Globals.ThisAddIn.MainMenu("Sumup")
     End Sub
 
@@ -339,13 +339,13 @@ Public Class Ribbon2
         Globals.ThisAddIn.ShowSettings()
     End Sub
 
-    Private Sub Sumup_Click(sender As Object, e As RibbonControlEventArgs) Handles Sumup.Click
+    Private Sub RI_Sumup_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Sumup.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Sumup_Click invoked")
         Globals.ThisAddIn.MainMenu("Sumup")
     End Sub
 
-    Private Sub Sumup2_Click(sender As Object, e As RibbonControlEventArgs) Handles Sumup2.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Sumup2_Click invoked")
+    Private Sub RI_Sumup2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Sumup2.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Sumup2_Click invoked")
         Globals.ThisAddIn.MainMenu("Sumup")
     End Sub
 
