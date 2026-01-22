@@ -67,7 +67,7 @@ Partial Class Ribbon1
         Me.RI_Convincing = Me.Factory.CreateRibbonButton
         Me.RI_Shorten = Me.Factory.CreateRibbonButton
         Me.RI_Summarize = Me.Factory.CreateRibbonButton
-        Me.Sumup = Me.Factory.CreateRibbonButton
+        Me.RI_Sumup = Me.Factory.CreateRibbonButton
         Me.RI_Answers = Me.Factory.CreateRibbonButton
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
@@ -77,7 +77,7 @@ Partial Class Ribbon1
         Me.Group2 = Me.Factory.CreateRibbonGroup
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
-        Me.Sumup2 = Me.Factory.CreateRibbonButton
+        Me.RI_Sumup2 = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -111,7 +111,7 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.Menu2)
         Me.Menu1.Items.Add(Me.RI_Shorten)
         Me.Menu1.Items.Add(Me.RI_Summarize)
-        Me.Menu1.Items.Add(Me.Sumup)
+        Me.Menu1.Items.Add(Me.RI_Sumup)
         Me.Menu1.Items.Add(Me.RI_Answers)
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
@@ -228,13 +228,13 @@ Partial Class Ribbon1
         Me.RI_Summarize.ScreenTip = "Will create a short summary of your selected text"
         Me.RI_Summarize.ShowImage = True
         '
-        'Sumup
+        'RI_Sumup
         '
-        Me.Sumup.Label = "Sum-up"
-        Me.Sumup.Name = "Sumup"
-        Me.Sumup.OfficeImageId = "MessageDeliveryInformation"
-        Me.Sumup.ScreenTip = "Will create a summary of the mail chain"
-        Me.Sumup.ShowImage = True
+        Me.RI_Sumup.Label = "Sum-up"
+        Me.RI_Sumup.Name = "RI_Sumup"
+        Me.RI_Sumup.OfficeImageId = "MessageDeliveryInformation"
+        Me.RI_Sumup.ScreenTip = "Will create a summary of the mail chain"
+        Me.RI_Sumup.ShowImage = True
         '
         'RI_Answers
         '
@@ -299,7 +299,7 @@ Partial Class Ribbon1
         '
         Me.Group2.Items.Add(Me.RI_PrimLang2)
         Me.Group2.Items.Add(Me.RI_Correct2)
-        Me.Group2.Items.Add(Me.Sumup2)
+        Me.Group2.Items.Add(Me.RI_Sumup2)
         Me.Group2.KeyTip = "R"
         Me.Group2.Label = "Red Ink"
         Me.Group2.Name = "Group2"
@@ -323,13 +323,13 @@ Partial Class Ribbon1
         Me.RI_Correct2.ScreenTip = "Will correct the selected text (clean and with a markup for visibility)"
         Me.RI_Correct2.ShowImage = True
         '
-        'Sumup2
+        'RI_Sumup2
         '
-        Me.Sumup2.Label = "Sum-up"
-        Me.Sumup2.Name = "Sumup2"
-        Me.Sumup2.OfficeImageId = "MessageDeliveryInformation"
-        Me.Sumup2.ScreenTip = "Will create a summary of the mail chain"
-        Me.Sumup2.ShowImage = True
+        Me.RI_Sumup2.Label = "Sum-up"
+        Me.RI_Sumup2.Name = "RI_Sumup2"
+        Me.RI_Sumup2.OfficeImageId = "MessageDeliveryInformation"
+        Me.RI_Sumup2.ScreenTip = "Will create a summary of the mail chain"
+        Me.RI_Sumup2.ShowImage = True
         '
         'Ribbon1
         '
@@ -398,8 +398,8 @@ Partial Class Ribbon1
     Friend WithEvents RI_PrimLang2 As RibbonButton
     Friend WithEvents RI_Correct2 As RibbonButton
     Friend WithEvents Settings As RibbonButton
-    Friend WithEvents Sumup As RibbonButton
-    Friend WithEvents Sumup2 As RibbonButton
+    Friend WithEvents RI_Sumup As RibbonButton
+    Friend WithEvents RI_Sumup2 As RibbonButton
     Friend WithEvents Menu2 As RibbonMenu
     Friend WithEvents RI_Improve As RibbonButton
     Friend WithEvents RI_NoFillers As RibbonButton
@@ -483,7 +483,7 @@ Partial Class Ribbon2
         Me.RI_Convincing = Me.Factory.CreateRibbonButton
         Me.RI_Shorten = Me.Factory.CreateRibbonButton
         Me.RI_Summarize = Me.Factory.CreateRibbonButton
-        Me.Sumup = Me.Factory.CreateRibbonButton
+        Me.RI_Sumup = Me.Factory.CreateRibbonButton
         Me.RI_Answers = Me.Factory.CreateRibbonButton
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
@@ -494,7 +494,7 @@ Partial Class Ribbon2
         Me.Group2 = Me.Factory.CreateRibbonGroup
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
-        Me.Sumup2 = Me.Factory.CreateRibbonButton
+        Me.RI_Sumup2 = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -528,7 +528,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.Menu2)
         Me.Menu1.Items.Add(Me.RI_Shorten)
         Me.Menu1.Items.Add(Me.RI_Summarize)
-        Me.Menu1.Items.Add(Me.Sumup)
+        Me.Menu1.Items.Add(Me.RI_Sumup)
         Me.Menu1.Items.Add(Me.RI_Answers)
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
@@ -647,11 +647,11 @@ Partial Class Ribbon2
         '
         'Sumup
         '
-        Me.Sumup.Label = "Sum-up"
-        Me.Sumup.Name = "Sumup"
-        Me.Sumup.OfficeImageId = "MessageDeliveryInformation"
-        Me.Sumup.ScreenTip = "Will create a summary of the mail chain"
-        Me.Sumup.ShowImage = True
+        Me.RI_Sumup.Label = "Sum-up"
+        Me.RI_Sumup.Name = "RI_Sumup"
+        Me.RI_Sumup.OfficeImageId = "MessageDeliveryInformation"
+        Me.RI_Sumup.ScreenTip = "Will create a summary of the mail chain"
+        Me.RI_Sumup.ShowImage = True
         '
         'RI_Answers
         '
@@ -717,7 +717,7 @@ Partial Class Ribbon2
         '
         Me.Group2.Items.Add(Me.RI_PrimLang2)
         Me.Group2.Items.Add(Me.RI_Correct2)
-        Me.Group2.Items.Add(Me.Sumup2)
+        Me.Group2.Items.Add(Me.RI_Sumup2)
         Me.Group2.KeyTip = "R"
         Me.Group2.Label = "Red Ink"
         Me.Group2.Name = "Group2"
@@ -741,13 +741,13 @@ Partial Class Ribbon2
         Me.RI_Correct2.ScreenTip = "Will correct the selected text (clean and with a markup for visibility)"
         Me.RI_Correct2.ShowImage = True
         '
-        'Sumup2
+        'RI_Sumup2
         '
-        Me.Sumup2.Label = "Sum-up"
-        Me.Sumup2.Name = "Sumup2"
-        Me.Sumup2.OfficeImageId = "MessageDeliveryInformation"
-        Me.Sumup2.ScreenTip = "Will create a summary of the mail chain"
-        Me.Sumup2.ShowImage = True
+        Me.RI_Sumup2.Label = "Sum-up"
+        Me.RI_Sumup2.Name = "RI_Sumup2"
+        Me.RI_Sumup2.OfficeImageId = "MessageDeliveryInformation"
+        Me.RI_Sumup2.ScreenTip = "Will create a summary of the mail chain"
+        Me.RI_Sumup2.ShowImage = True
         '
         'Ribbon2
         '
@@ -816,8 +816,8 @@ Partial Class Ribbon2
     Friend WithEvents RI_PrimLang2 As RibbonButton
     Friend WithEvents RI_Correct2 As RibbonButton
     Friend WithEvents Settings As RibbonButton
-    Friend WithEvents Sumup As RibbonButton
-    Friend WithEvents Sumup2 As RibbonButton
+    Friend WithEvents RI_Sumup As RibbonButton
+    Friend WithEvents RI_Sumup2 As RibbonButton
     Friend WithEvents Menu2 As RibbonMenu
     Friend WithEvents RI_Improve As RibbonButton
     Friend WithEvents RI_NoFillers As RibbonButton

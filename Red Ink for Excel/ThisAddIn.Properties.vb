@@ -670,6 +670,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Translate_Multi As String
+        Get
+            Return _context.SP_Translate_Multi
+        End Get
+        Set(value As String)
+            _context.SP_Translate_Multi = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_Translate_Document As String
         Get

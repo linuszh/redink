@@ -49,6 +49,7 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports Markdig
 Imports Microsoft.Office.Interop.Word
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
@@ -1212,6 +1213,9 @@ Partial Public Class ThisAddIn
                         End Try
 
                     Case "inky_selecttools"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SelectTools invoked")
+
                         ' Tool selection dialog
                         Try
                             Dim st = LoadInkyState()
@@ -1249,6 +1253,9 @@ Partial Public Class ThisAddIn
                         End Try
 
                     Case "inky_settooling"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SetTooling invoked")
+
                         ' Enable/disable tooling
                         Try
                             Dim enabled As Boolean = CBool(j("Enabled"))
@@ -1414,6 +1421,9 @@ Partial Public Class ThisAddIn
                             })
 
                     Case "inky_upload"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Upload invoked")
+
                         ' (Upload logic preserved)
                         ' ------------------------------------------------------------------
                         Try
@@ -1456,6 +1466,9 @@ Partial Public Class ThisAddIn
                         End Try
 
                     Case "inky_cancel"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Cancel invoked")
+
                         ' (Cancellation logic preserved)
                         ' ------------------------------------------------------------------
                         ' Optional job id (preferred modern path)
@@ -1546,6 +1559,9 @@ Partial Public Class ThisAddIn
                         Catch
                             supportsFilesNow = False
                         End Try
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Send invoked")
+
                         ' ------------------ (B) File / clipboard object extraction (unchanged logic) ------------
                         Dim extractedDoc As System.String = Nothing
                         Dim extractedLabel As System.String = Nothing
@@ -1808,6 +1824,9 @@ Partial Public Class ThisAddIn
                         })
 
                     Case "inky_pure"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Pure invoked")
+
                         ' (Pure mode logic preserved)
                         ' ------------------------------------------------------------------
                         Dim fileObject As String = j("FileObject")?.ToString()
@@ -1962,6 +1981,9 @@ Partial Public Class ThisAddIn
                         End If
 
                     Case "inky_canceljob"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_CancelJob invoked")
+
                         ' (Direct cancel by id)
                         ' ------------------------------------------------------------------
                         Dim jobId = j("Job")?.ToString()
@@ -1976,6 +1998,9 @@ Partial Public Class ThisAddIn
                         End Try
 
                     Case "inky_toword"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_ToWord invoked")
+
                         Try
                             Dim st As InkyState = LoadInkyState()
                             Dim turns = If(st?.History, New System.Collections.Generic.List(Of ChatTurn)())
@@ -2051,6 +2076,9 @@ Partial Public Class ThisAddIn
                         })
 
                     Case "inky_copylast"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_CopyLast invoked")
+
                         ' (Copy last assistant response)
                         ' ------------------------------------------------------------------
                         Dim stCopy As InkyState = LoadInkyState()
@@ -2063,6 +2091,9 @@ Partial Public Class ThisAddIn
                         Return JsonOk(New With {.ok = True})
 
                     Case "inky_setmodel"
+
+                        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SetModel invoked")
+
                         ' (Model selection)
                         ' ------------------------------------------------------------------
                         Dim key As System.String = j("Key")?.ToString()
@@ -2135,6 +2166,9 @@ Partial Public Class ThisAddIn
 
         Select Case cmd0
             Case "redink_sendtooutlook"
+
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_SentToOutlook invoked")
+
                 ' (Legacy Outlook insert)
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
                 ' All Outlook automation on UI thread
@@ -2186,6 +2220,9 @@ Partial Public Class ThisAddIn
                 Return ""
 
             Case "redink_translate"
+
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_Translate invoked")
+
                 ' ─── 1  guard clauses ─────────────────────────────────────────
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
                 Dim targetLang As String = Await SwitchToUi(Function()
@@ -2213,6 +2250,9 @@ Partial Public Class ThisAddIn
                 Return llmOut
 
             Case "redink_correct"
+
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_Correct invoked")
+
                 If String.IsNullOrWhiteSpace(textBody0) Then Return ""
                 ' 1)  Run the LLM on the UI thread
                 Dim llmOut As String = Await RunLlmAsync(
@@ -2230,6 +2270,9 @@ Partial Public Class ThisAddIn
                 Return llmOut
 
             Case "redink_freestyle"
+
+                SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Browser_Freestyle invoked")
+
                 ' (Freestyle flow preserved)
                 '─── A  gather prompt on UI thread ──────────────────────────────
                 ' ---------------------------------------------------------------
