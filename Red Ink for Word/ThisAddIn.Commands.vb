@@ -42,6 +42,7 @@ Imports System.Globalization
 Imports System.IO
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml.Drawing
+Imports DocumentFormat.OpenXml.Office2010.Ink
 Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Google.Cloud.Speech.V1.LanguageCodes
 Imports Microsoft.Office.Interop.PowerPoint
@@ -949,9 +950,12 @@ Partial Public Class ThisAddIn
     Public Sub ShowQuickTranslate()
         If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
             _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
-            Async Function(text, lang, token)
+            Async Function(text, lang, sourcelang, token)
                 TranslateLanguage = lang
-                Return Await LLM(InterpolateAtRuntime(SP_Translate_Multi),
+                SourceLanguage = sourcelang
+                Dim SysPrompt As String = SP_Translate_Multi
+                If Not String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
+                Return Await LLM(InterpolateAtRuntime(SysPrompt),
                                 "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
                                 "", "", 0,
                                 UseSecondAPI:=False,
