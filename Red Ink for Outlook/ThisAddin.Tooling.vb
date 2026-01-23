@@ -1105,6 +1105,7 @@ Partial Public Class ThisAddIn
 
             Dim currentResponse As String = ""
             Dim iteration As Integer = 0
+            Dim fullUserPrompt As String = ""
 
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
 
@@ -1128,8 +1129,6 @@ Partial Public Class ThisAddIn
                 context.Log($"--- Iteration {iteration} of {context.MaxIterations} ---")
 
                 context.Log("Calling LLM...", "llm")
-
-                Dim fullUserPrompt As String
 
                 If Not String.IsNullOrWhiteSpace(fullPromptOverride) Then
                     fullUserPrompt = fullPromptOverride
@@ -1287,6 +1286,62 @@ Partial Public Class ThisAddIn
                 End If
 
             End While
+
+            ' If we hit max iterations and the last response was a tool call, force a final text response.
+            ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
+            If iteration >= context.MaxIterations AndAlso
+               Not context.IsCancelled AndAlso
+               Not cancellationToken.IsCancellationRequested AndAlso
+               ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) Then
+
+                context.Log("Forcing final response (max iterations reached with pending tool call)...")
+
+                ' Disable tool definitions to prevent further tool calls
+                INI_APICall_ToolInstructions_2 = ""
+
+                ' Append instruction to force synthesis
+                Dim finalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. " &
+                    "Based on all the information gathered from the tools so far, provide your final answer now."
+
+                ToolingFileLogger.LogStep("Forcing final LLM call without tools")
+                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+                Using timeoutCts As New System.Threading.CancellationTokenSource()
+                    Dim totalTimeout = effectiveTimeout + 60
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+
+                    Using combinedCts As System.Threading.CancellationTokenSource =
+                        System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+
+                        Try
+                            Dim finalResponse As String = Await LLM(
+                                finalSysPrompt,
+                                fullUserPrompt,
+                                "", "", 0,
+                                useSecondAPI,
+                                hideSplash,
+                                otherPrompt,
+                                fileObject,
+                                combinedCts.Token,
+                                True, True)
+
+                            If Not String.IsNullOrWhiteSpace(finalResponse) Then
+                                currentResponse = finalResponse
+                                context.Log($"Final response received ({currentResponse.Length} chars)")
+                                ToolingFileLogger.LogRawResponse("Main LLM() - Forced Final", currentResponse)
+                            Else
+                                context.LogWarn("Empty response from forced final LLM call")
+                            End If
+
+                        Catch ex As OperationCanceledException
+                            context.LogWarn("Forced final call was cancelled")
+                        Catch ex As Exception
+                            context.LogError($"Error during forced final call: {ex.Message}", ex:=ex)
+                        End Try
+                    End Using
+                End Using
+            End If
 
             If context.IsCancelled OrElse cancellationToken.IsCancellationRequested Then
                 context.LogWarn("Session cancelled")

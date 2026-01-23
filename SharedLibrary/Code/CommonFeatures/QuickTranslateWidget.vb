@@ -9,7 +9,8 @@
 '
 ' Architecture:
 '  - Non-modal Form with two side-by-side panels (input TextBox, output RichTextBox)
-'  - Language input field with persistence via My.Settings
+'  - Source language input field with "(auto)" placeholder
+'  - Target language input field with persistence via My.Settings
 '  - Debounce timer (1 second) triggers translation after user stops typing
 '  - Enter key also triggers immediate translation
 '  - Buttons: Clear, [Collapse], [Clear 2], [Copy 2], Copy, Close
@@ -24,6 +25,7 @@ Option Strict On
 Option Explicit On
 
 Imports System.Drawing
+Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -42,10 +44,18 @@ Namespace SharedLibrary
         Private Const EXPANDED_OUTPUT1_PERCENT As Single = 37.5F
         Private Const EXPANDED_OUTPUT2_PERCENT As Single = 37.5F
 
+        ' Win32 API for cue banner (placeholder text)
+        Private Const EM_SETCUEBANNER As Integer = &H1501
+
+        <DllImport("user32.dll", CharSet:=CharSet.Unicode)>
+        Private Shared Function SendMessage(hWnd As IntPtr, msg As Integer, wParam As IntPtr, lParam As String) As IntPtr
+        End Function
+
         ' Controls
         Private WithEvents txtInput As TextBox
         Private WithEvents rtbOutput As RichTextBox
         Private WithEvents rtbOutput2 As RichTextBox
+        Private WithEvents txtSourceLanguage As TextBox
         Private WithEvents txtLanguage As TextBox
         Private WithEvents btnClear As Button
         Private WithEvents btnCopy As Button
@@ -82,8 +92,8 @@ Namespace SharedLibrary
         Private _cts As CancellationTokenSource
         Private _cts2 As CancellationTokenSource
 
-        ' Callback to perform translation
-        Private ReadOnly _translateFunc As Func(Of String, String, CancellationToken, Task(Of String))
+        ' Callback to perform translation (now with sourceLanguage parameter)
+        Private ReadOnly _translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String))
 
         ' Default language from context
         Private ReadOnly _defaultLanguage As String
@@ -93,6 +103,9 @@ Namespace SharedLibrary
         Private _collapsedWidth As Integer
         Private _collapsedX As Integer
 
+        ' Store calculated minimum width for collapsed state
+        Private _minWidthCollapsed As Integer
+
         ' Track if form is closing
         Private _isClosing As Boolean = False
 
@@ -100,10 +113,10 @@ Namespace SharedLibrary
         ''' Creates a new QuickTranslateWidget.
         ''' </summary>
         ''' <param name="translateFunc">
-        ''' Async function that takes (textToTranslate, targetLanguage, cancellationToken) and returns the translated text.
+        ''' Async function that takes (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) and returns the translated text.
         ''' </param>
         ''' <param name="defaultLanguage">The default target language (from INI_Language1).</param>
-        Public Sub New(translateFunc As Func(Of String, String, CancellationToken, Task(Of String)),
+        Public Sub New(translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String)),
                        defaultLanguage As String)
             _translateFunc = translateFunc
             _defaultLanguage = If(defaultLanguage, "English")
@@ -119,8 +132,6 @@ Namespace SharedLibrary
             Me.ShowInTaskbar = True
             Me.TopMost = True
             Me.StartPosition = FormStartPosition.Manual
-            Me.MinimumSize = New Size(500, 155)
-            Me.Size = New Size(600, 175)
             Me.KeyPreview = True
 
             ' Set icon
@@ -143,8 +154,6 @@ Namespace SharedLibrary
             }
 
             ' Main layout: 2 rows, 3 columns (3rd column for expanded view)
-            ' Row 0: Input/Output panels (fill)
-            ' Row 1: Language field + buttons (auto-size, minimal padding)
             mainTable = New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
                 .ColumnCount = 3,
@@ -168,7 +177,7 @@ Namespace SharedLibrary
             }
             mainTable.Controls.Add(txtInput, 0, 0)
 
-            ' Output RichTextBox (middle) - supports text selection
+            ' Output RichTextBox (middle)
             rtbOutput = New RichTextBox() With {
                 .Dock = DockStyle.Fill,
                 .Font = stdFont,
@@ -202,7 +211,9 @@ Namespace SharedLibrary
                                             "Select text: auto-copies after brief pause." & vbCrLf &
                                             "Click on selection: use as new input text.")
 
-            ' Bottom row: use a TableLayoutPanel for left (language) and right (buttons) alignment
+            ' Bottom row: use a TableLayoutPanel with improved layout
+            ' Col 0 (Left): 100% width (takes usually remaining space)
+            ' Col 1 (Right): AutoSize (ensures buttons are never covered)
             Dim bottomTable As New TableLayoutPanel() With {
                 .Dock = DockStyle.Fill,
                 .ColumnCount = 2,
@@ -211,13 +222,13 @@ Namespace SharedLibrary
                 .Padding = New Padding(0, 5, 0, 0),
                 .AutoSize = True
             }
-            bottomTable.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 50.0F))
-            bottomTable.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 50.0F))
+            bottomTable.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+            bottomTable.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
             bottomTable.RowStyles.Add(New RowStyle(SizeType.AutoSize))
             mainTable.Controls.Add(bottomTable, 0, 1)
             mainTable.SetColumnSpan(bottomTable, 3)
 
-            ' Left side: Language label + textbox + spinners
+            ' Left side: Source language + arrow + Target language + spinners
             Dim leftFlow As New FlowLayoutPanel() With {
                 .FlowDirection = FlowDirection.LeftToRight,
                 .Dock = DockStyle.Fill,
@@ -228,24 +239,34 @@ Namespace SharedLibrary
             }
             bottomTable.Controls.Add(leftFlow, 0, 0)
 
-            ' Language label - aligned with textbox baseline
-            Dim lblLang As New Label() With {
-                .Text = "Language:",
-                .AutoSize = True,
-                .Margin = New Padding(0, 4, 5, 0),
-                .TextAlign = ContentAlignment.MiddleLeft
+            ' Source language textbox
+            txtSourceLanguage = New TextBox() With {
+                .Width = 100,
+                .Font = stdFont,
+                .Margin = New Padding(0, 2, 0, 0)
             }
-            leftFlow.Controls.Add(lblLang)
+            leftFlow.Controls.Add(txtSourceLanguage)
+            toolTip.SetToolTip(txtSourceLanguage, "Source language (leave empty for auto-detect)")
 
-            ' Language textbox
+            ' Arrow label
+            Dim lblArrow As New Label() With {
+                .Text = "▶",
+                .AutoSize = True,
+                .Margin = New Padding(5, 4, 5, 0),
+                .TextAlign = ContentAlignment.MiddleCenter
+            }
+            leftFlow.Controls.Add(lblArrow)
+
+            ' Target language textbox
             txtLanguage = New TextBox() With {
-                .Width = 120,
+                .Width = 150,
                 .Font = stdFont,
                 .Margin = New Padding(0, 2, 0, 0)
             }
             leftFlow.Controls.Add(txtLanguage)
+            toolTip.SetToolTip(txtLanguage, "Target language")
 
-            ' Spinner label (hidden by default)
+            ' Spinner label (needed for calculation even if hidden)
             lblSpinner = New Label() With {
                 .Text = "⏳",
                 .AutoSize = True,
@@ -254,7 +275,7 @@ Namespace SharedLibrary
             }
             leftFlow.Controls.Add(lblSpinner)
 
-            ' Second spinner for expanded translation
+            ' Second spinner
             lblSpinner2 = New Label() With {
                 .Text = "⏳",
                 .AutoSize = True,
@@ -274,8 +295,7 @@ Namespace SharedLibrary
             }
             bottomTable.Controls.Add(rightFlow, 1, 0)
 
-            ' Buttons - RightToLeft flow means we add in reverse order
-
+            ' Buttons (added in reverse order due to RightToLeft flow)
             btnClose = New Button() With {
                 .Text = "Close",
                 .AutoSize = True,
@@ -323,24 +343,37 @@ Namespace SharedLibrary
 
             Me.Controls.Add(mainTable)
 
-            ' Calculate DPI-aware minimum size based on actual control heights
+            ' === Dynamic Size Calculation ===
+            ' Calculate Heights
             Dim oneLineHeight As Integer = txtInput.Font.Height + 6
             Dim bottomRowHeight As Integer = btnClose.Height + 10
             Dim chromeHeight As Integer = Me.Height - Me.ClientSize.Height
             Dim minHeight As Integer = chromeHeight + oneLineHeight + bottomRowHeight + 25
 
-            Me.MinimumSize = New Size(CInt(500 * Me.DeviceDpi / 96.0F), minHeight)
-            Me.Size = New Size(CInt(600 * Me.DeviceDpi / 96.0F), minHeight)
+            ' Calculate Widths for Collapse Mode
+            ' Left side: Input + Arrow + Target + Spinner + Margins (approx manually summed to be safe)
+            Dim leftContentWidth As Integer = txtSourceLanguage.Width + 5 + lblArrow.PreferredWidth + 10 + txtLanguage.Width + 5 + lblSpinner.PreferredWidth + 15
+            ' Right side: Clear + Copy + Close + Margins
+            Dim rightContentWidth As Integer = btnClear.PreferredSize.Width + 5 + btnCopy.PreferredSize.Width + 5 + btnClose.PreferredSize.Width + 5
 
-            ' Debounce timer
+            ' Total width required (content + padding)
+            Dim totalContentWidth As Integer = leftContentWidth + rightContentWidth + mainTable.Padding.Horizontal + 20
+
+            ' Store calculated min width for logic usage
+            _minWidthCollapsed = CInt(Math.Max(520, totalContentWidth) * Me.DeviceDpi / 96.0F)
+
+            Me.MinimumSize = New Size(_minWidthCollapsed, minHeight)
+            Me.Size = New Size(CInt(Math.Max(600, _minWidthCollapsed + 50) * Me.DeviceDpi / 96.0F), minHeight)
+
+
+            ' Timers
             debounceTimer = New System.Windows.Forms.Timer() With {.Interval = DEBOUNCE_MS}
             AddHandler debounceTimer.Tick, AddressOf OnDebounceTimerTick
 
-            ' Selection copy timer (auto-copy after selection pause)
             _selectionCopyTimer = New System.Windows.Forms.Timer() With {.Interval = SELECTION_COPY_DELAY_MS}
             AddHandler _selectionCopyTimer.Tick, AddressOf OnSelectionCopyTimerTick
 
-            ' Wire up mouse handlers for RichTextBoxes
+            ' Event Handlers
             AddHandler rtbOutput.MouseDown, AddressOf RtbOutput_MouseDown
             AddHandler rtbOutput.MouseMove, AddressOf RtbOutput_MouseMove
             AddHandler rtbOutput.MouseUp, AddressOf RtbOutput_MouseUp
@@ -350,6 +383,12 @@ Namespace SharedLibrary
             AddHandler rtbOutput2.MouseMove, AddressOf RtbOutput2_MouseMove
             AddHandler rtbOutput2.MouseUp, AddressOf RtbOutput2_MouseUp
             AddHandler rtbOutput2.SelectionChanged, AddressOf RtbOutput2_SelectionChanged
+        End Sub
+
+        Protected Overrides Sub OnHandleCreated(e As EventArgs)
+            MyBase.OnHandleCreated(e)
+            ' Set cue banner (placeholder) for source language field
+            SendMessage(txtSourceLanguage.Handle, EM_SETCUEBANNER, IntPtr.Zero, "(auto)")
         End Sub
 
         Private Sub RestoreSettings()
@@ -437,6 +476,7 @@ Namespace SharedLibrary
         Private Async Sub PerformTranslationAsync()
             Dim textToTranslate As String = txtInput.Text.Trim()
             Dim targetLanguage As String = txtLanguage.Text.Trim()
+            Dim sourceLanguage As String = txtSourceLanguage.Text.Trim()
 
             If String.IsNullOrWhiteSpace(textToTranslate) Then
                 rtbOutput.Text = ""
@@ -457,7 +497,7 @@ Namespace SharedLibrary
             Try
                 Dim result As String = Await Task.Run(
                     Async Function()
-                        Return Await _translateFunc(textToTranslate, targetLanguage, token)
+                        Return Await _translateFunc(textToTranslate, targetLanguage, sourceLanguage, token)
                     End Function, token).ConfigureAwait(False)
 
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then
@@ -509,7 +549,24 @@ Namespace SharedLibrary
             _cts2 = New CancellationTokenSource()
             Dim token As CancellationToken = _cts2.Token
 
-            Dim targetLanguage As String = $"the language of this text ""{Me.txtInput.Text}"""
+            ' Determine target and source language based on source language field
+            Dim userSourceLanguage As String = txtSourceLanguage.Text.Trim()
+            Dim userTargetLanguage As String = txtLanguage.Text.Trim()
+
+            Dim targetLanguage As String
+            Dim sourceLanguage As String
+
+            If Not String.IsNullOrWhiteSpace(userSourceLanguage) Then
+                ' Source language is specified: swap roles for word translation
+                ' Target becomes the original source language
+                ' Source becomes the original target language
+                targetLanguage = userSourceLanguage
+                sourceLanguage = userTargetLanguage
+            Else
+                ' Source language is empty: detect from input text
+                targetLanguage = $"the language of this text ""{Me.txtInput.Text}"""
+                sourceLanguage = userTargetLanguage
+            End If
 
             lblSpinner2.Visible = True
             rtbOutput2.Text = ""
@@ -517,7 +574,7 @@ Namespace SharedLibrary
             Try
                 Dim result As String = Await Task.Run(
                     Async Function()
-                        Return Await _translateFunc(word, targetLanguage, token)
+                        Return Await _translateFunc(word, targetLanguage, sourceLanguage, token)
                     End Function, token).ConfigureAwait(False)
 
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then
@@ -876,7 +933,8 @@ Namespace SharedLibrary
             btnClear2.Visible = False
             btnCopy2.Visible = False
 
-            Me.MinimumSize = New Size(CInt(500 * Me.DeviceDpi / 96.0F), Me.MinimumSize.Height)
+            ' Restore the correctly calculated minimum width instead of hardcoded 500
+            Me.MinimumSize = New Size(_minWidthCollapsed, Me.MinimumSize.Height)
 
             mainTable.ColumnStyles(0) = New ColumnStyle(SizeType.Percent, COLLAPSED_INPUT_PERCENT)
             mainTable.ColumnStyles(1) = New ColumnStyle(SizeType.Percent, COLLAPSED_OUTPUT_PERCENT)

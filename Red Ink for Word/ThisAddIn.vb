@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 22.1.2026
+' 23.1.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.220126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.230126" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -262,6 +262,7 @@ Partial Public Class ThisAddIn
     ' Declare variables publicly so that InterpolateAtRuntime can access them; case-sensitive
 
     Public TranslateLanguage As String
+    Public SourceLanguage As String
     Public ShortenLength As Double
     Public FilibusterLength As Integer
     Public SummaryLength As Integer
