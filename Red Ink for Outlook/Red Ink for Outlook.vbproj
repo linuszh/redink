@@ -32,9 +32,11 @@
     <ResolveComReferenceSilent>true</ResolveComReferenceSilent>
     <IsWebBootstrapper>True</IsWebBootstrapper>
     <TargetFrameworkProfile />
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <TargetCulture>en</TargetCulture>
-    <AutoIncrementApplicationRevision>true</AutoIncrementApplicationRevision>
+    <AutoIncrementApplicationRevision>false</AutoIncrementApplicationRevision>
     <UpdateEnabled>false</UpdateEnabled>
     <UpdateInterval>0</UpdateInterval>
     <UpdateIntervalUnits>days</UpdateIntervalUnits>
@@ -42,11 +44,9 @@
     <SupportUrl>https://redink.ai</SupportUrl>
     <OfficeApplicationDescription />
     <LoadBehavior>3</LoadBehavior>
-    <NuGetPackageImportStamp>
-    </NuGetPackageImportStamp>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.0.0.700</ApplicationVersion>
+    <ApplicationVersion>1.1.21.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
