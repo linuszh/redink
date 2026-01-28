@@ -217,13 +217,28 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Updates the stored Private license confirmation timestamp, version, and dismissal counter.
+        ''' When the version has changed, also extends the license validity period.
         ''' </summary>
         ''' <param name="context">Shared execution context providing the current `RDV`.</param>
         Private Shared Sub UpdatePrivateReconfirmation(context As ISharedContext)
             Try
+                Dim storedVersion = My.Settings.License_PrivateVersion
+                Dim isNewVersion = Not String.IsNullOrEmpty(storedVersion) AndAlso
+                           Not storedVersion.Equals(context.RDV, StringComparison.OrdinalIgnoreCase)
+
                 My.Settings.License_PrivateConfirmedOn = Date.Now.Date
                 My.Settings.License_PrivateVersion = context.RDV
                 My.Settings.License_PrivateDismissCount = 0
+
+                ' Extend license validity when upgrading to a new version
+                If isNewVersion Then
+                    Dim versionDate = ParseVersionDateFromRDV(context.RDV)
+                    Dim newValidUntil = versionDate.AddYears(PrivateLicenseYears)
+                    My.Settings.License_ValidUntil = newValidUntil
+                    LicensedTill = newValidUntil
+                    LogLicenseEvent("License Extended", $"New ValidUntil={newValidUntil:d} for version {context.RDV}")
+                End If
+
                 My.Settings.Save()
             Catch ex As Exception
                 LogLicenseEvent("Update Reconfirmation Error", ex.Message)

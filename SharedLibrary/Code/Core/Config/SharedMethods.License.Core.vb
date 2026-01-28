@@ -52,10 +52,10 @@ Namespace SharedLibrary
 
         ' Testing Pro License
         Private Const TestingProComplianceIntervalStartups As Integer = 15 ' 0 = every startup
-        Private Const TestingProProductIdPrefix As String = "7"
-        Private Const TestingProComplianceMessage As String = "This testing license is for non-productive testing purposes only. " &
+        Private Const TestingProProductIdPrefix As String = "1727"
+        Private Const TestingProComplianceMessage As String = "This Pro Test Tec license is for non-productive testing purposes only. " &
                                     "You confirm that you are not using this software for any productive purposes. " &
-                                    "For productive use, please obtain a full Professional License."
+                                    "For productive use, please obtain another suitable Professional License."
 
         ' Legacy Transition
         Private Shared ReadOnly LegacyRegimeEndDate As Date = #1/31/2026#
