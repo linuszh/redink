@@ -2030,7 +2030,10 @@ Partial Public Class ThisAddIn
                         {"PromptLibPath", "Prompt library file"},
                         {"PromptLibPathLocal", "Prompt library file (local)"},
                         {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
-                        {"Location", "Location information to use, e.g., in 'Freestyle'"}
+                        {"Location", "Location information to use, e.g., in 'Freestyle'"},
+                        {"ToolingLogWindow", "Tooling: Show log window"},
+                        {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
+                        {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"}
                     }
 
         Dim SettingsTips As New Dictionary(Of String, String) From {
@@ -2058,8 +2061,11 @@ Partial Public Class ThisAddIn
                         {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
                         {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
                         {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},
-                        {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."}
-                    }
+                        {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
+                        {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
+                        {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
+                        {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."}
+        }
 
         ShowSettingsWindow(Settings, SettingsTips)
 

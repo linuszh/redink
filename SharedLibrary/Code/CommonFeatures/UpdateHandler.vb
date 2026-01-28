@@ -17,7 +17,7 @@
 '    to pause update checks after repeated failures.
 '  - Installer: Locates `VSTOInstaller.exe`, attempts a silent install first, then falls back
 '    to an interactive install that is brought to the foreground.
-'  - Logging: Writes to `%AppData%\{AN2}\updater.log` and trims by size/line count.
+'  - Logging: Writes to `%AppData%\{AN2}\RI_Logfile.txt` and trims by size/line count.
 '  - Configuration Updates: Optionally triggers INI configuration refresh via
 '    `SharedMethods.CheckForIniUpdates`.
 ' =============================================================================
@@ -178,7 +178,7 @@ Namespace SharedLibrary
 
         ' LOGGING with trimming
         ''' <summary>
-        ''' Appends an entry to the updater log under `%AppData%\{AN2}\updater.log` and triggers trimming when needed.
+        ''' Appends an entry to the updater log under `%AppData%\{AN2}\RI_Logfile.txt` and triggers trimming when needed.
         ''' </summary>
         ''' <param name="message">Log message to append.</param>
         ''' <param name="ex">Optional exception details to include.</param>
@@ -186,7 +186,7 @@ Namespace SharedLibrary
             Try
                 Dim logDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), SharedMethods.AN2)
                 If Not Directory.Exists(logDir) Then Directory.CreateDirectory(logDir)
-                Dim logPath = Path.Combine(logDir, "updater.log")
+                Dim logPath = Path.Combine(logDir, LogFileName)
 
                 ' Trim before writing if too large
                 Try

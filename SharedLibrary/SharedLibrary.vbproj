@@ -272,6 +272,7 @@
     <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
     </Reference>
+    <Reference Include="System.Web" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Core" />
@@ -339,6 +340,10 @@
     <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="Code\Core\Config\SharedMethods.License.Core.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.License.Private.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.License.Pro.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.License.Testing.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.UpdateIni.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.LoadConfig.vb" />

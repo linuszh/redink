@@ -2479,7 +2479,7 @@ Partial Public Class ThisAddIn
         Dim alts As System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.ModelConfig) = Nothing
         Dim altCount As Integer = 0
         Try
-            If hasSecondApi AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                 alts = LoadAlternativeModels(INI_AlternateModelPath, _context)
                 If alts IsNot Nothing Then altCount = alts.Count
             End If

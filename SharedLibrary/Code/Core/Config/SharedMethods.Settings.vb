@@ -3124,7 +3124,8 @@ Namespace SharedLibrary
             Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version For {context.INI_BrandingName}"))
 
             ' Calculate height based on text content
-            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
+            'Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
+            Dim ExpireText As String = vbCrLf & vbCrLf & GetLicenseStatusShort()
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
                             .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
@@ -3225,7 +3226,7 @@ Namespace SharedLibrary
 
             ' Measure button text widths to size buttons appropriately
             Dim licenseButtonText As String = "3rd Party Software Used"
-            Dim resetButtonText As String = "Update License Info"
+            Dim resetButtonText As String = "Manage License"
             Dim licenseTextSize As Size = TextRenderer.MeasureText(licenseButtonText, standardFont)
             Dim resetTextSize As Size = TextRenderer.MeasureText(resetButtonText, standardFont)
             Dim buttonPadding As Integer = 20
@@ -3253,22 +3254,25 @@ Namespace SharedLibrary
                     }
             AddHandler resetLicenseButton.Click, Sub(sender, e)
                                                      Try
+
                                                          ' Reset license information in My.Settings
-                                                         My.Settings.LicenseStatus = ""
-                                                         My.Settings.LicenseUsers = 1
-                                                         My.Settings.LicensedTill = Date.MinValue
-                                                         My.Settings.Save()
+                                                         'My.Settings.LicenseStatus = ""
+                                                         'My.Settings.LicenseUsers = 1
+                                                         'My.Settings.LicensedTill = Date.MinValue
+                                                         'My.Settings.Save()
 
                                                          ' Reset global license variables
-                                                         LicenseStatus = ""
-                                                         LicenseUsers = 1
-                                                         LicensedTill = Date.MinValue
+                                                         'LicenseStatus = ""
+                                                         'LicenseUsers = 1
+                                                         'LicensedTill = Date.MinValue
 
                                                          ' Close the current About window
                                                          aboutForm.Close()
 
                                                          ' Show the license configuration form
-                                                         ShowLicenseEntryForm(context)
+                                                         'ShowLicenseEntryForm(context)
+
+                                                         ShowLicenseStatusDialog()
 
                                                          ' Re-show the About window with updated info
                                                          ShowAboutWindow(owner, context)

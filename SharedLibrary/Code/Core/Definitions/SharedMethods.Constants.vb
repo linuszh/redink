@@ -347,7 +347,7 @@ Namespace SharedLibrary
 
         ' Tooling Defaults
 
-        Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = 5
+        Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = 10
         Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = True
 
         ' Tooling Constants
@@ -362,9 +362,15 @@ Namespace SharedLibrary
 
         ' LICENSING SYSTEM CONSTANTS AND GLOBAL VARIABLES        
 
+        ' LogFile
+
+        Public Const LogFileName As String = "RI_Logfile.txt"
+
         ' URLs
         Public Const NewHomeURL As String = "https://redink.ai"   ' Home of the Post Beta Website
         Public Const BetaUpgradeInstructions As String = "https://redink.ai/beta-upgrade"
+        Public Const UpdateSubUrl As String = "/downloads"        ' Sub-URL for downloads/updates
+        Public Const ProSubUrl As String = "/shop"                ' Sub-URL for Pro license purchase
 
         ' License constants
         Public Const PrivateLicenseYears As Integer = 3

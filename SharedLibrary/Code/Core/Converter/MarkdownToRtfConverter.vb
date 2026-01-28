@@ -608,10 +608,19 @@ Optional visitedFootnotes As System.Collections.Generic.HashSet(Of String) = Not
                         Dim fl = CType(inline, Markdig.Extensions.Footnotes.FootnoteLink)
                         HandleFootnoteLink(rtf, fl, fnDefs, visitedFootnotes)
 
+                    ' Skip internal Markdig delimiter inlines (e.g., pipe table delimiters).
+                    ' These are structural markers that should not be rendered or recursively processed.
+                    Case TypeOf inline Is Markdig.Extensions.Tables.PipeTableDelimiterInline
+                        ' Do nothing - skip these internal delimiters to prevent infinite recursion.
+
                         ' Fallback handling (recursive for containers, otherwise ToString()).
                     Case Else
                         If TypeOf inline Is Markdig.Syntax.Inlines.ContainerInline Then
-                            ConvertInline(rtf, CType(inline, Markdig.Syntax.Inlines.ContainerInline), fnDefs, visitedFootnotes)
+                            ' Guard against self-referencing containers by checking if we'd recurse into the same object.
+                            Dim childContainer = CType(inline, Markdig.Syntax.Inlines.ContainerInline)
+                            If childContainer IsNot container Then
+                                ConvertInline(rtf, childContainer, fnDefs, visitedFootnotes)
+                            End If
                         Else
                             rtf.Append(EscapeRtf(inline.ToString()))
                         End If

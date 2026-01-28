@@ -1077,34 +1077,98 @@ ContinueLoop:
 )
         If rng Is Nothing Then Exit Sub
 
-        Dim searchRng As Microsoft.Office.Interop.Word.Range = rng.Duplicate
-        With searchRng.Find
-            .ClearFormatting()
-            .Text = ""
-            .Format = True
-            .Highlight = True
-            .MatchWildcards = False
-            .Forward = True
-            .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
-        End With
+        Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
+        Dim originalStart As Integer = rng.Start
+        Dim originalEnd As Integer = rng.End
+        Dim totalGrowth As Integer = 0
 
-        While searchRng.Find.Execute()
+        Dim maxIterations As Integer = Math.Max(100000, originalEnd - originalStart)
+        Dim iterations As Integer = 0
+        Dim currentPos As Integer = originalStart
+        Dim currentDocEnd As Integer = originalEnd
+
+        While currentPos < currentDocEnd
             If ProgressBarModule.CancelOperation Then Exit While
             System.Windows.Forms.Application.DoEvents()
 
-            Dim found As Microsoft.Office.Interop.Word.Range = searchRng.Duplicate
+            iterations += 1
+            If iterations >= maxIterations Then Exit While
+
+            ' Create a fresh search range from current position
+            Dim searchRng As Microsoft.Office.Interop.Word.Range = doc.Range(currentPos, currentDocEnd)
+
+            ' Check if the very first character is highlighted
+            ' Word's Find sometimes skips formatting at the start of a range
+            Dim firstCharRng As Microsoft.Office.Interop.Word.Range = doc.Range(currentPos, Math.Min(currentPos + 1, currentDocEnd))
+            Dim firstCharHL As Integer = CInt(firstCharRng.HighlightColorIndex)
+
+            Dim found As Microsoft.Office.Interop.Word.Range = Nothing
+
+            If firstCharHL > 0 AndAlso firstCharHL <> 9999999 Then
+                ' First character IS highlighted - expand to find the full highlighted run
+                found = doc.Range(currentPos, currentPos)
+                Dim hlColor As Integer = firstCharHL
+
+                ' Expand forward while highlight continues with same color
+                Dim expandPos As Integer = currentPos
+                While expandPos < currentDocEnd
+                    Dim testRng As Microsoft.Office.Interop.Word.Range = doc.Range(expandPos, Math.Min(expandPos + 1, currentDocEnd))
+                    Dim testHL As Integer = CInt(testRng.HighlightColorIndex)
+                    If testHL = hlColor Then
+                        expandPos += 1
+                    Else
+                        Exit While
+                    End If
+                End While
+
+                found.SetRange(currentPos, expandPos)
+            Else
+                ' First character not highlighted - use Find to locate next highlight
+                With searchRng.Find
+                    .ClearFormatting()
+                    .Replacement.ClearFormatting()
+                    .Text = ""
+                    .Forward = True
+                    .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+                    .Format = True
+                    .MatchWildcards = False
+                    .Highlight = True
+                End With
+
+                If Not searchRng.Find.Execute() Then
+                    Exit While
+                End If
+
+                ' Check if found range is within bounds
+                If searchRng.Start >= currentDocEnd Then
+                    Exit While
+                End If
+
+                found = searchRng.Duplicate
+            End If
+
+            Dim foundStart As Integer = found.Start
+            Dim foundEnd As Integer = found.End
+
+            ' Verify highlight
+            Dim hlColorInt As Integer = CInt(found.HighlightColorIndex)
+
+            If hlColorInt = 0 OrElse hlColorInt = 9999999 Then
+                currentPos = Math.Min(foundEnd, currentDocEnd)
+                If currentPos >= currentDocEnd Then Exit While
+                Continue While
+            End If
+
             Dim txt As System.String = found.Text
             If System.String.IsNullOrEmpty(txt) Then
-                searchRng.Start = System.Math.Min(searchRng.Start + 1, rng.End)
-                searchRng.End = rng.End
-                If searchRng.Start >= rng.End Then Exit While
+                currentPos = Math.Min(currentPos + 1, currentDocEnd)
                 Continue While
             End If
 
             Dim trailing As System.String = ""
             If keepParagraphBreakOutside Then
                 If txt.EndsWith(vbCr & ChrW(7), System.StringComparison.Ordinal) Then
-                    trailing = vbCr & ChrW(7) ' paragraph + cell
+                    trailing = vbCr & ChrW(7)
                     txt = txt.Substring(0, txt.Length - 2)
                 ElseIf txt.EndsWith(vbCr, System.StringComparison.Ordinal) Then
                     trailing = vbCr
@@ -1112,8 +1176,7 @@ ContinueLoop:
                 End If
             End If
 
-            ' Trim leading/trailing spaces/tabs so <mark> hugs the content
-            ' (do this after removing the trailing paragraph/cell marker above)
+            ' Trim whitespace
             Dim startIdx As Integer = 0
             Dim endIdx As Integer = txt.Length
             While startIdx < endIdx AndAlso (txt(startIdx) = " "c OrElse txt(startIdx) = vbTab)
@@ -1126,8 +1189,14 @@ ContinueLoop:
                 txt = If(endIdx > startIdx, txt.Substring(startIdx, endIdx - startIdx), String.Empty)
             End If
 
-            ' Capture color before clearing
+            If String.IsNullOrEmpty(txt) AndAlso String.IsNullOrEmpty(trailing) Then
+                found.HighlightColorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight
+                currentPos = foundEnd
+                Continue While
+            End If
+
             Dim hi As Microsoft.Office.Interop.Word.WdColorIndex = found.HighlightColorIndex
+            found.HighlightColorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight
 
             Dim openTag As System.String = "<mark>"
             If includeColorInTag Then
@@ -1137,15 +1206,18 @@ ContinueLoop:
                 End If
             End If
 
-            found.Text = openTag & txt & "</mark>" & trailing
+            Dim replacementText As String = openTag & txt & "</mark>" & trailing
+            Dim originalLength As Integer = foundEnd - foundStart
+            found.Text = replacementText
 
-            ' Clear highlight from inserted text
-            found.HighlightColorIndex = Microsoft.Office.Interop.Word.WdColorIndex.wdNoHighlight
+            Dim growth As Integer = replacementText.Length - originalLength
+            totalGrowth += growth
+            currentDocEnd = originalEnd + totalGrowth
 
-            searchRng.Start = found.End
-            searchRng.End = rng.End
-            If searchRng.Start >= rng.End Then Exit While
+            currentPos = foundStart + replacementText.Length
         End While
+
+        rng.SetRange(originalStart, originalEnd + totalGrowth)
     End Sub
 
     ''' <summary>

@@ -254,7 +254,7 @@ Public Module SharedLogger
                     appInvokedUsageByDay(appCode) = New Dictionary(Of String, Dictionary(Of Date, HashSet(Of String)))(StringComparer.Ordinal)
                 End If
 
-                For Each line As String In System.IO.File.ReadAllLines(file, Encoding.UTF8)
+                For Each line As String In System.IO.File.ReadLines(file, Encoding.UTF8)
                     Dim parsed As ParsedLine = ParseLogLine(line)
                     If parsed Is Nothing Then Continue For
 
@@ -337,62 +337,6 @@ Public Module SharedLogger
             {"UK", "Unknown"}
         }
 
-            Dim formatAppName As Func(Of String, String) =
-            Function(code As String)
-                If appNameMap.ContainsKey(code) Then Return appNameMap(code) & " (" & code & ")"
-                Return code
-            End Function
-
-            Dim appendSection As Action(Of String, HashSet(Of String),
-                                  Dictionary(Of String, Integer), Dictionary(Of String, HashSet(Of String)),
-                                  Dictionary(Of String, Integer), Dictionary(Of String, HashSet(Of String)),
-                                  Dictionary(Of String, Integer), Dictionary(Of String, HashSet(Of String)),
-                                  Dictionary(Of String, Dictionary(Of Date, HashSet(Of String)))) =
-            Sub(title As String,
-                users As HashSet(Of String),
-                versionUsage As Dictionary(Of String, Integer), versionUsers As Dictionary(Of String, HashSet(Of String)),
-                invokedUsage As Dictionary(Of String, Integer), invokedUsers As Dictionary(Of String, HashSet(Of String)),
-                otherUsage As Dictionary(Of String, Integer), otherUsers As Dictionary(Of String, HashSet(Of String)),
-                invokedByDay As Dictionary(Of String, Dictionary(Of Date, HashSet(Of String))))
-
-                sb.AppendLine("=== " & title & " ===")
-                sb.AppendLine("Total users: " & users.Count)
-
-                sb.AppendLine()
-                sb.AppendLine("Version usage (count; unique users):")
-                For Each kvp In versionUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-                    Dim u As Integer = If(versionUsers.ContainsKey(kvp.Key), versionUsers(kvp.Key).Count, 0)
-                    sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
-                Next
-
-                sb.AppendLine()
-                sb.AppendLine("Functions invoked: count; unique users")
-                For Each kvp In invokedUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-                    Dim u As Integer = If(invokedUsers.ContainsKey(kvp.Key), invokedUsers(kvp.Key).Count, 0)
-                    sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
-                Next
-
-                If otherUsage.Count > 0 Then
-                    sb.AppendLine()
-                    sb.AppendLine("Other log lines (not ending with 'invoked'): count; unique users")
-                    For Each kvp In otherUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-                        Dim u As Integer = If(otherUsers.ContainsKey(kvp.Key), otherUsers(kvp.Key).Count, 0)
-                        sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
-                    Next
-                End If
-
-                sb.AppendLine()
-                sb.AppendLine("Functions invoked per day (unique users):")
-                For Each fn In invokedByDay.Keys.OrderBy(Function(x) x)
-                    For Each usageDay As Date In invokedByDay(fn).Keys.OrderBy(Function(d) d)
-                        sb.AppendLine(fn & " | " & usageDay.ToString("yyyy-MM-dd") &
-                                      " | users: " & invokedByDay(fn)(usageDay).Count)
-                    Next
-                Next
-
-                sb.AppendLine()
-            End Sub
-
             sb.AppendLine("=== RED INK LOG ANALYSIS ===")
             sb.AppendLine("Log path: " & context.INI_LogPath)
             sb.AppendLine("Date range: " &
@@ -400,22 +344,16 @@ Public Module SharedLogger
                       If(endDate.HasValue, endDate.Value.ToString("yyyy-MM-dd"), "N/A"))
             sb.AppendLine()
 
-            appendSection(
-            "OVERALL",
-            allUsers,
-            allVersionUsage, allVersionUsers,
-            allInvokedUsage, allInvokedUsers,
-            allOtherUsage, allOtherUsers,
-            allInvokedUsageByDay)
+            AppendSection(sb, "OVERALL", allUsers, allVersionUsage, allVersionUsers,
+                          allInvokedUsage, allInvokedUsers, allOtherUsage, allOtherUsers,
+                          allInvokedUsageByDay)
 
             For Each appCode In appUsers.Keys.OrderBy(Function(x) x)
-                appendSection(
-                formatAppName(appCode),
-                appUsers(appCode),
-                appVersionUsage(appCode), appVersionUsers(appCode),
-                appInvokedUsage(appCode), appInvokedUsers(appCode),
-                appOtherUsage(appCode), appOtherUsers(appCode),
-                appInvokedUsageByDay(appCode))
+                AppendSection(sb, FormatAppName(appCode), appUsers(appCode),
+                              appVersionUsage(appCode), appVersionUsers(appCode),
+                              appInvokedUsage(appCode), appInvokedUsers(appCode),
+                              appOtherUsage(appCode), appOtherUsers(appCode),
+                              appInvokedUsageByDay(appCode))
             Next
 
             ShowCustomWindow($"The following log statistics were compiled based on the content found in {context.INI_LogPath}", sb.ToString(), "", $"{AN} Log Statistics")
@@ -429,6 +367,72 @@ Public Module SharedLogger
     '==============================
     ' INTERNAL HELPERS
     '==============================
+
+    ''' <summary>
+    ''' Formats an application code into a friendly name.
+    ''' </summary>
+    Private Function FormatAppName(code As String) As String
+        Select Case code.ToUpperInvariant()
+            Case "WD" : Return "Word (WD)"
+            Case "XL" : Return "Excel (XL)"
+            Case "OL" : Return "Outlook (OL)"
+            Case "UK" : Return "Unknown (UK)"
+            Case Else : Return code
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Appends a formatted statistics section to the output StringBuilder.
+    ''' </summary>
+    Private Sub AppendSection(
+    sb As StringBuilder,
+    title As String,
+    users As HashSet(Of String),
+    versionUsage As Dictionary(Of String, Integer),
+    versionUsers As Dictionary(Of String, HashSet(Of String)),
+    invokedUsage As Dictionary(Of String, Integer),
+    invokedUsers As Dictionary(Of String, HashSet(Of String)),
+    otherUsage As Dictionary(Of String, Integer),
+    otherUsers As Dictionary(Of String, HashSet(Of String)),
+    invokedByDay As Dictionary(Of String, Dictionary(Of Date, HashSet(Of String))))
+
+        sb.AppendLine("=== " & title & " ===")
+        sb.AppendLine("Total users: " & users.Count)
+
+        sb.AppendLine()
+        sb.AppendLine("Version usage (count; unique users):")
+        For Each kvp In versionUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
+            Dim u As Integer = If(versionUsers.ContainsKey(kvp.Key), versionUsers(kvp.Key).Count, 0)
+            sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
+        Next
+
+        sb.AppendLine()
+        sb.AppendLine("Functions invoked: count; unique users")
+        For Each kvp In invokedUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
+            Dim u As Integer = If(invokedUsers.ContainsKey(kvp.Key), invokedUsers(kvp.Key).Count, 0)
+            sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
+        Next
+
+        If otherUsage.Count > 0 Then
+            sb.AppendLine()
+            sb.AppendLine("Other log lines (not ending with 'invoked'): count; unique users")
+            For Each kvp In otherUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
+                Dim u As Integer = If(otherUsers.ContainsKey(kvp.Key), otherUsers(kvp.Key).Count, 0)
+                sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
+            Next
+        End If
+
+        sb.AppendLine()
+        sb.AppendLine("Functions invoked per day (unique users):")
+        For Each fn In invokedByDay.Keys.OrderBy(Function(x) x)
+            For Each usageDay As Date In invokedByDay(fn).Keys.OrderBy(Function(d) d)
+                sb.AppendLine(fn & " | " & usageDay.ToString("yyyy-MM-dd") &
+                          " | users: " & invokedByDay(fn)(usageDay).Count)
+            Next
+        Next
+
+        sb.AppendLine()
+    End Sub
 
     ''' <summary>
     ''' Determines a short application code (WD/XL/OL/UK) from a host descriptor string.
