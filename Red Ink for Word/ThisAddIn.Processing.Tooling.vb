@@ -1394,7 +1394,9 @@ Partial Public Class ThisAddIn
             .ToolName = toolCall.ToolName
         }
 
-        context.Log($"Executing tool: {toolCall.ToolName}")
+        ' Build condensed parameter summary for log window
+        Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
+        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
 
         Try
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -1405,7 +1407,13 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponse($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
 
-            context.Log($"Tool {toolCall.ToolName} completed: {If(response.Success, "Success", "Failed - " & response.ErrorMessage)}")
+            ' Log completion with excerpt
+            If response.Success Then
+                Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
+                context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
+            Else
+                context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+            End If
 
         Catch ex As Exception
             response.Success = False
@@ -1415,6 +1423,67 @@ Partial Public Class ThisAddIn
         End Try
 
         Return response
+    End Function
+
+    ''' <summary>
+    ''' Builds a condensed parameter summary for display in the log window.
+    ''' </summary>
+    ''' <param name="arguments">Tool call arguments dictionary.</param>
+    ''' <param name="maxLength">Maximum length for each parameter value display.</param>
+    ''' <returns>Formatted parameter string like " (query: 'search term', count: 10)".</returns>
+    Private Function BuildCondensedParamSummary(arguments As Dictionary(Of String, Object), Optional maxLength As Integer = 50) As String
+        If arguments Is Nothing OrElse arguments.Count = 0 Then
+            Return ""
+        End If
+
+        Dim parts As New List(Of String)()
+
+        For Each kvp In arguments
+            Dim valueStr As String = ""
+            If kvp.Value IsNot Nothing Then
+                If TypeOf kvp.Value Is JArray Then
+                    Dim arr = DirectCast(kvp.Value, JArray)
+                    valueStr = $"[{arr.Count} items]"
+                ElseIf TypeOf kvp.Value Is IEnumerable(Of Object) AndAlso Not TypeOf kvp.Value Is String Then
+                    valueStr = $"[{DirectCast(kvp.Value, IEnumerable(Of Object)).Count()} items]"
+                Else
+                    valueStr = kvp.Value.ToString()
+                    If valueStr.Length > maxLength Then
+                        valueStr = valueStr.Substring(0, maxLength - 3) & "..."
+                    End If
+                End If
+            End If
+
+            parts.Add($"{kvp.Key}: '{valueStr}'")
+        Next
+
+        Return $" ({String.Join(", ", parts)})"
+    End Function
+
+    ''' <summary>
+    ''' Builds a brief excerpt of the tool result for display in the log window.
+    ''' </summary>
+    ''' <param name="result">Full tool response text.</param>
+    ''' <param name="maxExcerptLength">Maximum length for the excerpt portion.</param>
+    ''' <returns>Formatted string like "12,345 chars: 'The quick brown fox...'".</returns>
+    Private Function BuildResultExcerpt(result As String, Optional maxExcerptLength As Integer = 80) As String
+        If String.IsNullOrEmpty(result) Then
+            Return "0 chars (empty)"
+        End If
+
+        Dim charCount As Integer = result.Length
+        Dim formattedCount As String = charCount.ToString("N0")
+
+        ' Clean up the result for excerpt (remove excessive whitespace/newlines)
+        Dim cleaned As String = Regex.Replace(result, "\s+", " ").Trim()
+
+        If cleaned.Length <= maxExcerptLength Then
+            Return $"{formattedCount} chars: '{cleaned}'"
+        End If
+
+        ' Truncate and add ellipsis
+        Dim excerpt As String = cleaned.Substring(0, maxExcerptLength - 3) & "..."
+        Return $"{formattedCount} chars: '{excerpt}'"
     End Function
 
     ''' <summary>

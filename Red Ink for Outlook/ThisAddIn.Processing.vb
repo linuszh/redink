@@ -197,7 +197,7 @@ Partial Public Class ThisAddIn
         Else
             Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & "\r\r" & sText)
             System.Threading.Tasks.Task.Run(Sub()
-                                                ShowRTFCustomMessageBox(htmlContent)
+                                                ShowRTFCustomMessageBox(htmlContent, RestoreWindow:=True)
                                             End Sub)
         End If
 

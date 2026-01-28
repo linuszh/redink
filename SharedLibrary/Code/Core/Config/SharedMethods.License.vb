@@ -4,6 +4,8 @@
 ' =============================================================================
 ' File: SharedMethods.License.vb
 ' Purpose: Implements runtime license validation and related user messaging.
+' 
+' NOTE: This code is LEGACY and will be removed following the switch to the new regime on 1.2.26.
 '
 ' Architecture:
 '  - Configuration Sources:
@@ -28,7 +30,6 @@
 '       `AN`, `AN4`, `BetaEndDate`, `BetaUpgradeInstructions`, thresholds/interval constants.
 ' =============================================================================
 
-
 Option Strict On
 Option Explicit On
 
@@ -50,7 +51,7 @@ Namespace SharedLibrary
         ''' <returns>
         ''' <c>True</c> if the license check allows continuation; otherwise <c>False</c>.
         ''' </returns>
-        Public Shared Function LicenseOK(ByVal context As ISharedContext,
+        Public Shared Function LicenseOK_Legacy(ByVal context As ISharedContext,
                                           ByVal configDict As Dictionary(Of String, String)) As Boolean
             Try
                 ' Load license settings from config file and My.Settings.
@@ -631,6 +632,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+
         ''' <summary>
         ''' Shows the license entry form for selecting a license type and persisting selection to <c>My.Settings</c>.
         ''' Returns <c>False</c> immediately for beta versions (license storage is disabled in beta).
@@ -638,6 +640,34 @@ Namespace SharedLibrary
         ''' <param name="context">Execution context used to resolve license types and version date.</param>
         ''' <returns><c>True</c> if the user saved a license successfully; otherwise <c>False</c>.</returns>
         Public Shared Function ShowLicenseEntryForm(context As ISharedContext) As Boolean
+            Try
+                ' Beta version cannot store license information.
+                Dim isBetaVersion As Boolean = Not AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)
+                If isBetaVersion Then
+                    ShowCustomMessageBox(
+                        $"License configuration is not available during the beta test period." & vbCrLf & vbCrLf &
+                        $"To use {AN} after the beta ends on {BetaEndDate:d}, please upgrade to the General Audience or Preview version. " &
+                        $"Visit {AN4} for more information.",
+                        $"{AN} Beta Test")
+                    Return False
+                End If
+
+                ' Redirect to the new license type selection dialog
+                Return ShowLicenseTypeSelectionDialog(context)
+
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error showing license form: {ex.Message}", AN)
+                Return False
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Shows the license entry form for selecting a license type and persisting selection to <c>My.Settings</c>.
+        ''' Returns <c>False</c> immediately for beta versions (license storage is disabled in beta).
+        ''' </summary>
+        ''' <param name="context">Execution context used to resolve license types and version date.</param>
+        ''' <returns><c>True</c> if the user saved a license successfully; otherwise <c>False</c>.</returns>
+        Public Shared Function oldShowLicenseEntryForm(context As ISharedContext) As Boolean
             Try
                 ' Beta version cannot store license information.
                 Dim isBetaVersion As Boolean = Not AppsUrl.StartsWith(NewHomeURL, StringComparison.OrdinalIgnoreCase)

@@ -4,21 +4,29 @@
 ' =============================================================================
 ' File: QuickTranslateWidget.vb
 ' Purpose: Provides a non-modal, resizable translation widget allowing users to
-'          quickly translate text using the LLM. Features debounced auto-translate
+'          quickly translate text using an LLM. Features debounced auto-translate
 '          on typing pause, Enter key translation, and clipboard copy support.
 '
 ' Architecture:
 '  - Non-modal Form with two side-by-side panels (input TextBox, output RichTextBox)
-'  - Source language input field with "(auto)" placeholder
-'  - Target language input field with persistence via My.Settings
-'  - Debounce timer (1 second) triggers translation after user stops typing
-'  - Enter key also triggers immediate translation
-'  - Buttons: Clear, [Collapse], [Clear 2], [Copy 2], Copy, Close
-'  - Keyboard shortcuts: Escape closes, Ctrl+C copies result, Ctrl+L clears
-'  - Spinner indicator during LLM call
-'  - Window position/size persisted via My.Settings
-'  - Click on word selects it and copies to clipboard
-'  - Click on selected text triggers translation/action
+'    and an optional second output panel in expanded mode.
+'  - Source language input field with "(auto)" placeholder (Win32 cue banner).
+'  - Target language input field persisted via My.Settings (QuickTranslateLanguage).
+'  - Debounce timer triggers translation after user stops typing.
+'  - Enter key triggers immediate translation (Shift+Enter is not inserted).
+'  - Buttons: Clear, Copy, Close; expanded mode adds Collapse, Clear 2, Copy 2.
+'  - Keyboard shortcuts: Escape closes; Ctrl+C copies result (if input is not focused);
+'    Ctrl+L clears all fields.
+'  - Spinner indicators shown during translation calls.
+'  - Window position/size persisted via My.Settings (QuickTranslateX/Y/Width/Height)
+'    for collapsed mode; expanded mode is not persisted.
+'  - RichTextBox interactions:
+'      - Click a word: selects it and copies to clipboard.
+'      - Select text: copies selection to clipboard after a short delay.
+'      - Click within existing selection:
+'          - Output 1: expands window and translates selection (word/phrase) into the
+'            opposite language direction determined by the source language field.
+'          - Output 2: uses selection as new input text.
 ' =============================================================================
 
 Option Strict On
@@ -32,16 +40,24 @@ Imports System.Windows.Forms
 
 Namespace SharedLibrary
     ''' <summary>
-    ''' A non-modal translation widget that provides quick LLM-powered translation.
+    ''' Non-modal translation widget for quick LLM-powered translation.
     ''' </summary>
     Public Class QuickTranslateWidget
         Inherits Form
 
+        ''' <summary>Debounce interval (milliseconds) before auto-translation starts.</summary>
         Private Const DEBOUNCE_MS As Integer = 1000
+
+        ''' <summary>Input column width percentage in collapsed mode.</summary>
         Private Const COLLAPSED_INPUT_PERCENT As Single = 40.0F
+        ''' <summary>Output column width percentage in collapsed mode.</summary>
         Private Const COLLAPSED_OUTPUT_PERCENT As Single = 60.0F
+
+        ''' <summary>Input column width percentage in expanded mode.</summary>
         Private Const EXPANDED_INPUT_PERCENT As Single = 25.0F
+        ''' <summary>First output column width percentage in expanded mode.</summary>
         Private Const EXPANDED_OUTPUT1_PERCENT As Single = 37.5F
+        ''' <summary>Second output column width percentage in expanded mode.</summary>
         Private Const EXPANDED_OUTPUT2_PERCENT As Single = 37.5F
 
         ' Win32 API for cue banner (placeholder text)
@@ -74,11 +90,13 @@ Namespace SharedLibrary
         ' Selection copy timer (for auto-copy after selection)
         Private _selectionCopyTimer As System.Windows.Forms.Timer
         Private _selectionCopyRtb As RichTextBox = Nothing
+        ''' <summary>Delay (milliseconds) before copying a selection when user stops changing selection.</summary>
         Private Const SELECTION_COPY_DELAY_MS As Integer = 500
 
         ' Track mouse drag state
         Private _mouseDownPoint As Point = Point.Empty
         Private _isDragging As Boolean = False
+        ''' <summary>Mouse movement threshold (pixels) above which the interaction is treated as selection drag.</summary>
         Private Const DRAG_THRESHOLD As Integer = 3
 
         ' Track selection state for click-on-selection detection
@@ -93,9 +111,13 @@ Namespace SharedLibrary
         Private _cts2 As CancellationTokenSource
 
         ' Callback to perform translation (now with sourceLanguage parameter)
+        ''' <summary>
+        ''' Async translation function: (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) -> translated text.
+        ''' </summary>
         Private ReadOnly _translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String))
 
         ' Default language from context
+        ''' <summary>Default target language used when no target language is provided.</summary>
         Private ReadOnly _defaultLanguage As String
 
         ' Expansion state
@@ -110,12 +132,12 @@ Namespace SharedLibrary
         Private _isClosing As Boolean = False
 
         ''' <summary>
-        ''' Creates a new QuickTranslateWidget.
+        ''' Creates a new <see cref="QuickTranslateWidget"/>.
         ''' </summary>
         ''' <param name="translateFunc">
         ''' Async function that takes (textToTranslate, targetLanguage, sourceLanguage, cancellationToken) and returns the translated text.
         ''' </param>
-        ''' <param name="defaultLanguage">The default target language (from INI_Language1).</param>
+        ''' <param name="defaultLanguage">The default target language.</param>
         Public Sub New(translateFunc As Func(Of String, String, String, CancellationToken, Task(Of String)),
                        defaultLanguage As String)
             _translateFunc = translateFunc
@@ -124,6 +146,9 @@ Namespace SharedLibrary
             RestoreSettings()
         End Sub
 
+        ''' <summary>
+        ''' Builds the UI, initializes timers, and wires all event handlers.
+        ''' </summary>
         Private Sub InitializeComponent()
             Me.Text = $"{SharedMethods.AN} Translate on-the-fly"
             Me.FormBorderStyle = FormBorderStyle.Sizable
@@ -365,7 +390,6 @@ Namespace SharedLibrary
             Me.MinimumSize = New Size(_minWidthCollapsed, minHeight)
             Me.Size = New Size(CInt(Math.Max(600, _minWidthCollapsed + 50) * Me.DeviceDpi / 96.0F), minHeight)
 
-
             ' Timers
             debounceTimer = New System.Windows.Forms.Timer() With {.Interval = DEBOUNCE_MS}
             AddHandler debounceTimer.Tick, AddressOf OnDebounceTimerTick
@@ -385,12 +409,18 @@ Namespace SharedLibrary
             AddHandler rtbOutput2.SelectionChanged, AddressOf RtbOutput2_SelectionChanged
         End Sub
 
+        ''' <summary>
+        ''' Sets the cue banner text for <see cref="txtSourceLanguage"/> once the window handle exists.
+        ''' </summary>
         Protected Overrides Sub OnHandleCreated(e As EventArgs)
             MyBase.OnHandleCreated(e)
             ' Set cue banner (placeholder) for source language field
             SendMessage(txtSourceLanguage.Handle, EM_SETCUEBANNER, IntPtr.Zero, "(auto)")
         End Sub
 
+        ''' <summary>
+        ''' Restores widget state from <c>My.Settings</c> (language and window position/size).
+        ''' </summary>
         Private Sub RestoreSettings()
             Try
                 Dim savedLang As String = My.Settings.QuickTranslateLanguage
@@ -422,12 +452,18 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Positions the widget near the top-right of the screen at the current cursor position.
+        ''' </summary>
         Private Sub PositionOnScreen()
             Dim wa As Rectangle = Screen.FromPoint(Cursor.Position).WorkingArea
             Const MARGIN As Integer = 30
             Me.Location = New Point(wa.Right - Me.Width - MARGIN, wa.Top + MARGIN)
         End Sub
 
+        ''' <summary>
+        ''' Persists language and (collapsed) window position/size into <c>My.Settings</c>.
+        ''' </summary>
         Private Sub SaveSettings()
             Try
                 My.Settings.QuickTranslateLanguage = txtLanguage.Text
@@ -442,6 +478,9 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Stops timers, cancels pending translations, and persists settings.
+        ''' </summary>
         Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
             _isClosing = True
             SaveSettings()
@@ -453,6 +492,9 @@ Namespace SharedLibrary
             MyBase.OnFormClosing(e)
         End Sub
 
+        ''' <summary>
+        ''' Starts/restarts the debounce timer to trigger translation after the user stops typing.
+        ''' </summary>
         Private Sub txtInput_TextChanged(sender As Object, e As EventArgs) Handles txtInput.TextChanged
             debounceTimer.Stop()
             If Not String.IsNullOrWhiteSpace(txtInput.Text) Then
@@ -460,6 +502,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Triggers translation on Enter (Shift+Enter is not inserted due to <c>AcceptsReturn=False</c>).
+        ''' </summary>
         Private Sub txtInput_KeyDown(sender As Object, e As KeyEventArgs) Handles txtInput.KeyDown
             If e.KeyCode = Keys.Enter AndAlso Not e.Shift Then
                 e.SuppressKeyPress = True
@@ -468,11 +513,17 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Debounce timer tick: initiates translation for the current input.
+        ''' </summary>
         Private Sub OnDebounceTimerTick(sender As Object, e As EventArgs)
             debounceTimer.Stop()
             PerformTranslationAsync()
         End Sub
 
+        ''' <summary>
+        ''' Translates the main input text into the target language.
+        ''' </summary>
         Private Async Sub PerformTranslationAsync()
             Dim textToTranslate As String = txtInput.Text.Trim()
             Dim targetLanguage As String = txtLanguage.Text.Trim()
@@ -495,53 +546,30 @@ Namespace SharedLibrary
             rtbOutput.Text = ""
 
             Try
-                Dim result As String = Await Task.Run(
-                    Async Function()
-                        Return Await _translateFunc(textToTranslate, targetLanguage, sourceLanguage, token)
-                    End Function, token).ConfigureAwait(False)
+                ' Call translate function - let it handle its own threading
+                ' Do NOT use ConfigureAwait(False) to stay on UI context
+                Dim result As String = Await _translateFunc(textToTranslate, targetLanguage, sourceLanguage, token)
 
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then
-                    If Me.InvokeRequired Then
-                        Me.BeginInvoke(Sub()
-                                           If Not _isClosing Then
-                                               rtbOutput.Text = If(result, "")
-                                               lblSpinner.Visible = False
-                                           End If
-                                       End Sub)
-                    Else
-                        rtbOutput.Text = If(result, "")
-                        lblSpinner.Visible = False
-                    End If
+                    rtbOutput.Text = If(result, "")
                 End If
             Catch ex As OperationCanceledException
                 ' Cancelled - ignore
             Catch ex As Exception
                 If Not token.IsCancellationRequested AndAlso Not _isClosing Then
-                    If Me.InvokeRequired Then
-                        Me.BeginInvoke(Sub()
-                                           If Not _isClosing Then
-                                               rtbOutput.Text = $"Error: {ex.Message}"
-                                               lblSpinner.Visible = False
-                                           End If
-                                       End Sub)
-                    Else
-                        rtbOutput.Text = $"Error: {ex.Message}"
-                        lblSpinner.Visible = False
-                    End If
+                    rtbOutput.Text = $"Error: {ex.Message}"
                 End If
             Finally
                 If Not _isClosing Then
-                    If Me.InvokeRequired Then
-                        Me.BeginInvoke(Sub()
-                                           If Not _isClosing Then lblSpinner.Visible = False
-                                       End Sub)
-                    Else
-                        lblSpinner.Visible = False
-                    End If
+                    lblSpinner.Visible = False
                 End If
             End Try
         End Sub
 
+        ''' <summary>
+        ''' Translates a selected word/phrase into the opposite direction used by the main translation.
+        ''' </summary>
+        ''' <param name="word">Word/phrase to translate.</param>
         Private Async Sub PerformWordTranslationAsync(word As String)
             If String.IsNullOrWhiteSpace(word) Then Return
 
@@ -563,7 +591,7 @@ Namespace SharedLibrary
                 targetLanguage = userSourceLanguage
                 sourceLanguage = userTargetLanguage
             Else
-                ' Source language is empty: detect from input text
+                ' Source language is empty: instruct translation function to detect language from input text
                 targetLanguage = $"the language of this text ""{Me.txtInput.Text}"""
                 sourceLanguage = userTargetLanguage
             End If
@@ -619,6 +647,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Cancels the current main translation request.</summary>
         Private Sub CancelOngoingTranslation()
             Try
                 _cts?.Cancel()
@@ -628,6 +657,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Cancels the current secondary (word/phrase) translation request.</summary>
         Private Sub CancelOngoingTranslation2()
             Try
                 _cts2?.Cancel()
@@ -637,10 +667,14 @@ Namespace SharedLibrary
             End Try
         End Sub
 
+        ''' <summary>Clear button handler.</summary>
         Private Sub btnClear_Click(sender As Object, e As EventArgs) Handles btnClear.Click
             ClearAll()
         End Sub
 
+        ''' <summary>
+        ''' Clears input and both outputs, cancels ongoing translations, and focuses the input box.
+        ''' </summary>
         Private Sub ClearAll()
             CancelOngoingTranslation()
             CancelOngoingTranslation2()
@@ -650,45 +684,56 @@ Namespace SharedLibrary
             txtInput.Focus()
         End Sub
 
+        ''' <summary>Copy button handler for the first output.</summary>
         Private Sub btnCopy_Click(sender As Object, e As EventArgs) Handles btnCopy.Click
             CopyResult()
         End Sub
 
+        ''' <summary>Copies the first output text to clipboard.</summary>
         Private Sub CopyResult()
             Dim text As String = rtbOutput.Text
             If Not String.IsNullOrEmpty(text) Then
                 Try
-                    Clipboard.SetText(text.Trim())
+                    'Clipboard.SetText(text.Trim())
+                    SafeSetClipboard(text.Trim(), rtbOutput)
                     FlashControl(rtbOutput)
                 Catch
                 End Try
             End If
         End Sub
 
+        ''' <summary>Clear button handler for the second output.</summary>
         Private Sub btnClear2_Click(sender As Object, e As EventArgs) Handles btnClear2.Click
             CancelOngoingTranslation2()
             rtbOutput2.Text = ""
         End Sub
 
+        ''' <summary>Copy button handler for the second output.</summary>
         Private Sub btnCopy2_Click(sender As Object, e As EventArgs) Handles btnCopy2.Click
             Dim text As String = rtbOutput2.Text
             If Not String.IsNullOrEmpty(text) Then
                 Try
-                    Clipboard.SetText(text.Trim())
+                    'Clipboard.SetText(text.Trim())
+                    SafeSetClipboard(text.Trim(), rtbOutput2)
                     FlashControl(rtbOutput2)
                 Catch
                 End Try
             End If
         End Sub
 
+        ''' <summary>Close button handler.</summary>
         Private Sub btnClose_Click(sender As Object, e As EventArgs) Handles btnClose.Click
             Me.Close()
         End Sub
 
+        ''' <summary>Collapse button handler.</summary>
         Private Sub btnCollapse_Click(sender As Object, e As EventArgs) Handles btnCollapse.Click
             CollapseWindow()
         End Sub
 
+        ''' <summary>
+        ''' Handles global keyboard shortcuts for the form.
+        ''' </summary>
         Protected Overrides Sub OnKeyDown(e As KeyEventArgs)
             MyBase.OnKeyDown(e)
             If e.KeyCode = Keys.Escape Then
@@ -703,8 +748,57 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Sets clipboard text safely with retries to handle transient <see cref="ExternalException"/> failures.
+        ''' </summary>
+        ''' <param name="text">Text to place on the clipboard.</param>
+        ''' <param name="ctrl">Control to flash if the clipboard operation succeeds.</param>
+        Private Sub SafeSetClipboard(text As String, ctrl As Control)
+            If String.IsNullOrEmpty(text) OrElse _isClosing Then Return
+
+            ' Clipboard operations must happen on UI thread
+            ' Use BeginInvoke (non-blocking) with retry logic via timer
+            Dim attempts As Integer = 0
+            Dim retryTimer As System.Windows.Forms.Timer = Nothing
+
+            Dim trySetClipboard As Action = Nothing
+            trySetClipboard = Sub()
+                                  attempts += 1
+                                  Try
+                                      Clipboard.SetText(text)
+                                      FlashControl(ctrl)
+                                      retryTimer?.Dispose()
+                                  Catch ex As ExternalException
+                                      If attempts < 3 Then
+                                          ' Retry after short delay
+                                          If retryTimer Is Nothing Then
+                                              retryTimer = New System.Windows.Forms.Timer() With {.Interval = 100}
+                                              AddHandler retryTimer.Tick, Sub(s, ev)
+                                                                              retryTimer.Stop()
+                                                                              trySetClipboard()
+                                                                          End Sub
+                                          End If
+                                          retryTimer.Start()
+                                      Else
+                                          retryTimer?.Dispose()
+                                      End If
+                                  Catch
+                                      retryTimer?.Dispose()
+                                  End Try
+                              End Sub
+
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(trySetClipboard)
+            Else
+                trySetClipboard()
+            End If
+        End Sub
+
 #Region "Output RichTextBox Click Handling"
 
+        ''' <summary>
+        ''' Captures the selection state prior to mouse-up to detect click-on-selection actions.
+        ''' </summary>
         Private Sub RtbOutput_MouseDown(sender As Object, e As MouseEventArgs)
             If e.Button <> MouseButtons.Left Then Return
             _mouseDownPoint = e.Location
@@ -713,6 +807,9 @@ Namespace SharedLibrary
             _selectionCopyTimer.Stop()
         End Sub
 
+        ''' <summary>
+        ''' Marks interaction as drag selection once the cursor moves beyond <see cref="DRAG_THRESHOLD"/>.
+        ''' </summary>
         Private Sub RtbOutput_MouseMove(sender As Object, e As MouseEventArgs)
             If e.Button = MouseButtons.Left AndAlso _mouseDownPoint <> Point.Empty Then
                 If Math.Abs(e.X - _mouseDownPoint.X) > DRAG_THRESHOLD OrElse
@@ -722,6 +819,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Handles click actions unless the interaction was a drag selection.
+        ''' </summary>
         Private Sub RtbOutput_MouseUp(sender As Object, e As MouseEventArgs)
             If e.Button <> MouseButtons.Left Then Return
 
@@ -739,11 +839,17 @@ Namespace SharedLibrary
             _rtbOutput_SelectionBeforeClick = Nothing
         End Sub
 
+        ''' <summary>
+        ''' Starts or stops delayed selection copying for the first output box.
+        ''' </summary>
         Private Sub RtbOutput_SelectionChanged(sender As Object, e As EventArgs)
             If _suppressSelectionChanged Then Return
             HandleSelectionChanged(rtbOutput)
         End Sub
 
+        ''' <summary>
+        ''' Captures the selection state prior to mouse-up to detect click-on-selection actions.
+        ''' </summary>
         Private Sub RtbOutput2_MouseDown(sender As Object, e As MouseEventArgs)
             If e.Button <> MouseButtons.Left Then Return
             _mouseDownPoint = e.Location
@@ -752,6 +858,9 @@ Namespace SharedLibrary
             _selectionCopyTimer.Stop()
         End Sub
 
+        ''' <summary>
+        ''' Marks interaction as drag selection once the cursor moves beyond <see cref="DRAG_THRESHOLD"/>.
+        ''' </summary>
         Private Sub RtbOutput2_MouseMove(sender As Object, e As MouseEventArgs)
             If e.Button = MouseButtons.Left AndAlso _mouseDownPoint <> Point.Empty Then
                 If Math.Abs(e.X - _mouseDownPoint.X) > DRAG_THRESHOLD OrElse
@@ -761,6 +870,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Handles click actions unless the interaction was a drag selection.
+        ''' </summary>
         Private Sub RtbOutput2_MouseUp(sender As Object, e As MouseEventArgs)
             If e.Button <> MouseButtons.Left Then Return
 
@@ -776,11 +888,21 @@ Namespace SharedLibrary
             _rtbOutput2_SelectionBeforeClick = Nothing
         End Sub
 
+        ''' <summary>
+        ''' Starts or stops delayed selection copying for the second output box.
+        ''' </summary>
         Private Sub RtbOutput2_SelectionChanged(sender As Object, e As EventArgs)
             If _suppressSelectionChanged Then Return
             HandleSelectionChanged(rtbOutput2)
         End Sub
 
+        ''' <summary>
+        ''' Handles a click in an output box: either triggers selection action or selects/copies the clicked word.
+        ''' </summary>
+        ''' <param name="rtb">The output box being clicked.</param>
+        ''' <param name="location">Click coordinates in the control.</param>
+        ''' <param name="selectionBefore">Selection (start,length) prior to mouse-up.</param>
+        ''' <param name="isSecondOutput">When true, applies second-output click behavior.</param>
         Private Sub HandleOutputClick(rtb As RichTextBox, location As Point,
                                        selectionBefore As Tuple(Of Integer, Integer),
                                        isSecondOutput As Boolean)
@@ -817,13 +939,17 @@ Namespace SharedLibrary
             Dim wordText As String = SelectWordAtPositionSuppressed(rtb, location)
             If Not String.IsNullOrWhiteSpace(wordText) Then
                 Try
-                    Clipboard.SetText(wordText)
+                    'Clipboard.SetText(wordText)
+                    SafeSetClipboard(wordText, rtb)
                     FlashControl(rtb)
                 Catch
                 End Try
             End If
         End Sub
 
+        ''' <summary>
+        ''' Arms/disarms selection auto-copy behavior for the provided output box.
+        ''' </summary>
         Private Sub HandleSelectionChanged(rtb As RichTextBox)
             If rtb.SelectionLength > 0 Then
                 _selectionCopyTimer.Stop()
@@ -837,6 +963,9 @@ Namespace SharedLibrary
             End If
         End Sub
 
+        ''' <summary>
+        ''' Copies the currently selected text to clipboard after the selection delay elapses.
+        ''' </summary>
         Private Sub OnSelectionCopyTimerTick(sender As Object, e As EventArgs)
             _selectionCopyTimer.Stop()
 
@@ -844,7 +973,8 @@ Namespace SharedLibrary
                 Dim selectedText As String = _selectionCopyRtb.SelectedText.Trim()
                 If Not String.IsNullOrWhiteSpace(selectedText) Then
                     Try
-                        Clipboard.SetText(selectedText)
+                        'Clipboard.SetText(selectedText)
+                        SafeSetClipboard(selectedText, _selectionCopyRtb)
                         FlashControl(_selectionCopyRtb)
                     Catch
                     End Try
@@ -857,8 +987,11 @@ Namespace SharedLibrary
 #End Region
 
         ''' <summary>
-        ''' Selects the word at the given position, suppressing SelectionChanged event.
+        ''' Selects the word at the given position, suppressing the <c>SelectionChanged</c> event.
         ''' </summary>
+        ''' <param name="rtb">Target RichTextBox.</param>
+        ''' <param name="location">Mouse click location.</param>
+        ''' <returns>The selected word, trimmed; otherwise <c>Nothing</c>.</returns>
         Private Function SelectWordAtPositionSuppressed(rtb As RichTextBox, location As Point) As String
             Dim charIndex As Integer = rtb.GetCharIndexFromPosition(location)
             Dim text As String = rtb.Text
@@ -888,6 +1021,9 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
+        ''' <summary>
+        ''' Switches the widget into expanded mode and shows the second output panel.
+        ''' </summary>
         Private Sub ExpandWindow()
             If _isExpanded Then Return
 
@@ -922,6 +1058,9 @@ Namespace SharedLibrary
             _isExpanded = True
         End Sub
 
+        ''' <summary>
+        ''' Returns the widget to collapsed mode and hides the second output panel.
+        ''' </summary>
         Private Sub CollapseWindow()
             If Not _isExpanded Then Return
 
@@ -947,6 +1086,9 @@ Namespace SharedLibrary
             _isExpanded = False
         End Sub
 
+        ''' <summary>
+        ''' Flashes a control background briefly to indicate a completed action.
+        ''' </summary>
         Private Sub FlashControl(ctrl As Control)
             If _isClosing OrElse ctrl Is Nothing OrElse ctrl.IsDisposed Then Return
 
@@ -967,6 +1109,9 @@ Namespace SharedLibrary
             flashTimer.Start()
         End Sub
 
+        ''' <summary>
+        ''' Shows the widget or brings it to front if already visible.
+        ''' </summary>
         Public Sub ShowWidget()
             If Me.Visible Then
                 Me.BringToFront()

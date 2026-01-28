@@ -32,6 +32,8 @@
     <ResolveComReferenceSilent>true</ResolveComReferenceSilent>
     <IsWebBootstrapper>True</IsWebBootstrapper>
     <TargetFrameworkProfile />
+    <NuGetPackageImportStamp>
+    </NuGetPackageImportStamp>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <TargetCulture>en</TargetCulture>
     <AutoIncrementApplicationRevision>false</AutoIncrementApplicationRevision>
@@ -42,8 +44,6 @@
     <SupportUrl>https://redink.ai</SupportUrl>
     <OfficeApplicationDescription />
     <LoadBehavior>3</LoadBehavior>
-    <NuGetPackageImportStamp>
-    </NuGetPackageImportStamp>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
     <ApplicationVersion>1.1.0.700</ApplicationVersion>

@@ -3,7 +3,15 @@
 '
 ' =============================================================================
 ' File: LogWindow.vb
-' Purpose: Provides a log window for displaying tooling operations in real-time.
+' PURPOSE
+'   Modeless tooling log UI used by the tooling pipeline (e.g., ExecuteToolingLoop)
+'   to display real-time progress and allow user cancellation.
+'
+' KEY ARCHITECTURE
+'   • UI: RichTextBox log + button strip (Cancel/Close, Keep Open, Copy, Clear)
+'   • Threading: Safe cross-thread updates via InvokeRequired/BeginInvoke
+'   • Lifecycle: CancelRequested event; MarkComplete switches Cancel → Close
+'   • Auto-close: Optional countdown timer with "Keep Open" override
 ' =============================================================================
 
 Option Explicit On
@@ -15,7 +23,6 @@ Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
 ''' A modeless log window that displays tooling operations and allows cancellation.
-''' Supports color-coded entries by severity.
 ''' </summary>
 Public Class LogWindow
     Inherits Form
@@ -24,128 +31,36 @@ Public Class LogWindow
     Private ReadOnly btnCancel As Button
     Private ReadOnly btnCopy As Button
     Private ReadOnly btnClear As Button
+    Private ReadOnly btnKeepOpen As Button
 
     Private _initialPositionSet As Boolean = False
-
     Private _autoCloseTimer As Timer = Nothing
     Private _autoCloseSecondsRemaining As Integer = 0
     Private _closeButtonBaseText As String = "Close"
 
     ''' <summary>
-    ''' Raised when the user requests cancellation.
+    ''' Raised when the user requests cancellation of the current tooling run.
     ''' </summary>
+    ''' <remarks>
+    ''' The tooling loop should subscribe to this event and abort as soon as possible.
+    ''' </remarks>
     Public Event CancelRequested As EventHandler
 
     ''' <summary>
-    ''' Initializes a new instance of the LogWindow.
+    ''' Starts (or restarts) the auto-close countdown and updates the Close button text.
     ''' </summary>
-    Public Sub New()
-        Me.Text = $"{ThisAddIn.AN} Tooling Log"
-        Me.Width = 600
-        Me.Height = 400
-        Me.StartPosition = FormStartPosition.Manual
-        Me.FormBorderStyle = FormBorderStyle.Sizable
-        Me.MinimumSize = New Size(450, 300)
-        Me.TopMost = False
-        Me.MaximizeBox = False
-        Me.MinimizeBox = False
-        Me.ShowInTaskbar = False
-        Me.AutoScaleMode = AutoScaleMode.Font
-
-        Try
-            Me.Icon = Icon.FromHandle((New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
-        Catch
-        End Try
-
-        ' Main layout
-        Dim mainPanel As New TableLayoutPanel() With {
-            .Dock = DockStyle.Fill,
-            .ColumnCount = 1,
-            .RowCount = 2,
-            .Padding = New Padding(10)
-        }
-        mainPanel.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
-        mainPanel.RowStyles.Add(New RowStyle(SizeType.AutoSize))
-
-        ' Log box (RichTextBox for per-entry coloring)
-        rtbLog = New RichTextBox() With {
-            .Dock = DockStyle.Fill,
-            .ReadOnly = True,
-            .BorderStyle = BorderStyle.None,
-            .ScrollBars = RichTextBoxScrollBars.Vertical,
-            .WordWrap = False,
-            .DetectUrls = False,
-            .BackColor = Me.BackColor,
-            .HideSelection = False,
-            .ShortcutsEnabled = True,
-            .Font = New Font("Consolas", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
-        }
-        mainPanel.Controls.Add(rtbLog, 0, 0)
-
-        ' Button panel
-        Dim buttonPanel As New FlowLayoutPanel() With {
-            .Dock = DockStyle.Fill,
-            .FlowDirection = FlowDirection.RightToLeft,
-            .AutoSize = True
-        }
-
-        btnCancel = New Button() With {
-            .Text = "Cancel",
-            .AutoSize = True,
-            .Padding = New Padding(10, 5, 10, 5)
-        }
-        AddHandler btnCancel.Click, AddressOf OnCancelClick
-
-        btnCopy = New Button() With {
-            .Text = "Copy Log",
-            .AutoSize = True,
-            .Padding = New Padding(10, 5, 10, 5)
-        }
-        AddHandler btnCopy.Click, AddressOf OnCopyClick
-
-        btnClear = New Button() With {
-            .Text = "Clear",
-            .AutoSize = True,
-            .Padding = New Padding(10, 5, 10, 5)
-        }
-        AddHandler btnClear.Click, AddressOf OnClearClick
-
-        buttonPanel.Controls.Add(btnCancel)
-        buttonPanel.Controls.Add(btnCopy)
-        buttonPanel.Controls.Add(btnClear)
-
-        mainPanel.Controls.Add(buttonPanel, 0, 1)
-
-        Me.Controls.Add(mainPanel)
-    End Sub
-
-    Protected Overrides Sub OnShown(e As EventArgs)
-        MyBase.OnShown(e)
-
-        If Not _initialPositionSet Then
-            PositionWindowInitial()
-            _initialPositionSet = True
-        End If
-
-        Me.BringToFront()
-    End Sub
-
-    Private Sub PositionWindowInitial()
-        Const marginRight As Integer = 40
-        Const marginBottom As Integer = 40
-
-        Dim wa = Screen.PrimaryScreen.WorkingArea
-        Me.Location = New Point(
-            wa.Right - Me.Width - marginRight,
-            wa.Bottom - Me.Height - marginBottom
-        )
-    End Sub
-
+    ''' <param name="seconds">
+    ''' Countdown duration in seconds. Values &lt;= 0 are coerced to 1.
+    ''' </param>
+    ''' <remarks>
+    ''' Thread-safe: marshals to UI thread if called from a background thread.
+    ''' Makes <c>btnKeepOpen</c> visible so users can cancel the countdown.
+    ''' </remarks>
     Public Sub StartAutoCloseCountdown(Optional seconds As Integer = 30)
         If seconds <= 0 Then seconds = 1
 
         If Me.InvokeRequired Then
-            Me.BeginInvoke(Sub() StartAutoCloseCountdown(seconds))
+            If Me.IsHandleCreated Then Me.BeginInvoke(Sub() StartAutoCloseCountdown(seconds))
             Return
         End If
 
@@ -157,10 +72,17 @@ Public Class LogWindow
         End If
 
         btnCancel.Text = $"{_closeButtonBaseText} ({_autoCloseSecondsRemaining}s)"
+        btnKeepOpen.Visible = True
         _autoCloseTimer.Stop()
         _autoCloseTimer.Start()
     End Sub
 
+    ''' <summary>
+    ''' Timer tick handler for the auto-close countdown.
+    ''' Updates the Close button text and closes the window when time reaches zero.
+    ''' </summary>
+    ''' <param name="sender">Event sender (timer).</param>
+    ''' <param name="e">Event arguments.</param>
     Private Sub AutoCloseTimerTick(sender As Object, e As EventArgs)
         _autoCloseSecondsRemaining -= 1
 
@@ -176,6 +98,12 @@ Public Class LogWindow
         btnCancel.Text = $"{_closeButtonBaseText} ({_autoCloseSecondsRemaining}s)"
     End Sub
 
+    ''' <summary>
+    ''' Stops any active auto-close countdown and resets related UI state.
+    ''' </summary>
+    ''' <remarks>
+    ''' Resets the Close/Cancel button text to the base label and hides Keep Open.
+    ''' </remarks>
     Private Sub StopAutoCloseCountdown()
         If _autoCloseTimer IsNot Nothing Then
             _autoCloseTimer.Stop()
@@ -184,60 +112,155 @@ Public Class LogWindow
         If btnCancel IsNot Nothing Then
             btnCancel.Text = _closeButtonBaseText
         End If
+        If btnKeepOpen IsNot Nothing Then
+            btnKeepOpen.Visible = False
+        End If
     End Sub
 
     ''' <summary>
-    ''' Appends a log entry (default level: info).
+    ''' Creates a new modeless tooling log window and initializes all UI controls.
     ''' </summary>
-    Public Sub AppendLog(message As String)
-        AppendLog(message, "info")
+    ''' <remarks>
+    ''' The form handle is created immediately to ensure <c>BeginInvoke</c> can be used
+    ''' safely even if logging starts before the window is first shown.
+    ''' </remarks>
+    Public Sub New()
+        Me.Text = $"{ThisAddIn.AN} Tooling Log"
+        Me.Width = 600
+        Me.Height = 400
+        Me.StartPosition = FormStartPosition.Manual
+        Me.FormBorderStyle = FormBorderStyle.Sizable
+        Me.MinimumSize = New Size(450, 300)
+        Me.TopMost = False
+        Me.MaximizeBox = False
+        Me.MinimizeBox = False
+        Me.ShowInTaskbar = False
+        Me.AutoScaleMode = AutoScaleMode.Font
+
+        ' Double buffering prevents rendering artifacts on buttons/text
+        Me.DoubleBuffered = True
+
+        Try
+            Me.Icon = Icon.FromHandle((New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))).GetHicon())
+        Catch
+        End Try
+
+        Dim mainPanel As New TableLayoutPanel() With {
+            .Dock = DockStyle.Fill, .ColumnCount = 1, .RowCount = 2, .Padding = New Padding(10)
+        }
+        mainPanel.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+        mainPanel.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+
+        rtbLog = New RichTextBox() With {
+            .Dock = DockStyle.Fill, .ReadOnly = True, .BorderStyle = BorderStyle.None,
+            .ScrollBars = RichTextBoxScrollBars.Vertical, .WordWrap = False, .DetectUrls = False,
+            .BackColor = Me.BackColor, .HideSelection = False, .ShortcutsEnabled = True,
+            .Font = New Font("Consolas", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+        }
+        mainPanel.Controls.Add(rtbLog, 0, 0)
+
+        Dim buttonPanel As New FlowLayoutPanel() With {
+            .Dock = DockStyle.Fill, .FlowDirection = FlowDirection.RightToLeft, .AutoSize = True
+        }
+
+        btnCancel = New Button() With {.Text = "Cancel", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)}
+        AddHandler btnCancel.Click, AddressOf OnCancelClick
+
+        btnKeepOpen = New Button() With {.Text = "Keep Open", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5), .Visible = False}
+        AddHandler btnKeepOpen.Click, AddressOf OnKeepOpenClick
+
+        btnCopy = New Button() With {.Text = "Copy Log", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)}
+        AddHandler btnCopy.Click, AddressOf OnCopyClick
+
+        btnClear = New Button() With {.Text = "Clear", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)}
+        AddHandler btnClear.Click, AddressOf OnClearClick
+
+        buttonPanel.Controls.Add(btnCancel)
+        buttonPanel.Controls.Add(btnKeepOpen)
+        buttonPanel.Controls.Add(btnCopy)
+        buttonPanel.Controls.Add(btnClear)
+        mainPanel.Controls.Add(buttonPanel, 0, 1)
+        Me.Controls.Add(mainPanel)
+
+        ' Force handle creation immediately. This ensures BeginInvoke works
+        ' even if called before the window is fully Shown.
+        Me.CreateControl()
     End Sub
 
     ''' <summary>
-    ''' Appends a log entry with a severity level (info, warn, error, success, step, llm).
+    ''' Positions the window on first show and forces an initial paint.
     ''' </summary>
+    ''' <param name="e">Event arguments.</param>
+    ''' <remarks>
+    ''' On first show, positions the form near the bottom-right of the primary screen working area.
+    ''' </remarks>
+    Protected Overrides Sub OnShown(e As EventArgs)
+        MyBase.OnShown(e)
+        If Not _initialPositionSet Then
+            Dim wa = Screen.PrimaryScreen.WorkingArea
+            Me.Location = New Point(wa.Right - Me.Width - 40, wa.Bottom - Me.Height - 40)
+            _initialPositionSet = True
+        End If
+        Me.BringToFront()
+        Me.Refresh() ' Ensure initial paint
+    End Sub
+
+    ''' <summary>
+    ''' Appends a log entry to the output window.
+    ''' </summary>
+    ''' <param name="message">Message text to append.</param>
+    ''' <param name="level">
+    ''' Optional severity/category used for color-coding (e.g., "info", "warn", "error", "success", "step", "llm").
+    ''' </param>
+    ''' <remarks>
+    ''' Thread-safe: marshals to UI thread if required. No-op if the form or RichTextBox is disposed.
+    ''' </remarks>
     Public Sub AppendLog(message As String, Optional level As String = "info")
+        If Me.IsDisposed OrElse rtbLog.IsDisposed Then Return
+
+        ' Safe invoke pattern
         If Me.InvokeRequired Then
-            Me.BeginInvoke(Sub() AppendLogInternal(message, level))
+            ' Check handle again before invoking to avoid race conditions during close
+            If Me.IsHandleCreated Then
+                Me.BeginInvoke(Sub() AppendLogInternal(message, level))
+            End If
         Else
             AppendLogInternal(message, level)
         End If
     End Sub
 
+    ''' <summary>
+    ''' Performs the actual log append operation on the UI thread.
+    ''' </summary>
+    ''' <param name="message">Message text.</param>
+    ''' <param name="level">Severity/category used for color selection.</param>
+    ''' <remarks>
+    ''' Adds a timestamp prefix and applies color formatting per severity level.
+    ''' Uses SuspendLayout/ResumeLayout to reduce flicker during rapid output.
+    ''' </remarks>
     Private Sub AppendLogInternal(message As String, level As String)
         If String.IsNullOrEmpty(message) Then Return
+        If rtbLog.IsDisposed Then Return
 
         Dim timestamp = DateTime.Now.ToString("HH:mm:ss.fff")
-        Dim prefix = $"[{timestamp}] "
-
-        Dim textColor As Color
+        Dim textColor As Color = Color.Black
         Select Case (If(level, "info")).ToLowerInvariant()
-            Case "error", "err", "fail"
-                textColor = Color.DarkRed
-            Case "warn", "warning"
-                textColor = Color.DarkOrange
-            Case "success", "ok"
-                textColor = Color.DarkGreen
-            Case "step"
-                textColor = Color.DarkBlue
-            Case "llm"
-                textColor = Color.DarkMagenta
-            Case Else
-                textColor = Color.Black
+            Case "error", "err", "fail" : textColor = Color.DarkRed
+            Case "warn", "warning" : textColor = Color.DarkOrange
+            Case "success", "ok" : textColor = Color.DarkGreen
+            Case "step" : textColor = Color.DarkBlue
+            Case "llm" : textColor = Color.DarkMagenta
         End Select
 
+        ' Pause layout to prevent flicker during append
         rtbLog.SuspendLayout()
         Try
             rtbLog.SelectionStart = rtbLog.TextLength
-            rtbLog.SelectionLength = 0
             rtbLog.SelectionColor = Color.Gray
-            rtbLog.AppendText(prefix)
-
+            rtbLog.AppendText($"[{timestamp}] ")
             rtbLog.SelectionStart = rtbLog.TextLength
-            rtbLog.SelectionLength = 0
             rtbLog.SelectionColor = textColor
             rtbLog.AppendText(message & Environment.NewLine)
-
             rtbLog.SelectionStart = rtbLog.TextLength
             rtbLog.ScrollToCaret()
         Finally
@@ -245,34 +268,75 @@ Public Class LogWindow
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Handles the Cancel button click and raises <see cref="CancelRequested"/>.
+    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
+    ''' <remarks>
+    ''' Disables the button immediately to avoid double-cancel requests.
+    ''' </remarks>
     Private Sub OnCancelClick(sender As Object, e As EventArgs)
         btnCancel.Enabled = False
         btnCancel.Text = "Cancelling..."
         RaiseEvent CancelRequested(Me, EventArgs.Empty)
     End Sub
 
-    Private Sub OnCopyClick(sender As Object, e As EventArgs)
-        If Not String.IsNullOrEmpty(rtbLog.Text) Then
-            Clipboard.SetText(rtbLog.Text)
-        End If
+    ''' <summary>
+    ''' Cancels auto-close behavior and keeps the window visible.
+    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
+    Private Sub OnKeepOpenClick(sender As Object, e As EventArgs)
+        StopAutoCloseCountdown()
+        AppendLog("Auto-close cancelled - window will remain open", "step")
     End Sub
 
+    ''' <summary>
+    ''' Copies the current log text to the clipboard.
+    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
+    Private Sub OnCopyClick(sender As Object, e As EventArgs)
+        If Not String.IsNullOrEmpty(rtbLog.Text) Then Clipboard.SetText(rtbLog.Text)
+    End Sub
+
+    ''' <summary>
+    ''' Clears the current log output.
+    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
     Private Sub OnClearClick(sender As Object, e As EventArgs)
         rtbLog.Clear()
     End Sub
 
     ''' <summary>
-    ''' Updates the cancel button to indicate session is complete.
+    ''' Marks the tooling operation as completed and switches the Cancel button to Close behavior.
     ''' </summary>
+    ''' <remarks>
+    ''' Thread-safe: may be called from background threads. After completion, the window title is updated and an
+    ''' auto-close countdown is started using <c>ThisAddIn.ToolingLog_AutoCloseDefaultSeconds</c>.
+    ''' </remarks>
     Public Sub MarkComplete()
+        If Me.IsDisposed Then Return
+
         If Me.InvokeRequired Then
-            Me.BeginInvoke(Sub() MarkCompleteInternal())
+            If Me.IsHandleCreated Then Me.BeginInvoke(Sub() MarkCompleteInternal())
         Else
             MarkCompleteInternal()
         End If
     End Sub
 
+    ''' <summary>
+    ''' Applies "completed" UI state changes on the UI thread.
+    ''' </summary>
+    ''' <remarks>
+    ''' Resets countdown state, updates button text/handler to Close, updates window title,
+    ''' and starts the default auto-close countdown.
+    ''' </remarks>
     Private Sub MarkCompleteInternal()
+        If btnCancel.IsDisposed Then Return
+
         StopAutoCloseCountdown()
 
         btnCancel.Text = "Close"
@@ -288,4 +352,5 @@ Public Class LogWindow
 
         StartAutoCloseCountdown(ThisAddIn.ToolingLog_AutoCloseDefaultSeconds)
     End Sub
+
 End Class

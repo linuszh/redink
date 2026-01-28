@@ -49,6 +49,7 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml
 Imports DocumentFormat.OpenXml.Office2010.CustomUI
+Imports DocumentFormat.OpenXml.Office2016.Drawing.Charts
 Imports DocumentFormat.OpenXml.Presentation
 Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Google.Rpc.Context.AttributeContext.Types
@@ -874,6 +875,7 @@ Partial Public Class ThisAddIn
                 AddItem("version", "Show the installed Red Ink version.")
                 AddItem("switch", "Temporarily swap primary and secondary models.")
                 AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
+                AddItem("license", "Show license information and access license manage dialog.")
 
                 ' CONFIG / MENU
                 AddItem("settings", "Open the settings dialog.")
@@ -896,6 +898,7 @@ Partial Public Class ThisAddIn
                 AddItem("clearlastprompt", "Clear the stored last Freestyle prompt and repeat state.")
                 AddItem("promptlog", "Show/edit the cached Freestyle prompt log.")
                 AddItem("logstat", $"Compile and show {AN} usage startistics based on collected logs.")
+                AddItem("logfile", $"Open the {AN} local log file (for events re update, license, etc.).")
 
                 ' MYSTYLE
                 AddItem("definemystyle", "Create/update your MyStyle prompts.")
@@ -1305,9 +1308,41 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Reset local configuration to defaults (with confirmation)
+#If DEBUG Then
+            If String.Equals(OtherPrompt.Trim(), "lt", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.TestLicenseSystem()
+                Return
+            End If
+#End If
+
+            If String.Equals(OtherPrompt.Trim(), "license", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowLicenseManagementDialog()
+                Return
+            End If
+
+            ' Open the centralized usage Log File
             If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
                 SharedLogger.AnalyzeLogs(_context)
+                Return
+            End If
+
+            ' Open the Red Ink Local Log File
+            If String.Equals(OtherPrompt.Trim(), "logfile", StringComparison.OrdinalIgnoreCase) Then
+                Dim logPath As String = ""
+                Try
+                    logPath = System.IO.Path.Combine(
+                                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                                AN2,
+                                LogFileName)
+
+                    If System.IO.File.Exists(logPath) Then
+                        SLib.ShowTextFileEditor(logPath, $"{AN} Local Log File '{logPath}':", True, _context)
+                    Else
+                        ShowCustomMessageBox($"Local logfile at '{logPath}' not found.")
+                    End If
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Error opening local logfile at '{logPath}': " & ex.Message)
+                End Try
                 Return
             End If
 

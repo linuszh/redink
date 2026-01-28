@@ -766,7 +766,7 @@ Namespace SharedLibrary
             }
 
             bodyLabel.MaximumSize = New Size(contentWidth, 0)
-            bodyLabel.Location = New System.Drawing.Point(PADDING, PADDING)  ' Respect the left and top padding
+            bodyLabel.Location = New System.Drawing.Point(PADDING, PADDING)  ' Respect the left and top padding            
             bodyScrollPanel.Controls.Add(bodyLabel)
 
             If needsScroll Then
@@ -803,20 +803,28 @@ Namespace SharedLibrary
                 buttonPanelHeight + 100 + chromeHeight
             )
 
-            ' Handle resize to update label wrapping.
-            AddHandler messageForm.Resize,
-                Sub()
-                    Dim availableWidth As Integer = bodyScrollPanel.ClientSize.Width - 2 * PADDING
-                    If bodyScrollPanel.AutoScroll Then
-                        availableWidth -= SystemInformation.VerticalScrollBarWidth
-                    End If
-                    bodyLabel.MaximumSize = New Size(Math.Max(100, availableWidth), 0)
-                    bodyLabel.PerformLayout()
+            ' Resize handler 
+            Dim ApplyLayout As System.Action =
+                        Sub()
+                            Dim availableWidth As Integer = bodyScrollPanel.ClientSize.Width - 2 * PADDING
+                            If bodyScrollPanel.AutoScroll Then
+                                availableWidth -= SystemInformation.VerticalScrollBarWidth
+                            End If
 
-                    If bodyScrollPanel.AutoScroll Then
-                        bodyScrollPanel.AutoScrollMinSize = New Size(availableWidth, bodyLabel.PreferredHeight + PADDING)
-                    End If
-                End Sub
+                            bodyLabel.MaximumSize = New Size(Math.Max(100, availableWidth), 0)
+                            bodyLabel.PerformLayout()
+
+                            If bodyScrollPanel.AutoScroll Then
+                                bodyScrollPanel.AutoScrollMinSize = New Size(availableWidth, bodyLabel.PreferredHeight + PADDING)
+                            End If
+                        End Sub
+
+            ' Run once at the start
+            messageForm.PerformLayout()
+            ApplyLayout.Invoke()
+
+            ' Run on every resize
+            AddHandler messageForm.Resize, Sub() ApplyLayout.Invoke()
 
             ' Auto-close timer.
             If autoCloseSeconds.HasValue Then
@@ -1134,10 +1142,6 @@ Namespace SharedLibrary
         End Sub
 
 
-
-
-
-
         ''' <summary>
         ''' Shows a modal RichTextBox-based message dialog (RTF content) with optional auto-close.
         ''' </summary>
@@ -1145,7 +1149,8 @@ Namespace SharedLibrary
         ''' <param name="header">Dialog title. Defaults to <c>AN</c> if empty/whitespace.</param>
         ''' <param name="autoCloseSeconds">If set, closes the dialog after this many seconds.</param>
         ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
-        Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile")
+        ''' <param name="RestoreWindow">If True, saves and restores window position and size from settings.</param>
+        Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile", Optional RestoreWindow As Boolean = False)
 
             Dim RTFMessageForm As New System.Windows.Forms.Form()
             Dim bodyLabel As New System.Windows.Forms.RichTextBox()
@@ -1260,6 +1265,42 @@ Namespace SharedLibrary
                                          bodyLabel.Bottom + 20 + bottomPanel.Height)
             RTFMessageForm.ClientSize = New System.Drawing.Size(formWidth, formHeight)
 
+            ' Restore window position and size if RestoreWindow is True.
+            If RestoreWindow Then
+                Try
+                    Dim savedBounds As Rectangle = My.Settings.RTFMessageBoxBounds
+                    If savedBounds <> Rectangle.Empty AndAlso savedBounds.Width >= RTFMessageForm.MinimumSize.Width AndAlso savedBounds.Height >= RTFMessageForm.MinimumSize.Height Then
+                        ' Verify the saved position is on a visible screen.
+                        Dim isOnScreen As Boolean = False
+                        For Each scr As Screen In Screen.AllScreens
+                            If scr.WorkingArea.IntersectsWith(savedBounds) Then
+                                isOnScreen = True
+                                Exit For
+                            End If
+                        Next
+                        If isOnScreen Then
+                            RTFMessageForm.StartPosition = FormStartPosition.Manual
+                            RTFMessageForm.Bounds = savedBounds
+                        End If
+                    End If
+                Catch
+                    ' Ignore errors reading settings; use default position.
+                End Try
+
+                ' Save position and size on form closing.
+                AddHandler RTFMessageForm.FormClosing, Sub(sender As Object, e As FormClosingEventArgs)
+                                                           Try
+                                                               ' Only save if window is in normal state (not minimized/maximized).
+                                                               If RTFMessageForm.WindowState = FormWindowState.Normal Then
+                                                                   My.Settings.RTFMessageBoxBounds = RTFMessageForm.Bounds
+                                                                   My.Settings.Save()
+                                                               End If
+                                                           Catch
+                                                               ' Ignore errors saving settings.
+                                                           End Try
+                                                       End Sub
+            End If
+
             ' Auto-close timer.
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
@@ -1318,7 +1359,6 @@ Namespace SharedLibrary
             End If
 
         End Sub
-
 
         ''' <summary>
         ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
