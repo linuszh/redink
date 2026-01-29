@@ -138,6 +138,8 @@ Namespace SharedLibrary
                 context.INI_Model = If(configDict.ContainsKey("Model"), configDict("Model"), "")
 
                 context.SP_Translate = If(configDict.ContainsKey("SP_Translate"), configDict("SP_Translate"), Default_SP_Translate)
+                context.SP_Translate_Multi = If(configDict.ContainsKey("SP_Translate_Multi"), configDict("SP_Translate_Multi"), Default_SP_Translate_Multi)
+                context.SP_Translate_Multi_Source = If(configDict.ContainsKey("SP_Translate_Multi_Source"), configDict("SP_Translate_Multi_Source"), Default_SP_Translate_Multi_Source)
                 context.SP_Translate_Document = If(configDict.ContainsKey("SP_Translate_Document"), configDict("SP_Translate_Document"), Default_SP_Translate_Document)
                 context.SP_Correct = If(configDict.ContainsKey("SP_Correct"), configDict("SP_Correct"), Default_SP_Correct)
                 context.SP_Correct_Document = If(configDict.ContainsKey("SP_Correct_Document"), configDict("SP_Correct_Document"), Default_SP_Correct_Document)
@@ -194,6 +196,7 @@ Namespace SharedLibrary
                 context.SP_Add_Bubbles_Format = If(configDict.ContainsKey("SP_Add_Bubbles_Format"), configDict("SP_Add_Bubbles_Format"), Default_SP_Add_Bubbles_Format)
                 context.SP_Add_Batch = If(configDict.ContainsKey("SP_Add_Batch"), configDict("SP_Add_Batch"), Default_SP_Add_Batch)
                 context.SP_Add_Slides = If(configDict.ContainsKey("SP_Add_Slides"), configDict("SP_Add_Slides"), Default_SP_Add_Slides)
+                context.SP_Add_Chart = If(configDict.ContainsKey("SP_Add_Chart"), configDict("SP_Add_Chart"), Default_SP_Add_Chart)
                 context.SP_BubblesExcel = If(configDict.ContainsKey("SP_BubblesExcel"), configDict("SP_BubblesExcel"), Default_SP_BubblesExcel)
                 context.SP_Add_Revisions = If(configDict.ContainsKey("SP_Add_Revisions"), configDict("SP_Add_Revisions"), Default_SP_Add_Revisions)
                 context.SP_MarkupRegex = If(configDict.ContainsKey("SP_MarkupRegex"), configDict("SP_MarkupRegex"), Default_SP_MarkupRegex)
@@ -257,6 +260,7 @@ Namespace SharedLibrary
                 context.INI_ShortcutsWordExcel = If(configDict.ContainsKey("ShortcutsWordExcel"), configDict("ShortcutsWordExcel"), "")
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
+                context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
 
                 ' Tooling settings
 

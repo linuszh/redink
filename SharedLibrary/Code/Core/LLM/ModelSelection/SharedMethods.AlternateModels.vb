@@ -266,6 +266,9 @@ Namespace SharedLibrary
                                                       Optional Title As String = "",
                                                       Optional includeToolOnly As Boolean = False,
                                                       Optional toolsOnly As Boolean = False) As List(Of ModelConfig)
+
+            iniFilePath = ExpandEnvironmentVariables(iniFilePath)
+
             Dim models As New List(Of ModelConfig)()
             Try
                 If Not File.Exists(iniFilePath) Then
@@ -509,6 +512,9 @@ Namespace SharedLibrary
                                                ByVal iniFilePath As String,
                                                ByVal Task As String,
                                                Optional ByVal UseCase As Integer = 1) As Boolean
+
+            iniFilePath = ExpandEnvironmentVariables(iniFilePath)
+
             If String.IsNullOrWhiteSpace(Task) Then Return False
             Try
                 If Not File.Exists(iniFilePath) Then

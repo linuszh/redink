@@ -46,6 +46,7 @@ Imports System.Diagnostics
 Imports System.IO
 Imports System.Net.Http
 Imports System.Reflection
+Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
@@ -577,6 +578,7 @@ Partial Public Class ThisAddIn
     ''' This ensures tooling calls receive the same context as non-tooling LLM calls.</param>
     ''' <param name="hideSplash">When True, suppresses the splash/progress indicator during LLM calls.</param>
     ''' <param name="hideLogWindow">When True, suppresses the tooling log window (useful for chat integration).</param>
+    ''' <param name="DoChart">When True, adds charting instructions to the system prompt.</param>
     ''' <returns>The final LLM response string returned by the last iteration.</returns>
     Public Async Function ExecuteToolingLoop(
         sysCommand As String,
@@ -597,7 +599,8 @@ Partial Public Class ThisAddIn
         Optional otherPrompt As String = "",
         Optional fullPromptOverride As String = "",
         Optional hideSplash As Boolean = False,
-        Optional hideLogWindow As Boolean = False) As Task(Of String)
+        Optional hideLogWindow As Boolean = False,
+        Optional DoChart As Boolean = False) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -668,6 +671,11 @@ Partial Public Class ThisAddIn
                 baseSysPrompt &= " " & myStyleInsert
             End If
 
+            ' Add DoChart insert if enabled
+            If DoChart Then
+                baseSysPrompt &= " " & SP_Add_Chart
+            End If
+
             ' Add tool instructions on top of the standard prompt additions
             Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
 
@@ -693,6 +701,7 @@ Partial Public Class ThisAddIn
 
             Dim currentResponse As String = ""
             Dim iteration As Integer = 0
+            Dim fullUserPrompt As String = ""
 
             ' Determine if usertext is empty/whitespace
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
@@ -706,8 +715,6 @@ Partial Public Class ThisAddIn
                 context.Log("Calling LLM...", "llm")
 
                 ' Build user prompt - use override if provided, otherwise build internally
-                Dim fullUserPrompt As String
-
                 If Not String.IsNullOrWhiteSpace(fullPromptOverride) Then
                     ' Use the caller-provided prompt (ensures same context as non-tooling calls)
                     fullUserPrompt = fullPromptOverride
@@ -832,6 +839,49 @@ Partial Public Class ThisAddIn
                 End If
 
             End While
+
+            ' If we hit max iterations and the last response was a tool call, force a final text response.
+            ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
+            If iteration >= context.MaxIterations AndAlso
+               Not context.IsCancelled AndAlso
+               ContainsToolCalls(currentResponse, context.ToolingModel.ToolCallDetectionPattern) Then
+
+                context.Log("Forcing final response (max iterations reached with pending tool call)...")
+
+                ' Disable tool definitions to prevent further tool calls
+                INI_APICall_ToolInstructions_2 = ""
+
+                ' Append instruction to force synthesis
+                Dim finalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. " &
+                    "Based on all the information gathered from the tools so far, provide your final answer now."
+
+                ToolingFileLogger.LogStep("Forcing final LLM call without tools")
+                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+                Try
+                    Dim finalResponse As String = Await LLM(
+                        finalSysPrompt,
+                        fullUserPrompt,
+                        "", "", 0,
+                        useSecondAPI,
+                        hideSplash,
+                        otherPrompt,
+                        fileObject,
+                        True)
+
+                    If Not String.IsNullOrWhiteSpace(finalResponse) Then
+                        currentResponse = finalResponse
+                        context.Log($"Final response received ({currentResponse.Length} chars)")
+                        ToolingFileLogger.LogRawResponse("Main LLM() - Forced Final", currentResponse)
+                    Else
+                        context.LogWarn("Empty response from forced final LLM call")
+                    End If
+
+                Catch ex As Exception
+                    context.LogError($"Error during forced final call: {ex.Message}", ex:=ex)
+                End Try
+            End If
 
             If context.IsCancelled Then
                 context.LogWarn("Session cancelled by user")
@@ -1344,7 +1394,9 @@ Partial Public Class ThisAddIn
             .ToolName = toolCall.ToolName
         }
 
-        context.Log($"Executing tool: {toolCall.ToolName}")
+        ' Build condensed parameter summary for log window
+        Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
+        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
 
         Try
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -1355,7 +1407,13 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponse($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
 
-            context.Log($"Tool {toolCall.ToolName} completed: {If(response.Success, "Success", "Failed - " & response.ErrorMessage)}")
+            ' Log completion with excerpt
+            If response.Success Then
+                Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
+                context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
+            Else
+                context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+            End If
 
         Catch ex As Exception
             response.Success = False
@@ -1365,6 +1423,67 @@ Partial Public Class ThisAddIn
         End Try
 
         Return response
+    End Function
+
+    ''' <summary>
+    ''' Builds a condensed parameter summary for display in the log window.
+    ''' </summary>
+    ''' <param name="arguments">Tool call arguments dictionary.</param>
+    ''' <param name="maxLength">Maximum length for each parameter value display.</param>
+    ''' <returns>Formatted parameter string like " (query: 'search term', count: 10)".</returns>
+    Private Function BuildCondensedParamSummary(arguments As Dictionary(Of String, Object), Optional maxLength As Integer = 50) As String
+        If arguments Is Nothing OrElse arguments.Count = 0 Then
+            Return ""
+        End If
+
+        Dim parts As New List(Of String)()
+
+        For Each kvp In arguments
+            Dim valueStr As String = ""
+            If kvp.Value IsNot Nothing Then
+                If TypeOf kvp.Value Is JArray Then
+                    Dim arr = DirectCast(kvp.Value, JArray)
+                    valueStr = $"[{arr.Count} items]"
+                ElseIf TypeOf kvp.Value Is IEnumerable(Of Object) AndAlso Not TypeOf kvp.Value Is String Then
+                    valueStr = $"[{DirectCast(kvp.Value, IEnumerable(Of Object)).Count()} items]"
+                Else
+                    valueStr = kvp.Value.ToString()
+                    If valueStr.Length > maxLength Then
+                        valueStr = valueStr.Substring(0, maxLength - 3) & "..."
+                    End If
+                End If
+            End If
+
+            parts.Add($"{kvp.Key}: '{valueStr}'")
+        Next
+
+        Return $" ({String.Join(", ", parts)})"
+    End Function
+
+    ''' <summary>
+    ''' Builds a brief excerpt of the tool result for display in the log window.
+    ''' </summary>
+    ''' <param name="result">Full tool response text.</param>
+    ''' <param name="maxExcerptLength">Maximum length for the excerpt portion.</param>
+    ''' <returns>Formatted string like "12,345 chars: 'The quick brown fox...'".</returns>
+    Private Function BuildResultExcerpt(result As String, Optional maxExcerptLength As Integer = 80) As String
+        If String.IsNullOrEmpty(result) Then
+            Return "0 chars (empty)"
+        End If
+
+        Dim charCount As Integer = result.Length
+        Dim formattedCount As String = charCount.ToString("N0")
+
+        ' Clean up the result for excerpt (remove excessive whitespace/newlines)
+        Dim cleaned As String = Regex.Replace(result, "\s+", " ").Trim()
+
+        If cleaned.Length <= maxExcerptLength Then
+            Return $"{formattedCount} chars: '{cleaned}'"
+        End If
+
+        ' Truncate and add ellipsis
+        Dim excerpt As String = cleaned.Substring(0, maxExcerptLength - 3) & "..."
+        Return $"{formattedCount} chars: '{excerpt}'"
     End Function
 
     ''' <summary>

@@ -788,7 +788,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
         "APIDebug", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
             Return booleanSettings.Contains(settingKey)
@@ -1036,6 +1036,8 @@ Namespace SharedLibrary
                     Return context.INI_ContextMenu.ToString()
                 Case "NoLocalConfig"
                     Return context.INI_NoLocalConfig.ToString()
+                Case "ForceDrawioLocal"
+                    Return context.INI_ForceDrawioLocal.ToString()
                 Case "UpdateCheckInterval"
                     Return context.INI_UpdateCheckInterval.ToString()
                 Case "UpdatePath"
@@ -1326,6 +1328,8 @@ Namespace SharedLibrary
                     context.INI_ContextMenu = Boolean.Parse(value)
                 Case "NoLocalConfig"
                     context.INI_NoLocalConfig = Boolean.Parse(value)
+                Case "ForceDrawioLocal"
+                    context.INI_ForceDrawioLocal = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
                     context.INI_UpdateCheckInterval = Integer.Parse(value)
                 Case "UpdatePath"
@@ -1634,6 +1638,7 @@ Namespace SharedLibrary
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
+                    {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
@@ -1667,6 +1672,8 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LotoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
+                    {"SP_Translate_Multi", context.SP_Translate_Multi},
+                    {"SP_Translate_Multi_Source", context.SP_Translate_Multi_Source},
                     {"SP_Translate_Document", context.SP_Translate_Document},
                     {"SP_Correct", context.SP_Correct},
                     {"SP_Correct_Document", context.SP_Correct_Document},
@@ -1724,6 +1731,8 @@ Namespace SharedLibrary
                     {"SP_Add_Batch", context.SP_Add_Batch},
                     {"SP_Add_Tooling", context.SP_Add_Tooling},
                     {"SP_Add_Slides", context.SP_Add_Slides},
+                    {"SP_Add_Chart", context.SP_Add_Chart},
+                    {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
@@ -1759,6 +1768,8 @@ Namespace SharedLibrary
                     {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
                     {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
                     {"SP_Translate", Default_SP_Translate},
+                    {"SP_Translate_Multi", Default_SP_Translate_Multi},
+                    {"SP_Translate_Multi_Source", Default_SP_Translate_Multi_Source},
                     {"SP_Translate_Document", Default_SP_Translate_Document},
                     {"SP_Correct", Default_SP_Correct},
                     {"SP_Correct_Document", Default_SP_Correct_Document},
@@ -1816,6 +1827,7 @@ Namespace SharedLibrary
                     {"SP_Add_Batch", Default_SP_Add_Batch},
                     {"SP_Add_Tooling", Default_SP_Add_Tooling},
                     {"SP_Add_Slides", Default_SP_Add_Slides},
+                    {"SP_Add_Chart", Default_SP_Add_Chart},
                     {"SP_BubblesExcel", Default_SP_BubblesExcel},
                     {"SP_Add_Revisions", Default_SP_Add_Revisions},
                     {"SP_MarkupRegex", Default_SP_MarkupRegex},
@@ -2738,6 +2750,7 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
+            variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
             variableValues.Add("HelpMeInkyPath", context.INI_HelpMeInkyPath)
@@ -2772,6 +2785,8 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
             variableValues.Add("SP_Translate", context.SP_Translate)
+            variableValues.Add("SP_Translate_Multi", context.SP_Translate_Multi)
+            variableValues.Add("SP_Translate_Multi_Source", context.SP_Translate_Multi_Source)
             variableValues.Add("SP_Translate_Document", context.SP_Translate_Document)
             variableValues.Add("SP_Correct", context.SP_Correct)
             variableValues.Add("SP_Correct_Document", context.SP_Correct_Document)
@@ -2829,6 +2844,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Batch", context.SP_Add_Batch)
             variableValues.Add("SP_Add_Tooling", context.SP_Add_Tooling)
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
+            variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
             variableValues.Add("SP_Add_Revisions", context.SP_Add_Revisions)
             variableValues.Add("SP_MarkupRegex", context.SP_MarkupRegex)
@@ -2937,6 +2953,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("DoMarkupOutlook") Then context.INI_DoMarkupOutlook = CBool(updatedValues("DoMarkupOutlook"))
                 If updatedValues.ContainsKey("DoMarkupWord") Then context.INI_DoMarkupWord = CBool(updatedValues("DoMarkupWord"))
                 If updatedValues.ContainsKey("SP_Translate") Then context.SP_Translate = CStr(updatedValues("SP_Translate"))
+                If updatedValues.ContainsKey("SP_Translate_Multi") Then context.SP_Translate_Multi = CStr(updatedValues("SP_Translate_Multi"))
+                If updatedValues.ContainsKey("SP_Translate_Multi_Source") Then context.SP_Translate_Multi_Source = CStr(updatedValues("SP_Translate_Multi_Source"))
                 If updatedValues.ContainsKey("SP_Translate_Document") Then context.SP_Translate_Document = CStr(updatedValues("SP_Translate_Document"))
                 If updatedValues.ContainsKey("SP_Correct") Then context.SP_Correct = CStr(updatedValues("SP_Correct"))
                 If updatedValues.ContainsKey("SP_Correct_Document") Then context.SP_Correct_Document = CStr(updatedValues("SP_Correct_Document"))
@@ -2994,6 +3012,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Batch") Then context.SP_Add_Batch = CStr(updatedValues("SP_Add_Batch"))
                 If updatedValues.ContainsKey("SP_Add_Tooling") Then context.SP_Add_Tooling = CStr(updatedValues("SP_Add_Tooling"))
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
+                If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
                 If updatedValues.ContainsKey("SP_Add_Revisions") Then context.SP_Add_Revisions = CStr(updatedValues("SP_Add_Revisions"))
                 If updatedValues.ContainsKey("SP_MarkupRegex") Then context.SP_MarkupRegex = CStr(updatedValues("SP_MarkupRegex"))
@@ -3036,6 +3055,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
+                If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                 If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
                 If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
@@ -3104,7 +3124,8 @@ Namespace SharedLibrary
             Dim BrandedVersion As String = If(String.IsNullOrWhiteSpace(INI_LogoPath_Cached & INI_LogoPathMedium_Cached & INI_LogoPathLarge_Cached), "", If(String.IsNullOrWhiteSpace(context.INI_BrandingName), "Branded version", $"Branded version For {context.INI_BrandingName}"))
 
             ' Calculate height based on text content
-            Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
+            'Dim ExpireText As String = $"{vbCrLf}{vbCrLf}(your {If(String.IsNullOrEmpty(LicenseStatus), "(undefined license type)", LicenseStatus)} For {LicenseUsers} user(s) expires On {LicensedTill.ToString("dd-MMM-yyyy")})"
+            Dim ExpireText As String = vbCrLf & vbCrLf & GetLicenseStatusShort()
             Dim testRichTextBox As New System.Windows.Forms.RichTextBox() With {
                             .Font = standardFont,
                             .Text = $"{AN}{vbCrLf}{context.RDV}{ExpireText}{vbCrLf}{If(BrandedVersion = "", "", $"{vbCrLf}{BrandedVersion}{vbCrLf}")}{vbCrLf}By David Rosenthal & Team{vbCrLf}{vbCrLf}{CopyrightNotice}{vbCrLf}{vbCrLf}All rights reserved.{vbCrLf}{vbCrLf}{AN4}{vbCrLf}{vbCrLf}Local Chat: {AN7}"
@@ -3205,7 +3226,7 @@ Namespace SharedLibrary
 
             ' Measure button text widths to size buttons appropriately
             Dim licenseButtonText As String = "3rd Party Software Used"
-            Dim resetButtonText As String = "Update License Info"
+            Dim resetButtonText As String = "Manage License"
             Dim licenseTextSize As Size = TextRenderer.MeasureText(licenseButtonText, standardFont)
             Dim resetTextSize As Size = TextRenderer.MeasureText(resetButtonText, standardFont)
             Dim buttonPadding As Integer = 20
@@ -3233,22 +3254,25 @@ Namespace SharedLibrary
                     }
             AddHandler resetLicenseButton.Click, Sub(sender, e)
                                                      Try
+
                                                          ' Reset license information in My.Settings
-                                                         My.Settings.LicenseStatus = ""
-                                                         My.Settings.LicenseUsers = 1
-                                                         My.Settings.LicensedTill = Date.MinValue
-                                                         My.Settings.Save()
+                                                         'My.Settings.LicenseStatus = ""
+                                                         'My.Settings.LicenseUsers = 1
+                                                         'My.Settings.LicensedTill = Date.MinValue
+                                                         'My.Settings.Save()
 
                                                          ' Reset global license variables
-                                                         LicenseStatus = ""
-                                                         LicenseUsers = 1
-                                                         LicensedTill = Date.MinValue
+                                                         'LicenseStatus = ""
+                                                         'LicenseUsers = 1
+                                                         'LicensedTill = Date.MinValue
 
                                                          ' Close the current About window
                                                          aboutForm.Close()
 
                                                          ' Show the license configuration form
-                                                         ShowLicenseEntryForm(context)
+                                                         'ShowLicenseEntryForm(context)
+
+                                                         ShowLicenseStatusDialog()
 
                                                          ' Re-show the About window with updated info
                                                          ShowAboutWindow(owner, context)

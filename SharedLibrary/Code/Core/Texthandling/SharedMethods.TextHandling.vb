@@ -370,30 +370,67 @@ Namespace SharedLibrary
         ''' <param name="html">The input HTML.</param>
         ''' <param name="defaultColor">The default highlight token to apply for plain <c>&lt;mark&gt;</c> tags.</param>
         ''' <returns>The transformed HTML string.</returns>
+        ''' <summary>
+        ''' Converts HTML <c>&lt;mark&gt;</c> tags into <c>&lt;span&gt;</c> tags that use Word-compatible highlight styles.
+        ''' </summary>
+        ''' <param name="html">The input HTML.</param>
+        ''' <param name="defaultColor">The default highlight token to apply for plain <c>&lt;mark&gt;</c> tags.</param>
+        ''' <returns>The transformed HTML string.</returns>
+        ''' <summary>
+        ''' Converts HTML <c>&lt;mark&gt;</c> tags into <c>&lt;span&gt;</c> tags that use Word-compatible highlight styles.
+        ''' </summary>
+        ''' <param name="html">The input HTML.</param>
+        ''' <param name="defaultColor">The default highlight token to apply for plain <c>&lt;mark&gt;</c> tags.</param>
+        ''' <returns>The transformed HTML string.</returns>
         Private Shared Function FixMarkTagsForWord(html As String, Optional defaultColor As String = "yellow") As String
             If String.IsNullOrEmpty(html) Then Return html
+
+            ' --- Decode HTML-encoded <mark> tags first ---
+            ' Handle &lt;mark&gt; ... &lt;/mark&gt; (plain)
+            html = html.Replace("&lt;mark&gt;", "<mark>")
+            html = html.Replace("&lt;/mark&gt;", "</mark>")
+
+            ' Handle &lt;mark data-ri-color=&quot;...&quot;&gt; variants (with HTML-encoded quotes)
+            html = System.Text.RegularExpressions.Regex.Replace(
+                        html,
+                        "&lt;mark\s+data-ri-color\s*=\s*(?:&quot;|&#39;|[""'])([^&""']+)(?:&quot;|&#39;|[""'])\s*&gt;",
+                        Function(m)
+                            Dim color = m.Groups(1).Value.Trim().ToLowerInvariant()
+                            Dim css = MsoHighlightToCssColor(color)
+                            Return $"<span style=""background:{css}; mso-highlight:{color}"">"
+                        End Function,
+                        RegexOptions.IgnoreCase)
+
+            ' Handle &lt;mark data-ri-color=...&gt; without quotes (edge case)
+            html = System.Text.RegularExpressions.Regex.Replace(
+                        html,
+                        "&lt;mark\s+data-ri-color\s*=\s*([^&\s>]+)\s*&gt;",
+                        Function(m)
+                            Dim color = m.Groups(1).Value.Trim().ToLowerInvariant()
+                            Dim css = MsoHighlightToCssColor(color)
+                            Return $"<span style=""background:{css}; mso-highlight:{color}"">"
+                        End Function,
+                        RegexOptions.IgnoreCase)
 
             Dim opts As RegexOptions = RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant Or RegexOptions.Singleline
 
             ' 1) Convert <mark data-ri-color="...">...</mark> → <span style="background:css; mso-highlight:token">...</span>
             html = System.Text.RegularExpressions.Regex.Replace(
-                html,
-                "<\s*mark\b[^>]*data-ri-color\s*=\s*['""]?(?<color>[^'""\s>]+)['""]?[^>]*>",
-                Function(m As Match)
-                    Dim token = m.Groups("color").Value.Trim().ToLowerInvariant()
-                    Dim css = MsoHighlightToCssColor(token)
-                    Return $"<span style=""background:{css}; mso-highlight:{token}"">"
-                End Function,
-                opts)
+                        html,
+                        "<\s*mark\b[^>]*data-ri-color\s*=\s*['""]?(?<color>[^'""\s>]+)['""]?[^>]*>",
+                        Function(m As Match)
+                            Dim token = m.Groups("color").Value.Trim().ToLowerInvariant()
+                            Dim css = MsoHighlightToCssColor(token)
+                            Return $"<span style=""background:{css}; mso-highlight:{token}"">"
+                        End Function,
+                        opts)
 
             ' 2) Convert plain <mark>...</mark> (yellow) → <span style="...">...</span>
             html = System.Text.RegularExpressions.Regex.Replace(
-                html,
-                "<\s*mark\s*>",
-                "<span style=""mso-highlight:yellow"">",
-                opts)
-
-            ' "<span style=""background:yellow; mso-highlight:yellow"">",
+                        html,
+                        "<\s*mark\s*>",
+                        "<span style=""mso-highlight:yellow"">",
+                        opts)
 
             ' 3) Close tags
             html = System.Text.RegularExpressions.Regex.Replace(html, "</\s*mark\s*>", "</span>", opts)

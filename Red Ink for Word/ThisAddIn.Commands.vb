@@ -42,6 +42,7 @@ Imports System.Globalization
 Imports System.IO
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml.Drawing
+Imports DocumentFormat.OpenXml.Office2010.Ink
 Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Google.Cloud.Speech.V1.LanguageCodes
 Imports Microsoft.Office.Interop.PowerPoint
@@ -944,6 +945,29 @@ Partial Public Class ThisAddIn
     End Sub
 
 
+    Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
+
+    Public Sub ShowQuickTranslate()
+        If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
+            _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
+            Async Function(text, lang, sourcelang, token)
+                TranslateLanguage = lang
+                SourceLanguage = sourcelang
+                Dim SysPrompt As String = SP_Translate_Multi
+                If Not String.IsNullOrWhiteSpace(SourceLanguage) Then SysPrompt = SP_Translate_Multi_Source
+                Return Await LLM(InterpolateAtRuntime(SysPrompt),
+                                "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>",
+                                "", "", 0,
+                                UseSecondAPI:=False,
+                                Hidesplash:=True,
+                                cancellationToken:=token,
+                                EnsureUI:=False)
+            End Function,
+            INI_Language1)
+        End If
+        _quickTranslateWidget.ShowWidget()
+    End Sub
+
     Private _win As HelpMeInky = Nothing
 
     ''' <summary>
@@ -1014,7 +1038,8 @@ Partial Public Class ThisAddIn
                 {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
                 {"ToolingLogWindow", "Tooling: Show log window"},
-                {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"}
+                {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
+                {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"}
             }
         Dim SettingsTips As New Dictionary(Of String, String) From {
                 {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1053,7 +1078,8 @@ Partial Public Class ThisAddIn
                 {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added automatically)."},
                 {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
                 {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
-                {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."}
+                {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
+                {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."}
             }
 
         ShowSettingsWindow(Settings, SettingsTips)

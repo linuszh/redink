@@ -568,6 +568,7 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Shows a modal Yes/No-style dialog with two custom button labels and an optional auto-close timer.
+        ''' When nonModal is True, the dialog stays topmost but allows interaction with other windows.
         ''' </summary>
         ''' <param name="bodyText">Dialog body text (truncated to 10000 characters as implemented).</param>
         ''' <param name="button1Text">Text for the first button (result 1).</param>
@@ -578,7 +579,8 @@ Namespace SharedLibrary
         ''' <param name="extraButtonText">Optional extra button text (only when no auto-close is active).</param>
         ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
         ''' <param name="CloseAfterExtra">If <c>True</c>, closes the dialog after invoking the extra action.</param>
-        ''' <returns>1 for button1, 2 for button2, 3 for auto-close; otherwise 0 (initial value).</returns>
+        ''' <param name="nonModal">If <c>True</c>, shows the dialog non-modally with topmost behavior, allowing interaction with other windows.</param>
+        ''' <returns>1 for button1, 2 for button2, 3 for auto-close; otherwise 0 (initial value/cancelled).</returns>
         Public Shared Function ShowCustomYesNoBox(
                         ByVal bodyText As String,
                         ByVal button1Text As String,
@@ -588,7 +590,8 @@ Namespace SharedLibrary
                         Optional Defaulttext As String = "",
                         Optional extraButtonText As String = Nothing,
                         Optional extraButtonAction As System.Action = Nothing,
-                        Optional CloseAfterExtra As Boolean = False
+                        Optional CloseAfterExtra As Boolean = False,
+                        Optional nonModal As Boolean = False
                     ) As Integer
 
             ' Screen working area.
@@ -610,7 +613,7 @@ Namespace SharedLibrary
                 .StartPosition = FormStartPosition.CenterScreen,
                 .MaximizeBox = False,
                 .MinimizeBox = False,
-                .ShowInTaskbar = False,
+                .ShowInTaskbar = If(nonModal, True, False),
                 .TopMost = True,
                 .AutoScaleMode = AutoScaleMode.Font
             }
@@ -641,6 +644,12 @@ Namespace SharedLibrary
 
             ' Result variable.
             Dim result As Integer = 0
+
+            ' For non-modal, we need a signal to know when dialog is closed
+            Dim dialogClosed As Threading.ManualResetEvent = Nothing
+            If nonModal Then
+                dialogClosed = New Threading.ManualResetEvent(False)
+            End If
 
             AddHandler button1.Click, Sub()
                                           result = 1
@@ -757,7 +766,7 @@ Namespace SharedLibrary
             }
 
             bodyLabel.MaximumSize = New Size(contentWidth, 0)
-            bodyLabel.Location = New System.Drawing.Point(PADDING, PADDING)  ' Respect the left and top padding
+            bodyLabel.Location = New System.Drawing.Point(PADDING, PADDING)  ' Respect the left and top padding            
             bodyScrollPanel.Controls.Add(bodyLabel)
 
             If needsScroll Then
@@ -794,20 +803,28 @@ Namespace SharedLibrary
                 buttonPanelHeight + 100 + chromeHeight
             )
 
-            ' Handle resize to update label wrapping.
-            AddHandler messageForm.Resize,
-                Sub()
-                    Dim availableWidth As Integer = bodyScrollPanel.ClientSize.Width - 2 * PADDING
-                    If bodyScrollPanel.AutoScroll Then
-                        availableWidth -= SystemInformation.VerticalScrollBarWidth
-                    End If
-                    bodyLabel.MaximumSize = New Size(Math.Max(100, availableWidth), 0)
-                    bodyLabel.PerformLayout()
+            ' Resize handler 
+            Dim ApplyLayout As System.Action =
+                        Sub()
+                            Dim availableWidth As Integer = bodyScrollPanel.ClientSize.Width - 2 * PADDING
+                            If bodyScrollPanel.AutoScroll Then
+                                availableWidth -= SystemInformation.VerticalScrollBarWidth
+                            End If
 
-                    If bodyScrollPanel.AutoScroll Then
-                        bodyScrollPanel.AutoScrollMinSize = New Size(availableWidth, bodyLabel.PreferredHeight + PADDING)
-                    End If
-                End Sub
+                            bodyLabel.MaximumSize = New Size(Math.Max(100, availableWidth), 0)
+                            bodyLabel.PerformLayout()
+
+                            If bodyScrollPanel.AutoScroll Then
+                                bodyScrollPanel.AutoScrollMinSize = New Size(availableWidth, bodyLabel.PreferredHeight + PADDING)
+                            End If
+                        End Sub
+
+            ' Run once at the start
+            messageForm.PerformLayout()
+            ApplyLayout.Invoke()
+
+            ' Run on every resize
+            AddHandler messageForm.Resize, Sub() ApplyLayout.Invoke()
 
             ' Auto-close timer.
             If autoCloseSeconds.HasValue Then
@@ -827,6 +844,20 @@ Namespace SharedLibrary
                 t.Start()
             End If
 
+            ' For non-modal: keep topmost on deactivate and signal when closed
+            If nonModal Then
+                AddHandler messageForm.Deactivate, Sub(sender, e)
+                                                       Try
+                                                           messageForm.TopMost = True
+                                                       Catch
+                                                       End Try
+                                                   End Sub
+
+                AddHandler messageForm.FormClosed, Sub(sender, e)
+                                                       dialogClosed.Set()
+                                                   End Sub
+            End If
+
             ' Show and return.
             messageForm.TopMost = True
             messageForm.Opacity = 1
@@ -842,9 +873,26 @@ Namespace SharedLibrary
                     messageForm.BringToFront()
                 End Sub
 
-            messageForm.ShowDialog()
+            If nonModal Then
+                ' Show non-modal and pump messages until closed
+                messageForm.Show()
+                messageForm.BringToFront()
+                messageForm.Activate()
+
+                ' Pump messages until dialog is closed
+                While Not dialogClosed.WaitOne(50)
+                    System.Windows.Forms.Application.DoEvents()
+                End While
+
+                messageForm.Dispose()
+            Else
+                ' Show modal (original behavior)
+                messageForm.ShowDialog()
+            End If
+
             Return result
         End Function
+
 
         ''' <summary>
         ''' Shows a modal message dialog with OK button and optional auto-close behavior.
@@ -1094,10 +1142,6 @@ Namespace SharedLibrary
         End Sub
 
 
-
-
-
-
         ''' <summary>
         ''' Shows a modal RichTextBox-based message dialog (RTF content) with optional auto-close.
         ''' </summary>
@@ -1105,7 +1149,8 @@ Namespace SharedLibrary
         ''' <param name="header">Dialog title. Defaults to <c>AN</c> if empty/whitespace.</param>
         ''' <param name="autoCloseSeconds">If set, closes the dialog after this many seconds.</param>
         ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
-        Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile")
+        ''' <param name="RestoreWindow">If True, saves and restores window position and size from settings.</param>
+        Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile", Optional RestoreWindow As Boolean = False)
 
             Dim RTFMessageForm As New System.Windows.Forms.Form()
             Dim bodyLabel As New System.Windows.Forms.RichTextBox()
@@ -1144,7 +1189,15 @@ Namespace SharedLibrary
             bodyLabel.ReadOnly = True
             bodyLabel.BorderStyle = System.Windows.Forms.BorderStyle.None
             bodyLabel.BackColor = RTFMessageForm.BackColor
-            bodyLabel.TabStop = False
+            'bodyLabel.TabStop = False
+
+            ' allow focus so user can select/copy
+            bodyLabel.TabStop = True
+
+            ' make selection visible and allow standard shortcuts
+            bodyLabel.HideSelection = False
+            bodyLabel.ShortcutsEnabled = True
+
             bodyLabel.Rtf = bodyText
             bodyLabel.Location = New System.Drawing.Point(20, 20)
             bodyLabel.Width = 600
@@ -1212,6 +1265,42 @@ Namespace SharedLibrary
                                          bodyLabel.Bottom + 20 + bottomPanel.Height)
             RTFMessageForm.ClientSize = New System.Drawing.Size(formWidth, formHeight)
 
+            ' Restore window position and size if RestoreWindow is True.
+            If RestoreWindow Then
+                Try
+                    Dim savedBounds As Rectangle = My.Settings.RTFMessageBoxBounds
+                    If savedBounds <> Rectangle.Empty AndAlso savedBounds.Width >= RTFMessageForm.MinimumSize.Width AndAlso savedBounds.Height >= RTFMessageForm.MinimumSize.Height Then
+                        ' Verify the saved position is on a visible screen.
+                        Dim isOnScreen As Boolean = False
+                        For Each scr As Screen In Screen.AllScreens
+                            If scr.WorkingArea.IntersectsWith(savedBounds) Then
+                                isOnScreen = True
+                                Exit For
+                            End If
+                        Next
+                        If isOnScreen Then
+                            RTFMessageForm.StartPosition = FormStartPosition.Manual
+                            RTFMessageForm.Bounds = savedBounds
+                        End If
+                    End If
+                Catch
+                    ' Ignore errors reading settings; use default position.
+                End Try
+
+                ' Save position and size on form closing.
+                AddHandler RTFMessageForm.FormClosing, Sub(sender As Object, e As FormClosingEventArgs)
+                                                           Try
+                                                               ' Only save if window is in normal state (not minimized/maximized).
+                                                               If RTFMessageForm.WindowState = FormWindowState.Normal Then
+                                                                   My.Settings.RTFMessageBoxBounds = RTFMessageForm.Bounds
+                                                                   My.Settings.Save()
+                                                               End If
+                                                           Catch
+                                                               ' Ignore errors saving settings.
+                                                           End Try
+                                                       End Sub
+            End If
+
             ' Auto-close timer.
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
@@ -1271,274 +1360,570 @@ Namespace SharedLibrary
 
         End Sub
 
-
         ''' <summary>
         ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
         ''' </summary>
-        ''' <param name="bodyText">HTML assigned to <see cref="WebBrowser.DocumentText"/>.</param>
-        ''' <param name="header">Dialog title. Defaults to <c>AN</c>.</param>
+        ''' <param name="bodyText">HTML assigned to DocumentText.</param>
+        ''' <param name="header">Dialog title.</param>
         ''' <param name="Defaulttext">Unused parameter (kept for signature compatibility).</param>
         ''' <param name="extraButtonText">Optional extra button text.</param>
         ''' <param name="extraButtonAction">Action invoked when the extra button is clicked.</param>
-        ''' <param name="CloseAfterExtra">If <c>True</c>, closes the dialog after invoking the extra action.</param>
+        ''' <param name="CloseAfterExtra">If True, closes the dialog after invoking the extra action.</param>
+        ''' <param name="additionalButtons">Optional array of additional buttons (Text, Action, CloseAfter).</param>
+        ''' <param name="nonModal">If True, shows non-modally with topmost behavior.</param>
+        ''' <param name="onClose">Optional action invoked when the dialog is closed.</param>
         Public Shared Sub ShowHTMLCustomMessageBox(
-    ByVal bodyText As String,
-    Optional header As String = AN,
-    Optional Defaulttext As String = " - execution continues meanwhile",
-    Optional extraButtonText As String = Nothing,
-    Optional extraButtonAction As System.Action = Nothing,
-    Optional CloseAfterExtra As Boolean = False
-)
+            ByVal bodyText As String,
+            Optional header As String = AN,
+            Optional Defaulttext As String = " - execution continues meanwhile",
+            Optional extraButtonText As String = Nothing,
+            Optional extraButtonAction As System.Action = Nothing,
+            Optional CloseAfterExtra As Boolean = False,
+            Optional additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)() = Nothing,
+            Optional nonModal As Boolean = False,
+            Optional onClose As System.Action = Nothing
+        )
+            ' For non-modal on the current thread
+            If nonModal Then
+                ShowHTMLCustomMessageBoxNonModal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
+                Return
+            End If
+
             Dim t As New Thread(Sub()
-                                    ' Create and configure form.
-                                    Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
-                                .Opacity = 0,
-                                .Text = header,
-                                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
-                                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
-                                .MaximizeBox = True,
-                                .MinimizeBox = True,
-                                .ShowInTaskbar = True,
-                                .TopMost = False,
-                                .KeyPreview = True,
-                                .MinimumSize = New System.Drawing.Size(800, 500),
-                                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
-                            }
-
-                                    ' Header fallback.
-                                    If String.IsNullOrWhiteSpace(header) Then
-                                        HTMLMessageForm.Text = AN
-                                    End If
-
-                                    ' Set the icon.
-                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                                    HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
-
-                                    ' Standard font.
-                                    Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
-                                    HTMLMessageForm.Font = standardFont
-
-                                    ' WebBrowser with margin.
-                                    Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
-                                .AllowNavigation = False,
-                                .WebBrowserShortcutsEnabled = False,
-                                .ScrollBarsEnabled = True,
-                                .ScriptErrorsSuppressed = True,
-                                .DocumentText = bodyText,
-                                .Dock = System.Windows.Forms.DockStyle.Fill,
-                                .BackColor = HTMLMessageForm.BackColor,
-                                .Margin = New System.Windows.Forms.Padding(20)
-                            }
-                                    AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                                                  If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                                                      ' Body style with margin matching the form.
-                                                                                      htmlBrowser.Document.Body.Style =
-                                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
-                                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
-                                                                                  End If
-                                                                              End Sub
-
-                                    ' OK button.
-                                    Dim okButton As New System.Windows.Forms.Button() With {
-                                .Text = "OK",
-                                .AutoSize = True,
-                                .Font = standardFont,
-                                .Margin = New System.Windows.Forms.Padding(0)
-                            }
-                                    AddHandler okButton.Click, Sub()
-                                                                   HTMLMessageForm.Close()
-                                                               End Sub
-
-                                    ' Form-level Escape.
-                                    AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
-                                                                            If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
-                                                                                HTMLMessageForm.Close()
-                                                                                e2.SuppressKeyPress = True
-                                                                            End If
-                                                                        End Sub
-
-                                    ' Activate on shown.
-                                    AddHandler HTMLMessageForm.Shown, Sub(sender2, e2)
-                                                                          HTMLMessageForm.Activate()
-                                                                      End Sub
-
-                                    ' Bottom flow panel.
-                                    Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
-                                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
-                                .Dock = System.Windows.Forms.DockStyle.Bottom,
-                                .AutoSize = True,
-                                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                                .Padding = New System.Windows.Forms.Padding(20)
-                            }
-                                    bottomFlow.Controls.Add(okButton)
-
-                                    ' Optional extra button.
-                                    If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
-                                        Dim extraButton As New System.Windows.Forms.Button() With {
-                                            .Text = extraButtonText,
-                                            .AutoSize = True,
-                                            .Font = standardFont,
-                                            .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
-                                        }
-
-                                        AddHandler extraButton.Click,
-                                            Sub()
-                                                Try
-                                                    ' Execute the action. Recursive calls will spawn their own STA threads.
-                                                    extraButtonAction.Invoke()
-                                                Catch ex As System.Exception
-                                                    ' Swallow to keep dialog functional.
-                                                End Try
-                                                If CloseAfterExtra Then HTMLMessageForm.Close()
-                                            End Sub
-
-                                        bottomFlow.Controls.Add(extraButton)
-                                    End If
-
-                                    ' Compose form.
-                                    HTMLMessageForm.Controls.Add(htmlBrowser)
-                                    HTMLMessageForm.Controls.Add(bottomFlow)
-
-                                    HTMLMessageForm.BringToFront()
-                                    HTMLMessageForm.Focus()
-                                    HTMLMessageForm.Activate()
-
-                                    AddHandler HTMLMessageForm.Shown,
-                                        Sub(sender, e)
-                                            HTMLMessageForm.TopMost = False  ' Reset first.
-                                            HTMLMessageForm.TopMost = True   ' Then set again.
-                                            HTMLMessageForm.Activate()
-                                            HTMLMessageForm.BringToFront()
-                                        End Sub
-
-                                    HTMLMessageForm.Opacity = 1
-
-                                    ' Show dialog.
-                                    HTMLMessageForm.ShowDialog()
+                                    ShowHTMLCustomMessageBoxInternal(bodyText, header, extraButtonText, extraButtonAction, CloseAfterExtra, additionalButtons, onClose)
                                 End Sub)
             t.SetApartmentState(System.Threading.ApartmentState.STA)
             t.Start()
         End Sub
 
+        Private Shared Sub ShowHTMLCustomMessageBoxInternal(
+            ByVal bodyText As String,
+            header As String,
+            extraButtonText As String,
+            extraButtonAction As System.Action,
+            CloseAfterExtra As Boolean,
+            additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)(),
+            onClose As System.Action
+        )
+            ' Create and configure form
+            Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
+                .Opacity = 0,
+                .Text = If(String.IsNullOrWhiteSpace(header), AN, header),
+                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
+                .MaximizeBox = True,
+                .MinimizeBox = True,
+                .ShowInTaskbar = True,
+                .TopMost = False,
+                .KeyPreview = True,
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
+            }
 
+            ' Set the icon
+            Try
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Catch
+            End Try
+
+            ' Standard font
+            Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            HTMLMessageForm.Font = standardFont
+
+            ' WebBrowser
+            Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
+                .AllowNavigation = False,
+                .WebBrowserShortcutsEnabled = True,
+                .IsWebBrowserContextMenuEnabled = True,
+                .ScrollBarsEnabled = True,
+                .ScriptErrorsSuppressed = True,
+                .DocumentText = bodyText,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .BackColor = HTMLMessageForm.BackColor,
+                .Margin = New System.Windows.Forms.Padding(20)
+            }
+            AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
+                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
+                                                              htmlBrowser.Document.Body.Style =
+                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
+                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
+                                                          End If
+                                                      End Sub
+
+            ' OK button
+            Dim okButton As New System.Windows.Forms.Button() With {
+                .Text = "OK",
+                .AutoSize = True,
+                .Font = standardFont,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
+            AddHandler okButton.Click, Sub()
+                                           HTMLMessageForm.Close()
+                                       End Sub
+
+            ' Form-level Escape
+            AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
+                                                    If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
+                                                        HTMLMessageForm.Close()
+                                                        e2.SuppressKeyPress = True
+                                                    End If
+                                                End Sub
+
+            ' Bottom flow panel
+            Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .Dock = System.Windows.Forms.DockStyle.Bottom,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Padding = New System.Windows.Forms.Padding(20),
+                .WrapContents = False
+            }
+            bottomFlow.Controls.Add(okButton)
+
+            ' First extra button (legacy parameter)
+            If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
+                Dim extraButton As New System.Windows.Forms.Button() With {
+                    .Text = extraButtonText,
+                    .AutoSize = True,
+                    .Font = standardFont,
+                    .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                }
+                AddHandler extraButton.Click,
+                    Sub()
+                        Try
+                            extraButtonAction.Invoke()
+                        Catch ex As System.Exception
+                        End Try
+                        If CloseAfterExtra Then HTMLMessageForm.Close()
+                    End Sub
+                bottomFlow.Controls.Add(extraButton)
+            End If
+
+            ' Additional buttons array
+            If additionalButtons IsNot Nothing AndAlso additionalButtons.Length > 0 Then
+                For Each btnDef In additionalButtons
+                    If System.String.IsNullOrEmpty(btnDef.Item1) OrElse btnDef.Item2 Is Nothing Then Continue For
+                    Dim addBtn As New System.Windows.Forms.Button() With {
+                        .Text = btnDef.Item1,
+                        .AutoSize = True,
+                        .Font = standardFont,
+                        .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                    }
+                    Dim closeAfter As Boolean = btnDef.Item3
+                    Dim action As System.Action = btnDef.Item2
+                    AddHandler addBtn.Click,
+                        Sub()
+                            Try
+                                action.Invoke()
+                            Catch ex As System.Exception
+                            End Try
+                            If closeAfter Then HTMLMessageForm.Close()
+                        End Sub
+                    bottomFlow.Controls.Add(addBtn)
+                Next
+            End If
+
+            ' Calculate minimum width to fit all buttons in one row
+            bottomFlow.PerformLayout()
+            Dim totalButtonWidth As Integer = 0
+            For Each ctrl As Control In bottomFlow.Controls
+                totalButtonWidth += ctrl.PreferredSize.Width + ctrl.Margin.Left + ctrl.Margin.Right
+            Next
+            totalButtonWidth += bottomFlow.Padding.Left + bottomFlow.Padding.Right + 40
+
+            Dim minFormWidth As Integer = Math.Max(600, totalButtonWidth)
+            HTMLMessageForm.MinimumSize = New System.Drawing.Size(minFormWidth, 400)
+            HTMLMessageForm.Size = New System.Drawing.Size(Math.Max(minFormWidth, 1000), 700)
+
+            ' Compose form
+            HTMLMessageForm.Controls.Add(htmlBrowser)
+            HTMLMessageForm.Controls.Add(bottomFlow)
+
+            ' onClose callback
+            If onClose IsNot Nothing Then
+                AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
+                                                           Try
+                                                               onClose.Invoke()
+                                                           Catch
+                                                           End Try
+                                                       End Sub
+            End If
+
+            AddHandler HTMLMessageForm.Shown,
+                Sub(sender, e)
+                    HTMLMessageForm.TopMost = False
+                    HTMLMessageForm.TopMost = True
+                    HTMLMessageForm.Activate()
+                    HTMLMessageForm.BringToFront()
+                End Sub
+
+            HTMLMessageForm.Opacity = 1
+            HTMLMessageForm.ShowDialog()
+        End Sub
+
+        Private Shared Sub ShowHTMLCustomMessageBoxNonModal(
+            ByVal bodyText As String,
+            header As String,
+            extraButtonText As String,
+            extraButtonAction As System.Action,
+            CloseAfterExtra As Boolean,
+            additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)(),
+            onClose As System.Action
+        )
+            Dim dialogClosed As New Threading.ManualResetEvent(False)
+
+            ' Create and configure form
+            Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
+                .Opacity = 0,
+                .Text = If(String.IsNullOrWhiteSpace(header), AN, header),
+                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
+                .MaximizeBox = True,
+                .MinimizeBox = True,
+                .ShowInTaskbar = True,
+                .TopMost = True,
+                .KeyPreview = True,
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
+            }
+
+            ' Set the icon
+            Try
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Catch
+            End Try
+
+            ' Standard font
+            Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            HTMLMessageForm.Font = standardFont
+
+            ' WebBrowser
+            Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
+                .AllowNavigation = False,
+                .WebBrowserShortcutsEnabled = True,
+                .IsWebBrowserContextMenuEnabled = True,
+                .ScrollBarsEnabled = True,
+                .ScriptErrorsSuppressed = True,
+                .DocumentText = bodyText,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .BackColor = HTMLMessageForm.BackColor,
+                .Margin = New System.Windows.Forms.Padding(20)
+            }
+            AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
+                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
+                                                              htmlBrowser.Document.Body.Style =
+                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
+                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
+                                                          End If
+                                                      End Sub
+
+            ' OK button
+            Dim okButton As New System.Windows.Forms.Button() With {
+                .Text = "OK",
+                .AutoSize = True,
+                .Font = standardFont,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
+            AddHandler okButton.Click, Sub()
+                                           HTMLMessageForm.Close()
+                                       End Sub
+
+            ' Form-level Escape
+            AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
+                                                    If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
+                                                        HTMLMessageForm.Close()
+                                                        e2.SuppressKeyPress = True
+                                                    End If
+                                                End Sub
+
+            ' Bottom flow panel - no wrapping
+            Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .Dock = System.Windows.Forms.DockStyle.Bottom,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Padding = New System.Windows.Forms.Padding(20),
+                .WrapContents = False
+            }
+            bottomFlow.Controls.Add(okButton)
+
+            ' First extra button
+            If (Not String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
+                Dim extraButton As New System.Windows.Forms.Button() With {
+                    .Text = extraButtonText,
+                    .AutoSize = True,
+                    .Font = standardFont,
+                    .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                }
+                AddHandler extraButton.Click,
+                    Sub()
+                        Try
+                            extraButtonAction.Invoke()
+                        Catch
+                        End Try
+                        If CloseAfterExtra Then HTMLMessageForm.Close()
+                    End Sub
+                bottomFlow.Controls.Add(extraButton)
+            End If
+
+            ' Additional buttons
+            If additionalButtons IsNot Nothing AndAlso additionalButtons.Length > 0 Then
+                For Each btnDef In additionalButtons
+                    If String.IsNullOrEmpty(btnDef.Item1) OrElse btnDef.Item2 Is Nothing Then Continue For
+                    Dim addBtn As New System.Windows.Forms.Button() With {
+                        .Text = btnDef.Item1,
+                        .AutoSize = True,
+                        .Font = standardFont,
+                        .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                    }
+                    Dim closeAfter As Boolean = btnDef.Item3
+                    Dim action As System.Action = btnDef.Item2
+                    AddHandler addBtn.Click,
+                        Sub()
+                            Try
+                                action.Invoke()
+                            Catch
+                            End Try
+                            If closeAfter Then HTMLMessageForm.Close()
+                        End Sub
+                    bottomFlow.Controls.Add(addBtn)
+                Next
+            End If
+
+            ' Calculate minimum width to fit all buttons
+            bottomFlow.PerformLayout()
+            Dim totalButtonWidth As Integer = 0
+            For Each ctrl As Control In bottomFlow.Controls
+                totalButtonWidth += ctrl.PreferredSize.Width + ctrl.Margin.Left + ctrl.Margin.Right
+            Next
+            totalButtonWidth += bottomFlow.Padding.Left + bottomFlow.Padding.Right + 40
+
+            Dim minFormWidth As Integer = Math.Max(600, totalButtonWidth)
+            HTMLMessageForm.MinimumSize = New System.Drawing.Size(minFormWidth, 400)
+            HTMLMessageForm.Size = New System.Drawing.Size(Math.Max(minFormWidth, 1000), 700)
+
+            ' Compose form
+            HTMLMessageForm.Controls.Add(htmlBrowser)
+            HTMLMessageForm.Controls.Add(bottomFlow)
+
+            ' Keep topmost on deactivate
+            AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
+                                                       Try
+                                                           HTMLMessageForm.TopMost = True
+                                                       Catch
+                                                       End Try
+                                                   End Sub
+
+            ' Signal when closed and invoke onClose
+            AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
+                                                       If onClose IsNot Nothing Then
+                                                           Try
+                                                               onClose.Invoke()
+                                                           Catch
+                                                           End Try
+                                                       End If
+                                                       dialogClosed.Set()
+                                                   End Sub
+
+            AddHandler HTMLMessageForm.Shown,
+                Sub(sender, e)
+                    HTMLMessageForm.TopMost = False
+                    HTMLMessageForm.TopMost = True
+                    HTMLMessageForm.Activate()
+                    HTMLMessageForm.BringToFront()
+                End Sub
+
+            HTMLMessageForm.Opacity = 1
+            HTMLMessageForm.Show()
+            HTMLMessageForm.BringToFront()
+            HTMLMessageForm.Activate()
+
+            ' Pump messages until dialog is closed
+            While Not dialogClosed.WaitOne(50)
+                System.Windows.Forms.Application.DoEvents()
+            End While
+
+            HTMLMessageForm.Dispose()
+        End Sub
         ''' <summary>
-        ''' Legacy HTML message dialog variant without extra button support; kept for compatibility.
+        ''' Shows an HTML message dialog non-modally with topmost behavior, allowing interaction with other windows.
+        ''' Blocks the calling thread until the dialog is closed using a message pump.
         ''' </summary>
-        ''' <param name="bodyText">HTML assigned to <see cref="WebBrowser.DocumentText"/>.</param>
-        ''' <param name="header">Dialog title. Defaults to <c>AN</c>.</param>
-        ''' <param name="Defaulttext">Unused parameter (kept for signature compatibility).</param>
-        Public Shared Sub oldShowHTMLCustomMessageBox(
-    ByVal bodyText As String,
-    Optional header As String = AN,
-    Optional Defaulttext As String = " - execution continues meanwhile"
-)
-            Dim t As New Thread(Sub()
-                                    ' Create and configure form.
-                                    Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
-                                .Opacity = 0,
-                                .Text = header,
-                                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
-                                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
-                                .MaximizeBox = True,
-                                .MinimizeBox = True,
-                                .ShowInTaskbar = True,
-                                .TopMost = False,
-                                .KeyPreview = True,
-                                .MinimumSize = New System.Drawing.Size(800, 500),
-                                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
-                            }
+        Private Shared Sub ShowHTMLCustomMessageBoxNonModal(
+            ByVal bodyText As String,
+            header As String,
+            extraButtonText As String,
+            extraButtonAction As System.Action,
+            CloseAfterExtra As Boolean,
+            additionalButtons As System.Tuple(Of System.String, System.Action, System.Boolean)()
+        )
+            Dim dialogClosed As New Threading.ManualResetEvent(False)
 
-                                    ' Header fallback.
-                                    If String.IsNullOrWhiteSpace(header) Then
-                                        HTMLMessageForm.Text = AN
-                                    End If
+            ' Create and configure form.
+            Dim HTMLMessageForm As New System.Windows.Forms.Form() With {
+                .Opacity = 0,
+                .Text = header,
+                .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
+                .MaximizeBox = True,
+                .MinimizeBox = True,
+                .ShowInTaskbar = True,
+                .TopMost = True,
+                .KeyPreview = True,
+                .MinimumSize = New System.Drawing.Size(800, 500),
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font
+            }
 
-                                    ' Set the icon.
-                                    Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
-                                    HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            ' Header fallback.
+            If String.IsNullOrWhiteSpace(header) Then
+                HTMLMessageForm.Text = AN
+            End If
 
-                                    ' Standard font.
-                                    Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
-                                    HTMLMessageForm.Font = standardFont
+            ' Set the icon.
+            Try
+                Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                HTMLMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            Catch
+            End Try
 
-                                    ' WebBrowser with margin.
-                                    Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
-                                .AllowNavigation = False,
-                                .WebBrowserShortcutsEnabled = False,
-                                .ScrollBarsEnabled = True,
-                                .ScriptErrorsSuppressed = True,
-                                .DocumentText = bodyText,
-                                .Dock = System.Windows.Forms.DockStyle.Fill,
-                                .BackColor = HTMLMessageForm.BackColor,
-                                .Margin = New System.Windows.Forms.Padding(20)
-                            }
-                                    AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
-                                                                                  If htmlBrowser.Document?.Body IsNot Nothing Then
-                                                                                      ' Body style with margin matching the form.
-                                                                                      htmlBrowser.Document.Body.Style =
-                                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
-                                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
-                                                                                  End If
-                                                                              End Sub
+            ' Standard font.
+            Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            HTMLMessageForm.Font = standardFont
 
-                                    ' OK button.
-                                    Dim okButton As New System.Windows.Forms.Button() With {
-                                .Text = "OK",
-                                .AutoSize = True,
-                                .Font = standardFont,
-                                .Margin = New System.Windows.Forms.Padding(0) ' No extra spacing here.
-                            }
-                                    AddHandler okButton.Click, Sub()
-                                                                   HTMLMessageForm.Close()
-                                                               End Sub
+            ' WebBrowser with margin - enable shortcuts for copy/paste.
+            Dim htmlBrowser As New System.Windows.Forms.WebBrowser() With {
+                .AllowNavigation = False,
+                .WebBrowserShortcutsEnabled = True,
+                .IsWebBrowserContextMenuEnabled = True,
+                .ScrollBarsEnabled = True,
+                .ScriptErrorsSuppressed = True,
+                .DocumentText = bodyText,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .BackColor = HTMLMessageForm.BackColor,
+                .Margin = New System.Windows.Forms.Padding(20)
+            }
+            AddHandler htmlBrowser.DocumentCompleted, Sub(sender2, e2)
+                                                          If htmlBrowser.Document?.Body IsNot Nothing Then
+                                                              htmlBrowser.Document.Body.Style =
+                                                                  $"background-color: rgb({HTMLMessageForm.BackColor.R}, {HTMLMessageForm.BackColor.G}, {HTMLMessageForm.BackColor.B}); " &
+                                                                  "font-family: 'Segoe UI'; font-size: 9pt; margin: 20px;"
+                                                          End If
+                                                      End Sub
 
-                                    ' Form-level Escape.
-                                    AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
-                                                                            If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
-                                                                                HTMLMessageForm.Close()
-                                                                                e2.SuppressKeyPress = True
-                                                                            End If
-                                                                        End Sub
+            ' OK button.
+            Dim okButton As New System.Windows.Forms.Button() With {
+                .Text = "OK",
+                .AutoSize = True,
+                .Font = standardFont,
+                .Margin = New System.Windows.Forms.Padding(0)
+            }
+            AddHandler okButton.Click, Sub()
+                                           HTMLMessageForm.Close()
+                                       End Sub
 
-                                    ' Activate on shown.
-                                    AddHandler HTMLMessageForm.Shown, Sub(sender2, e2)
-                                                                          HTMLMessageForm.Activate()
-                                                                      End Sub
+            ' Form-level Escape.
+            AddHandler HTMLMessageForm.KeyDown, Sub(sender2, e2)
+                                                    If e2.KeyCode = System.Windows.Forms.Keys.Escape Then
+                                                        HTMLMessageForm.Close()
+                                                        e2.SuppressKeyPress = True
+                                                    End If
+                                                End Sub
 
-                                    ' Bottom flow panel.
-                                    Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
-                                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
-                                .Dock = System.Windows.Forms.DockStyle.Bottom,
-                                .AutoSize = True,
-                                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                                .Padding = New System.Windows.Forms.Padding(20)
-                            }
-                                    bottomFlow.Controls.Add(okButton)
+            ' Bottom flow panel.
+            Dim bottomFlow As New System.Windows.Forms.FlowLayoutPanel() With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .Dock = System.Windows.Forms.DockStyle.Bottom,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Padding = New System.Windows.Forms.Padding(20)
+            }
+            bottomFlow.Controls.Add(okButton)
 
-                                    ' Compose form.
-                                    HTMLMessageForm.Controls.Add(htmlBrowser)
-                                    HTMLMessageForm.Controls.Add(bottomFlow)
+            ' First extra button (legacy parameter).
+            If (Not System.String.IsNullOrEmpty(extraButtonText)) AndAlso (extraButtonAction IsNot Nothing) Then
+                Dim extraButton As New System.Windows.Forms.Button() With {
+                    .Text = extraButtonText,
+                    .AutoSize = True,
+                    .Font = standardFont,
+                    .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                }
 
-                                    HTMLMessageForm.BringToFront()
-                                    HTMLMessageForm.Focus()
-                                    HTMLMessageForm.Activate()
+                AddHandler extraButton.Click,
+                    Sub()
+                        Try
+                            extraButtonAction.Invoke()
+                        Catch ex As System.Exception
+                        End Try
+                        If CloseAfterExtra Then HTMLMessageForm.Close()
+                    End Sub
 
-                                    AddHandler HTMLMessageForm.Shown,
-                                        Sub(sender, e)
-                                            HTMLMessageForm.TopMost = False  ' Reset first.
-                                            HTMLMessageForm.TopMost = True   ' Then set again.
-                                            HTMLMessageForm.Activate()
-                                            HTMLMessageForm.BringToFront()
-                                        End Sub
+                bottomFlow.Controls.Add(extraButton)
+            End If
 
-                                    HTMLMessageForm.Opacity = 1
+            ' Additional buttons array.
+            If additionalButtons IsNot Nothing AndAlso additionalButtons.Length > 0 Then
+                For Each btnDef In additionalButtons
+                    If System.String.IsNullOrEmpty(btnDef.Item1) OrElse btnDef.Item2 Is Nothing Then Continue For
+                    Dim addBtn As New System.Windows.Forms.Button() With {
+                        .Text = btnDef.Item1,
+                        .AutoSize = True,
+                        .Font = standardFont,
+                        .Margin = New System.Windows.Forms.Padding(10, okButton.Margin.Top, 0, okButton.Margin.Bottom)
+                    }
+                    Dim closeAfter As Boolean = btnDef.Item3
+                    Dim action As System.Action = btnDef.Item2
+                    AddHandler addBtn.Click,
+                        Sub()
+                            Try
+                                action.Invoke()
+                            Catch ex As System.Exception
+                            End Try
+                            If closeAfter Then HTMLMessageForm.Close()
+                        End Sub
+                    bottomFlow.Controls.Add(addBtn)
+                Next
+            End If
 
-                                    ' Show dialog.
-                                    HTMLMessageForm.ShowDialog()
-                                End Sub)
-            t.SetApartmentState(System.Threading.ApartmentState.STA)
-            t.Start()
+            ' Compose form.
+            HTMLMessageForm.Controls.Add(htmlBrowser)
+            HTMLMessageForm.Controls.Add(bottomFlow)
+
+            ' Keep topmost on deactivate
+            AddHandler HTMLMessageForm.Deactivate, Sub(sender, e)
+                                                       Try
+                                                           HTMLMessageForm.TopMost = True
+                                                       Catch
+                                                       End Try
+                                                   End Sub
+
+            ' Signal when closed
+            AddHandler HTMLMessageForm.FormClosed, Sub(sender, e)
+                                                       dialogClosed.Set()
+                                                   End Sub
+
+            AddHandler HTMLMessageForm.Shown,
+                Sub(sender, e)
+                    HTMLMessageForm.TopMost = False
+                    HTMLMessageForm.TopMost = True
+                    HTMLMessageForm.Activate()
+                    HTMLMessageForm.BringToFront()
+                End Sub
+
+            HTMLMessageForm.Opacity = 1
+
+            ' Show non-modal
+            HTMLMessageForm.Show()
+            HTMLMessageForm.BringToFront()
+            HTMLMessageForm.Activate()
+
+            ' Pump messages until dialog is closed
+            While Not dialogClosed.WaitOne(50)
+                System.Windows.Forms.Application.DoEvents()
+            End While
+
+            HTMLMessageForm.Dispose()
         End Sub
+
 
 
         ''' <summary>

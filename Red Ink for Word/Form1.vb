@@ -25,6 +25,7 @@
 '     - btnCopyLastAnswer:   Copy most recent assistant response
 '     - btnClear:            Clear conversation history
 '     - btnSwitchModel:      Toggle between primary/secondary/alternate models
+'     - btnTools:            Select which tools are available for the chat session
 '     - btnExit:             Close chat window (saves state)
 '
 '   • Checkboxes (User Configuration):
@@ -32,6 +33,8 @@
 '     - chkIncludeSelection:  Include current selection or cursor context
 '     - chkIncludeOtherDocs:  Include all other open Word documents
 '     - chkPermitCommands:    Allow LLM to execute write operations
+'     - chkEnableTooling:     Enable tool calling loop (when model supports tools)
+'     - chkShowToolingLog:    Show/hide the tooling log window during tool runs
 '     - chkStayOnTop:         Toggle always-on-top window behavior
 '     - chkConvertMarkdown:   Apply Markdown formatting to inserted text
 '
@@ -69,6 +72,20 @@
 '     - Configuration snapshot/restore pattern preserves global context integrity
 '     - Secondary/alternate models disable document-related checkboxes (UpdateDocumentCheckboxesState)
 '     - CallLlmWithSelectedModelAsync handles temporary config application
+'
+' Tooling (Optional)
+'   • Tool selection:
+'     - btnTools opens SelectToolsForSession dialog
+'     - _selectedToolsForChat caches selected tool set per chat session
+'
+'   • Tool calling loop:
+'     - When chkEnableTooling is checked and current model supports tools,
+'       ExecuteToolingLoop is used instead of a direct LLM() call.
+'
+'   • Tooling log window:
+'     - chkShowToolingLog toggles visibility of the tooling log while tools run.
+'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
+'     - Persisted to My.Settings.ChatShowToolingLog
 '
 ' Bot Command Execution (Optional)
 '   Pattern: [#verb: @@argument1@@ §§argument2§§ #]
@@ -119,6 +136,7 @@
 '
 '   • User Preferences:
 '     - IncludeDocument, IncludeSelection, DoCommands
+'     - ChatEnableTooling, ChatShowToolingLog
 '     - NotAlwaysOnTop, ConvertMarkdownInChat
 '     - All persisted via My.Settings
 '
@@ -155,6 +173,7 @@
 '   • Comment ID tokens must match specific formats (see TryParseCommentIdToken)
 '
 ' =============================================================================
+
 
 Imports System.ComponentModel
 Imports System.Data
@@ -374,6 +393,14 @@ Public Class frmAIChat
         .Checked = My.Settings.ChatEnableTooling
     }
 
+    ''' <summary>
+    ''' When checked, shows the tooling log window during tool execution.
+    ''' </summary>
+    Private WithEvents chkShowToolingLog As New System.Windows.Forms.CheckBox() With {
+    .Text = "Tooling log",
+    .AutoSize = True,
+    .Checked = My.Settings.ChatShowToolingLog
+}
 
     ''' <summary>
     ''' Controls window TopMost property.
@@ -573,6 +600,13 @@ Public Class frmAIChat
             hasExistingChat = True
         End If
 
+        Try
+            If My.Settings.ChatShowToolingLog = False AndAlso _context.INI_ToolingLogWindow Then
+                chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            End If
+        Catch
+        End Try
+
         ' Configure form appearance
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
@@ -620,6 +654,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
         pnlCheckboxes.Controls.Add(chkEnableTooling)
+        pnlCheckboxes.Controls.Add(chkShowToolingLog)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkConvertMarkdown)
         pnlCheckboxes.Controls.Add(chkIncludeOtherDocs)
@@ -641,7 +676,10 @@ Public Class frmAIChat
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
+        AddHandler chkShowToolingLog.CheckedChanged, AddressOf chkShowToolingLog_CheckedChanged
         AddHandler btnTools.Click, AddressOf btnTools_Click
+
+        RestoreAlternateModelFromSettings()
 
         ' Update window title with active model name
         UpdateTitle()
@@ -975,7 +1013,7 @@ Public Class frmAIChat
                         _useSecondApi,
                         fullPromptOverride:=fullPrompt.ToString(),
                         hideSplash:=True,
-                        hideLogWindow:=True)
+                        hideLogWindow:=Not chkShowToolingLog.Checked)
                 Finally
                     If appliedAlternate AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
@@ -1330,6 +1368,15 @@ Public Class frmAIChat
         My.Settings.Save()
     End Sub
 
+
+    ''' <summary>
+    ''' Handles chkShowToolingLog checkbox change. Persists preference for showing tooling log window.
+    ''' </summary>
+    Private Sub chkShowToolingLog_CheckedChanged(sender As Object, e As EventArgs)
+        My.Settings.ChatShowToolingLog = chkShowToolingLog.Checked
+        My.Settings.Save()
+    End Sub
+
     ''' <summary>
     ''' Handles chkConvertMarkdown checkbox click. Persists preference for Markdown formatting.
     ''' </summary>
@@ -1424,7 +1471,7 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Handles chkEnableTooling checkbox click. Persists preference.
+    ''' Handles chkEnableTooling checkbox click. Persists preference and updates related controls.
     ''' </summary>
     Private Sub chkEnableTooling_Click(sender As Object, e As EventArgs)
         My.Settings.ChatEnableTooling = chkEnableTooling.Checked
@@ -1434,6 +1481,9 @@ Public Class frmAIChat
         If Not chkEnableTooling.Checked Then
             _selectedToolsForChat = Nothing
         End If
+
+        ' Update tooling log checkbox enabled state
+        chkShowToolingLog.Enabled = chkEnableTooling.Checked AndAlso chkEnableTooling.Enabled
     End Sub
 
     ' =========================================================================
@@ -1465,11 +1515,14 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Handles btnTools click. Opens tool selection dialog.
+    ''' Handles btnTools click. Opens tool selection dialog and caches the selection for this chat session.
     ''' </summary>
-    ''' <summary>
-    ''' Handles btnTools click. Opens tool selection dialog.
-    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
+    ''' <remarks>
+    ''' Temporarily disables TopMost so the selection dialog is not blocked by the chat form.
+    ''' The selected tool set is stored in _selectedToolsForChat and used by ExecuteToolingLoop.
+    ''' </remarks>
     Private Sub btnTools_Click(sender As Object, e As EventArgs)
         Dim wasTopMost As Boolean = Me.TopMost
         Try
@@ -1484,9 +1537,12 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Updates enabled state of tooling controls based on current model's tooling support.
-    ''' Called after model switches and on form load.
+    ''' Updates enabled/disabled state for tooling-related controls based on current model capabilities.
     ''' </summary>
+    ''' <remarks>
+    ''' Disables tooling when the effective model (primary/secondary/alternate) does not advertise tool support.
+    ''' When tooling is disabled, cached tool selection (_selectedToolsForChat) is cleared.
+    ''' </remarks>
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
 
@@ -1501,9 +1557,11 @@ Public Class frmAIChat
 
         chkEnableTooling.Enabled = supportsTooling
         btnTools.Enabled = supportsTooling
+        chkShowToolingLog.Enabled = supportsTooling AndAlso chkEnableTooling.Checked
 
         If Not supportsTooling Then
             chkEnableTooling.Checked = False
+            chkShowToolingLog.Checked = False
             _selectedToolsForChat = Nothing
         End If
     End Sub
@@ -1515,6 +1573,7 @@ Public Class frmAIChat
     ''' <summary>
     ''' Handles btnSwitchModel click. Toggles between primary/secondary/alternate models.
     ''' Implements snapshot/restore pattern to keep global context pristine.
+    ''' Persists selection to My.Settings for restoration on next session.
     ''' </summary>
     ''' <remarks>
     ''' Behavior depends on configuration:
@@ -1549,6 +1608,7 @@ Public Class frmAIChat
                 UpdateModelButtonText()
                 UpdateTitle()
                 UpdateDocumentCheckboxesState()
+                PersistAlternateModelToSettings()
                 Return
             End If
 
@@ -1607,6 +1667,7 @@ Public Class frmAIChat
             UpdateModelButtonText()
             UpdateTitle()
             UpdateDocumentCheckboxesState()
+            PersistAlternateModelToSettings()
         Else
             ' ─────────────────────────────────────────────────────────────
             ' Legacy Mode: Simple toggle between primary and secondary
@@ -1618,17 +1679,18 @@ Public Class frmAIChat
             UpdateModelButtonText()
             UpdateTitle()
             UpdateDocumentCheckboxesState()
+            PersistAlternateModelToSettings()
         End If
     End Sub
 
     ''' <summary>
-    ''' Updates btnSwitchModel text to reflect current model state.
+    ''' Updates btnSwitchModel text to reflect current model selection state.
     ''' </summary>
     ''' <remarks>
-    ''' Button text logic:
-    ''' - If alternate INI configured: shows "Primary model" when alternate active, 
-    '''   "Alternate Model" when primary active
-    ''' - If no alternate INI: shows generic "Switch Model"
+    ''' When an alternate model INI is configured, this button toggles between primary and an alternate selection:
+    ''' - Shows "Primary model" when an alternate model is active.
+    ''' - Shows "Alternate Model" when the primary model is active.
+    ''' Otherwise (no alternate INI), the button uses a generic "Switch Model" label.
     ''' </remarks>
     Private Sub UpdateModelButtonText()
         If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
@@ -1636,6 +1698,98 @@ Public Class frmAIChat
         Else
             btnSwitchModel.Text = "Switch Model"
         End If
+    End Sub
+
+
+    ' =========================================================================
+    ' Alternate Model Persistence
+    ' =========================================================================
+
+    ''' <summary>
+    ''' Persists the current alternate model selection to My.Settings.
+    ''' Only saves the display name - config is reloaded from INI on next session.
+    ''' </summary>
+    Private Sub PersistAlternateModelToSettings()
+        Try
+            If _alternateModelSelected AndAlso Not String.IsNullOrWhiteSpace(_alternateModelDisplayName) Then
+                My.Settings.ChatAlternateModelName = _alternateModelDisplayName
+            Else
+                My.Settings.ChatAlternateModelName = ""
+            End If
+            My.Settings.Save()
+        Catch ex As Exception
+            Debug.WriteLine($"PersistAlternateModelToSettings error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Restores the alternate model selection from My.Settings by looking up
+    ''' the saved model name in the alternate models INI file.
+    ''' Falls back to primary model if saved model is no longer available.
+    ''' </summary>
+    Private Sub RestoreAlternateModelFromSettings()
+        Try
+            Dim savedName As String = My.Settings.ChatAlternateModelName
+
+            If String.IsNullOrWhiteSpace(savedName) Then
+                ' No saved alternate model - use primary
+                Return
+            End If
+
+            If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
+                ' No alternate model INI configured - clear saved setting
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Load all available alternate models from INI
+            Dim availableModels As List(Of ModelConfig) = SharedMethods.LoadAlternativeModels(
+                _context.INI_AlternateModelPath,
+                _context,
+                "Chat Alternate Model",
+                includeToolOnly:=False,
+                toolsOnly:=False)
+
+            If availableModels Is Nothing OrElse availableModels.Count = 0 Then
+                ' No models available - clear saved setting and use primary
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Find the saved model by display name (ModelDescription)
+            Dim matchedModel As ModelConfig = availableModels.FirstOrDefault(
+                Function(m) String.Equals(m.ModelDescription, savedName, StringComparison.OrdinalIgnoreCase))
+
+            If matchedModel Is Nothing Then
+                ' Saved model no longer available - clear setting and use primary
+                Debug.WriteLine($"RestoreAlternateModelFromSettings: Model '{savedName}' no longer available, using primary")
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+                Return
+            End If
+
+            ' Found the model - apply it
+            _alternateModelSelected = True
+            _alternateModelConfig = matchedModel
+            _alternateModelDisplayName = savedName
+            _useSecondApi = True
+
+            UpdateModelButtonText()
+            UpdateDocumentCheckboxesState()
+
+            Debug.WriteLine($"RestoreAlternateModelFromSettings: Restored alternate model '{savedName}'")
+
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreAlternateModelFromSettings error: {ex.Message}")
+            ' On error, clear the persisted setting and use primary
+            Try
+                My.Settings.ChatAlternateModelName = ""
+                My.Settings.Save()
+            Catch
+            End Try
+        End Try
     End Sub
 
     ''' <summary>
@@ -2037,24 +2191,29 @@ Public Class frmAIChat
     ''' <returns>Normalized text with consistent vbCr paragraph marks</returns>
     ''' <remarks>
     ''' Processing order (critical for correct behavior):
-    ''' 
+    ''' <para>
     ''' 1. Unify actual control characters first:
-    '''    vbCrLf → vbCr, vbLf → vbCr
-    ''' 
+    ''' vbCrLf → vbCr, vbLf → vbCr
+    ''' </para>
+    ''' <para>
     ''' 2. Word Find tokens to vbCr:
-    '''    ^p → vbCr (case-insensitive)
-    '''    ^13 or ^013 → vbCr (optional leading zeros)
-    ''' 
+    ''' ^p → vbCr (case-insensitive)
+    ''' ^13 or ^013 → vbCr (optional leading zeros)
+    ''' </para>
+    ''' <para>
     ''' 3. Convert literal escape sequences from LLM output:
-    '''    \r\n → vbCr (treat as single paragraph)
-    '''    \r → vbCr
-    '''    \n → vbCr
-    '''    Only when NOT double-escaped (negative lookbehind (?<!\\) ignores \\r, \\n)
-    ''' 
+    ''' \r\n → vbCr (treat as single paragraph)
+    ''' \r → vbCr
+    ''' \n → vbCr
+    ''' Only when NOT double-escaped (negative lookbehind (?&lt;!\\) ignores \\r, \\n)
+    ''' </para>
+    ''' <para>
     ''' 4. Optional collapse multiple consecutive paragraphs (commented out by default)
-    ''' 
+    ''' </para>
+    ''' <para>
     ''' This handles mixed encodings from LLMs that may output \n, Word Find that uses ^p,
     ''' and actual control characters from clipboard/other sources.
+    ''' </para>
     ''' </remarks>
     Private Function DecodeParagraphMarks(raw As String) As String
         If String.IsNullOrEmpty(raw) Then Return ""
@@ -2464,15 +2623,15 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Checks if a range overlaps any Table of Contents in the document.
-    ''' Returns end position of overlapping TOC for skipping, or 0 if not inside TOC.
+    ''' Determines whether a range overlaps a table of contents and returns the TOC end position if so.
     ''' </summary>
-    ''' <param name="foundRange">Range to check for TOC overlap</param>
-    ''' <param name="doc">Active Word document</param>
-    ''' <returns>End position of overlapping TOC, or 0 if not inside any TOC</returns>
+    ''' <param name="foundRange">The candidate range that was found by a search.</param>
+    ''' <param name="doc">The document containing the table(s) of contents.</param>
+    ''' <returns>
+    ''' The end position of the overlapping TOC range, or 0 when the specified range does not overlap a TOC.
+    ''' </returns>
     ''' <remarks>
-    ''' Used during command execution to skip TOC areas and prevent corruption.
-    ''' Treats any overlap (partial or full) with TOC range as "inside" for safety.
+    ''' Command execution skips TOCs to avoid corrupting generated fields. Any overlap is treated as "inside" for safety.
     ''' </remarks>
     Private Function TocEndIfInside(foundRange As Word.Range, doc As Word.Document) As Integer
         If foundRange Is Nothing OrElse doc Is Nothing Then Return 0
@@ -2489,9 +2648,12 @@ Public Class frmAIChat
     End Function
 
     ''' <summary>
-    ''' Backward-compatible boolean wrapper for TocEndIfInside.
-    ''' Returns true if range overlaps any TOC in document.
+    ''' Indicates whether a range overlaps a table of contents.
     ''' </summary>
+    ''' <param name="range">The range to test.</param>
+    ''' <param name="doc">The document containing the table(s) of contents.</param>
+    ''' <returns><see langword="True"/> when the range overlaps a TOC; otherwise <see langword="False"/>.</returns>
+
     Private Function IsInsideToc(range As Word.Range, doc As Word.Document) As Boolean
         Return TocEndIfInside(range, doc) > 0
     End Function

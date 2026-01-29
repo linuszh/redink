@@ -126,6 +126,8 @@ Namespace SharedLibrary
             Property InitialConfigFailed As Boolean
             Property INI_ContextMenu As Boolean
             Property INI_NoLocalConfig As Boolean
+
+            Property INI_ForceDrawioLocal As Boolean
             Property INI_UpdateCheckInterval As Integer
             Property INI_UpdatePath As String
             Property INI_HelpMeInkyPath As String
@@ -141,6 +143,9 @@ Namespace SharedLibrary
             Property INI_LocalModelPath As String
             Property INI_TTSEndpoint As String
             Property SP_Translate As String
+            Property SP_Translate_Multi As String
+
+            Property SP_Translate_Multi_Source As String
             Property SP_Translate_Document As String
             Property SP_Correct As String
 
@@ -199,6 +204,7 @@ Namespace SharedLibrary
             Property SP_Add_Bubbles_Format As String
             Property SP_Add_Batch As String
             Property SP_Add_Slides As String
+            Property SP_Add_Chart As String
             Property SP_BubblesExcel As String
             Property SP_Add_Revisions As String
             Property SP_MarkupRegex As String
@@ -397,6 +403,7 @@ Namespace SharedLibrary
         Public Property InitialConfigFailed As Boolean Implements ISharedContext.InitialConfigFailed
         Public Property INI_ContextMenu As Boolean Implements ISharedContext.INI_ContextMenu
         Public Property INI_NoLocalConfig As Boolean Implements ISharedContext.INI_NoLocalConfig
+        Public Property INI_ForceDrawioLocal As Boolean Implements ISharedContext.INI_ForceDrawioLocal
         Public Property INI_UpdateCheckInterval As Integer Implements ISharedContext.INI_UpdateCheckInterval
         Public Property INI_UpdatePath As String Implements ISharedContext.INI_UpdatePath
         Public Property INI_HelpMeInkyPath As String Implements ISharedContext.INI_HelpMeInkyPath
@@ -413,6 +420,8 @@ Namespace SharedLibrary
         Public Property INI_LocalModelPath As String Implements ISharedContext.INI_LocalModelPath
         Public Property INI_TTSEndpoint As String Implements ISharedContext.INI_TTSEndpoint
         Public Property SP_Translate As String Implements ISharedContext.SP_Translate
+        Public Property SP_Translate_Multi As String Implements ISharedContext.SP_Translate_Multi
+        Public Property SP_Translate_Multi_Source As String Implements ISharedContext.SP_Translate_Multi_Source
         Public Property SP_Translate_Document As String Implements ISharedContext.SP_Translate_Document
         Public Property SP_Correct As String Implements ISharedContext.SP_Correct
         Public Property SP_Correct_Document As String Implements ISharedContext.SP_Correct_Document
@@ -474,6 +483,7 @@ Namespace SharedLibrary
         Public Property SP_Add_Bubbles_Format As String Implements ISharedContext.SP_Add_Bubbles_Format
         Public Property SP_Add_Batch As String Implements ISharedContext.SP_Add_Batch
         Public Property SP_Add_Slides As String Implements ISharedContext.SP_Add_Slides
+        Public Property SP_Add_Chart As String Implements ISharedContext.SP_Add_Chart
         Public Property SP_BubblesExcel As String Implements ISharedContext.SP_BubblesExcel
         Public Property SP_Add_Revisions As String Implements ISharedContext.SP_Add_Revisions
         Public Property SP_MarkupRegex As String Implements ISharedContext.SP_MarkupRegex

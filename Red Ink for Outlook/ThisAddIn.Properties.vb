@@ -699,6 +699,26 @@ Partial Public Class ThisAddIn
     End Property
 
 
+    Public Shared Property SP_Translate_Multi As String
+        Get
+            Return _context.SP_Translate_Multi
+        End Get
+        Set(value As String)
+            _context.SP_Translate_Multi = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Translate_Multi_Source As String
+        Get
+            Return _context.SP_Translate_Multi_Source
+        End Get
+        Set(value As String)
+            _context.SP_Translate_Multi_Source = value
+        End Set
+    End Property
+
+
+
     Public Shared Property SP_Translate_Document As String
         Get
             Return _context.SP_Translate_Document
@@ -1213,6 +1233,25 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Slides As String
+        Get
+            Return _context.SP_Add_Slides
+        End Get
+        Set(value As String)
+            _context.SP_Add_Slides = value
+        End Set
+    End Property
+
+
+    Public Shared Property SP_Add_Chart As String
+        Get
+            Return _context.SP_Add_Chart
+        End Get
+        Set(value As String)
+            _context.SP_Add_Chart = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_BubblesExcel As String
         Get
@@ -1637,6 +1676,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_NoLocalConfig = value
+        End Set
+    End Property
+
+    Public Shared Property INI_ForceDrawioLocal As Boolean
+        Get
+            Return _context.INI_ForceDrawioLocal
+        End Get
+        Set(value As Boolean)
+            _context.INI_ForceDrawioLocal = value
         End Set
     End Property
 

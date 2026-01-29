@@ -49,6 +49,7 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports DocumentFormat.OpenXml
 Imports DocumentFormat.OpenXml.Office2010.CustomUI
+Imports DocumentFormat.OpenXml.Office2016.Drawing.Charts
 Imports DocumentFormat.OpenXml.Presentation
 Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Google.Rpc.Context.AttributeContext.Types
@@ -726,6 +727,7 @@ Partial Public Class ThisAddIn
             Dim ChunkSize As Integer = 1
             Dim NoFormatAndFieldSaving As Boolean = False
             Dim DoSlides As Boolean = False
+            Dim DoChart As Boolean = False
             Dim DoMyStyle As Boolean = False
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
@@ -738,6 +740,7 @@ Partial Public Class ThisAddIn
             Dim BubblesInstruct As String = $"with '{BubblesPrefix}' for having your text commented"
             Dim PushbackInstruct As String = $"with '{PushbackPrefix}' for responding to comments only"
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
+            Dim ChartInstruct As String = $"with '{ChartPrefix}' for creating a chart"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{AddDocTrigger}' for an open Word doc"
@@ -832,24 +835,136 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
                         }
 
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {ClipboardInstruct}, {InplaceInstruct}, {BubblesInstruct}, {PushbackInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 Else
                     ' Offer limited optional buttons when no text is selected
                     Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
             End If
 
-            Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
+            'Debug.WriteLine($"OtherPrompt: '{OtherPrompt}'")
 
             SelectedText = ""
 
-            ' === Special utility commands (executed when text is selected) ===
+            ' === Special utility commands (can execute without text selection) ===
+
+            ' --- Help picker: show all short commands and let user choose one ---
+            If String.Equals(OtherPrompt.Trim(), "help", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "?", StringComparison.OrdinalIgnoreCase) Then
+
+                Dim items As New List(Of SLib.SelectionItem)()
+                Dim idToCommand As New Dictionary(Of Integer, String)()
+
+                Dim id As Integer = 1
+                Dim AddItem =
+                    Sub(cmd As String, desc As String)
+                        items.Add(New SLib.SelectionItem($"{cmd}: {desc}", id))
+                        idToCommand(id) = cmd
+                        id += 1
+                    End Sub
+
+                ' GENERAL
+                AddItem("domain", "Show the current domain and any configured domain restrictions.")
+                AddItem("model", "Show the primary model, timeout, and (if set) max output token length.")
+                AddItem("terms", "Insert configured usage restrictions/permissions into the document.")
+                AddItem("version", "Show the installed Red Ink version.")
+                AddItem("switch", "Temporarily swap primary and secondary models.")
+                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
+                AddItem("license", "Show license information and access license manage dialog.")
+
+                ' CONFIG / MENU
+                AddItem("settings", "Open the settings dialog.")
+                AddItem("reload", "Reload the configuration from disk and rebuild menus.")
+                AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
+                AddItem("cleanmenu", "Remove old context menus and rebuild them.")
+
+                ' INI UPDATE / SIGNING
+                AddItem("iniupdate", "Check for and apply configuration updates.")
+                AddItem("iniupdateignored", "Open the ignore list for configuration updates.")
+                AddItem("iniupdateignore", "Open the ignore list for configuration updates.")
+                AddItem("iniload", "Import/apply configuration via the configuration import workflow.")
+                AddItem("inirollback", "Roll back the last imported configuration change (creates a backup).")
+                AddItem("iniupdatekeys", "Open signature management (sign/validate configs, manage keys).")
+                AddItem("signtool", "Open signature management (sign/validate configs, manage keys).")
+                AddItem("iniupdatebatch", "Open batch signing.")
+                AddItem("signbatch", "Open batch signing.")
+
+                ' PROMPTS / LOGS
+                AddItem("clearlastprompt", "Clear the stored last Freestyle prompt and repeat state.")
+                AddItem("promptlog", "Show/edit the cached Freestyle prompt log.")
+                AddItem("logstat", $"Compile and show {AN} usage startistics based on collected logs.")
+                AddItem("logfile", $"Open the {AN} local log file (for events re update, license, etc.).")
+
+                ' MYSTYLE
+                AddItem("definemystyle", "Create/update your MyStyle prompts.")
+                AddItem("editmystyle", "Open the MyStyle prompt file in an editor.")
+
+                ' SECURITY / REGISTRY (selection required)
+                AddItem("encode", "Encode the selected text (e.g., API key) and copy it to the clipboard.")
+                AddItem("decode", "Decode the selected encoded text and copy it to the clipboard.")
+                AddItem("inipath", "Save the selected text as the INI path in the registry.")
+                AddItem("codebasis", "Save the selected text as the CodeBasis value in the registry.")
+
+                ' JSON / TEMPLATES (selection required)
+                AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
+                AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
+
+                ' CLIPBOARD / INSERTION
+                AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
+                AddItem("insertclip", "Insert clipboard content at the cursor position.")
+
+                ' TOOLS / SOURCES
+                AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
+                AddItem("loadurl", "Retrieve the text of a particular URL given.")
+                AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
+                AddItem("drawio", "Open a draw.io for editing chart files, optionally with Internet blocking.")
+
+                ' PRIVACY / TRANSFORMS
+                AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
+                AddItem("convertmarkdown", "Convert Markdown in the selected text to Word formatting.")
+
+                ' AUDIO / SPEECH
+                AddItem("speech", "Start speech transcription (Transcriptor).")
+                AddItem("read", "Create audio (TTS) from the selected text.")
+                AddItem("readlocal", "Read the selected text using local TTS (no cloud call).")
+                AddItem("voices", "Select a single cloud TTS voice.")
+                AddItem("voices2", "Select multiple cloud TTS voices.")
+                AddItem("voiceslocal", "Select the local TTS voice.")
+                AddItem("createpodcast", "Create a podcast from the selected text.")
+                AddItem("readpodcast", "Play/read a podcast based on the current selection.")
+
+                ' DOCUMENT / CLAUSES
+                AddItem("doccheck", "Run the document check.")
+                AddItem("learndocstyle", "Extract paragraph styles (learn document style).")
+                AddItem("applydocstyle", "Apply a style template.")
+                AddItem("findclause", "Search for a clause in the clause library/database.")
+                AddItem("addclause", "Add a clause to the clause library/database.")
+
+                ' WEB AGENT
+                AddItem("webagentcreator", "Create/modify web agent scripts.")
+                AddItem("webagent", "Run the web agent (requires configured script paths).")
+
+                ' ANALYSIS
+                AddItem("findhiddenprompts", "Scan the document for hidden prompts.")
+
+                Dim chosen As Integer = SLib.SelectValue(items,
+                            1,
+                            "Select a Freestyle short command (Esc to cancel):",
+                            $"{AN} Freestyle - Help"
+                        )
+
+                If chosen <= 0 OrElse Not idToCommand.ContainsKey(chosen) Then
+                    Return
+                End If
+
+                OtherPrompt = idToCommand(chosen)
+                ' Continue normal execution: the short-command checks below will now match.
+            End If
 
             If Not NoText Then
 
@@ -899,114 +1014,16 @@ Partial Public Class ThisAddIn
 
             End If
 
-            ' === Special utility commands (can execute without text selection) ===
+            ' Decode serial 
+            If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then
+                DecodeSerial(selection)
+                Return
+            End If
 
-            ' --- Help picker: show all short commands and let user choose one ---
-            If String.Equals(OtherPrompt.Trim(), "help", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "?", StringComparison.OrdinalIgnoreCase) Then
-
-                Dim items As New List(Of SLib.SelectionItem)()
-                Dim idToCommand As New Dictionary(Of Integer, String)()
-
-                Dim id As Integer = 1
-                Dim AddItem =
-                    Sub(cmd As String, desc As String)
-                        items.Add(New SLib.SelectionItem($"{cmd}: {desc}", id))
-                        idToCommand(id) = cmd
-                        id += 1
-                    End Sub
-
-                ' GENERAL
-                AddItem("domain", "Show the current domain and any configured domain restrictions.")
-                AddItem("model", "Show the primary model, timeout, and (if set) max output token length.")
-                AddItem("terms", "Insert configured usage restrictions/permissions into the document.")
-                AddItem("version", "Show the installed Red Ink version.")
-                AddItem("switch", "Temporarily swap primary and secondary models.")
-                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
-
-                ' CONFIG / MENU
-                AddItem("settings", "Open the settings dialog.")
-                AddItem("reload", "Reload the configuration from disk and rebuild menus.")
-                AddItem("reset", "Reset local configuration to defaults and rebuild menus.")
-                AddItem("cleanmenu", "Remove old context menus and rebuild them.")
-
-                ' INI UPDATE / SIGNING
-                AddItem("iniupdate", "Check for and apply configuration updates.")
-                AddItem("iniupdateignored", "Open the ignore list for configuration updates.")
-                AddItem("iniupdateignore", "Open the ignore list for configuration updates.")
-                AddItem("iniload", "Import/apply configuration via the configuration import workflow.")
-                AddItem("inirollback", "Roll back the last imported configuration change (creates a backup).")
-                AddItem("iniupdatekeys", "Open signature management (sign/validate configs, manage keys).")
-                AddItem("signtool", "Open signature management (sign/validate configs, manage keys).")
-                AddItem("iniupdatebatch", "Open batch signing.")
-                AddItem("signbatch", "Open batch signing.")
-
-                ' PROMPTS / LOGS
-                AddItem("clearlastprompt", "Clear the stored last Freestyle prompt and repeat state.")
-                AddItem("promptlog", "Show/edit the cached Freestyle prompt log.")
-                AddItem("logstat", $"Compile and show {AN} usage startistics based on collected logs.")
-
-                ' MYSTYLE
-                AddItem("definemystyle", "Create/update your MyStyle prompts.")
-                AddItem("editmystyle", "Open the MyStyle prompt file in an editor.")
-
-                ' SECURITY / REGISTRY (selection required)
-                AddItem("encode", "Encode the selected text (e.g., API key) and copy it to the clipboard.")
-                AddItem("decode", "Decode the selected encoded text and copy it to the clipboard.")
-                AddItem("inipath", "Save the selected text as the INI path in the registry.")
-                AddItem("codebasis", "Save the selected text as the CodeBasis value in the registry.")
-
-                ' JSON / TEMPLATES (selection required)
-                AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
-                AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
-
-                ' CLIPBOARD / INSERTION
-                AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
-                AddItem("insertclip", "Insert clipboard content at the cursor position.")
-
-                ' TOOLS / SOURCES
-                AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
-                AddItem("loadurl", "Retrieve the text of a particular URL given.")
-
-                ' PRIVACY / TRANSFORMS
-                AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
-                AddItem("convertmarkdown", "Convert Markdown in the selected text to Word formatting.")
-
-                ' AUDIO / SPEECH
-                AddItem("speech", "Start speech transcription (Transcriptor).")
-                AddItem("read", "Create audio (TTS) from the selected text.")
-                AddItem("readlocal", "Read the selected text using local TTS (no cloud call).")
-                AddItem("voices", "Select a single cloud TTS voice.")
-                AddItem("voices2", "Select multiple cloud TTS voices.")
-                AddItem("voiceslocal", "Select the local TTS voice.")
-                AddItem("createpodcast", "Create a podcast from the selected text.")
-                AddItem("readpodcast", "Play/read a podcast based on the current selection.")
-
-                ' DOCUMENT / CLAUSES
-                AddItem("doccheck", "Run the document check.")
-                AddItem("learndocstyle", "Extract paragraph styles (learn document style).")
-                AddItem("applydocstyle", "Apply a style template.")
-                AddItem("findclause", "Search for a clause in the clause library/database.")
-                AddItem("addclause", "Add a clause to the clause library/database.")
-
-                ' WEB AGENT
-                AddItem("webagentcreator", "Create/modify web agent scripts.")
-                AddItem("webagent", "Run the web agent (requires configured script paths).")
-
-                ' ANALYSIS
-                AddItem("findhiddenprompts", "Scan the document for hidden prompts.")
-
-                Dim chosen As Integer = SLib.SelectValue(items,
-                            1,
-                            "Select a Freestyle short command (Esc to cancel):",
-                            $"{AN} Freestyle - Help"
-                        )
-
-                If chosen <= 0 OrElse Not idToCommand.ContainsKey(chosen) Then
-                    Return
-                End If
-
-                OtherPrompt = idToCommand(chosen)
-                ' Continue normal execution: the short-command checks below will now match.
+            ' Create serial and copy to clipboard
+            If String.Equals(OtherPrompt.Trim(), "encodeserial", StringComparison.OrdinalIgnoreCase) Then
+                EncodeSerial(selection)
+                Return
             End If
 
             ' Display domain configuration information
@@ -1214,6 +1231,19 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "translator", StringComparison.OrdinalIgnoreCase) Then
+                ShowQuickTranslate()
+                Return
+            End If
+
+            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "drawio", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "chart", StringComparison.OrdinalIgnoreCase) Then
+                OpenExistingDrawioFileForEditing()
+                Return
+            End If
+
+
             ' Signature Management for importing INI keys            
             If String.Equals(OtherPrompt.Trim(), "iniload", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
 
@@ -1278,9 +1308,41 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Reset local configuration to defaults (with confirmation)
+#If DEBUG Then
+            If String.Equals(OtherPrompt.Trim(), "lt", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.TestLicenseSystem()
+                Return
+            End If
+#End If
+
+            If String.Equals(OtherPrompt.Trim(), "license", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowLicenseManagementDialog()
+                Return
+            End If
+
+            ' Open the centralized usage Log File
             If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
                 SharedLogger.AnalyzeLogs(_context)
+                Return
+            End If
+
+            ' Open the Red Ink Local Log File
+            If String.Equals(OtherPrompt.Trim(), "logfile", StringComparison.OrdinalIgnoreCase) Then
+                Dim logPath As String = ""
+                Try
+                    logPath = System.IO.Path.Combine(
+                                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                                AN2,
+                                LogFileName)
+
+                    If System.IO.File.Exists(logPath) Then
+                        SLib.ShowTextFileEditor(logPath, $"{AN} Local Log File '{logPath}':", True, _context)
+                    Else
+                        ShowCustomMessageBox($"Local logfile at '{logPath}' not found.")
+                    End If
+                Catch ex As Exception
+                    ShowCustomMessageBox($"Error opening local logfile at '{logPath}': " & ex.Message)
+                End Try
                 Return
             End If
 
@@ -1501,7 +1563,7 @@ Partial Public Class ThisAddIn
 
             ' === In-prompt trigger processing ===
 
-            ' {all} trigger: Select entire document
+            ' (all) trigger: Select entire document
             If OtherPrompt.IndexOf(AllTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(AllTrigger, "").Trim()
                 Dim document As Word.Document = application.ActiveDocument
@@ -1509,7 +1571,7 @@ Partial Public Class ThisAddIn
                 NoText = False
             End If
 
-            ' {lib} trigger: Enable library search
+            ' (lib) trigger: Enable library search
             If OtherPrompt.IndexOf(LibTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(LibTrigger, "").Trim()
                 DoLib = True
@@ -1521,7 +1583,7 @@ Partial Public Class ThisAddIn
                 DoTPMarkup = True
             End If
 
-            ' {chunk} trigger: Enable chunked processing (iterate through paragraphs)
+            ' (interate) trigger: Enable chunked processing (iterate through paragraphs)
             If OtherPrompt.IndexOf(ChunkTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(ChunkTrigger, "").Trim()
                 DoChunks = True
@@ -1580,7 +1642,7 @@ Partial Public Class ThisAddIn
 
             ' === File object triggers ===
 
-            ' {object} trigger: Attach file object to LLM request
+            ' (object) trigger: Attach file object to LLM request
             If DoFileObject AndAlso OtherPrompt.IndexOf(ObjectTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(ObjectTrigger, "(a file object follows)").Trim()
             ElseIf DoFileObject AndAlso OtherPrompt.IndexOf(ObjectTrigger2, StringComparison.OrdinalIgnoreCase) >= 0 Then
@@ -1624,6 +1686,11 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(SlidesPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(SlidesPrefix.Length).Trim()
                 DoSlides = True
+                DoClipboard = True
+                DoChunks = False
+            ElseIf OtherPrompt.StartsWith(ChartPrefix, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(ChartPrefix.Length).Trim()
+                DoChart = True
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
@@ -1677,7 +1744,7 @@ Partial Public Class ThisAddIn
                 DoFiles = True
             End If
 
-            ' {net} trigger: Enable internet search
+            ' (net) trigger: Enable internet search
             If OtherPrompt.IndexOf(NetTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(NetTrigger, "").Trim()
                 DoNet = True
@@ -1711,10 +1778,10 @@ Partial Public Class ThisAddIn
 
             ' === Multi-model selection ===
 
-            ' {multimodel} trigger: Prompt for multiple model selection
+            ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
             If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
-                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides Then
+                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso Not DoChart Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
                     End If
@@ -1726,7 +1793,7 @@ Partial Public Class ThisAddIn
 
             ' === MyStyle prompt integration ===
 
-            ' {mystyle} trigger: Select and apply personal style prompt
+            ' (mystyle) trigger: Select and apply personal style prompt
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) AndAlso OtherPrompt.IndexOf(MyStyleTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 Dim StylePath As String = ExpandEnvironmentVariables(INI_MyStylePath)
                 If Not IO.File.Exists(StylePath) Then
@@ -1742,8 +1809,8 @@ Partial Public Class ThisAddIn
 
             ' === Additional document integration ===
 
-            ' {adddoc} trigger: Gather content from other open Word documents
-            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not Dofiles Then
+            ' (adddoc) trigger: Gather content from other open Word documents
+            If Not String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt.IndexOf(AddDocTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
 
                 InsertDocs = GatherSelectedDocuments()
                 Debug.WriteLine($"GatherSelectedDocs returned: {Left(InsertDocs, 3000)}")
@@ -1760,20 +1827,22 @@ Partial Public Class ThisAddIn
                 OtherPrompt = Regex.Replace(OtherPrompt, Regex.Escape(AddDocTrigger), "", RegexOptions.IgnoreCase)
             End If
 
+            OtherPromptUnfilled = OtherPrompt.Trim()
 
             ' === External file/directory embedding ===
 
             ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
-            If Not DoFiles Then
-                Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
-                If Not fileResult.Success Then
-                    Return
-                End If
-                OtherPrompt = fileResult.ModifiedPrompt
+
+            Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
+            If Not fileResult.Success Then
+                Return
             End If
+            OtherPrompt = fileResult.ModifiedPrompt
+
+
             ' === File object selection (for LLM APIs that support file attachments) ===
 
-            If DoFileObject And Not Dofiles Then
+            If DoFileObject And Not DoFiles Then
                 If DoFileObjectClip Then
                     ' Use clipboard content as file object
                     FileObject = "clipboard"
@@ -1928,7 +1997,7 @@ Partial Public Class ThisAddIn
 
             If DoFiles Then
                 Try
-                    CorrectWordDocuments(SP_Freestyle_Document, "_freestyle", UseSecondAPI)
+                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI)
                 Catch ex As System.Exception
                     ' Handle any unexpected errors during freestyle execution
                     ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")
@@ -1976,12 +2045,12 @@ Partial Public Class ThisAddIn
                 ChunkSize = 0
             End If
 
-            Debug.WriteLine("Freestyle Prompt: " & SysPrompt)
+            'Debug.WriteLine("Freestyle Prompt: " & SysPrompt)
 
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options            
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession)
+            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart)
 
             ' Restore original model configuration if alternate model was used
             If UseSecondAPI And originalConfigLoaded Then

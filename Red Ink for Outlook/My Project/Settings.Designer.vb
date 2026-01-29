@@ -137,6 +137,18 @@ Namespace My
                 Me("Inky_LastChat") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property selectedToolNames() As String
+            Get
+                Return CType(Me("selectedToolNames"),String)
+            End Get
+            Set
+                Me("selectedToolNames") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

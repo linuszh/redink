@@ -5,7 +5,8 @@
 ' File: ThisAddIn.Processing.vb
 ' Purpose: Drives the Red Ink for Word text-processing pipeline, including selection
 '          validation, chunk iteration, formatting capture/restoration, LLM invocation,
-'          and routing AI output into Word, panes, clipboard, bubbles, podcasts, or slides.
+'          and routing AI output into Word, panes, clipboard, bubbles, podcasts, slides,
+'          and chart/diagram outputs.
 '
 ' Architecture:
 '  - Entry Points & Undo: `ProcessSelectedText` enforces prerequisites, opens `WordUndoScope`,
@@ -21,6 +22,10 @@
 '    and revision-tag helpers (`AddMarkupTags`, `InsertMarkupText`, `SearchAndReplace`).
 '  - Output & UI Surfaces: dispatches results to clipboard panes, new docs, in-place replacements,
 '    podcast scripts, slide decks, bubbles/pushbacks, with progress/cancellation handling.
+'  - Chart / Diagram Output: when `DoChart` is enabled, the LLM is prompted to return draw.io
+'    XML (mxfile). The response is cleaned (`CleanDrawioXml`), saved as a `.drawio` file
+'    (`ProcessChartResult`), and can be opened in an embedded diagrams.net editor
+'    (`OpenDrawioWithWebView2` / `DrawioEditorForm`) for interactive editing and re-save.
 '  - Story Routing: Detects non-main stories (comments, footnotes/endnotes) and routes processing to
 '    specialized handlers (`ProcessSelectedTextInActiveCommentBubble`, `ProcessSelectedTextInActiveFootnote`).
 '
@@ -29,12 +34,14 @@
 '  - SharedLibrary.SharedMethods for UI, prompt construction, LLM access, formatting utilities.
 '  - DiffPlex for diff building, Markdig + HtmlAgilityPack for Markdown-to-HTML conversion.
 '  - DocumentFormat.OpenXml, MarkdownToRtfConverter, and additional helpers referenced via SharedLibrary.
+'  - Microsoft.Web.WebView2 (via `DrawioEditorForm`) for embedded diagrams.net editor hosting.
 ' =============================================================================
 
 Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
+Imports System.Runtime.InteropServices
 Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -174,6 +181,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoBubblesExtract">Extract text from bubbles.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">Tools selected for Tooling</param>
+    ''' <param name="DoChart">Create a chart</param>
     ''' <returns>Empty string on completion.</returns>
     Public Async Function ProcessSelectedText(
      SysCommand As String,
@@ -201,7 +209,8 @@ Partial Public Class ThisAddIn
      Optional DoMyStyle As Boolean = False,
      Optional DoBubblesExtract As Boolean = False,
      Optional DoPushback As Boolean = False,
-     Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+     Optional SelectedTools As List(Of ModelConfig) = Nothing,
+     Optional DoChart As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -255,7 +264,7 @@ Partial Public Class ThisAddIn
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
 
-                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
+                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
 
                 Else
 
@@ -460,7 +469,7 @@ Partial Public Class ThisAddIn
 
                     ElseIf userdialog = 1 Then
 
-                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools)
+                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
 
                     End If
 
@@ -515,6 +524,7 @@ Partial Public Class ThisAddIn
     ''' <param name="InTable">Processing within table context.</param>
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">The tools selected for tooling runs</param>
+    ''' <param name="DoChart">Create a chart</param>
     ''' <returns>Empty string on completion.</returns>
     Private Async Function TrueProcessSelectedText(SysCommand As String,
        CheckMaxToken As Boolean,
@@ -542,7 +552,8 @@ Partial Public Class ThisAddIn
        Optional DoBubblesExtract As Boolean = False,
        Optional InTable As Boolean = False,
        Optional DoPushback As Boolean = False,
-       Optional SelectedTools As List(Of ModelConfig) = Nothing) As Task(Of String)
+       Optional SelectedTools As List(Of ModelConfig) = Nothing,
+       Optional DoChart As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -596,7 +607,8 @@ Partial Public Class ThisAddIn
                     vbCrLf & "DoMyStyle=" & DoMyStyle &
                     vbCrLf & "DoBubblesExtract=" & DoBubblesExtract &
                     vbCrLf & "InTable=" & InTable &
-                    vbCrLf & "DoPushback=" & DoPushback
+                    vbCrLf & "DoPushback=" & DoPushback &
+                    vbCrLf & "DoChart=" & DoChart
                 )
 
         Try
@@ -651,7 +663,7 @@ Partial Public Class ThisAddIn
                 If DoMarkup Then
                     Select Case MarkupMethod
                         Case 1
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using Word compare. Iteration only works using the Regex method. Continue using Regex markup (the character cap will be ignored) or go without markups?", "Yes, Regex markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using Word compare. Iteration only works Using the Regex method. Continue Using Regex markup (the character cap will be ignored) Or go without markups?", "Yes, Regex markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 4
                             ElseIf SilentMarkup = 2 Then
@@ -660,7 +672,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 2
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using Diff compare. Iteration only works using the Regex method. Continue using Diff markup (the character cap will be ignored) or go without markups?", "Yes, Diff markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using Diff compare. Iteration only works Using the Regex method. Continue Using Diff markup (the character cap will be ignored) Or go without markups?", "Yes, Diff markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 2
                             ElseIf SilentMarkup = 2 Then
@@ -669,7 +681,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 3
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using DiffW compare. Iteration only works using the Regex method. Continue using Diff markup (the character cap will be ignored) or go without markups?", "Yes, Diff markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using DiffW compare. Iteration only works Using the Regex method. Continue Using Diff markup (the character cap will be ignored) Or go without markups?", "Yes, Diff markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 2
                             ElseIf SilentMarkup = 2 Then
@@ -678,7 +690,7 @@ Partial Public Class ThisAddIn
                                 Return ""
                             End If
                         Case 4
-                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing and markups using the Regex method. This works, but may tak a very long time (the character cap will be ignored). Continue with Regex markups or go without markups?", "Yes, Regex markups", "No, no markups")
+                            Dim SilentMarkup As Integer = SLib.ShowCustomYesNoBox($"You have choosen both iterated processing And markups Using the Regex method. This works, but may tak a very Long time (the character cap will be ignored). Continue With Regex markups Or go without markups?", "Yes, Regex markups", "No, no markups")
                             If SilentMarkup = 1 Then
                                 MarkupMethod = 4
                             ElseIf SilentMarkup = 2 Then
@@ -1011,14 +1023,14 @@ Partial Public Class ThisAddIn
                         AddDocs,
                         InsertDocs,
                         SlideInsert,
-                        OtherPrompt)
+                        OtherPromptUnfilled, DoChart:=DoChart)
                 Else
 
                     ' Other LLM calls w/o Tooling
 
-                    If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" Then
+                    If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart, " " & SP_Add_Chart, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
 
                     Else
 
@@ -1026,7 +1038,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
 
                         Next
 
@@ -1034,6 +1046,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 OtherPrompt = ""
+                OtherPromptUnfilled = ""
 
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
 
@@ -1143,6 +1156,11 @@ Partial Public Class ThisAddIn
                                 SLib.PutInClipboard(FinalText)
                             End If
                         End If
+
+                    ElseIf DoChart Then
+
+                        ProcessChartResult(LLMResult)
+
                     ElseIf SlideInsert <> "" Then
 
                         Dim Jsonstring As String = CleanJsonString(LLMResult)
@@ -1742,7 +1760,7 @@ Partial Public Class ThisAddIn
                 Timeout:=0,
                 UseSecondAPI:=useSecondApi,
                 Hidesplash:=False,
-                AddUserPrompt:=OtherPrompt,
+                AddUserPrompt:=OtherPromptUnfilled,
                 FileObject:=fileObject
             )
 
@@ -2844,7 +2862,7 @@ Partial Public Class ThisAddIn
                 Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & "\r\r" & sText)
 
                 System.Threading.Tasks.Task.Run(Sub()
-                                                    ShowRTFCustomMessageBox(htmlContent)
+                                                    ShowRTFCustomMessageBox(htmlContent, RestoreWindow:=True)
                                                 End Sub)
             End If
 
@@ -3087,5 +3105,408 @@ Partial Public Class ThisAddIn
     )
     End Function
 
+    ' ========================== Chart Processing ==========================
+
+    ' Add this helper enum somewhere in ThisAddIn (same file is fine)
+    Private Enum DrawioOpenChoice
+        None = 0
+        OfflineAfterLoad = 1
+        Online = 2
+    End Enum
+
+    Private Function AskHowToOpenDrawio(prompt As String, caption As String) As DrawioOpenChoice
+
+        ' If local-only is enforced, do not offer the online option.
+        If _context IsNot Nothing AndAlso _context.INI_ForceDrawioLocal Then
+            Dim rLocalOnly As Integer = ShowCustomYesNoBox(
+                bodyText:=prompt,
+                button1Text:="Open draw.io (local processing after load)",
+                button2Text:="Do not open",
+                header:=caption,
+                autoCloseSeconds:=Nothing,
+                Defaulttext:="",
+                extraButtonText:="",
+                extraButtonAction:=Nothing,
+                CloseAfterExtra:=True,
+                nonModal:=False)
+
+            If rLocalOnly = 1 Then Return DrawioOpenChoice.OfflineAfterLoad
+            Return DrawioOpenChoice.None ' 0 abort or 2 do not open
+        End If
+
+        ' Default behavior: offer local + online + do-not-open.
+        Dim chosen As DrawioOpenChoice = DrawioOpenChoice.None
+
+        ' Two main buttons return 1/2.
+        ' Third button is implemented via extraButtonText+extraButtonAction and we set chosen inside.
+        Dim r As Integer = ShowCustomYesNoBox(
+            bodyText:=prompt,
+            button1Text:="Open draw.io (local processing after load)",
+            button2Text:="Open draw.io (with internet access)",
+            header:=caption,
+            autoCloseSeconds:=Nothing,
+            Defaulttext:="",
+            extraButtonText:="Do not open",
+            extraButtonAction:=Sub()
+                                   chosen = DrawioOpenChoice.None
+                               End Sub,
+            CloseAfterExtra:=True,
+            nonModal:=False)
+
+        If r = 1 Then Return DrawioOpenChoice.OfflineAfterLoad
+        If r = 2 Then Return DrawioOpenChoice.Online
+        Return DrawioOpenChoice.None
+
+    End Function
+
+    ''' <summary>
+    ''' Processes the LLM chart result by saving it as a draw.io file on the desktop
+    ''' and optionally opening draw.io in a WebView2 editor window.
+    ''' </summary>
+    ''' <param name="xmlContent">The draw.io XML content from the LLM.</param>
+    Private Sub ProcessChartResult(ByVal xmlContent As String)
+        Try
+            If String.IsNullOrWhiteSpace(xmlContent) Then
+                ShowCustomMessageBox("The LLM did not return any chart content.")
+                Return
+            End If
+
+            ' Extract + clean the XML (handles code fences AND extra text around the XML)
+            Dim cleanedXml As String = ExtractAndCleanDrawioXml(xmlContent)
+            If String.IsNullOrWhiteSpace(cleanedXml) Then
+                ShowCustomMessageBox("The chart output did not contain valid draw.io XML.")
+                Return
+            End If
+
+            ' Minimal validation (avoid writing obviously non-draw.io content)
+            Dim looksLikeDrawio As Boolean =
+                cleanedXml.IndexOf("<mxfile", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                cleanedXml.IndexOf("<mxGraphModel", StringComparison.OrdinalIgnoreCase) >= 0
+
+            If Not looksLikeDrawio Then
+                ShowCustomMessageBox("The chart output did not look like draw.io XML (missing <mxfile> / <mxGraphModel>).")
+                Return
+            End If
+
+            ' Get the desktop path
+            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+
+            ' Find the next available file number
+            Dim fileCounter As Integer = 1
+            Dim filePath As String
+            Do
+                filePath = IO.Path.Combine(desktopPath, $"AI_Chart_{fileCounter:D3}.drawio")
+                If Not IO.File.Exists(filePath) Then Exit Do
+                fileCounter += 1
+            Loop
+
+            ' Always save the XML content to the file first
+            IO.File.WriteAllText(filePath, cleanedXml, System.Text.Encoding.UTF8)
+
+            Dim choice As DrawioOpenChoice =
+            AskHowToOpenDrawio(
+                prompt:=$"The chart has been saved to your desktop as '{IO.Path.GetFileName(filePath)}'." & vbCrLf & vbCrLf &
+                        "How do you want to continue?",
+                caption:=$"{AN}")
+
+            Select Case choice
+                Case DrawioOpenChoice.OfflineAfterLoad
+                    OpenDrawioWithWebView2(cleanedXml, filePath, disableInternetAfterLoad:=True)
+                Case DrawioOpenChoice.Online
+                    OpenDrawioWithWebView2(cleanedXml, filePath, disableInternetAfterLoad:=False)
+                Case Else
+                    Return
+            End Select
+
+        Catch ex As Exception
+            Debug.WriteLine($"ProcessChartResult error: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            ShowCustomMessageBox($"Error processing chart result: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Opens draw.io in a WebView2-based editor form, loading the XML via postMessage.
+    ''' </summary>
+    ''' <param name="xmlContent">The draw.io XML content.</param>
+    ''' <param name="saveFilePath">Path where the .drawio file is saved.</param>
+    ''' <param name="disableInternetAfterLoad">When true, blocks http/https requests after initial load.</param>
+    Private Sub OpenDrawioWithWebView2(ByVal xmlContent As String, ByVal saveFilePath As String, Optional ByVal disableInternetAfterLoad As Boolean = False)
+        Try
+            ' Ensure we're on the UI thread
+            If _uiContext IsNot Nothing Then
+                _uiContext.Post(
+                    Sub(state)
+                        ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+                    End Sub, Nothing)
+            Else
+                ShowDrawioEditor(xmlContent, saveFilePath, disableInternetAfterLoad)
+            End If
+
+        Catch ex As Exception
+            Debug.WriteLine($"OpenDrawioWithWebView2 error: {ex.Message}")
+            ShowCustomMessageBox(
+                $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Shows the draw.io editor form with WebView2.
+    ''' </summary>
+    Private Sub ShowDrawioEditor(ByVal xmlContent As String, ByVal saveFilePath As String, ByVal disableInternetAfterLoad As Boolean)
+        Try
+            Dim editorForm As New DrawioEditorForm(xmlContent, saveFilePath, disableInternetAfterLoad:=disableInternetAfterLoad)
+
+            ' For Custom PDF export on form 
+            'AddHandler editorForm.Shown, Sub()            
+            '                                editorForm.ExportPdfToDevice()
+            '                            End Sub
+
+            editorForm.Show()
+        Catch ex As Exception
+            Debug.WriteLine($"ShowDrawioEditor error: {ex.Message}")
+            ShowCustomMessageBox(
+                $"Could not open the diagram editor: {ex.Message}{vbCrLf}{vbCrLf}" &
+                $"Your diagram has been saved to:{vbCrLf}{saveFilePath}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Opens an existing .drawio file using the application's drag & drop picker,
+    ''' then asks whether to open draw.io offline-after-load, with internet, or not at all.
+    ''' If the user cancels the file picker, offers to create a new empty diagram instead.
+    ''' </summary>
+    Public Sub OpenExistingDrawioFileForEditing()
+        Try
+            ' Configure DragDropForm for draw.io files
+            Globals.ThisAddIn.DragDropFormFilter = "draw.io files (*.drawio)|*.drawio|All files (*.*)|*.*"
+            Globals.ThisAddIn.DragDropFormLabel = "Drop a .drawio file here (or click Browse) to open it in the embedded draw.io editor."
+            Dim selectedPath As String = Nothing
+
+            Using f As New DragDropForm(DragDropMode.FileOnly)
+                If f.ShowDialog() <> DialogResult.OK Then
+                    ' User cancelled the file picker - ask if they want to create a new empty diagram
+                    Dim createNew As String = ShowCustomInputBox(
+    "You did not select a file. Do you want to create a new empty diagram instead?" & vbCrLf & vbCrLf &
+    "Enter a file name (or full path) for the new diagram (without extension), or leave empty to cancel:",
+    $"{AN} - Create New Diagram",
+    SimpleInput:=True,
+    DefaultValue:="AI_Chart_New")
+
+                    If String.IsNullOrWhiteSpace(createNew) Then
+                        Return ' User cancelled or left empty
+                    End If
+
+                    Dim newFilePath As String
+                    Dim userInput As String = createNew.Trim()
+
+                    ' Check if user provided a full path (contains directory separator or drive letter)
+                    If IO.Path.IsPathRooted(userInput) OrElse userInput.Contains(IO.Path.DirectorySeparatorChar) OrElse userInput.Contains(IO.Path.AltDirectorySeparatorChar) Then
+                        ' User provided a path - use it directly
+                        ' Ensure .drawio extension
+                        If Not userInput.EndsWith(".drawio", StringComparison.OrdinalIgnoreCase) Then
+                            userInput &= ".drawio"
+                        End If
+
+                        ' Validate the directory exists
+                        Dim directory As String = IO.Path.GetDirectoryName(userInput)
+                        If Not String.IsNullOrWhiteSpace(directory) AndAlso Not IO.Directory.Exists(directory) Then
+                            Dim createDir As Integer = ShowCustomYesNoBox(
+                                $"The directory '{directory}' does not exist. Create it?",
+                                "Yes", "No",
+                                $"{AN} - Create Directory")
+                            If createDir = 1 Then
+                                Try
+                                    IO.Directory.CreateDirectory(directory)
+                                Catch ex As Exception
+                                    ShowCustomMessageBox($"Could not create directory: {ex.Message}")
+                                    Return
+                                End Try
+                            Else
+                                Return
+                            End If
+                        End If
+
+                        newFilePath = userInput
+                    Else
+                        ' User provided just a file name - save to desktop
+                        Dim sanitizedName As String = SanitizeFileName2(userInput)
+                        If String.IsNullOrWhiteSpace(sanitizedName) Then
+                            ShowCustomMessageBox("Invalid file name. Operation cancelled.")
+                            Return
+                        End If
+
+                        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+                        newFilePath = IO.Path.Combine(desktopPath, sanitizedName & ".drawio")
+                    End If
+
+                    ' Check if file already exists and find unique name
+                    Dim counter As Integer = 1
+                    Dim basePath As String = IO.Path.Combine(IO.Path.GetDirectoryName(newFilePath), IO.Path.GetFileNameWithoutExtension(newFilePath))
+                    While IO.File.Exists(newFilePath)
+                        newFilePath = $"{basePath}_{counter:D3}.drawio"
+                        counter += 1
+                    End While
+
+                    ' Create empty draw.io XML
+                    Dim emptyXml As String = CreateEmptyDrawioXml()
+
+                    ' Save the empty file
+                    IO.File.WriteAllText(newFilePath, emptyXml, System.Text.Encoding.UTF8)
+
+                    ' Ask how to open
+                    Dim choice As DrawioOpenChoice =
+                        AskHowToOpenDrawio(
+                            prompt:=$"A new empty diagram has been created at '{IO.Path.GetFileName(newFilePath)}'.{vbCrLf}{vbCrLf}" &
+                                    "Choose how to open the draw.io editor:",
+                            caption:=$"{AN} - New Diagram Created")
+
+                    Select Case choice
+                        Case DrawioOpenChoice.OfflineAfterLoad
+                            OpenDrawioWithWebView2(emptyXml, newFilePath, disableInternetAfterLoad:=True)
+
+                        Case DrawioOpenChoice.Online
+                            OpenDrawioWithWebView2(emptyXml, newFilePath, disableInternetAfterLoad:=False)
+
+                        Case Else
+                            ShowCustomMessageBox($"The empty diagram has been saved to:{vbCrLf}{newFilePath}")
+                            Return
+                    End Select
+
+                    Return
+                End If
+                selectedPath = f.SelectedFilePath
+            End Using
+
+            If String.IsNullOrWhiteSpace(selectedPath) OrElse Not IO.File.Exists(selectedPath) Then
+                ShowCustomMessageBox("No valid .drawio file was selected.")
+                Return
+            End If
+
+            Dim xmlContent As String = IO.File.ReadAllText(selectedPath, System.Text.Encoding.UTF8)
+
+            ' Use the shared 3-button chooser based on ShowCustomYesNoBox(extraButtonText,...)
+            Dim choiceExisting As DrawioOpenChoice =
+                AskHowToOpenDrawio(
+                    prompt:=$"Open '{IO.Path.GetFileName(selectedPath)}' in the embedded draw.io editor?" & vbCrLf & vbCrLf &
+                            "Choose the mode:",
+                    caption:=$"{AN} Open draw.io")
+
+            Select Case choiceExisting
+                Case DrawioOpenChoice.OfflineAfterLoad
+                    OpenDrawioWithWebView2(xmlContent, selectedPath, disableInternetAfterLoad:=True)
+
+                Case DrawioOpenChoice.Online
+                    OpenDrawioWithWebView2(xmlContent, selectedPath, disableInternetAfterLoad:=False)
+
+                Case Else
+                    Return
+            End Select
+
+        Catch ex As Exception
+            Debug.WriteLine($"OpenExistingDrawioFileForEditing error: {ex.Message}")
+            ShowCustomMessageBox($"Could not open the .drawio file: {ex.Message}")
+        Finally
+            ' Best-effort: reset global drag-drop customization so other uses are unaffected
+            Try
+                Globals.ThisAddIn.DragDropFormFilter = ""
+                Globals.ThisAddIn.DragDropFormLabel = ""
+            Catch
+            End Try
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Creates an empty draw.io XML structure that can be used as a starting point for new diagrams.
+    ''' </summary>
+    ''' <returns>A valid empty draw.io XML string.</returns>
+    Private Function CreateEmptyDrawioXml() As String
+        Dim timestamp As String = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        Return $"<?xml version=""1.0"" encoding=""UTF-8""?>
+<mxfile host=""embed.diagrams.net"" modified=""{timestamp}"" agent=""{AN}"" version=""21.0.0"" etag=""empty"" type=""device"">
+  <diagram name=""Page-1"" id=""page1"">
+    <mxGraphModel dx=""800"" dy=""600"" grid=""1"" gridSize=""10"" guides=""1"" tooltips=""1"" connect=""1"" arrows=""1"" fold=""1"" page=""1"" pageScale=""1"" pageWidth=""827"" pageHeight=""1169"" math=""0"" shadow=""0"">
+      <root>
+        <mxCell id=""0""/>
+        <mxCell id=""1"" parent=""0""/>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>"
+    End Function
+
+    ''' <summary>
+    ''' Sanitizes a file name by removing invalid characters.
+    ''' </summary>
+    ''' <param name="fileName">The file name to sanitize.</param>
+    ''' <returns>A sanitized file name safe for use in the file system.</returns>
+    Private Function SanitizeFileName2(fileName As String) As String
+        If String.IsNullOrWhiteSpace(fileName) Then Return String.Empty
+
+        ' Remove invalid file name characters
+        Dim invalidChars As Char() = IO.Path.GetInvalidFileNameChars()
+        Dim sanitized As String = fileName
+
+        For Each c As Char In invalidChars
+            sanitized = sanitized.Replace(c.ToString(), "")
+        Next
+
+        ' Also remove any path separators that might have slipped through
+        sanitized = sanitized.Replace("/", "").Replace("\", "")
+
+        ' Trim whitespace and dots from start/end
+        sanitized = sanitized.Trim().Trim("."c)
+
+        Return sanitized
+    End Function
+
+    ''' <summary>
+    ''' Extracts draw.io XML from an LLM response and cleans it for saving/opening.
+    ''' Handles Markdown code fences and “extra text around the XML” by extracting the first
+    ''' <c>&lt;mxfile&gt;...&lt;/mxfile&gt;</c> (or fallback <c>&lt;mxGraphModel&gt;</c>) block.
+    ''' </summary>
+    ''' <param name="llmResponse">Raw LLM response potentially containing draw.io XML.</param>
+    ''' <returns>
+    ''' The extracted and trimmed draw.io XML, or an empty string if no suitable XML could be found.
+    ''' </returns>
+    Private Function ExtractAndCleanDrawioXml(ByVal llmResponse As String) As String
+        If String.IsNullOrWhiteSpace(llmResponse) Then Return String.Empty
+
+        Dim s As String = llmResponse.Trim()
+
+        ' 1) Remove markdown fences if they wrap the whole payload.
+        ' (This is a best-effort pre-clean; we still do XML extraction below.)
+        If s.StartsWith("```xml", StringComparison.OrdinalIgnoreCase) Then
+            s = s.Substring(6)
+        ElseIf s.StartsWith("```", StringComparison.Ordinal) Then
+            s = s.Substring(3)
+        End If
+        If s.EndsWith("```", StringComparison.Ordinal) Then
+            s = s.Substring(0, s.Length - 3)
+        End If
+        s = s.Trim()
+
+        ' 2) Prefer extracting the full draw.io wrapper (<mxfile>...</mxfile>).
+        Dim mxfileMatch As Match = Regex.Match(
+            s,
+            "<mxfile[\s\S]*?</mxfile>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+        If mxfileMatch.Success Then
+            Return mxfileMatch.Value.Trim()
+        End If
+
+        ' 3) Fallback: some outputs might contain only the model (<mxGraphModel>...</mxGraphModel>).
+        Dim mxGraphMatch As Match = Regex.Match(
+            s,
+            "<mxGraphModel[\s\S]*?</mxGraphModel>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+        If mxGraphMatch.Success Then
+            Return mxGraphMatch.Value.Trim()
+        End If
+
+        Return String.Empty
+    End Function
 
 End Class

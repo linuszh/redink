@@ -455,6 +455,298 @@ Namespace My
                 Me("IgnoredUpdates_Custom") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property QuickTranslateLanguage() As String
+            Get
+                Return CType(Me("QuickTranslateLanguage"),String)
+            End Get
+            Set
+                Me("QuickTranslateLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateX() As Integer
+            Get
+                Return CType(Me("QuickTranslateX"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateY() As Integer
+            Get
+                Return CType(Me("QuickTranslateY"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateWidth() As Integer
+            Get
+                Return CType(Me("QuickTranslateWidth"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateWidth") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property QuickTranslateHeight() As Integer
+            Get
+                Return CType(Me("QuickTranslateHeight"),Integer)
+            End Get
+            Set
+                Me("QuickTranslateHeight") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_Type() As String
+            Get
+                Return CType(Me("License_Type"),String)
+            End Get
+            Set
+                Me("License_Type") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_ProductID() As String
+            Get
+                Return CType(Me("License_ProductID"),String)
+            End Get
+            Set
+                Me("License_ProductID") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_Key() As String
+            Get
+                Return CType(Me("License_Key"),String)
+            End Get
+            Set
+                Me("License_Key") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_UserID() As String
+            Get
+                Return CType(Me("License_UserID"),String)
+            End Get
+            Set
+                Me("License_UserID") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_ProductName() As String
+            Get
+                Return CType(Me("License_ProductName"),String)
+            End Get
+            Set
+                Me("License_ProductName") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_ActivatedOn() As Date
+            Get
+                Return CType(Me("License_ActivatedOn"),Date)
+            End Get
+            Set
+                Me("License_ActivatedOn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_ValidUntil() As Date
+            Get
+                Return CType(Me("License_ValidUntil"),Date)
+            End Get
+            Set
+                Me("License_ValidUntil") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_LastCheck() As Date
+            Get
+                Return CType(Me("License_LastCheck"),Date)
+            End Get
+            Set
+                Me("License_LastCheck") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_PrivateConfirmedOn() As Date
+            Get
+                Return CType(Me("License_PrivateConfirmedOn"),Date)
+            End Get
+            Set
+                Me("License_PrivateConfirmedOn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_PrivateVersion() As String
+            Get
+                Return CType(Me("License_PrivateVersion"),String)
+            End Get
+            Set
+                Me("License_PrivateVersion") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property License_PrivateDismissCount() As Integer
+            Get
+                Return CType(Me("License_PrivateDismissCount"),Integer)
+            End Get
+            Set
+                Me("License_PrivateDismissCount") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_OfflineGraceStart() As Date
+            Get
+                Return CType(Me("License_OfflineGraceStart"),Date)
+            End Get
+            Set
+                Me("License_OfflineGraceStart") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_GracePeriodStart() As Date
+            Get
+                Return CType(Me("License_GracePeriodStart"),Date)
+            End Get
+            Set
+                Me("License_GracePeriodStart") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property License_State() As String
+            Get
+                Return CType(Me("License_State"),String)
+            End Get
+            Set
+                Me("License_State") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property License_AutoActivationWarningShown() As Boolean
+            Get
+                Return CType(Me("License_AutoActivationWarningShown"),Boolean)
+            End Get
+            Set
+                Me("License_AutoActivationWarningShown") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_LastMigrationPrompt() As Date
+            Get
+                Return CType(Me("License_LastMigrationPrompt"),Date)
+            End Get
+            Set
+                Me("License_LastMigrationPrompt") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property License_StartupCount() As Integer
+            Get
+                Return CType(Me("License_StartupCount"),Integer)
+            End Get
+            Set
+                Me("License_StartupCount") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property License_ApiConfirmed() As Boolean
+            Get
+                Return CType(Me("License_ApiConfirmed"),Boolean)
+            End Get
+            Set
+                Me("License_ApiConfirmed") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
+        Public Property License_LegacyMigrationStarted() As Date
+            Get
+                Return CType(Me("License_LegacyMigrationStarted"),Date)
+            End Get
+            Set
+                Me("License_LegacyMigrationStarted") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0, 0, 0, 0")>  _
+        Public Property RTFMessageBoxBounds() As Global.System.Drawing.Rectangle
+            Get
+                Return CType(Me("RTFMessageBoxBounds"),Global.System.Drawing.Rectangle)
+            End Get
+            Set
+                Me("RTFMessageBoxBounds") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
