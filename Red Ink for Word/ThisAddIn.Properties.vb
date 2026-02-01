@@ -715,8 +715,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-
-
     Public Shared Property SP_Correct As String
         Get
             Return _context.SP_Correct
@@ -1071,6 +1069,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_RemoveClutter As String
+        Get
+            Return _context.SP_RemoveClutter
+        End Get
+        Set(value As String)
+            _context.SP_RemoveClutter = value
+        End Set
+    End Property
 
     Public Shared Property SP_CheckforII As String
         Get
@@ -1830,7 +1836,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-
     Public Shared Property INI_MyStylePath As String
         Get
             Return _context.INI_MyStylePath
@@ -1901,6 +1906,24 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_WebAgentPathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SnapshotLibPath As String
+        Get
+            Return _context.INI_SnapshotLibPath
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SnapshotLibPathLocal As String
+        Get
+            Return _context.INI_SnapshotLibPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPathLocal = value
         End Set
     End Property
 

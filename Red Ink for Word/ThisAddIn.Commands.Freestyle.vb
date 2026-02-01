@@ -121,6 +121,39 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
+
+    ''' <summary>
+    ''' Loads content from a URL using WebView2 and wraps it in document tags.
+    ''' </summary>
+    ''' <param name="url">The URL to retrieve content from.</param>
+    ''' <param name="ctx">The file loading context for tracking state.</param>
+    ''' <returns>The content wrapped in document tags, or empty string on failure.</returns>
+    Private Async Function LoadUrlContentAsync(url As String, ctx As FileLoadingContext) As Task(Of String)
+        Try
+            ' Retrieve content using WebView2
+            Dim content As String = Await RetrieveWebsiteContent_WebView2(url, 0)
+
+            If String.IsNullOrWhiteSpace(content) Then
+                ctx.FailedFiles.Add(url)
+                Return ""
+            End If
+
+            ctx.GlobalDocumentCounter += 1
+            Dim docNum As Integer = ctx.GlobalDocumentCounter
+            ctx.LoadedFiles.Add(Tuple.Create(url, content.Length))
+
+            ' Always include URL info since it's a web resource
+            Dim openTag As String = "<document" & docNum.ToString() & " url=""" & System.Security.SecurityElement.Escape(url) & """>"
+            Dim closeTag As String = "</document" & docNum.ToString() & ">"
+
+            Return openTag & content & closeTag
+
+        Catch ex As Exception
+            ctx.FailedFiles.Add(url)
+            Return ""
+        End Try
+    End Function
+
     Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
         Try
             Dim doOCR As Boolean = False
@@ -319,7 +352,7 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Processes all external file/directory triggers in the prompt ({doc}, {dir}, and fixed paths).
+    ''' Processes all external file/directory/URL triggers in the prompt ({doc}, {dir}, {url}, inline URLs, and fixed paths).
     ''' Processes triggers in positional order to maintain correct document numbering.
     ''' </summary>
     ''' <param name="prompt">The prompt to process.</param>
@@ -328,7 +361,12 @@ Partial Public Class ThisAddIn
         ' Check if any file triggers are present
         Dim hasExtTriggers As Boolean = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase) >= 0
         Dim hasDirTriggers As Boolean = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase) >= 0
+        Dim hasUrlTriggers As Boolean = prompt.IndexOf(ExtUrlTrigger, StringComparison.OrdinalIgnoreCase) >= 0
         Dim hasFixedPaths As Boolean = False
+
+        ' Pattern for inline URLs like {https://example.com} or {http://example.com}
+        Dim inlineUrlPattern As String = "\{(https?://[^}]+)\}"
+        Dim hasInlineUrls As Boolean = Regex.IsMatch(prompt, inlineUrlPattern, RegexOptions.IgnoreCase)
 
         ' Prepare fixed path pattern
         Dim fixedPrefix As String = ""
@@ -347,7 +385,7 @@ Partial Public Class ThisAddIn
         End If
 
         ' No triggers present - nothing to do
-        If Not hasExtTriggers AndAlso Not hasDirTriggers AndAlso Not hasFixedPaths Then
+        If Not hasExtTriggers AndAlso Not hasDirTriggers AndAlso Not hasFixedPaths AndAlso Not hasUrlTriggers AndAlso Not hasInlineUrls Then
             Return (True, prompt)
         End If
 
@@ -358,11 +396,13 @@ Partial Public Class ThisAddIn
         ' This is an estimate - actual count may differ after user selections
         Dim extTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtTrigger), RegexOptions.IgnoreCase).Count
         Dim dirTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtDirTrigger), RegexOptions.IgnoreCase).Count
+        Dim urlTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtUrlTrigger), RegexOptions.IgnoreCase).Count
+        Dim inlineUrlCount As Integer = Regex.Matches(prompt, inlineUrlPattern, RegexOptions.IgnoreCase).Count
         Dim fixedPathCount As Integer = 0
         If Not String.IsNullOrEmpty(patternFixed) Then
             fixedPathCount = Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase).Count
         End If
-        ctx.ExpectedFileCount = extTriggerCount + fixedPathCount
+        ctx.ExpectedFileCount = extTriggerCount + fixedPathCount + urlTriggerCount + inlineUrlCount
         ' Note: dirTriggerCount files are added in LoadDirectoryFilesAsync
 
         ' NOTE: OCR prompt is handled per-directory when multiple PDFs are found,
@@ -377,8 +417,17 @@ Partial Public Class ThisAddIn
             ' Find position of each trigger type
             Dim extIdx As Integer = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
             Dim dirIdx As Integer = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase)
+            Dim urlIdx As Integer = prompt.IndexOf(ExtUrlTrigger, StringComparison.OrdinalIgnoreCase)
             Dim fixedIdx As Integer = -1
             Dim fixedMatch As Match = Nothing
+            Dim inlineUrlIdx As Integer = -1
+            Dim inlineUrlMatch As Match = Nothing
+
+            ' Check for inline URL pattern {https://...}
+            inlineUrlMatch = Regex.Match(prompt, inlineUrlPattern, RegexOptions.IgnoreCase)
+            If inlineUrlMatch.Success Then
+                inlineUrlIdx = inlineUrlMatch.Index
+            End If
 
             If Not String.IsNullOrEmpty(patternFixed) Then
                 fixedMatch = Regex.Match(prompt, patternFixed, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
@@ -410,6 +459,14 @@ Partial Public Class ThisAddIn
             If dirIdx >= 0 AndAlso dirIdx < minIdx Then
                 minIdx = dirIdx
                 triggerType = "dir"
+            End If
+            If urlIdx >= 0 AndAlso urlIdx < minIdx Then
+                minIdx = urlIdx
+                triggerType = "url"
+            End If
+            If inlineUrlIdx >= 0 AndAlso inlineUrlIdx < minIdx Then
+                minIdx = inlineUrlIdx
+                triggerType = "inlineurl"
             End If
             If fixedIdx >= 0 AndAlso fixedIdx < minIdx Then
                 minIdx = fixedIdx
@@ -478,6 +535,57 @@ Partial Public Class ThisAddIn
                     End If
 
                     prompt = prompt.Substring(0, dirIdx) & replacementText & prompt.Substring(dirIdx + ExtDirTrigger.Length)
+
+                Case "url"
+                    ' Process {url} trigger - prompt user for a URL to retrieve
+                    Dim userUrl As String = SLib.ShowCustomInputBox("Please enter the URL to retrieve content from:", $"{AN} - URL Content", True, "https://")
+
+                    Dim replacementText As String = ""
+
+                    If Not String.IsNullOrWhiteSpace(userUrl) AndAlso Not userUrl.Equals("esc", StringComparison.OrdinalIgnoreCase) Then
+                        userUrl = userUrl.Trim()
+                        InfoBox.ShowInfoBox($"Retrieving content from {userUrl} ...")
+
+                        Try
+                            replacementText = Await LoadUrlContentAsync(userUrl, ctx)
+                        Finally
+                            InfoBox.ShowInfoBox("")
+                        End Try
+
+                        If String.IsNullOrWhiteSpace(replacementText) Then
+                            Dim answer As Integer = ShowCustomYesNoBox(
+                                $"Could not retrieve content from '{userUrl}'. Do you want to continue or abort?",
+                                "Continue", "Abort")
+                            If answer <> 1 Then Return (False, prompt)
+                        End If
+                    Else
+                        Dim answer As Integer = ShowCustomYesNoBox(
+                            "No URL provided. Do you want to continue or abort?",
+                            "Continue", "Abort")
+                        If answer <> 1 Then Return (False, prompt)
+                    End If
+
+                    prompt = prompt.Substring(0, urlIdx) & replacementText & prompt.Substring(urlIdx + ExtUrlTrigger.Length)
+
+                Case "inlineurl"
+                    ' Process inline URL trigger like {https://example.com}
+                    Dim inlineUrl As String = inlineUrlMatch.Groups(1).Value.Trim()
+
+                    InfoBox.ShowInfoBox($"Retrieving content from {inlineUrl} ...")
+
+                    Dim replacementText As String = ""
+
+                    Try
+                        replacementText = Await LoadUrlContentAsync(inlineUrl, ctx)
+                    Finally
+                        InfoBox.ShowInfoBox("")
+                    End Try
+
+                    If String.IsNullOrWhiteSpace(replacementText) Then
+                        ctx.FailedFiles.Add(inlineUrl)
+                    End If
+
+                    prompt = prompt.Substring(0, inlineUrlMatch.Index) & replacementText & prompt.Substring(inlineUrlMatch.Index + inlineUrlMatch.Length)
 
                 Case "fixed"
                     ' Process fixed path trigger
@@ -576,6 +684,7 @@ Partial Public Class ThisAddIn
 
         Return (True, prompt)
     End Function
+
 
     ''' <summary>
     ''' Stores the model configuration from the last freestyle command using alternate model.
@@ -743,7 +852,7 @@ Partial Public Class ThisAddIn
             Dim ChartInstruct As String = $"with '{ChartPrefix}' for creating a chart"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
-            Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, or '{AddDocTrigger}' for an open Word doc"
+            Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, {ExtUrlTrigger} for URL content, or '{AddDocTrigger}' for an open Word doc"
             Dim TPMarkupInstruct As String = $"; add '{TPMarkupTriggerInstruct}' if revisions [of user] should be pointed out to the LLM"
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}/{SameAsReplaceTrigger}' for overriding formatting defaults"
             Dim AllInstruct As String = $"; add '{AllTrigger}' to select all"
@@ -1315,6 +1424,7 @@ Partial Public Class ThisAddIn
             End If
 #End If
 
+
             If String.Equals(OtherPrompt.Trim(), "license", StringComparison.OrdinalIgnoreCase) Then
                 SharedMethods.ShowLicenseManagementDialog()
                 Return
@@ -1831,7 +1941,7 @@ Partial Public Class ThisAddIn
 
             ' === External file/directory embedding ===
 
-            ' Handles {doc}, {dir}, and {path} triggers with unified document numbering
+            ' Handles {doc}, {dir}, {url} and {path} triggers with unified document numbering
 
             Dim fileResult = Await ProcessExternalFileTriggers(OtherPrompt)
             If Not fileResult.Success Then

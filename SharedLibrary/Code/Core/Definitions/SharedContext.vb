@@ -186,6 +186,7 @@ Namespace SharedLibrary
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
             Property SP_Rename As String
+            Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
             Property SP_ContextSearch As String
@@ -253,6 +254,9 @@ Namespace SharedLibrary
             Property INI_FindClausePathLocal As String
             Property INI_WebAgentPath As String
             Property INI_WebAgentPathLocal As String
+            Property INI_SnapshotLibPath As String
+            Property INI_SnapshotLibPathLocal As String
+
             Property INI_DocCheckPath As String
             Property INI_DocCheckPathLocal As String
             Property INI_DocStylePath As String
@@ -465,6 +469,7 @@ Namespace SharedLibrary
 
         Public Property SP_MergeDateRows As String Implements ISharedContext.SP_MergeDateRows
         Public Property SP_Rename As String Implements ISharedContext.SP_Rename
+        Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII
         Public Property SP_ContextSearch As String Implements ISharedContext.SP_ContextSearch
@@ -534,6 +539,9 @@ Namespace SharedLibrary
         Public Property INI_FindClausePathLocal As String Implements ISharedContext.INI_FindClausePathLocal
         Public Property INI_WebAgentPath As String Implements ISharedContext.INI_WebAgentPath
         Public Property INI_WebAgentPathLocal As String Implements ISharedContext.INI_WebAgentPathLocal
+        Public Property INI_SnapshotLibPath As String Implements ISharedContext.INI_SnapshotLibPath
+        Public Property INI_SnapshotLibPathLocal As String Implements ISharedContext.INI_SnapshotLibPathLocal
+
         Public Property INI_DocCheckPath As String Implements ISharedContext.INI_DocCheckPath
         Public Property INI_DocCheckPathLocal As String Implements ISharedContext.INI_DocCheckPathLocal
         Public Property INI_DocStylePath As String Implements ISharedContext.INI_DocStylePath

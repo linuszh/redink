@@ -96,6 +96,7 @@ Partial Class Ribbon1
         Me.RI_CreateAudio = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.RI_WebAgent = Me.Factory.CreateRibbonButton
+        Me.RI_Snapshot = Me.Factory.CreateRibbonButton
         Me.RI_EditWebAgent = Me.Factory.CreateRibbonButton
         Me.RI_FindHidden = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
@@ -427,6 +428,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu3.Items.Add(Me.RI_WebAgent)
         Me.Menu3.Items.Add(Me.RI_EditWebAgent)
+        Me.Menu3.Items.Add(Me.RI_Snapshot)
         Me.Menu3.Items.Add(Me.RI_FindHidden)
         Me.Menu3.Label = "Analyze"
         Me.Menu3.Name = "Menu3"
@@ -538,6 +540,14 @@ Partial Class Ribbon1
         Me.RI_WebAgent.OfficeImageId = "TransitionTimeAutomaticallyAfter"
         Me.RI_WebAgent.ScreenTip = "Will run the integrated WebAgent with the script selected"
         Me.RI_WebAgent.ShowImage = True
+        '
+        'RI_Snapshot
+        '
+        Me.RI_Snapshot.Label = "Snapshot && Compare"
+        Me.RI_Snapshot.Name = "RI_Snapshot"
+        Me.RI_Snapshot.OfficeImageId = "ReviewCompareLastVersion"
+        Me.RI_Snapshot.ScreenTip = "Snapshot a file or URL and have it compared with earlier snapshots of the same"
+        Me.RI_Snapshot.ShowImage = True
         '
         'RI_EditWebAgent
         '
@@ -966,6 +976,12 @@ Partial Class Ribbon1
         End If
 
 
+        If Trim(ThisAddIn.INI_SnapshotLibPath) = "" And Trim(ThisAddIn.INI_SnapshotLibPathLocal) = "" Then
+            Me.RI_Snapshot.Visible = False
+        Else
+            Me.RI_Snapshot.Visible = True
+        End If
+
         If Trim(ThisAddIn.INI_DiscussInkyPath) = "" And Trim(ThisAddIn.INI_DiscussInkyPathLocal) = "" Then
             Me.RI_DiscussInky.Visible = False
         Else
@@ -1067,6 +1083,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_ConvertDocToTxt As RibbonButton
     Friend WithEvents RI_FlattenPDF As RibbonButton
     Friend WithEvents RI_Charting As RibbonButton
+    Friend WithEvents RI_Snapshot As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection
