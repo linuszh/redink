@@ -2876,4 +2876,130 @@ Partial Public Class ThisAddIn
             CompareAndInsertComparedoc(text1, text2, secondRange)
         End If
     End Sub
+
+
+    ''' <summary>
+    ''' Removes leading "RI: " prefix from Word comments (including threaded replies) in the selection or entire document.
+    ''' Uses a progress bar and supports cancellation.
+    ''' </summary>
+    Public Sub RemoveRIPrefixFromComments()
+
+        Dim riPrefix As String = $"{AN5}: "
+
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+            Dim hasSelection As Boolean = (sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End)
+            Dim scopeRange As Microsoft.Office.Interop.Word.Range = If(hasSelection, sel.Range, doc.Content)
+
+            Dim candidates As New List(Of Microsoft.Office.Interop.Word.Comment)()
+
+            ' Collect candidates that start with the prefix (base comments + replies)
+            For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                Dim inScope As Boolean = False
+
+                Try
+                    Dim cStart As Integer = c.Scope.Start
+                    Dim cEnd As Integer = c.Scope.End
+                    inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                Catch
+                    Try
+                        Dim cStart As Integer = c.Reference.Start
+                        Dim cEnd As Integer = c.Reference.End
+                        inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                    Catch
+                        inScope = False
+                    End Try
+                End Try
+
+                If Not inScope Then Continue For
+
+                Try
+                    Dim text As String = If(c.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        candidates.Add(c)
+                    End If
+                Catch
+                End Try
+
+                ' Threaded replies
+                Try
+                    If c.Replies IsNot Nothing AndAlso c.Replies.Count > 0 Then
+                        For Each r As Microsoft.Office.Interop.Word.Comment In c.Replies
+                            Try
+                                Dim replyText As String = If(r.Range.Text, String.Empty)
+                                If replyText.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                                    candidates.Add(r)
+                                End If
+                            Catch
+                            End Try
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If candidates.Count = 0 Then
+                ShowCustomMessageBox($"No '{AN5}:' prefixes found in comments for the current scope.", AN)
+                Exit Sub
+            End If
+
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressMax = candidates.Count
+            ProgressBarModule.GlobalProgressLabel = "Processing comments..."
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.ShowProgressBarInSeparateThread(AN & $" Remove {AN5} Prefix", "Starting...")
+
+            Dim removedCount As Integer = 0
+
+            For i As Integer = 0 To candidates.Count - 1
+                System.Windows.Forms.Application.DoEvents()
+
+                If ProgressBarModule.CancelOperation Then Exit For
+                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                    ProgressBarModule.CancelOperation = True
+                    Exit For
+                End If
+
+                ProgressBarModule.GlobalProgressValue = i + 1
+                ProgressBarModule.GlobalProgressLabel = $"Processing {i + 1} of {candidates.Count}..."
+
+                Try
+                    Dim cmt As Microsoft.Office.Interop.Word.Comment = candidates(i)
+                    Dim text As String = If(cmt.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        cmt.Range.Text = text.Substring(riPrefix.Length)
+                        removedCount += 1
+                    End If
+                Catch
+                End Try
+            Next
+
+            ProgressBarModule.CancelOperation = True
+
+            Dim scopeInfo As String = If(hasSelection, "the selected text", "the entire document")
+            If ProgressBarModule.CancelOperation AndAlso removedCount < candidates.Count Then
+                ShowCustomMessageBox($"Operation cancelled. Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}.", AN)
+            Else
+                ShowCustomMessageBox($"Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}.", AN)
+            End If
+
+        Catch ex As System.Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Error in RemoveRIPrefixFromComments: {ex.Message}", AN)
+        End Try
+    End Sub
+
 End Class

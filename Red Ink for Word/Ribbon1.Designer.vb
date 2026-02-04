@@ -96,8 +96,8 @@ Partial Class Ribbon1
         Me.RI_CreateAudio = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.RI_WebAgent = Me.Factory.CreateRibbonButton
-        Me.RI_Snapshot = Me.Factory.CreateRibbonButton
         Me.RI_EditWebAgent = Me.Factory.CreateRibbonButton
+        Me.RI_Snapshot = Me.Factory.CreateRibbonButton
         Me.RI_FindHidden = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleAM = Me.Factory.CreateRibbonButton
@@ -117,6 +117,7 @@ Partial Class Ribbon1
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
+        Me.RI_Remove = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
@@ -541,14 +542,6 @@ Partial Class Ribbon1
         Me.RI_WebAgent.ScreenTip = "Will run the integrated WebAgent with the script selected"
         Me.RI_WebAgent.ShowImage = True
         '
-        'RI_Snapshot
-        '
-        Me.RI_Snapshot.Label = "Snapshot && Compare"
-        Me.RI_Snapshot.Name = "RI_Snapshot"
-        Me.RI_Snapshot.OfficeImageId = "ReviewCompareLastVersion"
-        Me.RI_Snapshot.ScreenTip = "Snapshot a file or URL and have it compared with earlier snapshots of the same"
-        Me.RI_Snapshot.ShowImage = True
-        '
         'RI_EditWebAgent
         '
         Me.RI_EditWebAgent.Label = "Edit WebAgent"
@@ -556,6 +549,14 @@ Partial Class Ribbon1
         Me.RI_EditWebAgent.OfficeImageId = "CreateCodeSnippet"
         Me.RI_EditWebAgent.ScreenTip = "Allows you to create or edit a WebAgent script using your LLM"
         Me.RI_EditWebAgent.ShowImage = True
+        '
+        'RI_Snapshot
+        '
+        Me.RI_Snapshot.Label = "Snapshot && Compare"
+        Me.RI_Snapshot.Name = "RI_Snapshot"
+        Me.RI_Snapshot.OfficeImageId = "ReviewCompareLastVersion"
+        Me.RI_Snapshot.ScreenTip = "Snapshot a file or URL and have it compared with earlier snapshots of the same"
+        Me.RI_Snapshot.ShowImage = True
         '
         'RI_FindHidden
         '
@@ -631,6 +632,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
         Me.Menu2.Items.Add(Me.RI_Markdown)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
+        Me.Menu2.Items.Add(Me.RI_Remove)
         Me.Menu2.Items.Add(Me.RI_InsertClipboard)
         Me.Menu2.Label = "Word Helpers"
         Me.Menu2.Name = "Menu2"
@@ -729,6 +731,15 @@ Partial Class Ribbon1
         Me.RI_ContentControls.ScreenTip = "Removes content controls from the selected or all text while preserving content a" &
     "nd formatting"
         Me.RI_ContentControls.ShowImage = True
+        '
+        'RI_Remove
+        '
+        Me.RI_Remove.Label = "Remove RI: Reference"
+        Me.RI_Remove.Name = "RI_Remove"
+        Me.RI_Remove.OfficeImageId = "ReviewDeleteComment"
+        Me.RI_Remove.ScreenTip = "Remove the RI: references from bubbles comments that indicate that the content is" &
+    " from Red Ink"
+        Me.RI_Remove.ShowImage = True
         '
         'RI_InsertClipboard
         '
@@ -1084,6 +1095,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_FlattenPDF As RibbonButton
     Friend WithEvents RI_Charting As RibbonButton
     Friend WithEvents RI_Snapshot As RibbonButton
+    Friend WithEvents RI_Remove As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection
