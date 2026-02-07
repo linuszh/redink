@@ -2269,9 +2269,12 @@ Public Class frmAIChat
     Private Function CleanArgument(arg As String) As String
         If arg Is Nothing Then Return ""
         arg = DecodeParagraphMarks(arg)
+        ' Strip Word cell end marker Chr(7) — appears as a dot in table cell text
+        arg = arg.TrimStart(ChrW(7)).TrimEnd(ChrW(7))
         ' Trim only spaces/tabs, preserve paragraph marks
         Return Regex.Replace(arg, "^[ \t]+|[ \t]+$", "")
     End Function
+
 
     ' =========================================================================
     ' Bot Command Parsing
@@ -2709,6 +2712,7 @@ Public Class frmAIChat
         ' Add to chat history so AI can see failures in future context
         _chatHistory.Add(("assistant", $"System: Some commands failed - {String.Join("; ", FailedCommandsList)}"))
     End Sub
+
 
     ' =========================================================================
     ' Marker Character Cleanup
@@ -3188,40 +3192,77 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' Finds and replaces all occurrences of oldText with newText using tracked changes.
-    ''' Inserts MarkerChar to prevent infinite loops when replacement contains search term.
+    ''' Uses two-pass strategy: forward scan to collect match positions, then reverse-order replacement.
     ''' </summary>
     ''' <param name="oldText">Text to find (normalized via DecodeParagraphMarks)</param>
     ''' <param name="newText">Replacement text (empty for delete)</param>
     ''' <param name="OnlySelection">True to restrict to current selection</param>
-    ''' <param name="Marker">MarkerChar (U+E000) inserted to prevent infinite loops</param>
+    ''' <param name="Marker">MarkerChar (U+E000) — unused in two-pass approach but kept for API compat</param>
     ''' <returns>True if at least one replacement made</returns>
     ''' <remarks>
-    ''' Processing strategy:
-    ''' 1. Insert newText AFTER oldText (with embedded MarkerChar)
-    ''' 2. Delete oldText
-    ''' Result: deleted text tracked BEFORE new text, avoiding re-matching replacement.
+    ''' Two-pass strategy rationale:
     ''' 
-    ''' View management: Shows Final + Markup during operation, restores original in Finally.
-    ''' Markdown conversion applied to inserted text if chkConvertMarkdown enabled.
-    ''' Max 1000 iterations safety limit to prevent infinite loops.
+    ''' Single-pass approaches fail because:
+    ''' - With TrackRevisions=True, Range.Delete() does NOT remove characters from the
+    '''   position space — it only marks them as tracked deletions. Position arithmetic
+    '''   that assumes deletion shifts positions is therefore completely wrong.
+    ''' - MarkerChar (U+E000) is not filtered by FindLongTextInChunks' canonical search
+    '''   (Strategy 4), so it cannot prevent re-matching.
+    ''' - FindLongTextInChunks does not support backward searching.
+    ''' 
+    ''' The two-pass approach avoids all of these issues:
+    ''' - Pass 1 collects match positions as integer pairs (Start, End) — not Range objects,
+    '''   which avoids COM stale-reference problems in tables.
+    ''' - Pass 2 replaces in reverse document order (last match first). Since each
+    '''   Selection.Text assignment only affects positions AT or AFTER the replacement
+    '''   site, earlier match positions (lower indices) remain valid.
+    ''' - Selection.Text = newText creates an atomic tracked change (the old text is
+    '''   marked as deleted and the new text as inserted in a single operation).
+    '''   This is how Word's own Find/Replace works internally.
+    ''' 
+    ''' Table handling:
+    ''' - Using integer positions instead of Range.Duplicate avoids the stale COM reference
+    '''   problem that corrupted tables in the original implementation.
+    ''' - Selection.Text assignment handles table cell boundaries correctly because Word
+    '''   manages the cell markers internally for Selection operations.
+    ''' - The cell-boundary advancement in Pass 1 prevents the scanner from getting stuck
+    '''   at end-of-cell markers.
     ''' </remarks>
     Private Function ExecuteReplaceCommand(oldText As String, newText As String, OnlySelection As Boolean, Marker As String) As Boolean
-        Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
-
-        Dim trackChangesEnabled As Boolean = doc.TrackRevisions
-        Dim originalAuthor As String = doc.Application.UserName
-
-        ' Save and modify view settings
-        Dim view = doc.Application.ActiveWindow.View
-        Dim originalRevisionsView As Word.WdRevisionsView = view.RevisionsView
-        Dim originalShowRevisions As Boolean = view.ShowRevisionsAndComments
+        Dim doc As Word.Document = Nothing
+        Dim view As Word.View = Nothing
+        Dim trackChangesEnabled As Boolean = False
+        Dim originalRevisionsView As Word.WdRevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
+        Dim originalShowRevisions As Boolean = False
 
         Try
+            Debug.WriteLine("ExecuteReplaceCommand: START")
+
+            Try
+                doc = Globals.ThisAddIn.Application.ActiveDocument
+            Catch ex As Exception
+                Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get ActiveDocument: {ex.Message}")
+                Return False
+            End Try
+
+            trackChangesEnabled = doc.TrackRevisions
+
+            Try
+                view = doc.Application.ActiveWindow.View
+                originalRevisionsView = view.RevisionsView
+                originalShowRevisions = view.ShowRevisionsAndComments
+            Catch ex As Exception
+                Debug.WriteLine($"ExecuteReplaceCommand: FAILED to get view settings: {ex.Message}")
+                Return False
+            End Try
+
             ' Normalize inputs
             oldText = DecodeParagraphMarks(oldText)
             newText = DecodeParagraphMarks(newText)
             oldText = If(oldText, String.Empty)
             newText = If(newText, String.Empty)
+
+            Debug.WriteLine($"ExecuteReplaceCommand: oldText='{oldText}' ({oldText.Length} chars), newText='{newText}' ({newText.Length} chars)")
 
             If String.IsNullOrWhiteSpace(oldText) Then
                 CommandsList = $"Note: Empty search term (ignored)." & Environment.NewLine & CommandsList
@@ -3237,124 +3278,242 @@ Public Class frmAIChat
             view.RevisionsView = Word.WdRevisionsView.wdRevisionsViewFinal
             view.ShowRevisionsAndComments = True
 
-            ' Determine working range
-            Dim workRange As Word.Range
-            If OnlySelection Then
-                If doc.Application.Selection Is Nothing OrElse doc.Application.Selection.Range.Text = "" Then
-                    OnlySelection = False
-                    workRange = doc.Content.Duplicate
-                Else
-                    workRange = doc.Application.Selection.Range.Duplicate
-                End If
+            Dim savedSelectionStart As Integer = doc.Application.Selection.Start
+            Dim savedSelectionEnd As Integer = doc.Application.Selection.End
+            Debug.WriteLine($"ExecuteReplaceCommand: savedSelection=[{savedSelectionStart},{savedSelectionEnd}]")
+
+            ' Define search boundaries
+            Dim searchEnd As Integer
+            If OnlySelection AndAlso Not String.IsNullOrWhiteSpace(doc.Application.Selection.Text) Then
+                searchEnd = doc.Application.Selection.End
+                Debug.WriteLine($"ExecuteReplaceCommand: searching within selection, searchEnd={searchEnd}")
             Else
-                workRange = doc.Content.Duplicate
+                OnlySelection = False
+                doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.End)
+                searchEnd = doc.Content.End
+                Debug.WriteLine($"ExecuteReplaceCommand: searching whole document, searchEnd={searchEnd}")
             End If
-
-            Debug.WriteLine($"Replacing '{oldText}' with '{newText}'")
-
-            ' Embed MarkerChar in replacement text to prevent re-matching
-            Dim newTextWithMarker As String
-            If newText.Length > 2 Then
-                newTextWithMarker = newText.Substring(0, newText.Length - 2) & Marker & newText.Substring(newText.Length - 2)
-            Else
-                newTextWithMarker = newText
-            End If
-
-            Dim selectionStart As Integer = doc.Application.Selection.Start
-            Dim selectionEnd As Integer = doc.Application.Selection.End
-            doc.Application.Selection.SetRange(workRange.Start, workRange.End)
-
-            Dim found As Boolean = False
-            Dim maxIterations As Integer = 1000
+            ' ─────────────────────────────────────────────────────────────────────
+            ' PASS 1: COLLECT ALL MATCH POSITIONS (forward scan)
+            ' ─────────────────────────────────────────────────────────────────────
+            Dim matchPositions As New List(Of (Start As Integer, [End] As Integer))
+            Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
+            Dim lastFoundEnd As Integer = -1
 
-            ' Find and replace all instances
+            Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
+
             Do While Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True) = True
-                If doc.Application.Selection Is Nothing Then Exit Do
+                If doc.Application.Selection Is Nothing Then
+                    Debug.WriteLine("ExecuteReplaceCommand: Selection is Nothing after Find, exiting loop")
+                    Exit Do
+                End If
 
+                ' Check for user abort
                 System.Windows.Forms.Application.DoEvents()
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
-                    Exit Do
+                    Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
+                    Return False
                 End If
 
-                ' Safety: prevent infinite loops
                 iterationCount += 1
                 If iterationCount > maxIterations Then
-                    CommandsList = $"Warning: Max iterations reached, stopping to prevent infinite loop." & Environment.NewLine & CommandsList
+                    CommandsList = $"Warning: Max search iterations ({maxIterations}) reached." & Environment.NewLine & CommandsList
+                    Debug.WriteLine($"ExecuteReplaceCommand: Max iterations reached")
                     Exit Do
                 End If
 
-                Dim matchStart As Integer = doc.Application.Selection.Start
-                Dim matchEnd As Integer = doc.Application.Selection.End
-                Dim matchLength As Integer = matchEnd - matchStart
+                Dim selStart As Integer = doc.Application.Selection.Start
+                Dim selEnd As Integer = doc.Application.Selection.End
+                Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}]")
 
-                found = True
+                ' Validate match is within search bounds
+                If selStart >= searchEnd Then
+                    Debug.WriteLine($"ExecuteReplaceCommand: match start {selStart} >= searchEnd {searchEnd}, exiting")
+                    Exit Do
+                End If
 
-                ' ─────────────────────────────────────────────────────────────────────
-                ' REPLACE STRATEGY: Insert new AFTER old, then delete old
-                ' This puts deleted (strikethrough) text BEFORE new text,
-                ' preventing forward search from re-matching the replacement.
-                ' ─────────────────────────────────────────────────────────────────────
+                ' ─── Reject matches that did not advance past the previous one ───
+                ' FindLongTextInChunks / Word Find can return matches BEFORE the
+                ' selection start in tables.  When that happens the match end will
+                ' be <= lastFoundEnd.  Force the selection past the previous match
+                ' and retry instead of recording a duplicate.
+                If selEnd <= lastFoundEnd Then
+                    Debug.WriteLine($"ExecuteReplaceCommand: match [{selStart},{selEnd}] not past lastFoundEnd={lastFoundEnd}, forcing advance")
 
-                ' Step 1: Insert new text at END of match
-                Dim insertRange As Word.Range = doc.Range(matchEnd, matchEnd)
-                insertRange.Text = newTextWithMarker
+                    ' Increment lastFoundEnd so repeated failures keep moving forward
+                    ' instead of retrying the same forcePos indefinitely.
+                    lastFoundEnd += 1
+                    Dim forcePos As Integer = lastFoundEnd
 
-                ' Step 2: Delete original text (now tracked before new text)
-                Dim deleteRange As Word.Range = doc.Range(matchStart, matchEnd)
-                deleteRange.Delete()
+                    If forcePos >= searchEnd Then
+                        Debug.WriteLine("ExecuteReplaceCommand: forced position past searchEnd, exiting")
+                        Exit Do
+                    End If
+                    doc.Application.Selection.SetRange(forcePos, searchEnd)
+                    Debug.WriteLine($"ExecuteReplaceCommand: forced selection to [{forcePos},{searchEnd}]")
+                    Continue Do
+                End If
 
-                Dim newEnd As Integer = matchStart + Len(newTextWithMarker)
+                ' Record this match
+                lastFoundEnd = selEnd
+                matchPositions.Add((selStart, selEnd))
+                Debug.WriteLine($"ExecuteReplaceCommand: stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
 
-                ' Apply Markdown conversion to inserted span if enabled
-                If chkConvertMarkdown.Checked AndAlso newTextWithMarker.Length > 0 Then
+                ' Advance past current match
+                doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                Debug.WriteLine($"ExecuteReplaceCommand: collapsed to {doc.Application.Selection.Start}")
+
+                ' Handle table cell boundaries to avoid getting stuck at cell end marker
+                Try
+                    Dim isInTable As Boolean = False
                     Try
-                        doc.Range(matchStart, newEnd).Select()
-                        Globals.ThisAddIn.ConvertMarkdownToWord()
-                    Catch
-                        ' Best effort
+                        isInTable = CBool(doc.Application.Selection.Information(Word.WdInformation.wdWithInTable))
+                    Catch ex As Exception
+                        Debug.WriteLine($"ExecuteReplaceCommand: wdWithInTable check failed: {ex.Message}")
                     End Try
+
+                    If isInTable Then
+                        Debug.WriteLine("ExecuteReplaceCommand: in table, checking cell boundary")
+                        Dim cel As Word.Cell = Nothing
+                        Try
+                            If doc.Application.Selection.Cells.Count > 0 Then
+                                cel = doc.Application.Selection.Cells(1)
+                            End If
+                        Catch ex As Exception
+                            Debug.WriteLine($"ExecuteReplaceCommand: Cells access failed: {ex.Message}")
+                        End Try
+
+                        If cel IsNot Nothing Then
+                            Dim selEndPos As Integer = doc.Application.Selection.End
+                            Dim celRangeEnd As Integer = cel.Range.End
+                            If selEndPos >= celRangeEnd - 1 Then
+                                doc.Application.Selection.SetRange(celRangeEnd, celRangeEnd)
+                                Debug.WriteLine($"ExecuteReplaceCommand: jumped past cell end to {celRangeEnd}")
+                            End If
+                        End If
+                    End If
+                Catch ex As Exception
+                    Debug.WriteLine($"ExecuteReplaceCommand: table navigation failed: {ex.Message}")
+                End Try
+
+                ' Check if past search boundary
+                Dim currentPos As Integer = doc.Application.Selection.Start
+                Debug.WriteLine($"ExecuteReplaceCommand: after advance, position={currentPos}, searchEnd={searchEnd}")
+                If currentPos >= searchEnd Then
+                    Debug.WriteLine("ExecuteReplaceCommand: past searchEnd, exiting loop")
+                    Exit Do
                 End If
 
-                ' Update selection bounds when constrained
-                If OnlySelection Then
-                    selectionEnd = selectionEnd - matchLength + Len(newTextWithMarker)
-                End If
-
-                ' Continue from after new text
-                Dim continueFrom As Integer = newEnd
-                Dim searchEnd As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
-
-                If continueFrom >= searchEnd Then Exit Do
-
-                doc.Application.Selection.SetRange(continueFrom, searchEnd)
+                ' Extend selection to remaining search scope
+                Try
+                    doc.Application.Selection.SetRange(currentPos, searchEnd)
+                Catch ex As Exception
+                    Debug.WriteLine($"ExecuteReplaceCommand: SetRange({currentPos},{searchEnd}) failed: {ex.Message}")
+                    Exit Do
+                End Try
             Loop
 
-            If Not found Then
-                CommandsList = $"Note: The search term was not found (Chunk Search)." & Environment.NewLine & CommandsList
+            Debug.WriteLine($"ExecuteReplaceCommand: PASS 1 complete, found {matchPositions.Count} matches")
+
+            If matchPositions.Count = 0 Then
+                CommandsList = $"Note: The search term '{oldText}' was not found." & Environment.NewLine & CommandsList
+                Try
+                    doc.Application.Selection.SetRange(savedSelectionStart, savedSelectionEnd)
+                Catch
+                End Try
+                Return False
             End If
 
-            ' Restore original selection
-            doc.Application.Selection.SetRange(selectionStart, selectionEnd)
-            doc.Application.Selection.Select()
+            ' ─────────────────────────────────────────────────────────────────────
+            ' PASS 2: REPLACE IN REVERSE ORDER (last match first)
+            ' ─────────────────────────────────────────────────────────────────────
+            Debug.WriteLine("ExecuteReplaceCommand: PASS 2 - replacing in reverse order...")
+            Dim replaceCount As Integer = 0
 
-            Return found
+            For i As Integer = matchPositions.Count - 1 To 0 Step -1
+                Dim mStart As Integer = matchPositions(i).Start
+                Dim mEnd As Integer = matchPositions(i).End
+
+                Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
+
+                Try
+                    ' Select the matched text using stored positions
+                    Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
+                    doc.Application.Selection.SetRange(mStart, mEnd)
+                    Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                    ' Atomic replacement
+                    Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
+                    doc.Application.Selection.Text = newText
+                    Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                    ' Apply Markdown conversion if enabled and text was inserted
+                    If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                        Try
+                            Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
+                            Globals.ThisAddIn.ConvertMarkdownToWord()
+                            Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
+                        Catch ex As Exception
+                            Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                        End Try
+                    End If
+
+                    replaceCount += 1
+                Catch ex As Exception
+                    Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
+                    Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
+                End Try
+            Next
+
+            Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {matchPositions.Count}")
+
+            ' ─────────────────────────────────────────────────────────────────────
+            ' RESTORE SELECTION
+            ' ─────────────────────────────────────────────────────────────────────
+            Try
+                Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(savedSelectionStart, doc.Content.End))
+                Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(savedSelectionEnd, doc.Content.End))
+                Debug.WriteLine($"ExecuteReplaceCommand: restoring selection to [{safeStart},{safeEnd}]")
+                doc.Application.Selection.SetRange(safeStart, safeEnd)
+                doc.Application.Selection.Select()
+            Catch ex As Exception
+                Debug.WriteLine($"ExecuteReplaceCommand: restore selection failed: {ex.Message}")
+                Try
+                    doc.Application.Selection.SetRange(doc.Content.Start, doc.Content.Start)
+                Catch
+                End Try
+            End Try
+
+            Debug.WriteLine($"ExecuteReplaceCommand: END (success={replaceCount > 0})")
+            Return replaceCount > 0
 
         Catch ex As System.Exception
+            Debug.WriteLine($"ExecuteReplaceCommand: OUTER CATCH: {ex.GetType().Name}: {ex.Message}")
+            Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
 #If DEBUG Then
-            Debug.WriteLine("Error: " & ex.Message)
-            Debug.WriteLine("Stacktrace: " & ex.StackTrace)
             System.Diagnostics.Debugger.Break()
 #End If
             MsgBox("Error in ExecuteReplaceCommand: " & ex.Message, MsgBoxStyle.Critical)
             Return False
 
         Finally
-            ' Restore original view and track changes state
-            view.RevisionsView = originalRevisionsView
-            view.ShowRevisionsAndComments = originalShowRevisions
-            doc.TrackRevisions = trackChangesEnabled
+            Try
+                If view IsNot Nothing Then
+                    view.RevisionsView = originalRevisionsView
+                    view.ShowRevisionsAndComments = originalShowRevisions
+                End If
+            Catch ex As Exception
+                Debug.WriteLine($"ExecuteReplaceCommand: FINALLY view restore failed: {ex.Message}")
+            End Try
+            Try
+                If doc IsNot Nothing Then
+                    doc.TrackRevisions = trackChangesEnabled
+                End If
+            Catch ex As Exception
+                Debug.WriteLine($"ExecuteReplaceCommand: FINALLY TrackRevisions restore failed: {ex.Message}")
+            End Try
         End Try
     End Function
 

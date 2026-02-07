@@ -1204,6 +1204,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Markers As String
+        Get
+            Return _context.SP_Add_Markers
+        End Get
+        Set(value As String)
+            _context.SP_Add_Markers = value
+        End Set
+    End Property
 
     Public Shared Property SP_Add_Revisions As String
         Get

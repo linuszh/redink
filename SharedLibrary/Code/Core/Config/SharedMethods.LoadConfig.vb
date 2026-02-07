@@ -191,6 +191,7 @@ Namespace SharedLibrary
                 context.SP_Add_KeepHTMLIntact = If(configDict.ContainsKey("SP_Add_KeepHTMLIntact"), configDict("SP_Add_KeepHTMLIntact"), Default_SP_Add_KeepHTMLIntact)
                 context.SP_Add_KeepInlineIntact = If(configDict.ContainsKey("SP_Add_KeepInlineIntact"), configDict("SP_Add_KeepInlineIntact"), Default_SP_Add_KeepInlineIntact)
                 context.SP_Add_Tooling = If(configDict.ContainsKey("SP_Add_Tooling"), configDict("SP_Add_Tooling"), Default_SP_Add_Tooling)
+                context.SP_Add_Markers = If(configDict.ContainsKey("SP_Add_Markers"), configDict("SP_Add_Markers"), Default_SP_Add_Markers)
                 context.SP_Add_Bubbles = If(configDict.ContainsKey("SP_Add_Bubbles"), configDict("SP_Add_Bubbles"), Default_SP_Add_Bubbles)
                 context.SP_Add_BubblesExtract = If(configDict.ContainsKey("SP_Add_BubblesExtract"), configDict("SP_Add_BubblesExtract"), Default_SP_Add_BubblesExtract)
                 context.SP_Add_BubblesReply = If(configDict.ContainsKey("SP_Add_BubblesReply"), configDict("SP_Add_BubblesReply"), Default_SP_Add_BubblesReply)

@@ -196,6 +196,7 @@ Namespace SharedLibrary
             Property SP_ParseFile As String
             Property SP_Ignore As String
             Property SP_Add_Tooling As String
+            Property SP_Add_Markers As String
             Property SP_Add_KeepFormulasIntact As String
             Property SP_Add_KeepHTMLIntact As String
             Property SP_Add_KeepInlineIntact As String
@@ -479,6 +480,7 @@ Namespace SharedLibrary
         Public Property SP_Ignore As String Implements ISharedContext.SP_Ignore
         Public Property SP_WriteNeatly As String Implements ISharedContext.SP_WriteNeatly
         Public Property SP_Add_Tooling As String Implements ISharedContext.SP_Add_Tooling
+        Public Property SP_Add_Markers As String Implements ISharedContext.SP_Add_Markers
         Public Property SP_Add_KeepFormulasIntact As String Implements ISharedContext.SP_Add_KeepFormulasIntact
         Public Property SP_Add_KeepHTMLIntact As String Implements ISharedContext.SP_Add_KeepHTMLIntact
         Public Property SP_Add_KeepInlineIntact As String Implements ISharedContext.SP_Add_KeepInlineIntact
