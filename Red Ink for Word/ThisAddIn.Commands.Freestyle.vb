@@ -706,7 +706,7 @@ Partial Public Class ThisAddIn
     ''' Saves the command parameters to settings for potential repeat execution.
     ''' </summary>
     Public Async Sub FreeStyleNM()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         FreeStyle(False)
 
         My.Settings.LastFreestyleModelConfig = Nothing
@@ -724,7 +724,7 @@ Partial Public Class ThisAddIn
     ''' Saves the command parameters and model configuration to settings for potential repeat execution.
     ''' </summary>
     Public Async Sub FreeStyleAM()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
 
@@ -754,7 +754,7 @@ Partial Public Class ThisAddIn
     ''' Shows error message if no previous freestyle command is stored.
     ''' </summary>
     Public Async Sub FreeStyleRepeat()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim LastFreestylePrompt As String = My.Settings.LastFreestylePrompt
 
@@ -804,7 +804,7 @@ Partial Public Class ThisAddIn
     ''' 10. Restores original configuration if alternate model was used
     ''' </remarks>
     Public Async Sub FreeStyle(UseSecondAPI As Boolean, Optional LastPrompt As String = "")
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Try
             ' Initialize prompt and system variables
             OtherPrompt = ""
@@ -2107,7 +2107,7 @@ Partial Public Class ThisAddIn
 
             If DoFiles Then
                 Try
-                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI)
+                    CorrectWordDocuments(SP_Freestyle_Document & " " & MyStyleInsert & " " & InsertDocs, "_freestyle", UseSecondAPI, True)
                 Catch ex As System.Exception
                     ' Handle any unexpected errors during freestyle execution
                     ShowCustomMessageBox("Error in Freestyle ('File:'): " & ex.Message, "Error")

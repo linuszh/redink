@@ -35,6 +35,7 @@ Option Strict Off
 Imports System.Diagnostics
 Imports System.IO
 Imports System.IO.Compression
+Imports System.Runtime.InteropServices
 
 Imports System.Text
 Imports System.Text.RegularExpressions
@@ -136,9 +137,25 @@ Partial Public Class ThisAddIn
     ''' Entry point for correction (default prompt/suffix).
     ''' </summary>
     Public Async Sub CorrectWordDocuments()
-        _isFreestyle = False
-        Await CorrectWordDocuments(Nothing, Nothing)
+        Await CorrectWordDocuments(Nothing, Nothing, False, False)
     End Sub
+
+    ''' <summary>
+    ''' Entry point for anonymization (default prompt/suffix).
+    ''' </summary>
+    Public Async Sub AnonymizeWordDocuments()
+        OtherPromptUnfilled = ""
+        Await CorrectWordDocuments(SP_Anonymize_Document, "_anonymized", False, True)
+    End Sub
+
+    ''' <summary>
+    ''' Entry point for switching parties (default prompt/suffix).
+    ''' </summary>
+    Public Async Sub SwitchPartiesDocuments()
+        OtherPromptUnfilled = ""
+        Await CorrectWordDocuments(InterpolateAtRuntime(SP_SwitchParty_Document), "_newparties", False, True)
+    End Sub
+
 
     ''' <summary>
     ''' Entry point for correction with optional prompt/suffix overrides.
@@ -148,11 +165,12 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Function CorrectWordDocuments(Optional promptOverride As String = Nothing,
                                           Optional correctedSuffixOverride As String = Nothing,
-                                          Optional UseSecondAPI As Boolean = False) As System.Threading.Tasks.Task
+                                          Optional UseSecondAPI As Boolean = False,
+                                          Optional IsFreestyle As Boolean = False) As Threading.Tasks.Task
 
         _correctPromptOverride = If(String.IsNullOrWhiteSpace(promptOverride), Nothing, promptOverride)
         _useSecondAPI = UseSecondAPI
-        _isFreestyle = True
+        _isFreestyle = IsFreestyle
 
         If String.IsNullOrWhiteSpace(correctedSuffixOverride) Then
             _correctSuffixOverride = Nothing

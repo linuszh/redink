@@ -175,6 +175,8 @@ Namespace SharedLibrary
                 context.SP_MailSumup2 = If(configDict.ContainsKey("SP_MailSumup2"), configDict("SP_MailSumup2"), Default_SP_MailSumup2)
                 context.SP_SwitchParty = If(configDict.ContainsKey("SP_SwitchParty"), configDict("SP_SwitchParty"), Default_SP_SwitchParty)
                 context.SP_Anonymize = If(configDict.ContainsKey("SP_Anonymize"), configDict("SP_Anonymize"), Default_SP_Anonymize)
+                context.SP_SwitchParty_Document = If(configDict.ContainsKey("SP_SwitchParty_Document"), configDict("SP_SwitchParty_Document"), Default_SP_SwitchParty_Document)
+                context.SP_Anonymize_Document = If(configDict.ContainsKey("SP_Anonymize_Document"), configDict("SP_Anonymize_Document"), Default_SP_Anonymize_Document)
                 context.SP_Rename = If(configDict.ContainsKey("SP_Rename"), configDict("SP_Rename"), Default_SP_Rename)
                 context.SP_RemoveClutter = If(configDict.ContainsKey("SP_RemoveClutter"), configDict("SP_RemoveClutter"), Default_SP_RemoveClutter)
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)

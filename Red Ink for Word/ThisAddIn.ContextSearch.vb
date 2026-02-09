@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
 
         Dim Prefix As String = "-CS"
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim EmbedModel As String = ""
         Dim EmbedVocab As String = ""

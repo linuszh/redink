@@ -208,21 +208,28 @@ Partial Public Class ThisAddIn
         ' Add management options
         Const ViewSnapshotsValue As Integer = -4
         Const DeleteSnapshotsValue As Integer = -3
+        Const CompareExistingValue As Integer = -5
         Const AddNewValue As Integer = -1
         Const EditLibraryValue As Integer = -2
 
         If allDocuments.Count > 0 Then
             items.Add(New SelectionItem("View snapshots...", ViewSnapshotsValue))
+            items.Add(New SelectionItem("Compare two snapshots...", CompareExistingValue))
             items.Add(New SelectionItem("Delete snapshots...", DeleteSnapshotsValue))
         End If
 
-        If localLibrary IsNot Nothing Then
+        ' Add new document is available when any library exists
+        If localLibrary IsNot Nothing OrElse centralLibrary IsNot Nothing Then
             items.Add(New SelectionItem("Add new document...", AddNewValue))
+        End If
+
+        ' Edit local library only available when local library is configured
+        If localLibrary IsNot Nothing Then
             items.Add(New SelectionItem("Edit local snapshot library...", EditLibraryValue))
         End If
 
         If items.Count = 0 Then
-            ShowCustomMessageBox("No snapshot documents configured and no local library available.", AN)
+            ShowCustomMessageBox("No snapshot documents configured and no library available.", AN)
             Return
         End If
 
@@ -234,10 +241,33 @@ Partial Public Class ThisAddIn
             Return
         ElseIf result = ViewSnapshotsValue Then
             ViewSnapshots(allDocuments, localLibrary, centralLibrary)
+        ElseIf result = CompareExistingValue Then
+            CompareExistingSnapshots(allDocuments, localLibrary, centralLibrary)
         ElseIf result = DeleteSnapshotsValue Then
             ManageSnapshots(allDocuments, localLibrary, centralLibrary)
         ElseIf result = AddNewValue Then
-            Await CreateNewSnapshotDocument(localLibrary)
+            ' Determine target library
+            Dim targetLibrary As SnapshotLibrary = Nothing
+            If localLibrary IsNot Nothing AndAlso centralLibrary IsNot Nothing Then
+                ' Both exist — ask the user
+                Dim libChoice = ShowCustomYesNoBox(
+                    "Which library should the new document be added to?",
+                    "Local library",
+                    "Central library")
+                If libChoice = 0 Then Return ' User cancelled
+                targetLibrary = If(libChoice = 1, localLibrary, centralLibrary)
+            ElseIf localLibrary IsNot Nothing Then
+                targetLibrary = localLibrary
+            ElseIf centralLibrary IsNot Nothing Then
+                targetLibrary = centralLibrary
+            End If
+
+            If targetLibrary Is Nothing Then
+                ShowCustomMessageBox("No library available to add the document to.", AN)
+                Return
+            End If
+
+            Await CreateNewSnapshotDocument(targetLibrary)
             SelectSnapshotDocument()
         ElseIf result = EditLibraryValue Then
             If localLibrary IsNot Nothing AndAlso Not String.IsNullOrEmpty(localLibrary.FilePath) Then
@@ -433,9 +463,10 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Compares two text strings using Word's comparison and shows in HTML viewer with snapshot save option.
+    ''' Compares two text strings using Word's comparison and shows in HTML viewer with optional snapshot save.
+    ''' Includes buttons for summarization, PDF export, clipboard copy, Word document export, and optional snapshot save.
     ''' </summary>
-    Private Sub CompareTextsAndShowHtmlWithSnapshotOption(originalText As String, revisedText As String, title As String, saveSnapshotCallback As System.Action)
+    Private Sub CompareTextsAndShowHtmlWithSnapshotOption(originalText As String, revisedText As String, title As String, Optional saveSnapshotCallback As System.Action = Nothing)
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
         Try
             wordApp = Globals.ThisAddIn.Application
@@ -495,21 +526,82 @@ Partial Public Class ThisAddIn
             wordApp.DisplayAlerts = prevAlerts
             wordApp.ScreenUpdating = prevScreenUpdating
 
-            Dim htmlContent = ReadHtmlWithEncodingDetection(tempHtmlPath)
-            Dim baseHref = $"<base href=""file:///{tempFolder.Replace("\", "/")}/"">"
+            ' Capture references for button closures
+            Dim capturedWordApp = wordApp
+            Dim capturedTempHtmlPath = tempHtmlPath
+            Dim capturedTempFolder = tempFolder
+
+            Dim htmlContent = ReadHtmlWithEncodingDetection(capturedTempHtmlPath)
+            Dim baseHref = $"<base href=""file:///{capturedTempFolder.Replace("\", "/")}/"">"
             Dim motw = "<!-- saved from url=(0016)http://localhost -->"
             htmlContent = htmlContent.Replace("<head>", "<head>" & vbCrLf & motw & vbCrLf & baseHref)
 
             Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
+
+            ' 1. Summarize Changes (conditional on extracted changes)
             If Not String.IsNullOrWhiteSpace(extractedChangesText) Then
                 additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)("Summarize Changes", Sub() SummarizeComparisonChangesAsync(extractedChangesText), False))
             End If
-            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)("Send to PDF", Sub() ExportComparisonToPdfFromHtml(tempHtmlPath, wordApp, "Snapshot_Compare", Environment.GetFolderPath(Environment.SpecialFolder.Desktop)), False))
-            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)("Save Snapshot", Sub() saveSnapshotCallback?.Invoke(), False))
+
+            ' 2. Send to PDF
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)("Send to PDF", Sub() ExportComparisonToPdfFromHtml(capturedTempHtmlPath, capturedWordApp, "Snapshot_Compare", Environment.GetFolderPath(Environment.SpecialFolder.Desktop)), False))
+
+            ' 3. Copy to Clipboard
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Copy to Clipboard",
+                Sub()
+                    Try
+                        If Not File.Exists(capturedTempHtmlPath) Then
+                            ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                            Return
+                        End If
+                        Dim clipDoc As Microsoft.Office.Interop.Word.Document = Nothing
+                        Dim prevSU = capturedWordApp.ScreenUpdating
+                        Dim prevAL = capturedWordApp.DisplayAlerts
+                        Try
+                            capturedWordApp.ScreenUpdating = False
+                            capturedWordApp.DisplayAlerts = WdAlertLevel.wdAlertsNone
+                            clipDoc = capturedWordApp.Documents.Open(FileName:=capturedTempHtmlPath, ReadOnly:=True, Visible:=False)
+                            clipDoc.Content.Copy()
+                            clipDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+                            clipDoc = Nothing
+                            ShowCustomMessageBox("Comparison copied to clipboard with formatting.", AN)
+                        Finally
+                            If clipDoc IsNot Nothing Then Try : clipDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                            capturedWordApp.DisplayAlerts = prevAL
+                            capturedWordApp.ScreenUpdating = prevSU
+                        End Try
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Failed to copy to clipboard: {ex.Message}", AN)
+                    End Try
+                End Sub,
+                False))
+
+            ' 4. Send to Document
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "Send to Document",
+                Sub()
+                    Try
+                        If Not File.Exists(capturedTempHtmlPath) Then
+                            ShowCustomMessageBox("The comparison file is no longer available.", AN)
+                            Return
+                        End If
+                        Dim newDoc = capturedWordApp.Documents.Open(FileName:=capturedTempHtmlPath, ReadOnly:=False, Visible:=True)
+                        newDoc.Activate()
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Failed to open in Word: {ex.Message}", AN)
+                    End Try
+                End Sub,
+                False))
+
+            ' 5. Save Snapshot (only when callback provided)
+            If saveSnapshotCallback IsNot Nothing Then
+                additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)("Save Snapshot", Sub() saveSnapshotCallback.Invoke(), False))
+            End If
 
             Dim cleanupAction As System.Action = Sub()
                                                      Try
-                                                         If Directory.Exists(tempFolder) Then Directory.Delete(tempFolder, recursive:=True)
+                                                         If Directory.Exists(capturedTempFolder) Then Directory.Delete(capturedTempFolder, recursive:=True)
                                                      Catch
                                                      End Try
                                                  End Sub
@@ -532,12 +624,20 @@ Partial Public Class ThisAddIn
 #Region "Create New Document"
 
     ''' <summary>
-    ''' Creates a new snapshot document entry.
+    ''' Creates a new snapshot document entry in the specified library.
     ''' </summary>
-    Private Async Function CreateNewSnapshotDocument(localLibrary As SnapshotLibrary) As System.Threading.Tasks.Task
-        If localLibrary Is Nothing OrElse String.IsNullOrEmpty(localLibrary.FilePath) Then
-            ShowCustomMessageBox("Local library is not configured.", AN)
+    Private Async Function CreateNewSnapshotDocument(targetLibrary As SnapshotLibrary) As System.Threading.Tasks.Task
+        If targetLibrary Is Nothing OrElse String.IsNullOrEmpty(targetLibrary.FilePath) Then
+            ShowCustomMessageBox("No library is configured.", AN)
             Return
+        End If
+
+        ' Determine if this is the local library
+        Dim isLocalLibrary As Boolean = False
+        If Not String.IsNullOrWhiteSpace(INI_SnapshotLibPathLocal) Then
+            Dim expandedLocal = Path.GetFullPath(ExpandEnvironmentVariables(INI_SnapshotLibPathLocal))
+            Dim expandedTarget = Path.GetFullPath(targetLibrary.FilePath)
+            isLocalLibrary = expandedTarget.Equals(expandedLocal, StringComparison.OrdinalIgnoreCase)
         End If
 
         Dim params(3) As Slib.InputParameter
@@ -564,22 +664,22 @@ Partial Public Class ThisAddIn
             .Location = location,
             .RemoveClutter = removeClutter,
             .SnapshotArchive = archivePath,
-            .IsLocal = True,
-            .SourceLibraryPath = localLibrary.FilePath
+            .IsLocal = isLocalLibrary,
+            .SourceLibraryPath = targetLibrary.FilePath
         }
 
-        EnsureSnapshotLibraryExists(localLibrary.FilePath)
+        EnsureSnapshotLibraryExists(targetLibrary.FilePath)
 
         Dim confirmed = ShowCustomYesNoBox(
-            $"Configured: {friendlyName}{vbCrLf}Location: {location}{vbCrLf}{vbCrLf}Download initial snapshot now?",
+            $"Configured: {friendlyName}{vbCrLf}Location: {location}{vbCrLf}Library: {If(isLocalLibrary, "Local", "Central")}{vbCrLf}{vbCrLf}Download initial snapshot now?",
             "Yes, download", "No, just add to library")
 
-        AddDocumentToLibrary(newDoc, localLibrary)
+        AddDocumentToLibrary(newDoc, targetLibrary)
 
         If confirmed = 1 Then
             Try
                 ' Force resolution logic to run exactly as standard logic does
-                Dim resolvedArchive = ResolveArchivePath(newDoc, localLibrary)
+                Dim resolvedArchive = ResolveArchivePath(newDoc, targetLibrary)
 
                 If String.IsNullOrEmpty(resolvedArchive) Then
                     ShowCustomMessageBox("Failed to resolve archive path.", AN)
@@ -616,7 +716,7 @@ Partial Public Class ThisAddIn
                 Dim snapshotFullPath = SaveSnapshotWithTimestamp(newDoc, content, resolvedArchive, timestamp)
                 If Not String.IsNullOrEmpty(snapshotFullPath) Then
                     Dim fn = Path.GetFileName(snapshotFullPath)
-                    AddSnapshotToLibrary(newDoc, fn, localLibrary)
+                    AddSnapshotToLibrary(newDoc, fn, targetLibrary)
                     ShowCustomMessageBox($"Snapshot saved:{vbCrLf}{snapshotFullPath}", AN)
                 Else
                     ShowCustomMessageBox("Failed to save snapshot file.", AN)
@@ -665,6 +765,118 @@ Partial Public Class ThisAddIn
         Dim docLibrary = GetLibraryForDocument(selectedDoc, localLibrary, centralLibrary)
         ViewDocumentSnapshots(selectedDoc, docLibrary)
     End Sub
+
+    ''' <summary>
+    ''' Allows the user to pick a document, then select two existing snapshots to compare.
+    ''' Only documents with at least 2 snapshots are shown.
+    ''' </summary>
+    Private Sub CompareExistingSnapshots(allDocuments As List(Of SnapshotDocument), localLibrary As SnapshotLibrary, centralLibrary As SnapshotLibrary)
+        ' Filter to documents with at least 2 snapshots
+        Dim docsWithMultiple = allDocuments.Where(Function(d As SnapshotDocument) d.Snapshots.Count >= 2).ToList()
+
+        If docsWithMultiple.Count = 0 Then
+            ShowCustomMessageBox("No documents have 2 or more snapshots to compare.", AN)
+            Return
+        End If
+
+        ' Select document
+        Dim items As New List(Of SelectionItem)()
+        Dim docMap As New Dictionary(Of Integer, SnapshotDocument)()
+
+        Dim idx = 1
+        For Each doc As SnapshotDocument In docsWithMultiple
+            items.Add(New SelectionItem($"{doc.GetDisplayName()} ({doc.Snapshots.Count} snapshots)", idx))
+            docMap(idx) = doc
+            idx += 1
+        Next
+
+        Dim docResult = SelectValue(items, 1, "Select document to compare snapshots:", $"{AN} - Compare Snapshots")
+        If docResult <= 0 OrElse Not docMap.ContainsKey(docResult) Then Return
+
+        Dim selectedDoc = docMap(docResult)
+        Dim docLibrary = GetLibraryForDocument(selectedDoc, localLibrary, centralLibrary)
+        Dim archivePath = ResolveArchivePath(selectedDoc, docLibrary)
+
+        If String.IsNullOrEmpty(archivePath) Then
+            ShowCustomMessageBox("Could not determine snapshot archive path.", AN)
+            Return
+        End If
+
+        ' Build snapshot list (sorted newest first)
+        Dim sortedSnapshots = selectedDoc.Snapshots.OrderByDescending(Function(s) s).ToList()
+
+        ' Select first (older/base) snapshot - default to second-most-recent
+        Dim firstSnapshot = SelectSnapshotFromList(sortedSnapshots, archivePath, "Select OLDER snapshot (base):",
+                                                    $"{AN} - Compare Snapshots (1/2)",
+                                                    If(sortedSnapshots.Count >= 2, 2, 1))
+        If String.IsNullOrEmpty(firstSnapshot) Then Return
+
+        ' Select second (newer/revised) snapshot - default to most-recent, exclude the first selection
+        Dim remainingSnapshots = sortedSnapshots.Where(Function(s) Not s.Equals(firstSnapshot, StringComparison.OrdinalIgnoreCase)).ToList()
+
+        If remainingSnapshots.Count = 0 Then
+            ShowCustomMessageBox("No other snapshot available to compare against.", AN)
+            Return
+        End If
+
+        Dim secondSnapshot = SelectSnapshotFromList(remainingSnapshots, archivePath, "Select NEWER snapshot (revised):",
+                                                     $"{AN} - Compare Snapshots (2/2)", 1)
+        If String.IsNullOrEmpty(secondSnapshot) Then Return
+
+        ' Read both files
+        Dim firstPath = Path.Combine(archivePath, firstSnapshot)
+        Dim secondPath = Path.Combine(archivePath, secondSnapshot)
+
+        If Not File.Exists(firstPath) Then
+            ShowCustomMessageBox($"Snapshot file not found:{vbCrLf}{firstPath}", AN)
+            Return
+        End If
+        If Not File.Exists(secondPath) Then
+            ShowCustomMessageBox($"Snapshot file not found:{vbCrLf}{secondPath}", AN)
+            Return
+        End If
+
+        Dim firstContent = File.ReadAllText(firstPath, Encoding.UTF8)
+        Dim secondContent = File.ReadAllText(secondPath, Encoding.UTF8)
+
+        ' Check for identical content
+        If ComputeContentHash(firstContent) = ComputeContentHash(secondContent) Then
+            ShowCustomMessageBox("The two snapshots are identical. No differences to show.", AN)
+            Return
+        End If
+
+        ' Compare without save callback (no Save Snapshot button)
+        CompareTextsAndShowHtmlWithSnapshotOption(firstContent, secondContent,
+            $"{AN} Snapshot Compare - {selectedDoc.FriendlyName}")
+    End Sub
+
+    ''' <summary>
+    ''' Shows a snapshot selection dialog from a given list with customizable prompt, title, and default selection.
+    ''' </summary>
+    Private Function SelectSnapshotFromList(snapshots As List(Of String), archivePath As String, prompt As String, title As String, defaultIndex As Integer) As String
+        Dim items As New List(Of SelectionItem)()
+        Dim snapshotMap As New Dictionary(Of Integer, String)()
+
+        Dim idx = 1
+        For Each snapshot In snapshots
+            Dim snapshotDate = SnapshotDocument.ParseSnapshotDate(snapshot)
+            Dim displayName = If(snapshotDate.HasValue, $"{snapshotDate.Value:yyyy-MM-dd HH:mm:ss}", snapshot)
+            Dim fullPath = Path.Combine(archivePath, snapshot)
+            If File.Exists(fullPath) Then
+                Dim fileInfo = New FileInfo(fullPath)
+                displayName &= $" ({FormatFileSize(fileInfo.Length)})"
+            Else
+                displayName &= " [FILE MISSING]"
+            End If
+            items.Add(New SelectionItem(displayName, idx))
+            snapshotMap(idx) = snapshot
+            idx += 1
+        Next
+
+        Dim result = SelectValue(items, Math.Min(defaultIndex, items.Count), prompt, title)
+        If result > 0 AndAlso snapshotMap.ContainsKey(result) Then Return snapshotMap(result)
+        Return Nothing
+    End Function
 
     Private Sub ViewDocumentSnapshots(doc As SnapshotDocument, library As SnapshotLibrary)
         Dim archivePath = ResolveArchivePath(doc, library)

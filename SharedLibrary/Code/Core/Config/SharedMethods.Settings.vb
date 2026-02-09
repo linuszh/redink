@@ -1719,6 +1719,8 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
                     {"SP_SwitchParty", context.SP_SwitchParty},
                     {"SP_Anonymize", context.SP_Anonymize},
+                    {"SP_SwitchParty_Document", context.SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", context.SP_Anonymize_Document},
                     {"SP_Rename", context.SP_Rename},
                     {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
@@ -1817,6 +1819,8 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
                     {"SP_SwitchParty", Default_SP_SwitchParty},
                     {"SP_Anonymize", Default_SP_Anonymize},
+                    {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
                     {"SP_Rename", Default_SP_Rename},
                     {"SP_RemoveClutter", Default_SP_RemoveClutter},
                     {"SP_Redact", Default_SP_Redact},
@@ -2840,6 +2844,8 @@ Namespace SharedLibrary
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
             variableValues.Add("SP_SwitchParty", context.SP_SwitchParty)
             variableValues.Add("SP_Anonymize", context.SP_Anonymize)
+            variableValues.Add("SP_SwitchParty_Document", context.SP_SwitchParty_Document)
+            variableValues.Add("SP_Anonymize_Document", context.SP_Anonymize_Document)
             variableValues.Add("SP_Rename", context.SP_Rename)
             variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
@@ -3010,6 +3016,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
                 If updatedValues.ContainsKey("SP_SwitchParty") Then context.SP_SwitchParty = CStr(updatedValues("SP_SwitchParty"))
                 If updatedValues.ContainsKey("SP_Anonymize") Then context.SP_Anonymize = CStr(updatedValues("SP_Anonymize"))
+                If updatedValues.ContainsKey("SP_SwitchParty_Document") Then context.SP_SwitchParty_Document = CStr(updatedValues("SP_SwitchParty_Document"))
+                If updatedValues.ContainsKey("SP_Anonymize_Document") Then context.SP_Anonymize_Document = CStr(updatedValues("SP_Anonymize_Document"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
                 If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))

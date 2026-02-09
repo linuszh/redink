@@ -358,10 +358,10 @@ Partial Class Ribbon1
         '
         'RI_Anonymize
         '
-        Me.RI_Anonymize.Label = "Anonymize Text (AI)"
+        Me.RI_Anonymize.Label = "Anonymize Text/File (AI)"
         Me.RI_Anonymize.Name = "RI_Anonymize"
         Me.RI_Anonymize.OfficeImageId = "ApplyCoAuthoringLock"
-        Me.RI_Anonymize.ScreenTip = "Will anonymize the selected text"
+        Me.RI_Anonymize.ScreenTip = "Will anonymize the selected text or the Word file(s) you provide"
         Me.RI_Anonymize.ShowImage = True
         '
         'RI_Anonymization
@@ -410,7 +410,7 @@ Partial Class Ribbon1
         Me.RI_SwitchParty.Label = "Switch Party"
         Me.RI_SwitchParty.Name = "RI_SwitchParty"
         Me.RI_SwitchParty.OfficeImageId = "AddDepartment"
-        Me.RI_SwitchParty.ScreenTip = "Will switch two parties in your selected text"
+        Me.RI_SwitchParty.ScreenTip = "Will switch two parties in your selected text or in the Word file(s) you provide"
         Me.RI_SwitchParty.ShowImage = True
         '
         'Menu3

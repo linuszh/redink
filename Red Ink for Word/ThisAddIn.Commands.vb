@@ -61,7 +61,7 @@ Partial Public Class ThisAddIn
     ''' Uses ProcessSelectedText with SP_Translate prompt and INI_KeepFormat1 settings.
     ''' </summary>
     Public Async Sub InLanguage1()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language1
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub InLanguage2()
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         TranslateLanguage = INI_Language2
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Translate), True, INI_KeepFormat1, INI_KeepParaFormatInline, INI_ReplaceText1, False, 0, False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not INI_ReplaceText1)
     End Sub
@@ -82,7 +82,7 @@ Partial Public Class ThisAddIn
     ''' Uses ProcessSelectedText with SP_Translate prompt and INI_KeepFormat1 settings.
     ''' </summary>
     Public Async Sub InOther()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
@@ -103,7 +103,7 @@ Partial Public Class ThisAddIn
     ''' Applies optional markup based on INI_DoMarkupWord and INI_MarkupMethodWord settings.
     ''' </summary>
     Public Async Sub Correct()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
@@ -121,7 +121,7 @@ Partial Public Class ThisAddIn
     ''' Enhances the selected text using the SP_Improve prompt while honoring the configured formatting and markup settings.
     ''' </summary>
     Public Async Sub Improve()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Improve), True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not Override(INI_ReplaceText2, INI_ReplaceText2Override))
     End Sub
 
@@ -129,7 +129,7 @@ Partial Public Class ThisAddIn
     ''' Rewrites the selection with a friendlier tone through the SP_Friendly prompt, respecting the current formatting and markup options.
     ''' </summary>
     Public Async Sub Friendly()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Friendly), True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not Override(INI_ReplaceText2, INI_ReplaceText2Override))
     End Sub
 
@@ -137,7 +137,7 @@ Partial Public Class ThisAddIn
     ''' Strengthens the persuasiveness of the selected text by invoking SP_Convincing with the active formatting and markup configuration.
     ''' </summary>
     Public Async Sub Convincing()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_Convincing), True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not Override(INI_ReplaceText2, INI_ReplaceText2Override))
     End Sub
 
@@ -145,7 +145,7 @@ Partial Public Class ThisAddIn
     ''' Removes filler phrases from the selection via SP_NoFillers while keeping the configured formatting logic intact.
     ''' </summary>
     Public Async Sub NoFillers()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_NoFillers), True, INI_KeepFormat2, INI_KeepParaFormatInline, Override(INI_ReplaceText2, INI_ReplaceText2Override), INI_DoMarkupWord, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride), False, False, True, False, INI_KeepFormatCap, NoFormatAndFieldSaving:=Not Override(INI_ReplaceText2, INI_ReplaceText2Override))
     End Sub
 
@@ -154,7 +154,7 @@ Partial Public Class ThisAddIn
     ''' Validates MyStyle configuration, prompts for style selection, then processes text.
     ''' </summary>
     Public Async Sub ApplyMyStyle()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
@@ -298,6 +298,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub EditRedactionInstructions()
         If INILoadFail() Then Return
+
         Dim chosenPath As String = ""
         If Not String.IsNullOrEmpty(INI_RedactionInstructionsPathLocal) AndAlso Not String.IsNullOrEmpty(INI_RedactionInstructionsPath) Then
             Dim answer = ShowCustomYesNoBox("Do you want to edit the local or central redaction instructions set (if it does not yet exist, it will be created)?", "Local", "Central")
@@ -341,7 +342,15 @@ Partial Public Class ThisAddIn
     ''' Uses SP_Anonymize prompt with optional Regex markup for larger texts.
     ''' </summary>
     Public Async Sub Anonymize()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
+
+        Dim application As Word.Application = Globals.ThisAddIn.Application
+        Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
+
+        If Selection.Type = WdSelectionType.wdSelectionIP Then
+            AnonymizeWordDocuments()
+            Return
+        End If
 
         Dim DoMarkup As Boolean = INI_DoMarkupWord
         Dim DoReplace As Boolean = Override(INI_ReplaceText2, INI_ReplaceText2Override)
@@ -450,7 +459,7 @@ Partial Public Class ThisAddIn
             End If
         End With
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SP_InsertClipboard), False, False, False, False, False, 0, False, False, False, False, 0, False, "", False, "clipboard")
 
@@ -469,7 +478,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub Shorten()
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
@@ -565,7 +574,8 @@ Partial Public Class ThisAddIn
     ''' Swaps occurrences of two user-specified party names through SP_SwitchParty, optionally forcing Regex markup for larger texts.
     ''' </summary>
     Public Async Sub SwitchParty()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
+
         Dim UserInput As String
         Do
             UserInput = SLib.ShowCustomInputBox("Please provide the original party name And the New party name, separated by a comma (example: Elvis Presley, Taylor Swift):", $"{AN} Switch Party", True).Trim()
@@ -583,6 +593,15 @@ Partial Public Class ThisAddIn
                 ShowCustomMessageBox("Please enter two names separated by a comma.")
             End If
         Loop
+
+
+        Dim application As Word.Application = Globals.ThisAddIn.Application
+        Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
+
+        If Selection.Type = WdSelectionType.wdSelectionIP Then
+            SwitchPartiesDocuments()
+            Return
+        End If
 
         Dim DoMarkup As Boolean = INI_DoMarkupWord
         Dim DoReplace As Boolean = Override(INI_ReplaceText2, INI_ReplaceText2Override)
@@ -621,7 +640,7 @@ Partial Public Class ThisAddIn
     ''' Summarizes the selected text to a user-defined word count using SP_Summarize without replacement markup.
     ''' </summary>
     Public Async Sub Summarize()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
@@ -817,6 +836,8 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub EasterEgg()
 
+        If INILoadFail() Then Return
+
         Dim splash As New SLib.SplashScreen($"{AN6} is preparing to tickle{If(INI_RoastMe, " (inofficial version)", "")}...")
         splash.Show()
         splash.Refresh()
@@ -885,6 +906,8 @@ Partial Public Class ThisAddIn
 
     Public Sub AnonymizeSelection()
 
+        If INILoadFail() Then Return
+
         Dim sel As String = Globals.ThisAddIn.Application.Selection.Text
 
         If String.IsNullOrWhiteSpace(sel) Then
@@ -932,7 +955,7 @@ Partial Public Class ThisAddIn
         sb.AppendLine()
         sb.AppendLine("Entity-Mapping:")
         sb.AppendLine()
-        For Each kvp In OnnxAnonymizer.mapping
+        For Each kvp In OnnxAnonymizer.Mapping
             sb.AppendLine($"{kvp.Key} -> {kvp.Value}")
         Next
 
@@ -948,6 +971,9 @@ Partial Public Class ThisAddIn
     Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
 
     Public Sub ShowQuickTranslate()
+
+        If INILoadFail() Then Return
+
         If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
             _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
             Async Function(text, lang, sourcelang, token)
@@ -974,6 +1000,9 @@ Partial Public Class ThisAddIn
     ''' Displays (or raises) the HelpMeInky helper window bound to the current add-in context.
     ''' </summary>
     Public Sub HelpMeInky()
+
+        If INILoadFail() Then Return
+
         If _win Is Nothing OrElse _win.IsDisposed Then
             _win = New HelpMeInky(_context, RDV)
         End If
@@ -987,6 +1016,9 @@ Partial Public Class ThisAddIn
     ''' Displays (or raises) the DiscussInky discussion window for the active add-in context.
     ''' </summary>
     Public Sub DiscussInky()
+
+        If INILoadFail() Then Return
+
         If _win2 Is Nothing OrElse _win2.IsDisposed Then
             _win2 = New DiscussInky(_context)
         End If
@@ -1001,6 +1033,7 @@ Partial Public Class ThisAddIn
     Public Sub ShowSettings()
 
         If INILoadFail() Then Return
+
         Dim Settings As New Dictionary(Of String, String) From {
                 {"Temperature", "Temperature of {model}"},
                 {"Timeout", "Timeout of {model}"},

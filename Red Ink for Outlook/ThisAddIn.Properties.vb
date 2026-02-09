@@ -1039,7 +1039,23 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_SwitchParty_Document As String
+        Get
+            Return _context.SP_SwitchParty_Document
+        End Get
+        Set(value As String)
+            _context.SP_SwitchParty_Document = value
+        End Set
+    End Property
 
+    Public Shared Property SP_Anonymize_Document As String
+        Get
+            Return _context.SP_Anonymize_Document
+        End Get
+        Set(value As String)
+            _context.SP_Anonymize_Document = value
+        End Set
+    End Property
     Public Shared Property SP_Extract As String
         Get
             Return _context.SP_Extract

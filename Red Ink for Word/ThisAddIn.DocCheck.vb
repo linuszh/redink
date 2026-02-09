@@ -42,7 +42,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Sub RunDocCheck()
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         ' Expand and normalize the configured paths
         Dim DocCheckPath As System.String = ExpandEnvironmentVariables(INI_DocCheckPath)

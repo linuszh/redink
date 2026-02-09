@@ -182,6 +182,8 @@ Namespace SharedLibrary
             Property SP_Freestyle_Document As String
             Property SP_SwitchParty As String
             Property SP_Anonymize As String
+            Property SP_SwitchParty_Document As String
+            Property SP_Anonymize_Document As String
             Property SP_Extract As String
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
@@ -465,6 +467,8 @@ Namespace SharedLibrary
         Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
         Public Property SP_SwitchParty As String Implements ISharedContext.SP_SwitchParty
         Public Property SP_Anonymize As String Implements ISharedContext.SP_Anonymize
+        Public Property SP_SwitchParty_Document As String Implements ISharedContext.SP_SwitchParty_Document
+        Public Property SP_Anonymize_Document As String Implements ISharedContext.SP_Anonymize_Document
         Public Property SP_Extract As String Implements ISharedContext.SP_Extract
         Public Property SP_ExtractSchema As String Implements ISharedContext.SP_ExtractSchema
 
