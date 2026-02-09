@@ -59,8 +59,8 @@ Namespace SharedLibrary
 
         ' Legacy Transition
         Private Shared ReadOnly LegacyRegimeEndDate As Date = #1/31/2026#
-        Private Const LegacyMigrationGracePeriodDays As Integer = 5
-        Private Const LegacyMigrationPromptIntervalStartups As Integer = 5
+        Private Const LegacyMigrationGracePeriodDays As Integer = 12
+        Private Const LegacyMigrationPromptIntervalStartups As Integer = 15
 
         ' Warning/Prompt Intervals
         Private Const OfflineGraceWarningIntervalStartups As Integer = 5

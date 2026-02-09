@@ -201,4 +201,8 @@ Public Class Ribbon1
         Globals.ThisAddIn.RenameDocumentsWithAi()
     End Sub
 
+    Private Sub RI_RIRemove_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_RIRemove.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_RIRemove_Click invoked")
+        Globals.ThisAddIn.RemoveRIPrefixFromComments()
+    End Sub
 End Class

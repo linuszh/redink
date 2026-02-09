@@ -400,4 +400,14 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Charting_Click invoked")
         Globals.ThisAddIn.OpenExistingDrawioFileForEditing()
     End Sub
+
+    Private Sub RI_Snapshot_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Snapshot.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Snapshot_Click invoked")
+        Globals.ThisAddIn.SelectSnapshotDocument()
+    End Sub
+
+    Private Sub RI_Remove_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Remove.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Remove_Click invoked")
+        Globals.ThisAddIn.RemoveRIPrefixFromComments()
+    End Sub
 End Class

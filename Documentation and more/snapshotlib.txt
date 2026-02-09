@@ -1,0 +1,18 @@
+﻿; Snapshot Library
+; Sample
+
+; Global settings
+SnapshotArchive = SnapshotArchive
+
+; Add documents below using this format:
+; [Friendly Document Name]
+; Location = https://example.com/page or C:\path\to\file.pdf
+; RemoveClutter = True
+; Snapshot = YYMMDD_HHMMSS_shortname.txt
+
+
+[Google Data Processing Addendum]
+Shortname = Google_DPA
+Location = https://cloud.google.com/terms/data-processing-addendum
+RemoveClutter = True
+

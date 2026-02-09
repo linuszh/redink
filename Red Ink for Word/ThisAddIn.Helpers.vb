@@ -68,6 +68,75 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
+    ''' Checks whether the active document is in an editable state.
+    ''' Returns True if the document can be edited, False otherwise.
+    ''' If not editable, displays a message informing the user that editing must be enabled for Red Ink.
+    ''' </summary>
+    ''' <param name="silent">If True, suppresses the user-facing message box.</param>
+    ''' <returns>True if the active document is editable, False otherwise.</returns>
+    Public Function IsDocumentEditable(Optional silent As Boolean = False) As Boolean
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                doc = app.ActiveDocument
+            Catch
+                If Not silent Then
+                    ShowCustomMessageBox($"No document is open or editing is not enabled. Please open a document or enable editing on your document to use {AN}.")
+                End If
+                Return False
+            End Try
+
+            If doc Is Nothing Then
+                If Not silent Then
+                    ShowCustomMessageBox($"No document is open or editing is not enabled. Please open a document or enable editing on your document to use {AN}.")
+                End If
+                Return False
+            End If
+
+            ' Check if the document is read-only
+            'If doc.ReadOnly Then
+            'If Not silent Then
+            'ShowCustomMessageBox($"The document '{doc.Name}' is opened as read-only. To use {AN}, editing must be enabled." & vbCrLf & vbCrLf &
+            '                             "Please enable editing (e.g., click 'Enable Editing' in the message bar, uncheck read-only in File > Info, or save a writable copy).")
+            'End If
+            'Return False
+            'End If
+
+            ' Check if the document is protected (restricted editing)
+            'If doc.ProtectionType <> Microsoft.Office.Interop.Word.WdProtectionType.wdNoProtection Then
+            'If Not silent Then
+            'ShowCustomMessageBox($"The document '{doc.Name}' has restricted editing enabled. To use {AN}, editing restrictions must be removed." & vbCrLf & vbCrLf &
+            '                             "Please go to Review > Restrict Editing and stop protection.")
+            'End If
+            'Return False
+            'End If
+
+            ' Check if the document is marked as final
+            'Try
+            'If CBool(doc.Final) Then
+            'If Not silent Then
+            'ShowCustomMessageBox($"The document '{doc.Name}' is marked as final. To use {AN}, editing must be enabled." & vbCrLf & vbCrLf &
+            '                                 "Please go to File > Info and click 'Edit Anyway'.")
+            'End If
+            'Return False
+            'End If
+            'Catch
+            ' Final property may not be available in older versions — ignore
+            'End Try
+
+            Return True
+
+        Catch ex As System.Exception
+            If Not silent Then
+                ShowCustomMessageBox($"Could not determine document edit status: {ex.Message}")
+            End If
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Manages a custom Word undo record scope for VSTO operations.
     ''' Automatically starts a custom undo record on creation and ends it on disposal.
     ''' Only supported in Word 2013 (version 15.0) and later.

@@ -820,6 +820,35 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
+    ''' Ensures tooling selections are loaded and the tooling-enabled flag is consistent with model support.
+    ''' </summary>
+    Private Function SyncToolingState(ByVal st As InkyState, ByRef supportsTooling As Boolean) As Boolean
+        _selectedToolsForChat = Nothing
+        If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
+            Try
+                Dim availableTools = GetAvailableTools()
+                Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
+                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
+            Catch
+                _selectedToolsForChat = Nothing
+            End Try
+        End If
+
+        supportsTooling = CurrentModelSupportsTooling(st)
+
+        Dim hasTools As Boolean = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
+        Dim enabled As Boolean = st.ToolingEnabled AndAlso hasTools AndAlso supportsTooling
+
+        If st.ToolingEnabled <> enabled Then
+            st.ToolingEnabled = enabled
+            SaveInkyState(st)
+        End If
+
+        _chatToolingEnabled = enabled
+        Return enabled
+    End Function
+
+    ''' <summary>
     ''' Determines whether the currently selected model supports tooling.
     ''' </summary>
     Private Function CurrentModelSupportsTooling(st As InkyState) As Boolean
@@ -1149,7 +1178,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}updateModelTooltip();adjustModelSel();}")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
@@ -1325,31 +1354,8 @@ Partial Public Class ThisAddIn
                         Dim models As System.Collections.Generic.List(Of System.Object) =
                             Await GetModelListForBrowserAsync(st)
 
-                        ' Load tooling state - must load tools BEFORE setting enabled flag
-                        _selectedToolsForChat = Nothing
-                        If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
-
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        If st.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(st)
-                            _chatToolingEnabled = hasTools AndAlso modelSupports
-                            ' Update persisted state if tooling was disabled due to missing tools/support
-                            If st.ToolingEnabled AndAlso Not _chatToolingEnabled Then
-                                st.ToolingEnabled = False
-                                SaveInkyState(st)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim toolingEnabled As Boolean = SyncToolingState(st, supportsTooling)
 
                         Return JsonOk(New With {
                             .ok = True,
@@ -1360,8 +1366,8 @@ Partial Public Class ThisAddIn
                             .darkMode = st.DarkMode,
                             .supportsFiles = st.SupportsFileUploads,
                             .activeChat = activeChatId,
-                            .toolingEnabled = _chatToolingEnabled,
-                            .supportsTooling = CurrentModelSupportsTooling(st),
+                            .toolingEnabled = toolingEnabled,
+                            .supportsTooling = supportsTooling,
                             .toolingLogEnabled = INI_ToolingLogWindow,
                             .tools = GetToolListForBrowser()
                         })
@@ -1381,32 +1387,11 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
 
-                        ' Re-sync in-memory tooling state from persisted state
-                        _selectedToolsForChat = Nothing
-                        If stSw.SelectedToolNames IsNot Nothing AndAlso stSw.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(stSw.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim effectiveToolingEnabled As Boolean = SyncToolingState(stSw, supportsTooling)
 
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        Dim effectiveToolingEnabled As Boolean = False
-                        If stSw.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(stSw)
-                            effectiveToolingEnabled = hasTools AndAlso modelSupports
-                            _chatToolingEnabled = effectiveToolingEnabled
-                            If stSw.ToolingEnabled AndAlso Not effectiveToolingEnabled Then
-                                stSw.ToolingEnabled = False
-                                SaveInkyState(stSw)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        ' Build model list for the switched chat's state
+                        Dim models As List(Of Object) = Await GetModelListForBrowserAsync(stSw)
 
                         Return JsonOk(New With {
                                 .ok = True,
@@ -1416,8 +1401,9 @@ Partial Public Class ThisAddIn
                                 .supportsFiles = ComputeSupportsFiles(stSw.UseSecondApi, stSw.SelectedModelKey),
                                 .greeting = greetingSwitch,
                                 .toolingEnabled = effectiveToolingEnabled,
-                                .supportsTooling = CurrentModelSupportsTooling(stSw),
-                                .toolingLogEnabled = INI_ToolingLogWindow
+                                .supportsTooling = supportsTooling,
+                                .toolingLogEnabled = INI_ToolingLogWindow,
+                                .models = models
                             })
 
                     Case "inky_upload"
@@ -2040,39 +2026,15 @@ Partial Public Class ThisAddIn
                         ' Keep ToolingEnabled / SelectedToolNames / model selection / dark mode as-is
                         SaveInkyState(stClear)
 
-                        ' Re-sync in-memory tooling state from persisted state
-                        _selectedToolsForChat = Nothing
-                        If stClear.SelectedToolNames IsNot Nothing AndAlso stClear.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(stClear.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
-
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        Dim effectiveToolingEnabled As Boolean = False
-                        If stClear.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(stClear)
-                            effectiveToolingEnabled = hasTools AndAlso modelSupports
-                            _chatToolingEnabled = effectiveToolingEnabled
-                            If stClear.ToolingEnabled AndAlso Not effectiveToolingEnabled Then
-                                stClear.ToolingEnabled = False
-                                SaveInkyState(stClear)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim effectiveToolingEnabled As Boolean = SyncToolingState(stClear, supportsTooling)
 
                         Return JsonOk(New With {
                             .ok = True,
                             .activeChat = activeChatId,
                             .greeting = GetFriendlyGreeting(),
                             .toolingEnabled = effectiveToolingEnabled,
-                            .supportsTooling = CurrentModelSupportsTooling(stClear)
+                            .supportsTooling = supportsTooling
                         })
 
                     Case "inky_copylast"
@@ -2454,22 +2416,10 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
-        ' 1) Reconcile persisted preference
-        Try
-            Dim savedSecond As Boolean = My.Settings.Inky_UseSecondApiSelected
-            Dim savedKey As String = My.Settings.Inky_SelectedModelKey
-            Dim shouldApply As Boolean =
-                (savedSecond <> st.UseSecondApi) OrElse
-                (savedSecond AndAlso Not String.Equals(savedKey, st.SelectedModelKey, StringComparison.OrdinalIgnoreCase))
-            If shouldApply Then
-                st.UseSecondApi = savedSecond
-                st.SelectedModelKey = If(savedSecond, savedKey, "")
-                SaveInkyState(st)
-            End If
-        Catch
-        End Try
+        ' NOTE: Do NOT reconcile from My.Settings here - the passed-in st already has
+        ' the per-chat state. Overwriting it would break independent per-chat model selection.
 
-        ' 2) Availability
+        ' 1) Availability
         Dim hasPrimary As Boolean = Not String.IsNullOrWhiteSpace(INI_Model)
         Dim hasSecondApi As Boolean = INI_SecondAPI
         Dim hasSecondModelName As Boolean = Not String.IsNullOrWhiteSpace(INI_Model_2)
@@ -2488,7 +2438,7 @@ Partial Public Class ThisAddIn
             alts = Nothing
         End Try
 
-        ' 3) Normalize stale alternate selection EVEN if alts could not be loaded
+        ' 2) Normalize stale alternate selection EVEN if alts could not be loaded
         If st.UseSecondApi AndAlso Not String.IsNullOrWhiteSpace(st.SelectedModelKey) Then
             Dim exists As Boolean = False
             If alts IsNot Nothing Then
@@ -2506,7 +2456,7 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        ' 4) Only primary
+        ' 3) Only primary
         If hasPrimary AndAlso Not hasSecondary AndAlso altCount = 0 Then
             list.Add(New With {
                 .key = "default",
@@ -2518,7 +2468,7 @@ Partial Public Class ThisAddIn
             Return list
         End If
 
-        ' 5) Build list
+        ' 4) Build list
         If hasPrimary Then
             list.Add(New With {.key = "__hdr_primary__", .label = "Primary model:", .selected = False, .disabled = True, .isSeparator = False})
             list.Add(New With {
@@ -2557,7 +2507,7 @@ Partial Public Class ThisAddIn
             Next
         End If
 
-        ' 6) Never return an empty list → synthesize a safe primary entry
+        ' 5) Never return an empty list → synthesize a safe primary entry
         If list.Count = 0 Then
             Dim lbl = If(String.IsNullOrWhiteSpace(INI_Model), "Primary model (not configured)", INI_Model)
             list.Add(New With {

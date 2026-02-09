@@ -715,8 +715,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-
-
     Public Shared Property SP_Correct As String
         Get
             Return _context.SP_Correct
@@ -1007,7 +1005,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-
     Public Shared Property SP_SwitchParty As String
         Get
             Return _context.SP_SwitchParty
@@ -1023,6 +1020,24 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_Anonymize = value
+        End Set
+    End Property
+
+    Public Shared Property SP_SwitchParty_Document As String
+        Get
+            Return _context.SP_SwitchParty_Document
+        End Get
+        Set(value As String)
+            _context.SP_SwitchParty_Document = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Anonymize_Document As String
+        Get
+            Return _context.SP_Anonymize_Document
+        End Get
+        Set(value As String)
+            _context.SP_Anonymize_Document = value
         End Set
     End Property
 
@@ -1071,6 +1086,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_RemoveClutter As String
+        Get
+            Return _context.SP_RemoveClutter
+        End Get
+        Set(value As String)
+            _context.SP_RemoveClutter = value
+        End Set
+    End Property
 
     Public Shared Property SP_CheckforII As String
         Get
@@ -1219,6 +1242,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Markers As String
+        Get
+            Return _context.SP_Add_Markers
+        End Get
+        Set(value As String)
+            _context.SP_Add_Markers = value
+        End Set
+    End Property
 
     Public Shared Property SP_Add_Slides As String
         Get
@@ -1830,7 +1861,6 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
-
     Public Shared Property INI_MyStylePath As String
         Get
             Return _context.INI_MyStylePath
@@ -1901,6 +1931,24 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_WebAgentPathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SnapshotLibPath As String
+        Get
+            Return _context.INI_SnapshotLibPath
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SnapshotLibPathLocal As String
+        Get
+            Return _context.INI_SnapshotLibPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPathLocal = value
         End Set
     End Property
 
