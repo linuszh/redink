@@ -382,6 +382,12 @@ Namespace SharedLibrary
         ''' <param name="filePath">Path that may contain environment variables (e.g., <c>%APPDATA%</c>).</param>
         ''' <returns>The expanded full path, or an empty string on failure.</returns>
         Public Shared Function ExpandEnvironmentVariables(ByVal filePath As String) As String
+            ' Handle null/empty input early
+            If String.IsNullOrWhiteSpace(filePath) Then Return ""
+
+            ' Trim whitespace from input before processing
+            filePath = filePath.Trim()
+
             ' Start with the input path
             Dim expandedPath As String = Environment.ExpandEnvironmentVariables(filePath)
 
@@ -399,19 +405,27 @@ Namespace SharedLibrary
                 expandedPath = Regex.Replace(expandedPath, "%APPSTARTUPPATH%", Path.Combine(System.Windows.Forms.Application.StartupPath), RegexOptions.IgnoreCase)
                 expandedPath = Regex.Replace(expandedPath, "%DESKTOP%", Environment.GetFolderPath(Environment.SpecialFolder.Desktop), RegexOptions.IgnoreCase)
 
-                ' Clean up any potential double backslashes
-                expandedPath = Regex.Replace(expandedPath, "\\{2,}", "\\")
+                ' Clean up any potential double backslashes (but preserve UNC paths)
+                If Not expandedPath.StartsWith("\\") Then
+                    expandedPath = Regex.Replace(expandedPath, "\\{2,}", "\")
+                End If
 
-                ' Return the expanded path
-                If expandedPath = "" Then Return "" Else Return Path.GetFullPath(expandedPath)
+                ' Only normalize with GetFullPath if the path is already absolute.
+                ' Relative paths should remain relative - the caller knows the correct base directory.
+                If String.IsNullOrEmpty(expandedPath) Then
+                    Return ""
+                ElseIf Path.IsPathRooted(expandedPath) Then
+                    Return Path.GetFullPath(expandedPath).Trim()
+                Else
+                    Return expandedPath.Trim()
+                End If
 
             Catch ex As System.Exception
-                ' Return Nothing on failure
+                ' Return empty string on failure
                 Return ""
             End Try
 
         End Function
-
 
 
         ''' <summary>

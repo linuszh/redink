@@ -21,6 +21,10 @@
 '    preserve meaning, terminology, and tone across batch boundaries.
 '  - Pure Text to LLM: Only plain, visible text is sent to the LLM—no XML, no
 '    formatting codes, and no markup—ensuring maximum formatting preservation.
+'  - Formatting Marker Mode (optional): When enabled, inserts | markers at run
+'    boundaries so the LLM can preserve formatting alignment. The LLM returns
+'    markers in the same positions relative to the translated text, and the
+'    redistribution uses these markers instead of proportional character splitting.
 '  - Correction Mode: When correcting, creates a Word compare document showing
 '    all changes between original and corrected versions.
 ' =============================================================================
@@ -31,6 +35,7 @@ Option Strict Off
 Imports System.Diagnostics
 Imports System.IO
 Imports System.IO.Compression
+Imports System.Runtime.InteropServices
 
 Imports System.Text
 Imports System.Text.RegularExpressions
@@ -86,6 +91,11 @@ Partial Public Class ThisAddIn
     Private Const CompareFileSuffix As String = "_corrected_compare"
 
     ''' <summary>
+    ''' The marker character inserted at run boundaries when formatting-aware mode is enabled.
+    ''' </summary>
+    Private Const RunBoundaryMarker As String = "|"
+
+    ''' <summary>
     ''' Represents a text run (w:t element) with its content and XML reference.
     ''' </summary>
     Private Class TranslateTextRunInfo
@@ -100,6 +110,7 @@ Partial Public Class ThisAddIn
         Public Property Index As Integer
         Public Property TextRuns As List(Of TranslateTextRunInfo)
         Public Property FullText As String  ' Combined text from all runs (plain text only)
+        Public Property MarkerText As String ' Text with | markers at run boundaries (Nothing if single-run or formatting markers disabled)
         Public Property TranslatedText As String
         Public Property IsEmpty As Boolean
     End Class
@@ -118,12 +129,33 @@ Partial Public Class ThisAddIn
     Private _isFreestyle As Boolean = False
 
     ''' <summary>
+    ''' Whether to use formatting-aware marker mode for the current processing run.
+    ''' </summary>
+    Private _useFormattingMarkers As Boolean = False
+
+    ''' <summary>
     ''' Entry point for correction (default prompt/suffix).
     ''' </summary>
     Public Async Sub CorrectWordDocuments()
-        _isFreestyle = False
-        Await CorrectWordDocuments(Nothing, Nothing)
+        Await CorrectWordDocuments(Nothing, Nothing, False, False)
     End Sub
+
+    ''' <summary>
+    ''' Entry point for anonymization (default prompt/suffix).
+    ''' </summary>
+    Public Async Sub AnonymizeWordDocuments()
+        OtherPromptUnfilled = ""
+        Await CorrectWordDocuments(SP_Anonymize_Document, "_anonymized", False, True)
+    End Sub
+
+    ''' <summary>
+    ''' Entry point for switching parties (default prompt/suffix).
+    ''' </summary>
+    Public Async Sub SwitchPartiesDocuments()
+        OtherPromptUnfilled = ""
+        Await CorrectWordDocuments(InterpolateAtRuntime(SP_SwitchParty_Document), "_newparties", False, True)
+    End Sub
+
 
     ''' <summary>
     ''' Entry point for correction with optional prompt/suffix overrides.
@@ -133,11 +165,12 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Function CorrectWordDocuments(Optional promptOverride As String = Nothing,
                                           Optional correctedSuffixOverride As String = Nothing,
-                                          Optional UseSecondAPI As Boolean = False) As System.Threading.Tasks.Task
+                                          Optional UseSecondAPI As Boolean = False,
+                                          Optional IsFreestyle As Boolean = False) As Threading.Tasks.Task
 
         _correctPromptOverride = If(String.IsNullOrWhiteSpace(promptOverride), Nothing, promptOverride)
         _useSecondAPI = UseSecondAPI
-        _isFreestyle = True
+        _isFreestyle = IsFreestyle
 
         If String.IsNullOrWhiteSpace(correctedSuffixOverride) Then
             _correctSuffixOverride = Nothing
@@ -410,6 +443,17 @@ Partial Public Class ThisAddIn
             Exit Function
         End If
 
+        ' Ask about formatting-aware marker mode
+        Dim fmtChoice As Integer = ShowCustomYesNoBox(
+            "Would you like to enable formatting-aware mode?" & vbCrLf & vbCrLf &
+            "This mode uses markers to help the AI preserve the alignment of bold, italic, " &
+            "and other formatting changes within paragraphs. It produces better formatting " &
+            "results but may increase processing time and not work with all models." & vbCrLf & vbCrLf &
+            "Standard mode uses proportional text distribution which may shift formatting boundaries.",
+            "Yes, preserve formatting alignment", "No, use standard mode")
+        If fmtChoice = 0 Then Exit Function
+        _useFormattingMarkers = (fmtChoice = 1)
+
         ' Confirm if many files to process
         If filesToProcess.Count > 10 Then
             Dim confirmMsg As String = If(mode = DocumentProcessMode.Translate,
@@ -474,6 +518,7 @@ Partial Public Class ThisAddIn
             Next
         Finally
             ProgressBarModule.CancelOperation = True
+            _useFormattingMarkers = False
         End Try
 
         ' Summary
@@ -918,6 +963,7 @@ Partial Public Class ThisAddIn
     ''' Extracts paragraph information from document XML.
     ''' Only extracts plain text - no formatting codes sent to LLM.
     ''' Preserves space information for accurate redistribution.
+    ''' When formatting markers are enabled, also builds marker-annotated text.
     ''' </summary>
     Private Function ExtractTranslateParagraphsFromXml(xmlDoc As System.Xml.XmlDocument, nsMgr As System.Xml.XmlNamespaceManager) As List(Of TranslateParagraphInfo)
         Dim paragraphs As New List(Of TranslateParagraphInfo)()
@@ -930,7 +976,8 @@ Partial Public Class ThisAddIn
             Dim paraInfo As New TranslateParagraphInfo() With {
             .Index = paraIndex,
             .TextRuns = New List(Of TranslateTextRunInfo)(),
-            .TranslatedText = Nothing
+            .TranslatedText = Nothing,
+            .MarkerText = Nothing
         }
 
             ' Find all w:t (text) elements within this paragraph
@@ -970,6 +1017,12 @@ Partial Public Class ThisAddIn
             paraInfo.FullText = fullTextBuilder.ToString()
             paraInfo.IsEmpty = String.IsNullOrWhiteSpace(paraInfo.FullText)
 
+            ' Build marker-annotated text when formatting markers are enabled
+            ' Only meaningful for multi-run paragraphs with non-empty runs
+            If _useFormattingMarkers AndAlso Not paraInfo.IsEmpty AndAlso paraInfo.TextRuns.Count > 1 Then
+                paraInfo.MarkerText = BuildMarkerAnnotatedText(paraInfo.TextRuns)
+            End If
+
             paragraphs.Add(paraInfo)
             paraIndex += 1
         Next
@@ -978,8 +1031,50 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
+    ''' Builds a marker-annotated version of a paragraph's text by inserting | at run boundaries.
+    ''' Only inserts markers between non-empty runs where formatting actually changes.
+    ''' </summary>
+    ''' <param name="textRuns">The text runs of the paragraph.</param>
+    ''' <returns>The annotated text with | markers, or Nothing if only one effective run.</returns>
+    Private Shared Function BuildMarkerAnnotatedText(textRuns As List(Of TranslateTextRunInfo)) As String
+        If textRuns Is Nothing OrElse textRuns.Count <= 1 Then Return Nothing
+
+        Dim sb As New StringBuilder()
+        Dim markerCount As Integer = 0
+
+        For i As Integer = 0 To textRuns.Count - 1
+            Dim runText As String = textRuns(i).OriginalText
+
+            ' Insert marker between runs, but only when both sides are non-empty
+            ' (empty runs don't carry visible formatting, so a marker would be misleading)
+            If i > 0 AndAlso runText.Length > 0 Then
+                ' Check if previous run was non-empty
+                Dim prevNonEmpty As Boolean = False
+                For j As Integer = i - 1 To 0 Step -1
+                    If textRuns(j).OriginalText.Length > 0 Then
+                        prevNonEmpty = True
+                        Exit For
+                    End If
+                Next
+                If prevNonEmpty Then
+                    sb.Append(RunBoundaryMarker)
+                    markerCount += 1
+                End If
+            End If
+
+            sb.Append(runText)
+        Next
+
+        ' If no markers were inserted, there's no benefit to using marker mode
+        If markerCount = 0 Then Return Nothing
+
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
     ''' Processes paragraphs in batches with context windows.
     ''' Sends ONLY plain text to the LLM - no XML, no formatting codes.
+    ''' When formatting markers are enabled, includes | markers and instructs the LLM to preserve them.
     ''' </summary>
     Private Async Function ProcessParagraphBatches(
         paragraphs As List(Of TranslateParagraphInfo),
@@ -998,6 +1093,11 @@ Partial Public Class ThisAddIn
         Else
             Dim effectivePrompt As String = If(String.IsNullOrWhiteSpace(_correctPromptOverride), SP_Correct_Document, _correctPromptOverride)
             systemPrompt = InterpolateAtRuntime(effectivePrompt)
+        End If
+
+        ' Append formatting marker instructions to system prompt when enabled
+        If _useFormattingMarkers Then
+            systemPrompt = systemPrompt & vbCrLf & vbCrLf & SP_Add_Markers
         End If
 
         Dim batchIndex As Integer = 0
@@ -1024,28 +1124,38 @@ Partial Public Class ThisAddIn
             ' Build prompt with ONLY plain text - no formatting codes
             Dim promptBuilder As New StringBuilder()
 
-            ' Context Before (already processed - plain text only)
+            ' Context Before (already processed - plain text only, no markers)
             Dim contextBeforeStart As Integer = Math.Max(0, batchStart - TranslateContextBefore)
             If contextBeforeStart < batchStart Then
                 promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
                 For j As Integer = contextBeforeStart To batchStart - 1
                     Dim p = processableParagraphs(j)
-                    promptBuilder.AppendLine(If(p.TranslatedText, p.FullText))
+                    ' Context uses plain translated text (no markers) for readability
+                    Dim contextText As String = If(p.TranslatedText, p.FullText)
+                    ' Strip any markers from translated text for clean context
+                    If _useFormattingMarkers AndAlso contextText IsNot Nothing Then
+                        contextText = contextText.Replace(RunBoundaryMarker, "")
+                    End If
+                    promptBuilder.AppendLine(contextText)
                 Next
                 promptBuilder.AppendLine()
             End If
 
-            ' Paragraphs to process (plain text only)
+            ' Paragraphs to process (plain text, or marker-annotated if enabled)
             promptBuilder.AppendLine("[TEXTTOPROCESS]")
             Dim batchNumber As Integer = 1
             For j As Integer = batchStart To batchEnd
-                promptBuilder.AppendLine($"[{batchNumber}] {processableParagraphs(j).FullText}")
+                ' Use marker-annotated text when available, otherwise plain text
+                Dim textToSend As String = If(_useFormattingMarkers AndAlso processableParagraphs(j).MarkerText IsNot Nothing,
+                                              processableParagraphs(j).MarkerText,
+                                              processableParagraphs(j).FullText)
+                promptBuilder.AppendLine($"[{batchNumber}] {textToSend}")
                 batchNumber += 1
             Next
             promptBuilder.AppendLine("[/TEXTTOPROCESS]")
             promptBuilder.AppendLine()
 
-            ' Context After (upcoming - plain text only)
+            ' Context After (upcoming - plain text only, no markers)
             Dim contextAfterEnd As Integer = Math.Min(processableParagraphs.Count - 1, batchEnd + TranslateContextAfter)
             If contextAfterEnd > batchEnd Then
                 promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
@@ -1076,14 +1186,14 @@ Partial Public Class ThisAddIn
             End If
             _isFreestyle = False
 
-            If String.IsNullOrWhiteSpace(response) Then
+            If String.IsNullOrWhiteSpace(Response) Then
                 Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", "Correction")
                 ShowCustomMessageBox($"LLM returned empty response. {modeNoun} incomplete.")
                 Return False
             End If
 
             ' Parse and store results
-            ParseTranslateResponse(response, processableParagraphs, batchStart, batchEnd)
+            ParseTranslateResponse(Response, processableParagraphs, batchStart, batchEnd)
 
             batchIndex = batchEnd + 1
         End While
@@ -1123,7 +1233,9 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Applies translated/corrected text back to XML nodes, preserving all formatting.
-    ''' Uses character-based distribution with guaranteed spacing.
+    ''' When formatting markers are enabled and the LLM returned the correct number of | markers,
+    ''' uses marker-based splitting for precise formatting alignment.
+    ''' Otherwise falls back to character-based proportional distribution.
     ''' </summary>
     Private Sub ApplyTranslationsToXml(paragraphs As List(Of TranslateParagraphInfo))
         For Each para In paragraphs
@@ -1134,8 +1246,21 @@ Partial Public Class ThisAddIn
 
             ' Simple case: only one run
             If para.TextRuns.Count = 1 Then
+                ' Strip any markers that might have leaked into single-run paragraphs
+                If _useFormattingMarkers Then
+                    translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                End If
                 SetTextNodeWithSpacePreserve(para.TextRuns(0).TextNode, translatedText)
                 Continue For
+            End If
+
+            ' Try marker-based distribution if formatting markers were used
+            If _useFormattingMarkers AndAlso para.MarkerText IsNot Nothing Then
+                Dim markerApplied As Boolean = TryApplyMarkerBasedDistribution(para, translatedText)
+                If markerApplied Then Continue For
+                ' If marker parsing failed (wrong count, etc.), fall through to proportional
+                ' Strip markers before proportional fallback
+                translatedText = translatedText.Replace(RunBoundaryMarker, "")
             End If
 
             Dim totalOriginalLength As Integer = para.FullText.Length
@@ -1234,6 +1359,82 @@ Partial Public Class ThisAddIn
             ' The fix above ensures we never split mid-word, so this is no longer needed
         Next
     End Sub
+
+    ''' <summary>
+    ''' Attempts to distribute translated text across runs using | markers from the LLM response.
+    ''' The markers indicate where formatting boundaries should fall in the translated text.
+    ''' </summary>
+    ''' <param name="para">The paragraph info with run structure.</param>
+    ''' <param name="translatedText">The translated text potentially containing | markers.</param>
+    ''' <returns>True if markers were successfully applied; False to fall back to proportional mode.</returns>
+    Private Function TryApplyMarkerBasedDistribution(para As TranslateParagraphInfo, translatedText As String) As Boolean
+        ' Count expected markers: number of boundaries between non-empty runs
+        Dim expectedMarkerCount As Integer = 0
+        If para.MarkerText IsNot Nothing Then
+            For Each ch As Char In para.MarkerText
+                If ch = RunBoundaryMarker(0) Then expectedMarkerCount += 1
+            Next
+        End If
+
+        If expectedMarkerCount = 0 Then Return False
+
+        ' Count actual markers in translated text
+        Dim actualMarkerCount As Integer = 0
+        For Each ch As Char In translatedText
+            If ch = RunBoundaryMarker(0) Then actualMarkerCount += 1
+        Next
+
+        ' If marker count doesn't match, fall back to proportional
+        If actualMarkerCount <> expectedMarkerCount Then
+            Debug.WriteLine($"Marker count mismatch for paragraph {para.Index}: expected {expectedMarkerCount}, got {actualMarkerCount}. Falling back to proportional.")
+            Return False
+        End If
+
+        ' Split translated text by markers
+        Dim segments As String() = translatedText.Split(New String() {RunBoundaryMarker}, StringSplitOptions.None)
+
+        ' Map segments back to non-empty runs
+        ' Build list of (runIndex, isNonEmpty) pairs to identify which runs receive segments
+        Dim nonEmptyRunIndices As New List(Of Integer)()
+        Dim lastNonEmptyIndex As Integer = -1
+
+        ' Determine which run indices correspond to marker boundaries
+        ' A marker is placed between consecutive non-empty runs (skipping empty ones)
+        For i As Integer = 0 To para.TextRuns.Count - 1
+            If para.TextRuns(i).OriginalText.Length > 0 Then
+                nonEmptyRunIndices.Add(i)
+            End If
+        Next
+
+        ' We should have exactly (expectedMarkerCount + 1) segments for (expectedMarkerCount + 1) non-empty run groups
+        ' But non-empty runs may not equal segment count - we need segments = nonEmptyRunIndices.Count
+        If segments.Length <> nonEmptyRunIndices.Count Then
+            ' Segments don't match non-empty run count - this can happen when
+            ' multiple consecutive non-empty runs exist but only some boundaries had markers
+            Debug.WriteLine($"Segment count {segments.Length} <> non-empty run count {nonEmptyRunIndices.Count} for paragraph {para.Index}. Falling back.")
+            Return False
+        End If
+
+        ' Apply segments to non-empty runs, clear empty runs
+        Dim segmentIdx As Integer = 0
+        For runIdx As Integer = 0 To para.TextRuns.Count - 1
+            Dim run = para.TextRuns(runIdx)
+            If run.OriginalText.Length = 0 Then
+                ' Empty run stays empty
+                SetTextNodeWithSpacePreserve(run.TextNode, "")
+            Else
+                ' Non-empty run gets the corresponding segment
+                If segmentIdx < segments.Length Then
+                    SetTextNodeWithSpacePreserve(run.TextNode, segments(segmentIdx))
+                    segmentIdx += 1
+                Else
+                    SetTextNodeWithSpacePreserve(run.TextNode, "")
+                End If
+            End If
+        Next
+
+        Return True
+    End Function
 
     ''' <summary>
     ''' Sets the text content of a WordprocessingML <c>w:t</c> node and ensures

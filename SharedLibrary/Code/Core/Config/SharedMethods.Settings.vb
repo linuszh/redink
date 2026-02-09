@@ -956,6 +956,10 @@ Namespace SharedLibrary
                     Return context.INI_WebAgentPath
                 Case "WebAgentPathLocal"
                     Return context.INI_WebAgentPathLocal
+                Case "SnapshotLibPath"
+                    Return context.INI_SnapshotLibPath
+                Case "SnapshotLibPathLocal"
+                    Return context.INI_SnapshotLibPathLocal
                 Case "DocCheckPath"
                     Return context.INI_DocCheckPath
                 Case "DocCheckPathLocal"
@@ -1252,6 +1256,10 @@ Namespace SharedLibrary
                     context.INI_WebAgentPath = value
                 Case "WebAgentPathLocal"
                     context.INI_WebAgentPathLocal = value
+                Case "SnapshotLibPath"
+                    context.INI_SnapshotLibPath = value
+                Case "SnapshotLibPathLocal"
+                    context.INI_SnapshotLibPathLocal = value
                 Case "FindClausePath"
                     context.INI_FindClausePath = value
                 Case "FindClausePathLocal"
@@ -1663,6 +1671,8 @@ Namespace SharedLibrary
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
+                    {"SnapshotLibPath", context.INI_SnapshotLibPath},
+                    {"SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal},
                     {"DocCheckPath", context.INI_DocCheckPath},
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
@@ -1709,7 +1719,10 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
                     {"SP_SwitchParty", context.SP_SwitchParty},
                     {"SP_Anonymize", context.SP_Anonymize},
+                    {"SP_SwitchParty_Document", context.SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", context.SP_Anonymize_Document},
                     {"SP_Rename", context.SP_Rename},
+                    {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
                     {"SP_Extract", context.SP_Extract},
@@ -1730,6 +1743,7 @@ Namespace SharedLibrary
                     {"SP_Add_Bubbles_Format", context.SP_Add_Bubbles_Format},
                     {"SP_Add_Batch", context.SP_Add_Batch},
                     {"SP_Add_Tooling", context.SP_Add_Tooling},
+                    {"SP_Add_Markers", context.SP_Add_Markers},
                     {"SP_Add_Slides", context.SP_Add_Slides},
                     {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_Add_Chart", context.SP_Add_Chart},
@@ -1805,7 +1819,10 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
                     {"SP_SwitchParty", Default_SP_SwitchParty},
                     {"SP_Anonymize", Default_SP_Anonymize},
+                    {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
                     {"SP_Rename", Default_SP_Rename},
+                    {"SP_RemoveClutter", Default_SP_RemoveClutter},
                     {"SP_Redact", Default_SP_Redact},
                     {"SP_CheckforII", Default_SP_CheckforII},
                     {"SP_Extract", Default_SP_Extract},
@@ -1826,6 +1843,7 @@ Namespace SharedLibrary
                     {"SP_Add_Bubbles_Format", Default_SP_Add_Bubbles_Format},
                     {"SP_Add_Batch", Default_SP_Add_Batch},
                     {"SP_Add_Tooling", Default_SP_Add_Tooling},
+                    {"SP_Add_Markers", Default_SP_Add_Markers},
                     {"SP_Add_Slides", Default_SP_Add_Slides},
                     {"SP_Add_Chart", Default_SP_Add_Chart},
                     {"SP_BubblesExcel", Default_SP_BubblesExcel},
@@ -2185,6 +2203,8 @@ Namespace SharedLibrary
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
+                    {"SnapshotLibPath", context.INI_SnapshotLibPath},
+                    {"SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal},
                     {"DocCheckPath", context.INI_DocCheckPath},
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
@@ -2779,6 +2799,8 @@ Namespace SharedLibrary
             variableValues.Add("FindClausePathLocal", context.INI_FindClausePathLocal)
             variableValues.Add("WebAgentPath", context.INI_WebAgentPath)
             variableValues.Add("WebAgentPathLocal", context.INI_WebAgentPathLocal)
+            variableValues.Add("SnapshotLibPath", context.INI_SnapshotLibPath)
+            variableValues.Add("SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal)
             variableValues.Add("DocCheckPath", context.INI_DocCheckPath)
             variableValues.Add("DocCheckPathLocal", context.INI_DocCheckPathLocal)
             variableValues.Add("DocStylePath", context.INI_DocStylePath)
@@ -2822,7 +2844,10 @@ Namespace SharedLibrary
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
             variableValues.Add("SP_SwitchParty", context.SP_SwitchParty)
             variableValues.Add("SP_Anonymize", context.SP_Anonymize)
+            variableValues.Add("SP_SwitchParty_Document", context.SP_SwitchParty_Document)
+            variableValues.Add("SP_Anonymize_Document", context.SP_Anonymize_Document)
             variableValues.Add("SP_Rename", context.SP_Rename)
+            variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
             variableValues.Add("SP_Extract", context.SP_Extract)
@@ -2843,6 +2868,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Bubbles_Format", context.SP_Add_Bubbles_Format)
             variableValues.Add("SP_Add_Batch", context.SP_Add_Batch)
             variableValues.Add("SP_Add_Tooling", context.SP_Add_Tooling)
+            variableValues.Add("SP_Add_Markers", context.SP_Add_Markers)
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
             variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
@@ -2990,7 +3016,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
                 If updatedValues.ContainsKey("SP_SwitchParty") Then context.SP_SwitchParty = CStr(updatedValues("SP_SwitchParty"))
                 If updatedValues.ContainsKey("SP_Anonymize") Then context.SP_Anonymize = CStr(updatedValues("SP_Anonymize"))
+                If updatedValues.ContainsKey("SP_SwitchParty_Document") Then context.SP_SwitchParty_Document = CStr(updatedValues("SP_SwitchParty_Document"))
+                If updatedValues.ContainsKey("SP_Anonymize_Document") Then context.SP_Anonymize_Document = CStr(updatedValues("SP_Anonymize_Document"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
+                If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
                 If updatedValues.ContainsKey("SP_Extract") Then context.SP_Extract = CStr(updatedValues("SP_Extract"))
@@ -3011,6 +3040,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Bubbles_Format") Then context.SP_Add_Bubbles_Format = CStr(updatedValues("SP_Add_Bubbles_Format"))
                 If updatedValues.ContainsKey("SP_Add_Batch") Then context.SP_Add_Batch = CStr(updatedValues("SP_Add_Batch"))
                 If updatedValues.ContainsKey("SP_Add_Tooling") Then context.SP_Add_Tooling = CStr(updatedValues("SP_Add_Tooling"))
+                If updatedValues.ContainsKey("SP_Add_Markers") Then context.SP_Add_Markers = CStr(updatedValues("SP_Add_Markers"))
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
                 If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
@@ -3079,6 +3109,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
                 If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
                 If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
+                If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))
+                If updatedValues.ContainsKey("SnapshotLibPathLocal") Then context.INI_SnapshotLibPathLocal = CStr(updatedValues("SnapshotLibPathLocal"))
                 If updatedValues.ContainsKey("DocCheckPath") Then context.INI_DocCheckPath = CStr(updatedValues("DocCheckPath"))
                 If updatedValues.ContainsKey("DocCheckPathLocal") Then context.INI_DocCheckPathLocal = CStr(updatedValues("DocCheckPathLocal"))
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))

@@ -97,6 +97,7 @@ Partial Class Ribbon1
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.RI_WebAgent = Me.Factory.CreateRibbonButton
         Me.RI_EditWebAgent = Me.Factory.CreateRibbonButton
+        Me.RI_Snapshot = Me.Factory.CreateRibbonButton
         Me.RI_FindHidden = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleAM = Me.Factory.CreateRibbonButton
@@ -116,6 +117,7 @@ Partial Class Ribbon1
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
+        Me.RI_Remove = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
@@ -356,10 +358,10 @@ Partial Class Ribbon1
         '
         'RI_Anonymize
         '
-        Me.RI_Anonymize.Label = "Anonymize Text (AI)"
+        Me.RI_Anonymize.Label = "Anonymize Text/File (AI)"
         Me.RI_Anonymize.Name = "RI_Anonymize"
         Me.RI_Anonymize.OfficeImageId = "ApplyCoAuthoringLock"
-        Me.RI_Anonymize.ScreenTip = "Will anonymize the selected text"
+        Me.RI_Anonymize.ScreenTip = "Will anonymize the selected text or the Word file(s) you provide"
         Me.RI_Anonymize.ShowImage = True
         '
         'RI_Anonymization
@@ -408,7 +410,7 @@ Partial Class Ribbon1
         Me.RI_SwitchParty.Label = "Switch Party"
         Me.RI_SwitchParty.Name = "RI_SwitchParty"
         Me.RI_SwitchParty.OfficeImageId = "AddDepartment"
-        Me.RI_SwitchParty.ScreenTip = "Will switch two parties in your selected text"
+        Me.RI_SwitchParty.ScreenTip = "Will switch two parties in your selected text or in the Word file(s) you provide"
         Me.RI_SwitchParty.ShowImage = True
         '
         'Menu3
@@ -427,6 +429,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu3.Items.Add(Me.RI_WebAgent)
         Me.Menu3.Items.Add(Me.RI_EditWebAgent)
+        Me.Menu3.Items.Add(Me.RI_Snapshot)
         Me.Menu3.Items.Add(Me.RI_FindHidden)
         Me.Menu3.Label = "Analyze"
         Me.Menu3.Name = "Menu3"
@@ -547,6 +550,14 @@ Partial Class Ribbon1
         Me.RI_EditWebAgent.ScreenTip = "Allows you to create or edit a WebAgent script using your LLM"
         Me.RI_EditWebAgent.ShowImage = True
         '
+        'RI_Snapshot
+        '
+        Me.RI_Snapshot.Label = "Snapshot && Compare"
+        Me.RI_Snapshot.Name = "RI_Snapshot"
+        Me.RI_Snapshot.OfficeImageId = "ReviewCompareLastVersion"
+        Me.RI_Snapshot.ScreenTip = "Snapshot a file or URL and have it compared with earlier snapshots of the same"
+        Me.RI_Snapshot.ShowImage = True
+        '
         'RI_FindHidden
         '
         Me.RI_FindHidden.Label = "Find Hidden Prompts"
@@ -621,6 +632,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
         Me.Menu2.Items.Add(Me.RI_Markdown)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
+        Me.Menu2.Items.Add(Me.RI_Remove)
         Me.Menu2.Items.Add(Me.RI_InsertClipboard)
         Me.Menu2.Label = "Word Helpers"
         Me.Menu2.Name = "Menu2"
@@ -719,6 +731,15 @@ Partial Class Ribbon1
         Me.RI_ContentControls.ScreenTip = "Removes content controls from the selected or all text while preserving content a" &
     "nd formatting"
         Me.RI_ContentControls.ShowImage = True
+        '
+        'RI_Remove
+        '
+        Me.RI_Remove.Label = "Remove RI: Reference"
+        Me.RI_Remove.Name = "RI_Remove"
+        Me.RI_Remove.OfficeImageId = "ReviewDeleteComment"
+        Me.RI_Remove.ScreenTip = "Remove the RI: references from bubbles comments that indicate that the content is" &
+    " from Red Ink"
+        Me.RI_Remove.ShowImage = True
         '
         'RI_InsertClipboard
         '
@@ -966,6 +987,12 @@ Partial Class Ribbon1
         End If
 
 
+        If Trim(ThisAddIn.INI_SnapshotLibPath) = "" And Trim(ThisAddIn.INI_SnapshotLibPathLocal) = "" Then
+            Me.RI_Snapshot.Visible = False
+        Else
+            Me.RI_Snapshot.Visible = True
+        End If
+
         If Trim(ThisAddIn.INI_DiscussInkyPath) = "" And Trim(ThisAddIn.INI_DiscussInkyPathLocal) = "" Then
             Me.RI_DiscussInky.Visible = False
         Else
@@ -1067,6 +1094,8 @@ Partial Class Ribbon1
     Friend WithEvents RI_ConvertDocToTxt As RibbonButton
     Friend WithEvents RI_FlattenPDF As RibbonButton
     Friend WithEvents RI_Charting As RibbonButton
+    Friend WithEvents RI_Snapshot As RibbonButton
+    Friend WithEvents RI_Remove As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

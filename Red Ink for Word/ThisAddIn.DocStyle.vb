@@ -693,7 +693,7 @@ Partial Public Class ThisAddIn
     ''' definitions, and then applies LLM-provided style mappings to target paragraphs.
     ''' </summary>
     Public Async Sub ApplyStyleTemplate()
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim do2ndModel As Boolean = False
         Dim settings As New DocStyleSettings()

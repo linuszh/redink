@@ -13,7 +13,7 @@
 ; DefaultPath = the default path to be used if none is use (will be expanded)
 ; DefaultFileName = the default filename of the file on the target
 ;
-; 28 December 2025
+; 1 February 2026
 
 Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %Appdata%\microsoft\word; promptlib.txt
 
@@ -40,3 +40,4 @@ WebAgent Sample 2 (DuckDuckGo); {AppsUrl}{AppsUrlDir}redink-ag-DuckDuckGo_WebSea
 
 DocStyle Sample (Contract); {AppsUrl}{AppsUrlDir}redink-ds-General_Contract_Template.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ds-General_Contract_Template.json
 
+Snapshot Library; {AppsUrl}{AppsUrlDir}snapshotlib.txt; Word; SnapshotLibPath; True; %Appdata%\microsoft\word; snapshotlib.txt

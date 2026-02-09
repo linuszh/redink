@@ -63,7 +63,7 @@ Partial Public Class ThisAddIn
     ''' </remarks>
     Public Async Function FindHiddenPrompts() As System.Threading.Tasks.Task
 
-        If INILoadFail() Then Return
+        If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
         Dim Prefix As String = "-FHP"
 
