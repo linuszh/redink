@@ -1295,6 +1295,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_MailMover As String
+        Get
+            Return _context.SP_MailMover
+        End Get
+        Set(value As String)
+            _context.SP_MailMover = value
+        End Set
+    End Property
 
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
@@ -1748,6 +1756,23 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_MailMoverPath As String
+        Get
+            Return _context.INI_MailMoverPath
+        End Get
+        Set(value As String)
+            _context.INI_MailMoverPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_MailMoverPathLocal As String
+        Get
+            Return _context.INI_MailMoverPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_MailMoverPathLocal = value
+        End Set
+    End Property
 
     Public Shared Property INI_SpeechModelPath As String
         Get
