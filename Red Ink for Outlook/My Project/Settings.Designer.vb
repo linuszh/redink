@@ -149,6 +149,18 @@ Namespace My
                 Me("selectedToolNames") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardColumns() As String
+            Get
+                Return CType(Me("InboxBoardColumns"),String)
+            End Get
+            Set
+                Me("InboxBoardColumns") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

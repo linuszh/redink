@@ -641,6 +641,7 @@
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
+    <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />

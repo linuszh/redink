@@ -352,6 +352,7 @@
     <Compile Include="Ribbon1.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.Tooling.vb" />
