@@ -53,7 +53,7 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.2.1.200</ApplicationVersion>
+    <ApplicationVersion>1.2.2.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
@@ -352,6 +352,7 @@
     <Compile Include="Ribbon1.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.Commands.MailMover.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.Tooling.vb" />
     <Compile Include="ThisAddIn.VarHelpers.vb" />
