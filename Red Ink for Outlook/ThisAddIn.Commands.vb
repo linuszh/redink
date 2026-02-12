@@ -123,7 +123,6 @@ Partial Public Class ThisAddIn
                 Case "Correct"
                     Command_InsertAfter(InterpolateAtRuntime(SP_Correct), INI_DoMarkupOutlook, INI_KeepFormat2, Override(INI_ReplaceText2, INI_ReplaceText2Override), Override(INI_MarkupMethodOutlook, INI_MarkupMethodOutlookOverride))
                 Case "Summarize"
-
                     Textlength = GetSelectedTextLength()
 
                     If Textlength = 0 Then
@@ -265,6 +264,8 @@ Partial Public Class ThisAddIn
         Try
 
             If Command = "InsertClipboard" Then InsertClipboard() : Return
+
+            If Command = "MailMover" Then MailMover() : Return
 
             Dim Sumup As Boolean = (Command = "Sumup")
             Dim Translate As Boolean = (Command = "Translate" OrElse Command = "PrimLang")

@@ -980,7 +980,7 @@ Namespace SharedLibrary
                     Return context.INI_LogoPath
                 Case "LogoPathMedium"
                     Return context.INI_LogoPathMedium
-                Case "LotoPathLarge"
+                Case "LogoPathLarge"
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
@@ -1034,8 +1034,6 @@ Namespace SharedLibrary
                     Return context.INI_UsageRestrictions
                 Case "LogPath"
                     Return context.INI_LogPath
-                Case "LogPath"
-                    Return context.INI_LogPath
                 Case "ContextMenu"
                     Return context.INI_ContextMenu.ToString()
                 Case "NoLocalConfig"
@@ -1064,6 +1062,10 @@ Namespace SharedLibrary
                     Return context.INI_RenameLibPath
                 Case "RenameLibPathLocal"
                     Return context.INI_RenameLibPathLocal
+                Case "MailMoverPath"
+                    Return context.INI_MailMoverPath
+                Case "MailMoverPathLocal"
+                    Return context.INI_MailMoverPathLocal
                 Case "TTSEndpoint"
                     Return context.INI_TTSEndpoint
                 Case "OAuth2"
@@ -1360,6 +1362,10 @@ Namespace SharedLibrary
                     context.INI_RenameLibPath = value
                 Case "RenameLibPathLocal"
                     context.INI_RenameLibPathLocal = value
+                Case "MailMoverPath"
+                    context.INI_MailMoverPath = value
+                Case "MailMoverPathLocal"
+                    context.INI_MailMoverPathLocal = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
                 Case "ToolingLogWindow"
@@ -1625,6 +1631,7 @@ Namespace SharedLibrary
                     {"ISearch_URL", context.INI_ISearch_URL},
                     {"ISearch_ResponseMask1", context.INI_ISearch_ResponseMask1},
                     {"ISearch_ResponseMask2", context.INI_ISearch_ResponseMask2},
+                    {"ISearch_ResponseURLStart", context.INI_ISearch_ResponseURLStart},
                     {"ISearch_Name", context.INI_ISearch_Name},
                     {"ISearch_Tries", context.INI_ISearch_Tries.ToString()},
                     {"ISearch_Results", context.INI_ISearch_Results.ToString()},
@@ -1658,6 +1665,8 @@ Namespace SharedLibrary
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
+                    {"MailMoverPath", context.INI_MailMoverPath},
+                    {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
@@ -1746,7 +1755,6 @@ Namespace SharedLibrary
                     {"SP_Add_Markers", context.SP_Add_Markers},
                     {"SP_Add_Slides", context.SP_Add_Slides},
                     {"SP_Add_Chart", context.SP_Add_Chart},
-                    {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
@@ -1754,6 +1762,7 @@ Namespace SharedLibrary
                     {"SP_HelpMe", context.SP_HelpMe},
                     {"SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut},
                     {"SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp},
+                    {"SP_MailMover", context.SP_MailMover},
                     {"SP_Chat", context.SP_Chat},
                     {"SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands},
@@ -1853,6 +1862,7 @@ Namespace SharedLibrary
                     {"SP_HelpMe", Default_SP_HelpMe},
                     {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
                     {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
+                    {"SP_MailMover", Default_SP_MailMover},
                     {"SP_Chat", Default_SP_Chat},
                     {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
@@ -2216,6 +2226,8 @@ Namespace SharedLibrary
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
+                    {"MailMoverPath", context.INI_MailMoverPath},
+                    {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
                     {"DiscussInkyPath", context.INI_DiscussInkyPath},
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
@@ -2782,6 +2794,8 @@ Namespace SharedLibrary
             variableValues.Add("ExtractorPathLocal", context.INI_ExtractorPathLocal)
             variableValues.Add("RenameLibPath", context.INI_RenameLibPath)
             variableValues.Add("RenameLibPathLocal", context.INI_RenameLibPathLocal)
+            variableValues.Add("MailMoverPath", context.INI_MailMoverPath)
+            variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
@@ -2878,6 +2892,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_HelpMe", context.SP_HelpMe)
             variableValues.Add("SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut)
             variableValues.Add("SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp)
+            variableValues.Add("SP_MailMover", context.SP_MailMover)
             variableValues.Add("SP_Chat", context.SP_Chat)
             variableValues.Add("SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands)
             variableValues.Add("SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands)
@@ -3050,6 +3065,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_HelpMe") Then context.SP_HelpMe = CStr(updatedValues("SP_HelpMe"))
                 If updatedValues.ContainsKey("SP_DiscussThis_SortOut") Then context.SP_DiscussThis_SortOut = CStr(updatedValues("SP_DiscussThis_SortOut"))
                 If updatedValues.ContainsKey("SP_DiscussThis_SumUp") Then context.SP_DiscussThis_SumUp = CStr(updatedValues("SP_DiscussThis_SumUp"))
+                If updatedValues.ContainsKey("SP_MailMover") Then context.SP_MailMover = CStr(updatedValues("SP_MailMover"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))
                 If updatedValues.ContainsKey("SP_Add_ChatWord_Commands") Then context.SP_Add_ChatWord_Commands = CStr(updatedValues("SP_Add_ChatWord_Commands"))
                 If updatedValues.ContainsKey("SP_Add_Chat_NoCommands") Then context.SP_Add_Chat_NoCommands = CStr(updatedValues("SP_Add_Chat_NoCommands"))
@@ -3097,6 +3113,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ExtractorPathLocal") Then context.INI_ExtractorPathLocal = CStr(updatedValues("ExtractorPathLocal"))
                 If updatedValues.ContainsKey("RenameLibPath") Then context.INI_RenameLibPath = CStr(updatedValues("RenameLibPath"))
                 If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
+                If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
+                If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
                 If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))

@@ -2880,6 +2880,444 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Removes leading "RI: " prefix from Word comments (including threaded replies) in the selection or entire document.
+    ''' Optionally also removes comment timestamps via Open XML post-processing.
+    ''' Uses a progress bar and supports cancellation.
+    ''' </summary>
+    Public Sub NewRemoveRIPrefixFromComments()
+
+        Dim riPrefix As String = $"{AN5}: "
+
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+            Dim hasSelection As Boolean = (sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End)
+            Dim scopeRange As Microsoft.Office.Interop.Word.Range = If(hasSelection, sel.Range, doc.Content)
+
+            Dim candidates As New List(Of Microsoft.Office.Interop.Word.Comment)()
+
+            ' Collect candidates that start with the prefix (base comments + replies)
+            For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                Dim inScope As Boolean = False
+
+                Try
+                    Dim cStart As Integer = c.Scope.Start
+                    Dim cEnd As Integer = c.Scope.End
+                    inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                Catch
+                    Try
+                        Dim cStart As Integer = c.Reference.Start
+                        Dim cEnd As Integer = c.Reference.End
+                        inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                    Catch
+                        inScope = False
+                    End Try
+                End Try
+
+                If Not inScope Then Continue For
+
+                Try
+                    Dim text As String = If(c.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        candidates.Add(c)
+                    End If
+                Catch
+                End Try
+
+                ' Threaded replies
+                Try
+                    If c.Replies IsNot Nothing AndAlso c.Replies.Count > 0 Then
+                        For Each r As Microsoft.Office.Interop.Word.Comment In c.Replies
+                            Try
+                                Dim replyText As String = If(r.Range.Text, String.Empty)
+                                If replyText.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                                    candidates.Add(r)
+                                End If
+                            Catch
+                            End Try
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If candidates.Count = 0 Then
+                ShowCustomMessageBox($"No '{AN5}:' prefixes found in comments for the current scope.", AN)
+                Exit Sub
+            End If
+
+            ' Ask whether to also remove the date/time from the processed comments
+            Dim alsoRemoveDateTime As Boolean = False
+            Dim dateTimeAnswer As Integer = ShowCustomYesNoBox(
+                $"Found {candidates.Count} comment(s) with '{AN5}:' prefix." & vbCrLf & vbCrLf &
+                "Do you also want to remove the date/time from these comments?" & vbCrLf &
+                "(The date/time will be removed entirely.)",
+                "Yes, also remove date/time",
+                "No, only remove prefix",
+                AN & $" Remove {AN5} Prefix")
+            If dateTimeAnswer = 0 Then
+                Exit Sub ' User closed/cancelled
+            End If
+            alsoRemoveDateTime = (dateTimeAnswer = 1)
+
+            ' Collect the 1-based Interop Comment.Index for each candidate BEFORE modifying text
+            ' (Index is stable as long as we don't add/remove comments)
+            Dim commentIndicesToProcess As New List(Of Integer)()
+            If alsoRemoveDateTime Then
+                For Each cmt As Microsoft.Office.Interop.Word.Comment In candidates
+                    Try
+                        commentIndicesToProcess.Add(cmt.Index)
+                    Catch
+                    End Try
+                Next
+            End If
+
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressMax = candidates.Count
+            ProgressBarModule.GlobalProgressLabel = "Processing comments..."
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.ShowProgressBarInSeparateThread(AN & $" Remove {AN5} Prefix", "Starting...")
+
+            Dim removedCount As Integer = 0
+
+            For i As Integer = 0 To candidates.Count - 1
+                System.Windows.Forms.Application.DoEvents()
+
+                If ProgressBarModule.CancelOperation Then Exit For
+                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                    ProgressBarModule.CancelOperation = True
+                    Exit For
+                End If
+
+                ProgressBarModule.GlobalProgressValue = i + 1
+                ProgressBarModule.GlobalProgressLabel = $"Processing {i + 1} of {candidates.Count}..."
+
+                Try
+                    Dim cmt As Microsoft.Office.Interop.Word.Comment = candidates(i)
+                    Dim text As String = If(cmt.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        cmt.Range.Text = text.Substring(riPrefix.Length)
+                        removedCount += 1
+                    End If
+                Catch
+                End Try
+            Next
+
+            ProgressBarModule.CancelOperation = True
+
+            ' If user requested date/time removal, do it via Open XML post-processing
+            Dim dateTimeRemoved As Boolean = False
+            If alsoRemoveDateTime AndAlso removedCount > 0 AndAlso commentIndicesToProcess.Count > 0 Then
+                dateTimeRemoved = RemoveCommentDateTimesViaOpenXml(doc, app, commentIndicesToProcess)
+            End If
+
+            Dim scopeInfo As String = If(hasSelection, "the selected text", "the entire document")
+            If ProgressBarModule.CancelOperation AndAlso removedCount < candidates.Count Then
+                ShowCustomMessageBox($"Operation cancelled. Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}." &
+                    If(dateTimeRemoved, " Date/time was also removed.", ""), AN)
+            Else
+                ShowCustomMessageBox($"Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}." &
+                    If(dateTimeRemoved, " Date/time was also removed.", ""), AN)
+            End If
+
+        Catch ex As System.Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Error in RemoveRIPrefixFromComments: {ex.Message}", AN)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Removes comment date/time stamps by saving the document to a temp DOCX, modifying the
+    ''' w:date attributes in comments.xml (and commentsExtended/commentsExtensible.xml) via Open XML,
+    ''' then reopening the document.
+    ''' Instead of fragile index or text matching, processes ALL comments whose text (after prefix
+    ''' removal) matches any of the expected stripped texts. Falls back to processing all comments
+    ''' by the add-in's author if no matches are found.
+    ''' </summary>
+    ''' <param name="doc">The active Word document.</param>
+    ''' <param name="app">The Word application instance.</param>
+    ''' <param name="commentIndices">1-based Interop Comment.Index values (used only for count validation).</param>
+    ''' <returns>True if date/time removal succeeded; False otherwise.</returns>
+    Private Shared Function RemoveCommentDateTimesViaOpenXml(
+            doc As Microsoft.Office.Interop.Word.Document,
+            app As Microsoft.Office.Interop.Word.Application,
+            commentIndices As List(Of Integer)) As Boolean
+
+        Dim tempPath As String = Nothing
+        Dim originalPath As String = Nothing
+        Dim wasReadOnly As Boolean = False
+
+        Try
+            ' Get original path
+            Try
+                originalPath = doc.FullName
+            Catch
+                Return False
+            End Try
+
+            If String.IsNullOrEmpty(originalPath) Then Return False
+
+            ' Check if the document is in a format that supports Open XML
+            Dim ext As String = System.IO.Path.GetExtension(originalPath).ToLowerInvariant()
+            If ext <> ".docx" AndAlso ext <> ".docm" Then
+                ShowCustomMessageBox("Date/time removal requires a .docx or .docm document. Please save as .docx first.", AN)
+                Return False
+            End If
+
+            wasReadOnly = doc.ReadOnly
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 1: Before saving, collect the w:id values from the Interop
+            '         comments we want to process. We do this by saving the doc
+            '         first, reading the XML, and matching by author name.
+            '         The author for add-in comments is the current Word UserName
+            '         at time of creation, but comment text starts with the prefix.
+            ' ─────────────────────────────────────────────────────────────────
+
+            ' Collect the actual comment texts (already stripped of prefix by caller)
+            ' so we can match in Open XML by content
+            Dim strippedTexts As New HashSet(Of String)(StringComparer.Ordinal)
+            For Each idx In commentIndices
+                Try
+                    If idx >= 1 AndAlso idx <= doc.Comments.Count Then
+                        Dim cmtText As String = If(doc.Comments(idx).Range.Text, "")
+                        ' The prefix has already been removed by the caller, so this is the post-strip text
+                        strippedTexts.Add(cmtText.Trim())
+                    End If
+                Catch
+                End Try
+            Next
+
+            ' Save to temp
+            tempPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"{AN2}_cmtdate_{Guid.NewGuid():N}.docx")
+
+            Dim prevScreenUpdating As Boolean = app.ScreenUpdating
+            Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = app.DisplayAlerts
+            Try
+                app.ScreenUpdating = False
+                app.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+                doc.SaveAs2(tempPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                doc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Finally
+                app.DisplayAlerts = prevAlerts
+                app.ScreenUpdating = prevScreenUpdating
+            End Try
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 2: Open XML — remove w:date from matching comments
+            ' ─────────────────────────────────────────────────────────────────
+            Dim modified As Boolean = False
+            Dim modifiedWIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim modifiedParaIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            Using wordDoc As DocumentFormat.OpenXml.Packaging.WordprocessingDocument =
+                    DocumentFormat.OpenXml.Packaging.WordprocessingDocument.Open(tempPath, True)
+
+                Dim commentsPart = wordDoc.MainDocumentPart?.WordprocessingCommentsPart
+                If commentsPart IsNot Nothing AndAlso commentsPart.Comments IsNot Nothing Then
+
+                    Dim wNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    Dim w14Ns As System.Xml.Linq.XNamespace = "http://schemas.microsoft.com/office/word/2010/wordml"
+
+                    ' Load the entire comments part as XDocument for reliable attribute manipulation
+                    Dim commentsXDoc As System.Xml.Linq.XDocument = Nothing
+                    Using readStream As System.IO.Stream = commentsPart.GetStream(System.IO.FileMode.Open, System.IO.FileAccess.Read)
+                        commentsXDoc = System.Xml.Linq.XDocument.Load(readStream)
+                    End Using
+
+                    Dim commentsChanged As Boolean = False
+
+                    For Each commentElem In commentsXDoc.Descendants(wNs + "comment").ToList()
+
+                        ' Extract plain text from w:t elements
+                        Dim commentPlainText As String = String.Join("", commentElem.Descendants(wNs + "t").Select(Function(t) t.Value))
+                        Dim trimmedText As String = commentPlainText.Trim()
+
+                        ' Match: does this comment's text match one of the stripped texts?
+                        If Not strippedTexts.Contains(trimmedText) Then Continue For
+
+                        ' Collect w:id for extended parts
+                        Dim wIdAttr = commentElem.Attribute(wNs + "id")
+                        If wIdAttr IsNot Nothing AndAlso Not String.IsNullOrEmpty(wIdAttr.Value) Then
+                            modifiedWIds.Add(wIdAttr.Value)
+                        End If
+
+                        ' Collect paraId values
+                        For Each paraElem In commentElem.Descendants(wNs + "p")
+                            Dim paraIdAttr = paraElem.Attribute(w14Ns + "paraId")
+                            If paraIdAttr IsNot Nothing AndAlso Not String.IsNullOrEmpty(paraIdAttr.Value) Then
+                                modifiedParaIds.Add(paraIdAttr.Value)
+                            End If
+                        Next
+
+                        ' Remove the w:date attribute
+                        Dim dateAttr = commentElem.Attribute(wNs + "date")
+                        If dateAttr IsNot Nothing Then
+                            dateAttr.Remove()
+                            commentsChanged = True
+                            modified = True
+                        End If
+
+                        ' Remove from set so we don't match duplicates unnecessarily
+                        strippedTexts.Remove(trimmedText)
+                    Next
+
+                    If commentsChanged Then
+                        Using writeStream As System.IO.Stream = commentsPart.GetStream(System.IO.FileMode.Create, System.IO.FileAccess.Write)
+                            commentsXDoc.Save(writeStream)
+                        End Using
+                    End If
+                End If
+
+                ' ─────────────────────────────────────────────────────────────────
+                ' STEP 3: Remove dateUtc from commentsExtended/commentsExtensible
+                ' ─────────────────────────────────────────────────────────────────
+                If modified AndAlso (modifiedParaIds.Count > 0 OrElse modifiedWIds.Count > 0) Then
+                    Try
+                        For Each extPart In wordDoc.MainDocumentPart.Parts
+                            Try
+                                Dim uri As String = If(extPart.OpenXmlPart?.Uri?.ToString(), "")
+                                If Not (uri.Contains("commentsExtensible") OrElse
+                                        uri.Contains("commentsExtended") OrElse
+                                        uri.Contains("commentsEx")) Then Continue For
+
+                                Using stream As System.IO.Stream = extPart.OpenXmlPart.GetStream(
+                                    System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite)
+
+                                    Dim xdoc As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(stream)
+                                    Dim anyChanged As Boolean = False
+
+                                    For Each elem In xdoc.Descendants().ToList()
+                                        Dim shouldModify As Boolean = False
+
+                                        ' Match by paraId
+                                        Dim pIdAttr = elem.Attributes().FirstOrDefault(
+                                            Function(a) a.Name.LocalName.Equals("paraId", StringComparison.OrdinalIgnoreCase))
+                                        If pIdAttr IsNot Nothing AndAlso modifiedParaIds.Contains(pIdAttr.Value) Then
+                                            shouldModify = True
+                                        End If
+
+                                        ' Match by commentId (w:id reference)
+                                        If Not shouldModify Then
+                                            Dim cIdAttr = elem.Attributes().FirstOrDefault(
+                                                Function(a) a.Name.LocalName.Equals("commentId", StringComparison.OrdinalIgnoreCase))
+                                            If cIdAttr IsNot Nothing AndAlso modifiedWIds.Contains(cIdAttr.Value) Then
+                                                shouldModify = True
+                                            End If
+                                        End If
+
+                                        If Not shouldModify Then Continue For
+
+                                        For Each attr In elem.Attributes().ToList()
+                                            If attr.Name.LocalName.Equals("dateUtc", StringComparison.OrdinalIgnoreCase) Then
+                                                attr.Remove()
+                                                anyChanged = True
+                                            End If
+                                        Next
+                                    Next
+
+                                    If anyChanged Then
+                                        stream.SetLength(0)
+                                        xdoc.Save(stream)
+                                    End If
+                                End Using
+                            Catch
+                            End Try
+                        Next
+                    Catch
+                    End Try
+                End If
+            End Using
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 4: Reopen the document
+            ' ─────────────────────────────────────────────────────────────────
+            Dim prevScreenUpdating2 As Boolean = app.ScreenUpdating
+            Dim prevAlerts2 As Microsoft.Office.Interop.Word.WdAlertLevel = app.DisplayAlerts
+            Try
+                app.ScreenUpdating = False
+                app.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                Dim reopened As Microsoft.Office.Interop.Word.Document = app.Documents.Open(
+                    FileName:=tempPath,
+                    ReadOnly:=False,
+                    Visible:=True)
+
+                reopened.SaveAs2(originalPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+            Finally
+                app.DisplayAlerts = prevAlerts2
+                app.ScreenUpdating = prevScreenUpdating2
+            End Try
+
+            Return modified
+
+        Catch ex As System.Exception
+            Try
+                If Not String.IsNullOrEmpty(originalPath) AndAlso System.IO.File.Exists(originalPath) Then
+                    app.Documents.Open(FileName:=originalPath, ReadOnly:=wasReadOnly, Visible:=True)
+                ElseIf Not String.IsNullOrEmpty(tempPath) AndAlso System.IO.File.Exists(tempPath) Then
+                    app.Documents.Open(FileName:=tempPath, ReadOnly:=False, Visible:=True)
+                End If
+            Catch
+            End Try
+            Return False
+        Finally
+            Try
+                If Not String.IsNullOrEmpty(tempPath) AndAlso System.IO.File.Exists(tempPath) Then
+                    System.IO.File.Delete(tempPath)
+                End If
+            Catch
+            End Try
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Extracts plain text from an Open XML Comment element by collecting text from all w:t descendants.
+    ''' This is more reliable than InnerText which may include unexpected whitespace from XML structure.
+    ''' </summary>
+    Private Shared Function ExtractPlainTextFromOpenXmlComment(comment As DocumentFormat.OpenXml.Wordprocessing.Comment) As String
+        If comment Is Nothing Then Return Nothing
+        Dim sb As New System.Text.StringBuilder()
+        For Each textElement In comment.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Text)()
+            sb.Append(textElement.Text)
+        Next
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Normalizes comment text for comparison by removing control characters (BEL, vertical tab,
+    ''' form feed, etc.) that Word Interop and Open XML may handle differently.
+    ''' </summary>
+    Private Shared Function NormalizeCommentText(text As String) As String
+        If text Is Nothing Then Return String.Empty
+        Dim sb As New System.Text.StringBuilder(text.Length)
+        For Each ch As Char In text
+            ' Skip control characters except standard whitespace (space, tab, CR, LF)
+            If Char.IsControl(ch) AndAlso ch <> " "c AndAlso ch <> vbTab(0) AndAlso ch <> vbCr(0) AndAlso ch <> vbLf(0) Then
+                Continue For
+            End If
+            sb.Append(ch)
+        Next
+        ' Normalize line endings
+        Return sb.ToString().Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).TrimEnd()
+    End Function
+
+    ''' <summary>
+    ''' Removes leading "RI: " prefix from Word comments (including threaded replies) in the selection or entire document.
     ''' Uses a progress bar and supports cancellation.
     ''' </summary>
     Public Sub RemoveRIPrefixFromComments()

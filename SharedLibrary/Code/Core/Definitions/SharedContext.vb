@@ -137,6 +137,9 @@ Namespace SharedLibrary
             Property INI_ExtractorPathLocal As String
             Property INI_RenameLibPath As String
             Property INI_RenameLibPathLocal As String
+            Property INI_MailMoverPath As String
+            Property INI_MailMoverPathLocal As String
+
             Property INI_RedactionInstructionsPath As String
             Property INI_RedactionInstructionsPathLocal As String
             Property INI_SpeechModelPath As String
@@ -217,6 +220,7 @@ Namespace SharedLibrary
             Property SP_HelpMe As String
             Property SP_DiscussThis_SortOut As String
             Property SP_DiscussThis_SumUp As String
+            Property SP_MailMover As String
             Property SP_Add_ChatWord_Commands As String
             Property SP_Add_Chat_NoCommands As String
             Property SP_ChatExcel As String
@@ -420,7 +424,8 @@ Namespace SharedLibrary
         Public Property INI_ExtractorPathLocal As String Implements ISharedContext.INI_ExtractorPathLocal
         Public Property INI_RenameLibPath As String Implements ISharedContext.INI_RenameLibPath
         Public Property INI_RenameLibPathLocal As String Implements ISharedContext.INI_RenameLibPathLocal
-
+        Public Property INI_MailMoverPath As String Implements ISharedContext.INI_MailMoverPath
+        Public Property INI_MailMoverPathLocal As String Implements ISharedContext.INI_MailMoverPathLocal
         Public Property INI_RedactionInstructionsPath As String Implements ISharedContext.INI_RedactionInstructionsPath
         Public Property INI_RedactionInstructionsPathLocal As String Implements ISharedContext.INI_RedactionInstructionsPathLocal
         Public Property INI_SpeechModelPath As String Implements ISharedContext.INI_SpeechModelPath
@@ -504,6 +509,7 @@ Namespace SharedLibrary
         Public Property SP_HelpMe As String Implements ISharedContext.SP_HelpMe
         Public Property SP_DiscussThis_SortOut As String Implements ISharedContext.SP_DiscussThis_SortOut
         Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
+        Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
         Public Property SP_Add_Chat_NoCommands As String Implements ISharedContext.SP_Add_Chat_NoCommands
         Public Property SP_ChatExcel As String Implements ISharedContext.SP_ChatExcel
