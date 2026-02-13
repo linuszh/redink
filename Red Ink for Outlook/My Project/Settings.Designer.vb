@@ -161,6 +161,114 @@ Namespace My
                 Me("InboxBoardColumns") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardTheme() As String
+            Get
+                Return CType(Me("InboxBoardTheme"),String)
+            End Get
+            Set
+                Me("InboxBoardTheme") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardWindowX() As Integer
+            Get
+                Return CType(Me("InboxBoardWindowX"),Integer)
+            End Get
+            Set
+                Me("InboxBoardWindowX") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardWindowY() As Integer
+            Get
+                Return CType(Me("InboxBoardWindowY"),Integer)
+            End Get
+            Set
+                Me("InboxBoardWindowY") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardWindowH() As Integer
+            Get
+                Return CType(Me("InboxBoardWindowH"),Integer)
+            End Get
+            Set
+                Me("InboxBoardWindowH") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardWindowW() As Integer
+            Get
+                Return CType(Me("InboxBoardWindowW"),Integer)
+            End Get
+            Set
+                Me("InboxBoardWindowW") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardWindowMax() As Integer
+            Get
+                Return CType(Me("InboxBoardWindowMax"),Integer)
+            End Get
+            Set
+                Me("InboxBoardWindowMax") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardFields() As String
+            Get
+                Return CType(Me("InboxBoardFields"),String)
+            End Get
+            Set
+                Me("InboxBoardFields") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardLastLoadCount() As Integer
+            Get
+                Return CType(Me("InboxBoardLastLoadCount"),Integer)
+            End Get
+            Set
+                Me("InboxBoardLastLoadCount") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardColumnFilter() As String
+            Get
+                Return CType(Me("InboxBoardColumnFilter"),String)
+            End Get
+            Set
+                Me("InboxBoardColumnFilter") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

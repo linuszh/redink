@@ -10,18 +10,25 @@
 '
 ' Architecture:
 '  - Mail collection: Scans default Inbox for mails with at least one category.
-'    If >25 found, asks user how many to load via dropdown.
+'    If >50 found, asks user how many to load via dropdown.
 '  - Category columns: Dynamically built from Outlook's category list. Always-
 '    present columns stored in My.Settings.InboxBoardColumns (semicolon-delimited).
 '  - Board UI: Full HTML/CSS/JS board rendered in WebView2 inside a WinForms Form.
 '    Supports dark/light theme, search, column filter, card field toggles, and
 '    drag-and-drop reordering.
-'  - JS↔VB.NET bridge: WebView2 postMessage for move/unmark/open/reload actions.
-'    VB.NET responds by modifying MailItem categories via COM and pushing updated
-'    data back to the board.
+'  - JS↔VB.NET bridge: WebView2 postMessage for move/moveAdd/unmark/open/reload
+'    actions. VB.NET responds by modifying MailItem categories via COM and pushing
+'    updated data back to the board.
+'  - Drag modes: Normal drag replaces all categories with the target column's
+'    category. Ctrl+drag adds the target category while keeping existing ones
+'    (like copy vs. move in file managers). Visual feedback: green drop indicator
+'    and "+" badge when Ctrl is held.
 '  - AI Summaries: Generated asynchronously in batches after the board is displayed.
 '    Uses the existing LLM() helper with a summarization system prompt.
 '  - Threading: All Outlook COM access on the UI thread; LLM calls are async.
+'  - Persistence: Theme, window position/size/maximized state, card field toggles,
+'    last load count, column filter and pinned columns are all persisted via
+'    My.Settings (not localStorage).
 ' =============================================================================
 
 Option Explicit On
@@ -61,13 +68,6 @@ Partial Public Class ThisAddIn
     ''' <summary>Remembers the user's last load-count choice so Refresh reuses it.</summary>
     Private _inboxBoardLastMaxToLoad As Integer = 0
 
-    ''' <summary>System prompt for one-line mail summaries.</summary>
-    Private Const InboxBoard_SummarySystemPrompt As String =
-        "You are a concise email summarizer. For each email provided, produce a single short sentence " &
-        "(max 120 characters) that captures the key point, current status, or required action. " &
-        "Return a JSON array of objects with ""id"" (integer, matching the email id) and ""summary"" (string). " &
-        "Do not include any other text outside the JSON array."
-
 #End Region
 
 #Region "InboxBoard Data Classes"
@@ -105,6 +105,9 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub InboxBoard()
         Try
+            ' Restore last load count from settings
+            Try : _inboxBoardLastMaxToLoad = My.Settings.InboxBoardLastLoadCount : Catch : End Try
+
             ' 1. Collect categorized mails from Inbox
             Dim mails As List(Of InboxBoardEntry) = CollectCategorizedInboxMails()
             If mails Is Nothing Then Return
@@ -186,8 +189,13 @@ Partial Public Class ThisAddIn
             maxToLoad = chosen
         End If
 
-        ' Remember the effective load count for Refresh
+        ' Remember the effective load count for Refresh and persist
         _inboxBoardLastMaxToLoad = maxToLoad
+        Try
+            My.Settings.InboxBoardLastLoadCount = maxToLoad
+            My.Settings.Save()
+        Catch
+        End Try
 
         ' Build the category color map from Outlook
         Dim categoryColors As Dictionary(Of String, String) = GetOutlookCategoryColors(ns)
@@ -395,13 +403,48 @@ Partial Public Class ThisAddIn
     Private Sub ShowInboxBoardForm(mails As List(Of InboxBoardEntry), columns As List(Of InboxBoardColumn))
         Dim frm As New Form()
         frm.Text = $"{AN} - Inbox Board"
-        frm.StartPosition = FormStartPosition.CenterScreen
-        frm.Size = New Drawing.Size(1500, 850)
         frm.MinimumSize = New Drawing.Size(900, 500)
         frm.FormBorderStyle = FormBorderStyle.Sizable
         frm.MaximizeBox = True
         frm.MinimizeBox = True
         frm.ShowInTaskbar = True
+
+        ' Restore window position, size and maximized state from My.Settings
+        Dim savedX As Integer = 0, savedY As Integer = 0
+        Dim savedW As Integer = 0, savedH As Integer = 0
+        Dim savedMax As Integer = 0
+        Try
+            savedX = My.Settings.InboxBoardWindowX
+            savedY = My.Settings.InboxBoardWindowY
+            savedW = My.Settings.InboxBoardWindowW
+            savedH = My.Settings.InboxBoardWindowH
+            savedMax = My.Settings.InboxBoardWindowMax
+        Catch
+        End Try
+
+        If savedW >= 900 AndAlso savedH >= 500 Then
+            frm.Size = New Drawing.Size(savedW, savedH)
+            ' Verify the saved position is still on a visible screen
+            Dim savedRect As New Drawing.Rectangle(savedX, savedY, savedW, savedH)
+            Dim onScreen As Boolean = False
+            For Each scr As Screen In Screen.AllScreens
+                If scr.WorkingArea.IntersectsWith(savedRect) Then
+                    onScreen = True
+                    Exit For
+                End If
+            Next
+            If onScreen Then
+                frm.StartPosition = FormStartPosition.Manual
+                frm.Location = New Drawing.Point(savedX, savedY)
+            Else
+                frm.StartPosition = FormStartPosition.CenterScreen
+            End If
+        Else
+            frm.Size = New Drawing.Size(1500, 850)
+            frm.StartPosition = FormStartPosition.CenterScreen
+        End If
+
+        If savedMax <> 0 Then frm.WindowState = FormWindowState.Maximized
 
         Try
             Dim bmp As New Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
@@ -425,6 +468,26 @@ Partial Public Class ThisAddIn
 
         AddHandler frm.FormClosing, Sub(s, e)
                                         summaryCts.Cancel()
+
+                                        ' Save window position, size and maximized state
+                                        Try
+                                            If frm.WindowState = FormWindowState.Maximized Then
+                                                My.Settings.InboxBoardWindowMax = 1
+                                                My.Settings.InboxBoardWindowX = frm.RestoreBounds.X
+                                                My.Settings.InboxBoardWindowY = frm.RestoreBounds.Y
+                                                My.Settings.InboxBoardWindowW = frm.RestoreBounds.Width
+                                                My.Settings.InboxBoardWindowH = frm.RestoreBounds.Height
+                                            Else
+                                                My.Settings.InboxBoardWindowMax = 0
+                                                My.Settings.InboxBoardWindowX = frm.Location.X
+                                                My.Settings.InboxBoardWindowY = frm.Location.Y
+                                                My.Settings.InboxBoardWindowW = frm.Size.Width
+                                                My.Settings.InboxBoardWindowH = frm.Size.Height
+                                            End If
+                                            My.Settings.Save()
+                                        Catch
+                                        End Try
+
                                         ' Clean up temp file
                                         Try
                                             If Not String.IsNullOrEmpty(tempHtmlPath) AndAlso System.IO.File.Exists(tempHtmlPath) Then
@@ -479,12 +542,12 @@ Partial Public Class ThisAddIn
     ''' Handles messages sent from the board's JavaScript via postMessage.
     ''' </summary>
     Private Sub HandleBoardMessage(
-        jsonMessage As String,
-        mails As List(Of InboxBoardEntry),
-        columns As List(Of InboxBoardColumn),
-        webView As WebView2,
-        frm As Form,
-        summaryCts As CancellationTokenSource)
+    jsonMessage As String,
+    mails As List(Of InboxBoardEntry),
+    columns As List(Of InboxBoardColumn),
+    webView As WebView2,
+    frm As Form,
+    ByRef summaryCts As CancellationTokenSource)
 
         Try
             Dim msg As JObject = JObject.Parse(jsonMessage)
@@ -492,7 +555,7 @@ Partial Public Class ThisAddIn
 
             Select Case action
                 Case "move"
-                    ' Change mail category
+                    ' Replace: remove all existing categories, set only the new one
                     Dim entryId As String = CStr(msg("entryId"))
                     Dim newCategory As String = CStr(msg("newCategory"))
                     UpdateMailCategory(entryId, newCategory)
@@ -507,6 +570,39 @@ Partial Public Class ThisAddIn
                         Dim cc = GetOutlookCategoryColors(ns)
                         entry.CategoryColor = If(cc.ContainsKey(newCategory), cc(newCategory), "#6b7280")
                     End If
+
+                    ' Push updated card data back to JS so category badges refresh
+                    PushUpdatedCardToJs(entryId, mails, webView)
+
+                Case "moveAdd"
+                    ' Add: keep existing categories, append the new one
+                    Dim entryId As String = CStr(msg("entryId"))
+                    Dim addCategory As String = CStr(msg("newCategory"))
+                    AddMailCategory(entryId, addCategory)
+
+                    ' Update local state
+                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entry IsNot Nothing Then
+                        Dim existing As New List(Of String)()
+                        If Not String.IsNullOrEmpty(entry.AllCategories) Then
+                            For Each part In entry.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                                Dim t = part.Trim()
+                                If Not String.IsNullOrEmpty(t) Then existing.Add(t)
+                            Next
+                        End If
+                        If Not existing.Any(Function(c) c.Equals(addCategory, StringComparison.OrdinalIgnoreCase)) Then
+                            existing.Add(addCategory)
+                        End If
+                        entry.AllCategories = String.Join(", ", existing)
+                        entry.Categories = existing(0)
+                        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+                        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+                        Dim cc = GetOutlookCategoryColors(ns)
+                        entry.CategoryColor = If(cc.ContainsKey(entry.Categories), cc(entry.Categories), "#6b7280")
+                    End If
+
+                    ' Push updated card data back to JS so category badges refresh
+                    PushUpdatedCardToJs(entryId, mails, webView)
 
                 Case "unmark"
                     ' Remove all categories from the mail
@@ -530,6 +626,7 @@ Partial Public Class ThisAddIn
                     ' Re-scan inbox and push new data, reusing the user's last load-count choice
                     summaryCts.Cancel()
                     Dim newCts As New CancellationTokenSource()
+                    summaryCts = newCts
 
                     Dim reloadMax As Integer = If(_inboxBoardLastMaxToLoad > 0, _inboxBoardLastMaxToLoad, 0)
                     Dim newMails = CollectCategorizedInboxMails(reloadMax)
@@ -558,6 +655,7 @@ Partial Public Class ThisAddIn
                                                                                   End Sub, System.Windows.Forms.MethodInvoker))
                                                         End Function)
                     End If
+
                 Case "setPinnedColumns"
                     ' Save pinned column names to My.Settings
                     Try
@@ -574,6 +672,37 @@ Partial Public Class ThisAddIn
                     Catch ex2 As System.Exception
                         Debug.WriteLine($"[InboxBoard] setPinnedColumns error: {ex2.Message}")
                     End Try
+
+                Case "setTheme"
+                    ' Persist theme choice to My.Settings
+                    Try
+                        Dim theme As String = CStr(msg("theme"))
+                        If Not String.IsNullOrEmpty(theme) Then
+                            My.Settings.InboxBoardTheme = theme
+                            My.Settings.Save()
+                        End If
+                    Catch
+                    End Try
+
+                Case "setFieldSettings"
+                    ' Persist card field toggles as JSON string
+                    Try
+                        Dim fields As String = CStr(msg("fields"))
+                        If Not String.IsNullOrEmpty(fields) Then
+                            My.Settings.InboxBoardFields = fields
+                            My.Settings.Save()
+                        End If
+                    Catch
+                    End Try
+
+                Case "setColumnFilter"
+                    ' Persist column filter selection
+                    Try
+                        Dim filterVal As String = CStr(msg("filter"))
+                        My.Settings.InboxBoardColumnFilter = If(filterVal, "")
+                        My.Settings.Save()
+                    Catch
+                    End Try
             End Select
 
         Catch ex As System.Exception
@@ -581,13 +710,49 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Pushes updated card data (allCategories, category, color) to JS after a move/moveAdd.
+    ''' </summary>
+    Private Sub PushUpdatedCardToJs(entryId As String, mails As List(Of InboxBoardEntry), webView As WebView2)
+        Try
+            Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+            If entry Is Nothing Then Return
+
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim categoryColors = GetOutlookCategoryColors(ns)
+
+            Dim allCatsArr As New JArray()
+            If Not String.IsNullOrEmpty(entry.AllCategories) Then
+                For Each catPart In entry.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                    Dim catName As String = catPart.Trim()
+                    If Not String.IsNullOrEmpty(catName) Then
+                        Dim catObj As New JObject()
+                        catObj("name") = catName
+                        catObj("color") = If(categoryColors.ContainsKey(catName), categoryColors(catName), "#6b7280")
+                        allCatsArr.Add(catObj)
+                    End If
+                Next
+            End If
+
+            webView.CoreWebView2.PostWebMessageAsJson(
+                JsonConvert.SerializeObject(New With {
+                    .action = "updateCard",
+                    .entryId = entryId,
+                    .category = entry.Categories,
+                    .categoryColor = entry.CategoryColor,
+                    .allCategories = allCatsArr
+                }))
+        Catch
+        End Try
+    End Sub
 
 #End Region
 
 #Region "InboxBoard Outlook COM Operations"
 
     ''' <summary>
-    ''' Changes the category on a mail item.
+    ''' Changes the category on a mail item (replaces all existing categories).
     ''' </summary>
     Private Sub UpdateMailCategory(entryId As String, newCategory As String)
         Try
@@ -600,6 +765,34 @@ Partial Public Class ThisAddIn
             End If
         Catch ex As System.Exception
             Debug.WriteLine($"[InboxBoard] UpdateMailCategory error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Adds a category to a mail item, keeping existing categories.
+    ''' </summary>
+    Private Sub AddMailCategory(entryId As String, categoryToAdd As String)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi IsNot Nothing Then
+                Dim existing As String = ComRetry(Of String)(Function() If(mi.Categories, ""))
+                Dim cats As New List(Of String)()
+                If Not String.IsNullOrEmpty(existing) Then
+                    For Each part In existing.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                        Dim t = part.Trim()
+                        If Not String.IsNullOrEmpty(t) Then cats.Add(t)
+                    Next
+                End If
+                If Not cats.Any(Function(c) c.Equals(categoryToAdd, StringComparison.OrdinalIgnoreCase)) Then
+                    cats.Add(categoryToAdd)
+                End If
+                mi.Categories = String.Join(", ", cats)
+                mi.Save()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] AddMailCategory error: {ex.Message}")
         End Try
     End Sub
 
@@ -675,7 +868,7 @@ Partial Public Class ThisAddIn
 
             Try
                 Dim response As String = Await LLM(
-                    InboxBoard_SummarySystemPrompt, userPrompt.ToString(),
+                    InterpolateAtRuntime(SP_InboxBoard), userPrompt.ToString(),
                     "", "", 0, False, True)
 
                 If Not String.IsNullOrWhiteSpace(response) Then
@@ -812,6 +1005,14 @@ Partial Public Class ThisAddIn
     Private Function BuildInboxBoardHtml(mails As List(Of InboxBoardEntry), columns As List(Of InboxBoardColumn)) As String
         Dim dataJson As String = BuildBoardDataJson(mails, columns)
 
+        ' Read persisted settings to inject into JS as constants
+        Dim savedTheme As String = ""
+        Dim savedFields As String = ""
+        Dim savedColumnFilter As String = ""
+        Try : savedTheme = If(My.Settings.InboxBoardTheme, "") : Catch : End Try
+        Try : savedFields = If(My.Settings.InboxBoardFields, "") : Catch : End Try
+        Try : savedColumnFilter = If(My.Settings.InboxBoardColumnFilter, "") : Catch : End Try
+
         Dim sb As New StringBuilder(32000)
         sb.AppendLine("<!DOCTYPE html>")
         sb.AppendLine("<html lang=""en"">")
@@ -827,8 +1028,12 @@ Partial Public Class ThisAddIn
         sb.AppendLine(GetBoardHeaderHtml())
         sb.AppendLine("<div class=""board"" id=""board""></div>")
         sb.AppendLine("<div class=""toast-container"" id=""toastContainer""></div>")
+        sb.AppendLine("<div class=""drag-mode-label"" id=""dragModeLabel""><span class=""plus"">+</span> Add category (Ctrl held)</div>")
         sb.AppendLine("<script>")
         sb.AppendLine($"const INIT_DATA = {dataJson};")
+        sb.AppendLine($"const SAVED_THEME = {JsonConvert.SerializeObject(savedTheme)};")
+        sb.AppendLine($"const SAVED_FIELDS = {JsonConvert.SerializeObject(savedFields)};")
+        sb.AppendLine($"const SAVED_COLUMN_FILTER = {JsonConvert.SerializeObject(savedColumnFilter)};")
         sb.AppendLine(GetBoardJavaScript())
         sb.AppendLine("</script>")
         sb.AppendLine("</body>")
@@ -848,6 +1053,7 @@ Partial Public Class ThisAddIn
   --text: #1a1a1a; --text-secondary: #555; --text-muted: #888;
   --input-bg: #f0f2f5; --input-border: #d0d0d0;
   --drop-highlight: rgba(59,130,246,0.12); --drop-line: #3b82f6;
+  --drop-highlight-add: rgba(34,197,94,0.12); --drop-line-add: #22c55e;
   --toast-bg: #323232; --toast-text: #fff;
   --overlay-bg: rgba(0,0,0,0.05); --settings-bg: #ffffff; --settings-border: #e0e0e0;
 }
@@ -858,6 +1064,7 @@ Partial Public Class ThisAddIn
   --text: #e0e0e0; --text-secondary: #b0b0b0; --text-muted: #777;
   --input-bg: #2c2e33; --input-border: #444;
   --drop-highlight: rgba(59,130,246,0.2);
+  --drop-highlight-add: rgba(34,197,94,0.2); --drop-line-add: #22c55e;
   --toast-bg: #444; --toast-text: #fff;
   --overlay-bg: rgba(0,0,0,0.2); --settings-bg: #2c2e33; --settings-border: #444;
 }
@@ -901,6 +1108,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .column { min-width: 220px; max-width: 340px; flex: 1 1 280px; background: var(--col-bg);
   border: 1px solid var(--col-border); border-radius: 10px; display: flex; flex-direction: column; }
 .column.drag-over { background: var(--drop-highlight); }
+.column.drag-over-add { background: var(--drop-highlight-add); }
 .column-header { padding: 10px 12px; font-weight: 600; font-size: 13px; display: flex;
   align-items: center; gap: 6px; border-bottom: 1px solid var(--col-border); user-select: none; }
 .column-header .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
@@ -910,6 +1118,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .drop-indicator { height: 3px; background: var(--drop-line); border-radius: 2px;
   margin: 2px 4px; opacity: 0; flex-shrink: 0; }
 .drop-indicator.visible { opacity: 1; }
+.drop-indicator.add-mode { background: var(--drop-line-add); }
 .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
   padding: 9px 11px; cursor: grab; box-shadow: 0 1px 3px var(--card-shadow);
   user-select: none; margin-bottom: 6px; transition: box-shadow 0.2s, transform 0.15s; }
@@ -948,6 +1157,12 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 @keyframes toastIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
 @keyframes toastOut { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(10px); } }
 .icon-svg { width: 15px; height: 15px; display: inline-block; vertical-align: middle; }
+.drag-mode-label { position: fixed; bottom: 16px; left: 16px; background: var(--toast-bg);
+  color: var(--toast-text); padding: 6px 12px; border-radius: 8px; font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2); z-index: 1000; pointer-events: none;
+  display: none; }
+.drag-mode-label.visible { display: block; }
+.drag-mode-label .plus { color: #22c55e; font-weight: 700; margin-right: 4px; }
 "
     End Function
 
@@ -995,6 +1210,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Catch
         End Try
 
+        ' Field checkboxes default to checked; JS will override from SAVED_FIELDS on init
         Return $"
 <div class=""header"">
   <div class=""topline"">
@@ -1017,6 +1233,11 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         <label><input type=""checkbox"" data-field=""summary"" checked> AI Summary</label>
         <h3 class=""section-divider"">Pinned Columns</h3>
 {pinnedHtml.ToString().TrimEnd()}
+        <h3 class=""section-divider"">Drag &amp; Drop</h3>
+        <div style=""font-size:11px;color:var(--text-muted);line-height:1.4;padding:2px 0"">
+          <b>Drag</b> → replace all categories<br>
+          <b>Ctrl + Drag</b> → add category
+        </div>
       </div>
     </div>
     <button class=""icon-btn"" id=""reloadBtn"" title=""Reload mails from Inbox"">
@@ -1029,14 +1250,15 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 </div>"
     End Function
 
-
     ''' <summary>Returns the JavaScript for the board.</summary>
     Private Function GetBoardJavaScript() As String
-        Dim js As New StringBuilder(16000)
+        Dim js As New StringBuilder(20000)
         js.AppendLine("// --- State ---")
         js.AppendLine("var cards = [];")
         js.AppendLine("var COLUMNS = [];")
         js.AppendLine("var fieldSettings = { sender: true, date: true, messageCount: true, summary: true };")
+        js.AppendLine("var isDragging = false;")
+        js.AppendLine("var ctrlHeld = false;")
         js.AppendLine()
         js.AppendLine("function init(data) {")
         js.AppendLine("  try {")
@@ -1048,6 +1270,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    renderBoard();")
         js.AppendLine("    loadFieldSettings();")
         js.AppendLine("    applyFieldVisibility();")
+        js.AppendLine("    restoreColumnFilter();")
         js.AppendLine("  } catch(err) { document.body.innerHTML = '<pre style=""color:red;padding:20px"">' + err.message + '\n' + err.stack + '</pre>'; }")
         js.AppendLine("}")
         js.AppendLine()
@@ -1062,7 +1285,17 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Persistence ---")
+        js.AppendLine("function restoreColumnFilter() {")
+        js.AppendLine("  if (SAVED_COLUMN_FILTER) {")
+        js.AppendLine("    var sel = document.getElementById('columnFilter');")
+        js.AppendLine("    for (var i = 0; i < sel.options.length; i++) {")
+        js.AppendLine("      if (sel.options[i].value === SAVED_COLUMN_FILTER) { sel.selectedIndex = i; break; }")
+        js.AppendLine("    }")
+        js.AppendLine("    applySearchFilter();")
+        js.AppendLine("  }")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("// --- Persistence via My.Settings (postMessage to VB.NET) ---")
         js.AppendLine("function saveState() {")
         js.AppendLine("  try {")
         js.AppendLine("    var state = COLUMNS.map(function(col) {")
@@ -1076,11 +1309,12 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  } catch(err) { console.error('saveState error:', err); }")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("function saveFieldSettings() { localStorage.setItem('rib-fields', JSON.stringify(fieldSettings)); }")
+        js.AppendLine("function saveFieldSettings() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setFieldSettings', fields: JSON.stringify(fieldSettings) }));")
+        js.AppendLine("}")
         js.AppendLine()
         js.AppendLine("function loadFieldSettings() {")
-        js.AppendLine("  var saved = localStorage.getItem('rib-fields');")
-        js.AppendLine("  if (saved) { try { fieldSettings = JSON.parse(saved); } catch(e) {} }")
+        js.AppendLine("  if (SAVED_FIELDS) { try { fieldSettings = JSON.parse(SAVED_FIELDS); } catch(e) {} }")
         js.AppendLine("  document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) {")
         js.AppendLine("    cb.checked = fieldSettings[cb.dataset.field] !== false;")
         js.AppendLine("  });")
@@ -1105,14 +1339,15 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine("function initTheme() {")
-        js.AppendLine("  var saved = localStorage.getItem('rib-theme');")
-        js.AppendLine("  applyTheme(saved || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));")
+        js.AppendLine("  var theme = SAVED_THEME || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');")
+        js.AppendLine("  applyTheme(theme);")
         js.AppendLine("}")
         js.AppendLine()
         js.AppendLine("document.getElementById('themeToggle').addEventListener('click', function() {")
         js.AppendLine("  var cur = document.documentElement.getAttribute('data-theme');")
         js.AppendLine("  var next = cur === 'dark' ? 'light' : 'dark';")
-        js.AppendLine("  applyTheme(next); localStorage.setItem('rib-theme', next);")
+        js.AppendLine("  applyTheme(next);")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setTheme', theme: next }));")
         js.AppendLine("});")
         js.AppendLine()
         js.AppendLine("// --- Settings panel ---")
@@ -1153,6 +1388,36 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("document.getElementById('reloadBtn').addEventListener('click', function() {")
         js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'reload' }));")
         js.AppendLine("});")
+        js.AppendLine()
+        js.AppendLine("// --- Ctrl key tracking for drag mode ---")
+        js.AppendLine("document.addEventListener('keydown', function(e) {")
+        js.AppendLine("  if (e.key === 'Control' && !ctrlHeld) { ctrlHeld = true; updateDragModeVisuals(); }")
+        js.AppendLine("});")
+        js.AppendLine("document.addEventListener('keyup', function(e) {")
+        js.AppendLine("  if (e.key === 'Control') { ctrlHeld = false; updateDragModeVisuals(); }")
+        js.AppendLine("});")
+        js.AppendLine("window.addEventListener('blur', function() { ctrlHeld = false; updateDragModeVisuals(); });")
+        js.AppendLine()
+        js.AppendLine("function updateDragModeVisuals() {")
+        js.AppendLine("  var label = document.getElementById('dragModeLabel');")
+        js.AppendLine("  if (isDragging && ctrlHeld) {")
+        js.AppendLine("    label.classList.add('visible');")
+        js.AppendLine("    document.querySelectorAll('.column.drag-over').forEach(function(el) {")
+        js.AppendLine("      el.classList.add('drag-over-add');")
+        js.AppendLine("    });")
+        js.AppendLine("    document.querySelectorAll('.drop-indicator.visible').forEach(function(el) {")
+        js.AppendLine("      el.classList.add('add-mode');")
+        js.AppendLine("    });")
+        js.AppendLine("  } else {")
+        js.AppendLine("    label.classList.remove('visible');")
+        js.AppendLine("    document.querySelectorAll('.column.drag-over-add').forEach(function(el) {")
+        js.AppendLine("      el.classList.remove('drag-over-add');")
+        js.AppendLine("    });")
+        js.AppendLine("    document.querySelectorAll('.drop-indicator.add-mode').forEach(function(el) {")
+        js.AppendLine("      el.classList.remove('add-mode');")
+        js.AppendLine("    });")
+        js.AppendLine("  }")
+        js.AppendLine("}")
         js.AppendLine()
         js.AppendLine("// --- Render Board ---")
         js.AppendLine("function renderBoard() {")
@@ -1274,11 +1539,18 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  el.appendChild(footerDiv);")
         js.AppendLine()
         js.AppendLine("  el.addEventListener('dragstart', function(e) {")
+        js.AppendLine("    isDragging = true;")
         js.AppendLine("    el.classList.add('dragging');")
-        js.AppendLine("    e.dataTransfer.effectAllowed = 'move';")
+        js.AppendLine("    e.dataTransfer.effectAllowed = 'copyMove';")
         js.AppendLine("    e.dataTransfer.setData('text/plain', card.entryId);")
+        js.AppendLine("    updateDragModeVisuals();")
         js.AppendLine("  });")
-        js.AppendLine("  el.addEventListener('dragend', function() { el.classList.remove('dragging'); clearAllIndicators(); });")
+        js.AppendLine("  el.addEventListener('dragend', function() {")
+        js.AppendLine("    isDragging = false;")
+        js.AppendLine("    el.classList.remove('dragging');")
+        js.AppendLine("    clearAllIndicators();")
+        js.AppendLine("    document.getElementById('dragModeLabel').classList.remove('visible');")
+        js.AppendLine("  });")
         js.AppendLine()
         js.AppendLine("  el.querySelectorAll('.card-btn').forEach(function(btn) {")
         js.AppendLine("    btn.addEventListener('click', function(e) {")
@@ -1300,32 +1572,63 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("// --- Drag & Drop ---")
         js.AppendLine("function setupDropZone(list) {")
         js.AppendLine("  list.addEventListener('dragover', function(e) {")
-        js.AppendLine("    e.preventDefault(); e.dataTransfer.dropEffect = 'move';")
-        js.AppendLine("    list.closest('.column').classList.add('drag-over');")
+        js.AppendLine("    e.preventDefault();")
+        js.AppendLine("    e.dataTransfer.dropEffect = ctrlHeld ? 'copy' : 'move';")
+        js.AppendLine("    var col = list.closest('.column');")
+        js.AppendLine("    col.classList.add('drag-over');")
+        js.AppendLine("    if (ctrlHeld) col.classList.add('drag-over-add'); else col.classList.remove('drag-over-add');")
         js.AppendLine("    showDropIndicator(list, getDragAfterElement(list, e.clientY));")
         js.AppendLine("  });")
         js.AppendLine("  list.addEventListener('dragleave', function(e) {")
         js.AppendLine("    if (!list.contains(e.relatedTarget)) {")
-        js.AppendLine("      list.closest('.column').classList.remove('drag-over'); clearIndicators(list);")
+        js.AppendLine("      var col = list.closest('.column');")
+        js.AppendLine("      col.classList.remove('drag-over');")
+        js.AppendLine("      col.classList.remove('drag-over-add');")
+        js.AppendLine("      clearIndicators(list);")
         js.AppendLine("    }")
         js.AppendLine("  });")
         js.AppendLine("  list.addEventListener('drop', function(e) {")
         js.AppendLine("    e.preventDefault();")
+        js.AppendLine("    var isAddMode = ctrlHeld;")
         js.AppendLine("    var column = list.closest('.column');")
         js.AppendLine("    column.classList.remove('drag-over');")
+        js.AppendLine("    column.classList.remove('drag-over-add');")
         js.AppendLine("    var entryId = e.dataTransfer.getData('text/plain');")
         js.AppendLine("    var cardEl = document.querySelector('.card[data-entry-id=""' + CSS.escape(entryId) + '""]');")
         js.AppendLine("    if (!cardEl) return;")
         js.AppendLine("    var oldColumnId = cardEl.closest('.card-list').dataset.column;")
         js.AppendLine("    var newColumnId = list.dataset.column;")
-        js.AppendLine("    var after = getDragAfterElement(list, e.clientY);")
-        js.AppendLine("    if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
         js.AppendLine("    clearAllIndicators();")
-        js.AppendLine("    var card = cards.find(function(c) { return c.entryId === entryId; });")
-        js.AppendLine("    if (card) card.category = newColumnId;")
-        js.AppendLine("    updateCounts();")
-        js.AppendLine("    saveState();")
-        js.AppendLine("    if (oldColumnId !== newColumnId) {")
+        js.AppendLine()
+        js.AppendLine("    if (oldColumnId === newColumnId && !isAddMode) {")
+        js.AppendLine("      // Reorder within same column")
+        js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
+        js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
+        js.AppendLine("      saveState();")
+        js.AppendLine("      return;")
+        js.AppendLine("    }")
+        js.AppendLine()
+        js.AppendLine("    if (isAddMode) {")
+        js.AppendLine("      // Ctrl+Drag: add category (keep card in original column)")
+        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
+        js.AppendLine("      if (card) {")
+        js.AppendLine("        var alreadyHas = card.allCategories && card.allCategories.some(function(ac) { return ac.name === newColumnId; });")
+        js.AppendLine("        if (alreadyHas) {")
+        js.AppendLine("          showToast('Already in ' + newColumnId);")
+        js.AppendLine("          return;")
+        js.AppendLine("        }")
+        js.AppendLine("      }")
+        js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'moveAdd', entryId: entryId, newCategory: newColumnId }));")
+        js.AppendLine("      var addCol = COLUMNS.find(function(c) { return c.id === newColumnId; });")
+        js.AppendLine("      showToast('+ Added to ' + (addCol ? addCol.title : newColumnId));")
+        js.AppendLine("    } else {")
+        js.AppendLine("      // Normal drag: replace all categories")
+        js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
+        js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
+        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
+        js.AppendLine("      if (card) card.category = newColumnId;")
+        js.AppendLine("      updateCounts();")
+        js.AppendLine("      saveState();")
         js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'move', entryId: entryId, newCategory: newColumnId }));")
         js.AppendLine("      var newCol = COLUMNS.find(function(c) { return c.id === newColumnId; });")
         js.AppendLine("      showToast('Moved to ' + (newCol ? newCol.title : newColumnId));")
@@ -1346,13 +1649,15 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine()
         js.AppendLine("function showDropIndicator(list, after) {")
         js.AppendLine("  clearIndicators(list);")
-        js.AppendLine("  var ind = document.createElement('div'); ind.className = 'drop-indicator visible';")
+        js.AppendLine("  var ind = document.createElement('div');")
+        js.AppendLine("  ind.className = 'drop-indicator visible' + (ctrlHeld ? ' add-mode' : '');")
         js.AppendLine("  if (after) list.insertBefore(ind, after); else list.appendChild(ind);")
         js.AppendLine("}")
         js.AppendLine("function clearIndicators(list) { list.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); }); }")
         js.AppendLine("function clearAllIndicators() {")
         js.AppendLine("  document.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); });")
         js.AppendLine("  document.querySelectorAll('.column.drag-over').forEach(function(el) { el.classList.remove('drag-over'); });")
+        js.AppendLine("  document.querySelectorAll('.column.drag-over-add').forEach(function(el) { el.classList.remove('drag-over-add'); });")
         js.AppendLine("}")
         js.AppendLine()
         js.AppendLine("function updateCounts() {")
@@ -1375,7 +1680,11 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine()
         js.AppendLine("// --- Search & Filter ---")
         js.AppendLine("document.getElementById('searchInput').addEventListener('input', applySearchFilter);")
-        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', applySearchFilter);")
+        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', function() {")
+        js.AppendLine("  applySearchFilter();")
+        js.AppendLine("  var val = document.getElementById('columnFilter').value;")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setColumnFilter', filter: val }));")
+        js.AppendLine("});")
         js.AppendLine()
         js.AppendLine("function applySearchFilter() {")
         js.AppendLine("  var query = document.getElementById('searchInput').value.toLowerCase().trim();")
@@ -1420,6 +1729,16 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      var d = (typeof msg.data === 'string') ? JSON.parse(msg.data) : msg.data;")
         js.AppendLine("      init(d);")
         js.AppendLine("      showToast('Board reloaded');")
+        js.AppendLine("    } else if (msg.action === 'updateCard') {")
+        js.AppendLine("      // Refresh a card's category data after move/moveAdd")
+        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; });")
+        js.AppendLine("      if (card) {")
+        js.AppendLine("        card.category = msg.category;")
+        js.AppendLine("        card.categoryColor = msg.categoryColor;")
+        js.AppendLine("        card.allCategories = msg.allCategories || [];")
+        js.AppendLine("      }")
+        js.AppendLine("      // Re-render the entire board to reflect new category badges and column placement")
+        js.AppendLine("      renderBoard();")
         js.AppendLine("    }")
         js.AppendLine("  });")
         js.AppendLine("}")
