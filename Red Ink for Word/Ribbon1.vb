@@ -410,4 +410,9 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Remove_Click invoked")
         Globals.ThisAddIn.RemoveRIPrefixFromComments()
     End Sub
+
+    Private Sub RI_WebApp_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_WebApp.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_WebApp_Click invoked")
+        Globals.ThisAddIn.ConvertDrawioToHtml()
+    End Sub
 End Class

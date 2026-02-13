@@ -1350,6 +1350,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_InboxBoard As String
+        Get
+            Return _context.SP_InboxBoard
+        End Get
+        Set(value As String)
+            _context.SP_InboxBoard = value
+        End Set
+    End Property
+
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
             Return _context.SP_Add_ChatWord_Commands

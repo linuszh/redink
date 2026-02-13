@@ -484,8 +484,19 @@ Public NotInheritable Class IniImportManager
         End If
 
         Dim validEntries As New System.Collections.Generic.List(Of SampleFileEntry)()
+        Dim parameterOnlyEntries As New System.Collections.Generic.List(Of SampleFileEntry)()
 
         For Each entry As SampleFileEntry In allEntries
+
+            ' Parameter-only entry: no file to download, just set the INI parameter.
+            If System.String.IsNullOrWhiteSpace(entry.SourceURL) Then
+                DetermineParameterOnlyConfigUpdate(entry, activeIniPath)
+                If entry.NeedsConfigUpdate Then
+                    parameterOnlyEntries.Add(entry)
+                End If
+                Continue For
+            End If
+
             Try
                 Dim sourceUri As New System.Uri(entry.SourceURL)
                 entry.DownloadedContent = DownloadHttpsTextWithLimit(sourceUri, MAX_DOWNLOAD_BYTES)
@@ -510,7 +521,7 @@ Public NotInheritable Class IniImportManager
             validEntries.Add(entry)
         Next
 
-        If validEntries.Count = 0 Then
+        If validEntries.Count = 0 AndAlso parameterOnlyEntries.Count = 0 Then
             Dim msg As System.String = "No sample files could be processed."
             If InformOnErrors AndAlso errors.Count > 0 Then
                 msg &= System.Environment.NewLine & System.Environment.NewLine &
@@ -554,6 +565,15 @@ Public NotInheritable Class IniImportManager
             sbSummary.AppendLine()
         End If
 
+        If parameterOnlyEntries.Count > 0 Then
+            sbSummary.AppendLine("PARAMETERS ONLY (no file download):")
+            For Each entry As SampleFileEntry In parameterOnlyEntries
+                sbSummary.AppendLine("  • " & entry.FriendlyName)
+                sbSummary.AppendLine("    " & entry.ParameterForPath & " = " & entry.ConfigValueToStore)
+            Next
+            sbSummary.AppendLine()
+        End If
+
         If InformOnErrors AndAlso errors.Count > 0 Then
             sbSummary.AppendLine("ERRORS (these files will be skipped):")
             For Each err As System.String In errors
@@ -589,7 +609,7 @@ Public NotInheritable Class IniImportManager
             entriesToProcess.Add(entry)
         Next
 
-        If entriesToProcess.Count = 0 Then
+        If entriesToProcess.Count = 0 AndAlso parameterOnlyEntries.Count = 0 Then
             ShowCustomMessageBox("No files to process after applying your choice.")
             Return False
         End If
@@ -598,6 +618,13 @@ Public NotInheritable Class IniImportManager
             System.StringComparer.OrdinalIgnoreCase)
 
         For Each entry As SampleFileEntry In entriesToProcess
+            If entry.NeedsConfigUpdate AndAlso Not System.String.IsNullOrWhiteSpace(entry.ConfigValueToStore) Then
+                configUpdates(entry.ParameterForPath) = entry.ConfigValueToStore
+            End If
+        Next
+
+        ' Include parameter-only entries in config updates
+        For Each entry As SampleFileEntry In parameterOnlyEntries
             If entry.NeedsConfigUpdate AndAlso Not System.String.IsNullOrWhiteSpace(entry.ConfigValueToStore) Then
                 configUpdates(entry.ParameterForPath) = entry.ConfigValueToStore
             End If
@@ -725,6 +752,44 @@ Public NotInheritable Class IniImportManager
     End Function
 
     ''' <summary>
+    ''' Determines the configuration update needed for a parameter-only entry (no file download).
+    ''' Sets NeedsConfigUpdate and ConfigValueToStore based on whether the parameter already exists
+    ''' with the expected default value.
+    ''' </summary>
+    ''' <param name="entry">Entry to update.</param>
+    ''' <param name="activeIniPath">Active main INI file path.</param>
+    Private Shared Sub DetermineParameterOnlyConfigUpdate(
+        entry As SampleFileEntry,
+        activeIniPath As System.String
+    )
+
+        Dim existingValue As System.String =
+            TryReadIniKeyValue(activeIniPath, entry.ParameterForPath)
+
+        If Not System.String.IsNullOrWhiteSpace(existingValue) Then
+            ' Parameter already exists; no update needed.
+            entry.NeedsConfigUpdate = False
+            Return
+        End If
+
+        ' Parameter does not exist yet; set it to the default value.
+        entry.NeedsConfigUpdate = True
+
+        If entry.IsFullPath Then
+            ' Full path: combine DefaultDir and DefaultFileName (if available).
+            If Not System.String.IsNullOrWhiteSpace(entry.DefaultFileName) Then
+                entry.ConfigValueToStore = System.IO.Path.Combine(entry.DefaultDir, entry.DefaultFileName)
+            Else
+                entry.ConfigValueToStore = entry.DefaultDir
+            End If
+        Else
+            ' Directory only.
+            entry.ConfigValueToStore = entry.DefaultDir
+        End If
+
+    End Sub
+
+    ''' <summary>
     ''' Extracts the application name from the RDV string (e.g., "Word (V231312)" -> "Word").
     ''' </summary>
     ''' <param name="rdv">RDV identifier string.</param>
@@ -741,6 +806,7 @@ Public NotInheritable Class IniImportManager
 
         Return trimmed
     End Function
+
 
     ''' <summary>
     ''' Parses the sample files list, filters entries by the current application, and records parse errors.
@@ -782,10 +848,17 @@ Public NotInheritable Class IniImportManager
             Dim defaultFileName As System.String = parts(6).Trim()
 
             If System.String.IsNullOrWhiteSpace(friendlyName) OrElse
-               System.String.IsNullOrWhiteSpace(sourceURL) OrElse
                System.String.IsNullOrWhiteSpace(parameterForPath) OrElse
-               System.String.IsNullOrWhiteSpace(defaultDir) OrElse
-               System.String.IsNullOrWhiteSpace(defaultFileName) Then
+               System.String.IsNullOrWhiteSpace(defaultDir) Then
+                errors.Add("Missing required fields in line: " & trimmed)
+                Continue For
+            End If
+
+            ' SourceURL may be empty for parameter-only entries (no file download).
+            ' DefaultFileName may be empty when SourceURL is empty.
+            Dim isParameterOnly As System.Boolean = System.String.IsNullOrWhiteSpace(sourceURL)
+
+            If Not isParameterOnly AndAlso System.String.IsNullOrWhiteSpace(defaultFileName) Then
                 errors.Add("Missing required fields in line: " & trimmed)
                 Continue For
             End If
@@ -812,19 +885,20 @@ Public NotInheritable Class IniImportManager
 
             If Not appMatches Then Continue For
 
-            If Not sourceURL.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase) Then
+            If Not isParameterOnly AndAlso
+               Not sourceURL.StartsWith("https://", System.StringComparison.OrdinalIgnoreCase) Then
                 errors.Add("Invalid URL (must be HTTPS): " & sourceURL)
                 Continue For
             End If
 
             Dim entry As New SampleFileEntry() With {
                 .FriendlyName = friendlyName,
-                .SourceURL = sourceURL,
+                .SourceURL = If(isParameterOnly, "", sourceURL),
                 .Apps = apps,
                 .ParameterForPath = parameterForPath,
                 .IsFullPath = isFullPath,
                 .DefaultDir = defaultDir,
-                .DefaultFileName = defaultFileName
+                .DefaultFileName = If(System.String.IsNullOrWhiteSpace(defaultFileName), "", defaultFileName)
             }
 
             result.Add(entry)

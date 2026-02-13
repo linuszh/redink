@@ -126,6 +126,7 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
+        Me.RI_WebApp = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -627,6 +628,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_TimeSpan)
         Me.Menu2.Items.Add(Me.RI_Regex)
         Me.Menu2.Items.Add(Me.RI_Charting)
+        Me.Menu2.Items.Add(Me.RI_WebApp)
         Me.Menu2.Items.Add(Me.RI_Import)
         Me.Menu2.Items.Add(Me.RI_FlattenPDF)
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
@@ -810,6 +812,15 @@ Partial Class Ribbon1
         Me.RI_Chat.OfficeImageId = "ContactUs"
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
+        '
+        'RI_WebApp
+        '
+        Me.RI_WebApp.Label = "Flowchart to Webapp"
+        Me.RI_WebApp.Name = "RI_WebApp"
+        Me.RI_WebApp.OfficeImageId = "NewHTML"
+        Me.RI_WebApp.ScreenTip = "Create a self-standing web app (in the form of a HTML page) out of your draw.io f" &
+    "lowchart"
+        Me.RI_WebApp.ShowImage = True
         '
         'Ribbon1
         '
@@ -1096,6 +1107,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Charting As RibbonButton
     Friend WithEvents RI_Snapshot As RibbonButton
     Friend WithEvents RI_Remove As RibbonButton
+    Friend WithEvents RI_WebApp As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

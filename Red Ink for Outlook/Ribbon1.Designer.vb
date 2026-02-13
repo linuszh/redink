@@ -488,6 +488,7 @@ Partial Class Ribbon2
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
+        Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
@@ -534,6 +535,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
         Me.Menu1.Items.Add(Me.RI_MailMover)
+        Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
@@ -698,6 +700,14 @@ Partial Class Ribbon2
         Me.RI_MailMover.ScreenTip = "This will move all or the selected items of the current folder to their final folder based on a rule set"
         Me.RI_MailMover.ShowImage = True
         '
+        'RI_InboxBoard
+        '
+        Me.RI_InboxBoard.Label = "Inbox Board"
+        Me.RI_InboxBoard.Name = "RI_InboxBoard"
+        Me.RI_InboxBoard.OfficeImageId = "DatabaseAnalyzeTable"
+        Me.RI_InboxBoard.ScreenTip = "Will open a board that provides you an overview of all marked emails and allows you to manage them"
+        Me.RI_InboxBoard.ShowImage = True
+        '
         'RI_DefineMyStyle
         '
         Me.RI_DefineMyStyle.Label = "Define MyStyle"
@@ -825,6 +835,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
+    Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
     Friend WithEvents RI_QuickTranslate As RibbonButton
     Friend WithEvents RI_Primlang As RibbonButton
