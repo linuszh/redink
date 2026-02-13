@@ -1032,6 +1032,7 @@ Partial Public Class ThisAddIn
                 AddItem("loadurl", "Retrieve the text of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
                 AddItem("drawio", "Open a draw.io for editing chart files, optionally with Internet blocking.")
+                AddItem("drawioconverter", "Convert a draw.io flow chart to a HTML mini-web-app.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
@@ -1328,25 +1329,27 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Batch Signing for Update INI Key Functionality
+
             If String.Equals(OtherPrompt.Trim(), "iniupdatebatch", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "signbatch", StringComparison.OrdinalIgnoreCase) Then
                 ShowBatchSigningDialog()
                 Return
             End If
 
-            ' Signature Management for Update INI Key Functionality
             If String.Equals(OtherPrompt.Trim(), "iniupdateignored", StringComparison.OrdinalIgnoreCase) OrElse String.Equals(OtherPrompt.Trim(), "iniupdateignore", StringComparison.OrdinalIgnoreCase) Then
                 ShowIgnoredParametersDialog()
                 Return
             End If
 
-            ' Signature Management for Update INI Key Functionality
             If String.Equals(OtherPrompt.Trim(), "translator", StringComparison.OrdinalIgnoreCase) Then
                 ShowQuickTranslate()
                 Return
             End If
 
-            ' Signature Management for Update INI Key Functionality
+            If String.Equals(OtherPrompt.Trim(), "drawioconverter", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "chart", StringComparison.OrdinalIgnoreCase) Then
+                ConvertDrawioToHtml()
+                Return
+            End If
+
             If String.Equals(OtherPrompt.Trim(), "drawio", StringComparison.OrdinalIgnoreCase) Or String.Equals(OtherPrompt.Trim(), "chart", StringComparison.OrdinalIgnoreCase) Then
                 OpenExistingDrawioFileForEditing()
                 Return

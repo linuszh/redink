@@ -249,8 +249,8 @@ Partial Public Class ThisAddIn
     ''' Returns Nothing if cancelled or no rules available.
     ''' </summary>
     Private Function SelectMailMoverRules() As String
-        Dim centralPath As String = Environment.ExpandEnvironmentVariables(If(INI_MailMoverPath, ""))
-        Dim localPath As String = Environment.ExpandEnvironmentVariables(If(INI_MailMoverPathLocal, ""))
+        Dim centralPath As String = ExpandEnvironmentVariables(If(INI_MailMoverPath, ""))
+        Dim localPath As String = ExpandEnvironmentVariables(If(INI_MailMoverPathLocal, ""))
 
         Dim segments As New List(Of MailMoverRuleSegment)()
 
@@ -463,6 +463,9 @@ Partial Public Class ThisAddIn
         Return ExtractMailsFromFolder(currentFolder, isSent)
     End Function
 
+    ''' <summary>
+    ''' Extracts MailMoverEntry items from the current selection.
+    ''' </summary>
     Private Function ExtractMailsFromSelection(sel As Outlook.Selection) As List(Of MailMoverEntry)
         Dim entries As New List(Of MailMoverEntry)()
         Dim count As Integer = ComRetry(Of Integer)(Function() sel.Count)
@@ -481,6 +484,9 @@ Partial Public Class ThisAddIn
         Return entries
     End Function
 
+    ''' <summary>
+    ''' Extracts MailMoverEntry items from a folder, limited by the scan guard.
+    ''' </summary>
     Private Function ExtractMailsFromFolder(folder As MAPIFolder, isSent As Boolean) As List(Of MailMoverEntry)
         Dim entries As New List(Of MailMoverEntry)()
         Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() folder.Items)
@@ -503,6 +509,9 @@ Partial Public Class ThisAddIn
         Return entries
     End Function
 
+    ''' <summary>
+    ''' Builds a MailMoverEntry from an Outlook MailItem.
+    ''' </summary>
     Private Function BuildMailEntry(mi As MailItem, isSent As Boolean) As MailMoverEntry
         Dim entry As New MailMoverEntry()
 
@@ -563,6 +572,9 @@ Partial Public Class ThisAddIn
 
 #Region "MailMover Folder Enumeration"
 
+    ''' <summary>
+    ''' Collects all mailbox folders from the default store.
+    ''' </summary>
     Private Function CollectAllFolders() As List(Of String)
         Dim folders As New List(Of String)()
         Try
@@ -577,6 +589,9 @@ Partial Public Class ThisAddIn
         Return folders
     End Function
 
+    ''' <summary>
+    ''' Recursively enumerates folders and appends their folder paths.
+    ''' </summary>
     Private Sub EnumerateFolders(parentFolder As MAPIFolder, folders As List(Of String))
         Try
             folders.Add(parentFolder.FolderPath)
@@ -588,6 +603,9 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Finds a folder by full folder path in the default store.
+    ''' </summary>
     Private Function FindFolderByPath(ns As Outlook.NameSpace, folderPath As String) As MAPIFolder
         If String.IsNullOrWhiteSpace(folderPath) Then Return Nothing
         Try
@@ -621,6 +639,9 @@ Partial Public Class ThisAddIn
 
 #Region "MailMover LLM Processing"
 
+    ''' <summary>
+    ''' Sends mails to the LLM in batches and applies returned assignments.
+    ''' </summary>
     Private Async Function ProcessMailBatchesAsync(
         mails As List(Of MailMoverEntry),
         rules As String,
@@ -726,6 +747,9 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>
+    ''' Parses an LLM JSON response and applies suggested folders to the batch range.
+    ''' </summary>
     Private Sub ParseMailMoverResponse(response As String, mails As List(Of MailMoverEntry), batchStart As Integer, batchEnd As Integer)
         Try
             Dim jsonText As String = response.Trim()
@@ -780,6 +804,9 @@ Partial Public Class ThisAddIn
 
 #Region "MailMover Review Dialog"
 
+    ''' <summary>
+    ''' Shows the review dialog for suggested assignments and collects user selections.
+    ''' </summary>
     Private Function ShowMailMoverReviewDialog(mails As List(Of MailMoverEntry), folders As List(Of String)) As Boolean
         Dim approved As Boolean = False
 
@@ -1178,6 +1205,9 @@ Partial Public Class ThisAddIn
 
 #Region "MailMover Move Execution"
 
+    ''' <summary>
+    ''' Moves all mails that have a SelectedFolder and records undo metadata.
+    ''' </summary>
     Private Sub MoveApprovedMails(mails As List(Of MailMoverEntry))
         Dim toMove As List(Of MailMoverEntry) = mails.Where(Function(m) m.SelectedFolder IsNot Nothing).ToList()
         If toMove.Count = 0 Then Return

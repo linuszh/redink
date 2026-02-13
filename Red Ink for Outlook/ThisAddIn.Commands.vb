@@ -267,6 +267,8 @@ Partial Public Class ThisAddIn
 
             If Command = "MailMover" Then MailMover() : Return
 
+            If Command = "InboxBoard" Then InboxBoard() : Return
+
             Dim Sumup As Boolean = (Command = "Sumup")
             Dim Translate As Boolean = (Command = "Translate" OrElse Command = "PrimLang")
 

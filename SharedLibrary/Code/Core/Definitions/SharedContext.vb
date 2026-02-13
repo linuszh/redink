@@ -221,6 +221,7 @@ Namespace SharedLibrary
             Property SP_DiscussThis_SortOut As String
             Property SP_DiscussThis_SumUp As String
             Property SP_MailMover As String
+            Property SP_InboxBoard As String
             Property SP_Add_ChatWord_Commands As String
             Property SP_Add_Chat_NoCommands As String
             Property SP_ChatExcel As String
@@ -510,6 +511,7 @@ Namespace SharedLibrary
         Public Property SP_DiscussThis_SortOut As String Implements ISharedContext.SP_DiscussThis_SortOut
         Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
         Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
+        Public Property SP_InboxBoard As String Implements ISharedContext.SP_InboxBoard
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
         Public Property SP_Add_Chat_NoCommands As String Implements ISharedContext.SP_Add_Chat_NoCommands
         Public Property SP_ChatExcel As String Implements ISharedContext.SP_ChatExcel
