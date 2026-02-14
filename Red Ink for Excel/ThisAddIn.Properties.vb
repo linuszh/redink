@@ -1313,6 +1313,24 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_AutoPilot As String
+        Get
+            Return _context.SP_AutoPilot
+        End Get
+        Set(value As String)
+            _context.SP_AutoPilot = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AutoPilot_NoTools As String
+        Get
+            Return _context.SP_AutoPilot_NoTools
+        End Get
+        Set(value As String)
+            _context.SP_AutoPilot_NoTools = value
+        End Set
+    End Property
+
     Public Shared Property SP_Add_ChatWord_Commands As String
         Get
             Return _context.SP_Add_ChatWord_Commands
@@ -2158,6 +2176,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_UpdateIniIgnoreOverride = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AutoPilot As String
+        Get
+            Return _context.INI_AutoPilot
+        End Get
+        Set(value As String)
+            _context.INI_AutoPilot = value
         End Set
     End Property
 

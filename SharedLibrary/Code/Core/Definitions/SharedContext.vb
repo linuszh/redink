@@ -222,6 +222,9 @@ Namespace SharedLibrary
             Property SP_DiscussThis_SumUp As String
             Property SP_MailMover As String
             Property SP_InboxBoard As String
+            Property SP_AutoPilot As String
+            Property SP_AutoPilot_NoTools As String
+
             Property SP_Add_ChatWord_Commands As String
             Property SP_Add_Chat_NoCommands As String
             Property SP_ChatExcel As String
@@ -303,6 +306,7 @@ Namespace SharedLibrary
             ' Log silent update actions to a file for audit purposes
             Property INI_UpdateIniSilentLog As Boolean
 
+            Property INI_AutoPilot As String
 
             ' Tooling / tool-call settings 
             Property INI_ToolingLogWindow As Boolean
@@ -512,6 +516,8 @@ Namespace SharedLibrary
         Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
         Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
         Public Property SP_InboxBoard As String Implements ISharedContext.SP_InboxBoard
+        Public Property SP_AutoPilot As String Implements ISharedContext.SP_AutoPilot
+        Public Property SP_AutoPilot_NoTools As String Implements ISharedContext.SP_AutoPilot_NoTools
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
         Public Property SP_Add_Chat_NoCommands As String Implements ISharedContext.SP_Add_Chat_NoCommands
         Public Property SP_ChatExcel As String Implements ISharedContext.SP_ChatExcel
@@ -586,6 +592,7 @@ Namespace SharedLibrary
         Public Property Ignore As String Implements ISharedContext.Ignore
         Public Property Location As String Implements ISharedContext.Location
 
+        Public Property INI_AutoPilot As String Implements ISharedContext.INI_AutoPilot
 
         ' Tooling / tool-call settings 
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow

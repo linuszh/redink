@@ -997,6 +997,11 @@ Namespace SharedLibrary
         ''' </summary>
         Private Shared Function PerformAutoModeActivation(context As ISharedContext, productId As String, licenseKey As String, userId As String) As Boolean
             Try
+                Dim autoModeSilent As Boolean = False
+                If _licenseConfigDict IsNot Nothing Then
+                    autoModeSilent = ParseBoolean(_licenseConfigDict, "LicenseAutoModeSilent", False)
+                End If
+
                 ' Check if LicenseClearAll is set - if so, clear all licenses before proceeding
                 If _licenseConfigDict IsNot Nothing AndAlso ParseBoolean(_licenseConfigDict, "LicenseClearAll", False) Then
                     LogLicenseEvent("Auto Activation", "LicenseClearAll=True - clearing all licenses including legacy")
@@ -1036,7 +1041,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    If Not autoModeSilent Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    End If
 
                     Return True
                 End If
@@ -1095,7 +1102,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
+                    If Not autoModeSilent Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
+                    End If
 
                     Return True
                 End If
@@ -1125,7 +1134,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    If Not autoModeSilent Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    End If
 
                     Return True
                 ElseIf recheckResponse.Success AndAlso recheckResponse.ActivationsRemaining <= 0 Then

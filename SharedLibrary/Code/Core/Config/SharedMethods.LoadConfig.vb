@@ -210,6 +210,8 @@ Namespace SharedLibrary
                 context.SP_DiscussThis_SumUp = If(configDict.ContainsKey("SP_DiscussThis_SumUp"), configDict("SP_DiscussThis_SumUp"), Default_SP_DiscussThis_Sumup)
                 context.SP_MailMover = If(configDict.ContainsKey("SP_MailMover"), configDict("SP_MailMover"), Default_SP_MailMover)
                 context.SP_InboxBoard = If(configDict.ContainsKey("SP_InboxBoard"), configDict("SP_InboxBoard"), Default_SP_InboxBoard)
+                context.SP_AutoPilot = If(configDict.ContainsKey("SP_AutoPilot"), configDict("SP_AutoPilot"), Default_SP_AutoPilot)
+                context.SP_AutoPilot_NoTools = If(configDict.ContainsKey("SP_AutoPilot_NoTools"), configDict("SP_AutoPilot_NoTools"), Default_SP_AutoPilot_NoTools)
                 context.SP_Chat = If(configDict.ContainsKey("SP_Chat"), configDict("SP_Chat"), Default_SP_Chat)
                 context.SP_Add_ChatWord_Commands = If(configDict.ContainsKey("SP_Add_ChatWord_Commands"), configDict("SP_Add_ChatWord_Commands"), Default_SP_Add_ChatWord_Commands)
                 context.SP_Add_Chat_NoCommands = If(configDict.ContainsKey("SP_Add_Chat_NoCommands"), configDict("SP_Add_Chat_NoCommands"), Default_SP_Add_Chat_NoCommands)
@@ -267,6 +269,8 @@ Namespace SharedLibrary
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
+
+                context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
 
                 ' Tooling settings
 

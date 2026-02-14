@@ -5,28 +5,30 @@
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
 ' Purpose:
-'   Implements a model-agnostic tool/function-calling loop used by the LLM layer.
-'   The loop detects tool calls in model output, extracts tool call payloads, runs the
-'   requested tools (internal and external), and injects tool responses into the next
-'   model iteration until a final answer is produced or limits/cancellation are reached.
+'   Implements a model-agnostic tool/function-calling loop for LLM interactions.
+'   Detects tool calls in model output, executes internal/external tools, and
+'   injects tool responses into subsequent model iterations until a final answer
+'   is produced or limits/cancellation are reached.
 '
 ' Responsibilities:
 '   - Tool loop orchestration via `ExecuteToolingLoop`:
-'       * Build enhanced system prompt including tool usage guidance.
-'       * Generate model-specific tool definition payload and assign it to `INI_APICall_ToolInstructions_2`.
-'       * Invoke `LLM(...)` iteratively and determine whether tool calls are present.
-'       * Serialize tool results and assign them to `INI_APICall_ToolResponses_2` for the next iteration.
+'       * Build enhanced system prompt with tool usage guidance.
+'       * Generate model-specific tool definition payloads for `INI_APICall_ToolInstructions_2`.
+'       * Invoke `LLM(...)` iteratively, detect tool calls, and inject responses via
+'         `INI_APICall_ToolResponses_2`.
+'       * Enforce iteration limits, timeouts, cancellation, and forced final synthesis.
 '   - Tool call parsing:
-'       * Detect tool calls via regex (`ContainsToolCalls`) using `ToolCallDetectionPattern` or derived pattern.
-'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided extraction map.
+'       * Detect tool calls via regex (`ContainsToolCalls`) using tooling model patterns.
+'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided map.
 '   - Tool execution:
-'       * Internal tool: `retrieve_web_content` performs web retrieval with SSRF safeguards.
-'       * External tools: apply a selected `ModelConfig` to `_context`, build an API-call payload, force JSON
-'         response mode, invoke the model, then restore the prior config.
+'       * Internal tool: `retrieve_web_content` with SSRF safeguards (WebView2 or HTTP fallback).
+'       * External tools: apply selected `ModelConfig`, build API call payloads, force JSON
+'         response mode, invoke the model, and restore prior config.
+'       * AutoPilot routing for internal tools when AutoPilot is active.
 '   - Tool selection and persistence:
 '       * Load tool configurations from `INI_SpecialServicePath`.
 '       * Add a built-in web retrieval tool.
-'       * Persist selected tool names via application settings and restore them on demand.
+'       * Persist selected tool names and restore them on demand.
 '   - Diagnostics:
 '       * Optional per-run file logging via `ToolingFileLogger` (controlled by `INI_APIDebug`).
 '       * Optional UI logging via `LogWindow` when enabled.
@@ -35,7 +37,6 @@
 '   - This file is a partial definition of `ThisAddIn` and depends on shared configuration
 '     values (INI variables), `_context`, and the `LLM(...)` entry point provided elsewhere.
 '   - Web retrieval uses WebView2 when enabled to capture JavaScript-rendered content.
-'   - This file mirrors similar tooling support in Red Ink for Word (which is the master).
 ' =============================================================================
 
 Option Explicit On
@@ -89,7 +90,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Maximum tool loop iterations used by prompt-building helpers.
     ''' </summary>
-    Private MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = 10
 
 #Region "WebView2 Web Content Retrieval"
 
@@ -992,7 +993,8 @@ Partial Public Class ThisAddIn
         Optional hideSplash As Boolean = False,
         Optional hideLogWindow As Boolean = False,
         Optional DoChart As Boolean = False,
-        Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
+        Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+        Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1172,7 +1174,7 @@ Partial Public Class ThisAddIn
                                 otherPrompt,
                                 fileObject,
                                 combinedCts.Token,
-                                True, True)
+                                True, True, binaryOutputDirectory:=binaryOutputDirectory)
 
                         Catch ex As OperationCanceledException When timeoutCts.IsCancellationRequested
                             context.LogError($"LLM call timed out after {totalTimeout}s")
@@ -1324,7 +1326,7 @@ Partial Public Class ThisAddIn
                                 otherPrompt,
                                 fileObject,
                                 combinedCts.Token,
-                                True, True)
+                                True, True, binaryOutputDirectory:=binaryOutputDirectory)
 
                             If Not String.IsNullOrWhiteSpace(finalResponse) Then
                                 currentResponse = finalResponse
@@ -1857,6 +1859,13 @@ Partial Public Class ThisAddIn
     ''' Executes a single tool call using either the internal tool implementation or an external tool configuration.
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        ' ── AutoPilot internal tool routing ──
+        If _apActive AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
+            Dim apResult = Await TryExecuteAutoPilotTool(toolCall, context, cancellationToken)
+            If apResult IsNot Nothing Then Return apResult
+        End If
+
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId,
             .ToolName = toolCall.ToolName
@@ -1885,6 +1894,45 @@ Partial Public Class ThisAddIn
                 context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
             Else
                 context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+            End If
+
+            ' ── AutoPilot: record external tool call for dashboard + sources footer ──
+            If _apActive AndAlso _apCurrentToolCallLog IsNot Nothing Then
+                Dim elapsed = DateTime.Now - response.Timestamp
+                Dim excerpt = BuildResultExcerpt(response.Response, 80)
+
+                ' Log to AutoPilot dashboard (Feature 3)
+                ApDashboardLog($"🔧 External tool: {toolCall.ToolName}{paramSummary}", "info")
+                If response.Success Then
+                    ApDashboardLog($"   ✓ {excerpt}", "info")
+                Else
+                    ApDashboardLog($"   ✗ {If(response.ErrorMessage, excerpt)}", "error")
+                End If
+
+                ' Record for "Sources used:" footer (Feature 2)                
+                Dim toolUrls As List(Of String) = Nothing
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("urls") Then
+                    Try
+                        Dim urlsObj = toolCall.Arguments("urls")
+                        If TypeOf urlsObj Is JArray Then
+                            toolUrls = DirectCast(urlsObj, JArray).Select(Function(t) t.ToString()).ToList()
+                        ElseIf TypeOf urlsObj Is IEnumerable(Of Object) Then
+                            toolUrls = DirectCast(urlsObj, IEnumerable(Of Object)).Select(Function(o) o.ToString()).ToList()
+                        ElseIf TypeOf urlsObj Is String Then
+                            toolUrls = New List(Of String) From {CStr(urlsObj)}
+                        End If
+                    Catch
+                    End Try
+                End If
+                RecordAutoPilotToolCall(
+                    toolCall.ToolName,
+                    If(toolConfig?.ModelDescription, toolCall.ToolName),
+                    paramSummary,
+                    isInternalTool:=False,
+                    wasSuccessful:=response.Success,
+                    resultExcerpt:=excerpt,
+                    elapsed:=elapsed,
+                    urls:=toolUrls)
             End If
 
         Catch ex As OperationCanceledException
