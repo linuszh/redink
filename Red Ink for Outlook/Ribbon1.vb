@@ -399,4 +399,9 @@ Public Class Ribbon2
         Globals.ThisAddIn.CompareSelectedTextRangesOutlook()
     End Sub
 
+    Private Sub RI_AutoPilot_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_AutoPilot.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_AutoPilot_Click invoked")
+        Globals.ThisAddIn.StartAutoPilot()
+    End Sub
+
 End Class

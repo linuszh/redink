@@ -490,6 +490,7 @@ Partial Class Ribbon2
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
+        Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
@@ -537,6 +538,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
+        Me.Menu1.Items.Add(Me.RI_AutoPilot)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
         Me.Menu1.KeyTip = "S"
@@ -716,6 +718,14 @@ Partial Class Ribbon2
         Me.RI_DefineMyStyle.ScreenTip = "Analyze your writing style and create a MyStyle prompt based on it"
         Me.RI_DefineMyStyle.ShowImage = True
         '
+        'RI_AutoPilot
+        '
+        Me.RI_AutoPilot.Label = "AutoPilot"
+        Me.RI_AutoPilot.Name = "RI_AutoPilot"
+        Me.RI_AutoPilot.OfficeImageId = "ResourcePoolRefresh"
+        Me.RI_AutoPilot.ScreenTip = "Starts the feature that allows Inky to respond to defined emails automatically."
+        Me.RI_AutoPilot.ShowImage = True
+        '
         'RI_HelpMe
         '
         Me.RI_HelpMe.Label = "Help me, Inky"
@@ -813,6 +823,8 @@ Partial Class Ribbon2
             Me.RI_ApplyMyStyle.Visible = True
         End If
 
+        Me.RI_AutoPilot.Visible = ThisAddIn.IsAutoPilotPermitted()
+
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPathLocal) Then
             Me.RI_MailMover.Visible = False
         Else
@@ -852,6 +864,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
+    Friend WithEvents RI_AutoPilot As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
     Friend WithEvents RI_CompareSelected As RibbonButton
 End Class

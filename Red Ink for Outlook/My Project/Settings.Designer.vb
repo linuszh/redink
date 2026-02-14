@@ -269,6 +269,138 @@ Namespace My
                 Me("InboxBoardColumnFilter") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_FilterRules() As String
+            Get
+                Return CType(Me("AP_FilterRules"),String)
+            End Get
+            Set
+                Me("AP_FilterRules") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_WhitelistedSenders() As String
+            Get
+                Return CType(Me("AP_WhitelistedSenders"),String)
+            End Get
+            Set
+                Me("AP_WhitelistedSenders") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_SubjectTriggerWord() As String
+            Get
+                Return CType(Me("AP_SubjectTriggerWord"),String)
+            End Get
+            Set
+                Me("AP_SubjectTriggerWord") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("10")>  _
+        Public Property AP_CooldownSeconds() As Integer
+            Get
+                Return CType(Me("AP_CooldownSeconds"),Integer)
+            End Get
+            Set
+                Me("AP_CooldownSeconds") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("50")>  _
+        Public Property AP_MaxRepliesPerSession() As Integer
+            Get
+                Return CType(Me("AP_MaxRepliesPerSession"),Integer)
+            End Get
+            Set
+                Me("AP_MaxRepliesPerSession") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("10")>  _
+        Public Property AP_MaxAttachmentMB() As Integer
+            Get
+                Return CType(Me("AP_MaxAttachmentMB"),Integer)
+            End Get
+            Set
+                Me("AP_MaxAttachmentMB") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_FooterText() As String
+            Get
+                Return CType(Me("AP_FooterText"),String)
+            End Get
+            Set
+                Me("AP_FooterText") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_MonitoredMailbox() As String
+            Get
+                Return CType(Me("AP_MonitoredMailbox"),String)
+            End Get
+            Set
+                Me("AP_MonitoredMailbox") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
+        Public Property AP_RequireApproval() As Boolean
+            Get
+                Return CType(Me("AP_RequireApproval"),Boolean)
+            End Get
+            Set
+                Me("AP_RequireApproval") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_SelectedModelKey() As String
+            Get
+                Return CType(Me("AP_SelectedModelKey"),String)
+            End Get
+            Set
+                Me("AP_SelectedModelKey") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_SelectedExternalToolNames() As String
+            Get
+                Return CType(Me("AP_SelectedExternalToolNames"),String)
+            End Get
+            Set
+                Me("AP_SelectedExternalToolNames") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

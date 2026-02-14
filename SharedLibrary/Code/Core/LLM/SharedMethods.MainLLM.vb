@@ -85,8 +85,7 @@ Namespace SharedLibrary
         ''' <param name="cancellationToken">Cancellation token propagated to network calls and linked to splash cancellation.</param>
         ''' <param name="ToolExecution">If <c>True</c> then LLM expects to be in the tooling execution mode when calling an LLM (necessary for building APICall).</c>.</param>
         ''' <returns>Extracted text from the JSON response; returns an empty string on cancellation or on handled errors.</returns>
-        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False) As Task(Of String)
-
+        Public Shared Async Function LLM(context As ISharedContext, ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
             If cancellationToken.IsCancellationRequested Then
                 Return ""
             End If
@@ -873,7 +872,7 @@ Namespace SharedLibrary
                                     Select Case root2.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim obj2 As Newtonsoft.Json.Linq.JObject = CType(root2, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall)
+                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall, binaryOutputDirectory)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
                                             ' If template has a loop, process entire array at once
@@ -886,7 +885,7 @@ Namespace SharedLibrary
                                                 For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
                                                     If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
                                                         Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                        ResponseKey, responseText, RKMode, DetectToolCall)
+                                                        ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
                                                     End If
                                                 Next
                                             End If
@@ -900,7 +899,7 @@ Namespace SharedLibrary
                                     Select Case root.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall)
+                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
                                             ' If template has a loop, process entire array at once
@@ -913,7 +912,7 @@ Namespace SharedLibrary
                                                 For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
                                                     If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
                                                         Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                            ResponseKey, responseText, RKMode, DetectToolCall)
+                                                            ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
                                                     End If
                                                 Next
                                             End If
@@ -1256,8 +1255,10 @@ Namespace SharedLibrary
         ''' <param name="ResponseKey">Response key/template used by <c>JsonTemplateFormatter</c> or the literal string "JSON".</param>
         ''' <param name="ResponseText">Original response text used for error messages and "JSON" passthrough.</param>
         ''' <param name="RKMode">Response extraction mode passed through to <c>JsonTemplateFormatter</c>.</param>
+        ''' <param name="DetectToolCall">Regex pattern for tool call detection.</param>
+        ''' <param name="binaryOutputDirectory">Optional directory where binary outputs (images) are saved instead of the Desktop.</param>
         ''' <returns>Extracted response text; empty string on handled error.</returns>
-        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer, DetectToolCall As String) As String
+        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer, DetectToolCall As String, Optional binaryOutputDirectory As String = Nothing) As String
 
             ' Extract the "error" segment
             Dim text As String = FindJsonProperty(jsonObject, "error")
@@ -1270,7 +1271,7 @@ Namespace SharedLibrary
 
                 text = ""
 
-                Dim ImageFile As String = ImageDecoder.DecodeAndSaveImage(jsonObject)
+                Dim ImageFile As String = ImageDecoder.DecodeAndSaveImage(jsonObject, binaryOutputDirectory)
                 If Not String.IsNullOrWhiteSpace(ImageFile) Then
                     text = vbCrLf & "Image saved to: " & ImageFile & vbCrLf
                     text = text.Replace("\", "\\")
