@@ -163,12 +163,14 @@ Public Class ImageDecoder
 
 
     ''' <summary>
-    ''' Searches the provided JSON object for an embedded base64 image and, if found, saves it to a uniquely named file
-    ''' on the current user's Desktop.
+    ''' Searches the provided JSON object for an embedded base64 image and, if found, saves it to a uniquely named file.
+    ''' When <paramref name="targetDirectory"/> is set to a valid existing directory, the image is saved there;
+    ''' otherwise it is saved to the current user's Desktop.
     ''' </summary>
     ''' <param name="jsonData">JSON object to search for base64-encoded image data.</param>
+    ''' <param name="targetDirectory">Optional directory path to save the image to instead of the Desktop.</param>
     ''' <returns>Full path of the saved image file, or an empty string if no supported image was found or saving failed.</returns>
-    Public Shared Function DecodeAndSaveImage(jsonData As JObject) As String
+    Public Shared Function DecodeAndSaveImage(jsonData As JObject, Optional targetDirectory As String = Nothing) As String
         Dim imageBytes As Byte() = Nothing
         Dim mimeType As String = String.Empty
 
@@ -183,14 +185,29 @@ Public Class ImageDecoder
             Return ""
         End If
 
-        ' Determine the desktop path and generate a unique filename.
-        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+        ' Use the override directory if set and valid; otherwise fall back to the Desktop.
+        Dim saveDir As String = Nothing
+        If Not String.IsNullOrWhiteSpace(targetDirectory) Then
+            Try
+                If Directory.Exists(targetDirectory) Then
+                    saveDir = targetDirectory
+                End If
+            Catch
+                ' Ignore invalid paths; fall through to desktop
+            End Try
+        End If
+
+        If String.IsNullOrEmpty(saveDir) Then
+            saveDir = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+        End If
+
+        ' Generate a unique filename.
         Dim fileNumber As Integer = 1
         Dim saveFilePath As String = String.Empty
 
         Do
             Dim fileName As String = "AI_Image_" & fileNumber.ToString("D3") & ext
-            saveFilePath = Path.Combine(desktopPath, fileName)
+            saveFilePath = Path.Combine(saveDir, fileName)
             If Not File.Exists(saveFilePath) Then
                 Exit Do
             End If

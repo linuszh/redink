@@ -1074,6 +1074,8 @@ Namespace SharedLibrary
                     Return context.INI_OAuth2_2.ToString()
                 Case "NoHelperDownload"
                     Return context.INI_NoHelperDownload.ToString()
+                Case "AutoPilot"
+                    Return context.INI_AutoPilot
                 Case "ToolingLogWindow"
                     Return context.INI_ToolingLogWindow.ToString()
                 Case "ToolingDryRun"
@@ -1368,6 +1370,8 @@ Namespace SharedLibrary
                     context.INI_MailMoverPathLocal = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
+                Case "AutoPilot"
+                    context.INI_AutoPilot = value
                 Case "ToolingLogWindow"
                     context.INI_ToolingLogWindow = Boolean.Parse(value)
                 Case "ToolingDryRun"
@@ -1764,6 +1768,8 @@ Namespace SharedLibrary
                     {"SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp},
                     {"SP_MailMover", context.SP_MailMover},
                     {"SP_InboxBoard", context.SP_InboxBoard},
+                    {"SP_AutoPilot", context.SP_AutoPilot},
+                    {"SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools},
                     {"SP_Chat", context.SP_Chat},
                     {"SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands},
@@ -1774,6 +1780,7 @@ Namespace SharedLibrary
                     {"SP_MergePrompt2", context.SP_MergePrompt2},
                     {"SP_Add_MergePrompt", context.SP_Add_MergePrompt},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
+                    {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
@@ -1865,6 +1872,8 @@ Namespace SharedLibrary
                     {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
                     {"SP_MailMover", Default_SP_MailMover},
                     {"SP_InboxBoard", Default_SP_InboxBoard},
+                    {"SP_AutoPilot", Default_SP_AutoPilot},
+                    {"SP_AutoPilot_NoTools", Default_SP_AutoPilot_NoTools},
                     {"SP_Chat", Default_SP_Chat},
                     {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
@@ -2240,6 +2249,7 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LogoPathLarge", context.INI_LogoPathLarge},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
+                    {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
@@ -2896,6 +2906,8 @@ Namespace SharedLibrary
             variableValues.Add("SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp)
             variableValues.Add("SP_MailMover", context.SP_MailMover)
             variableValues.Add("SP_InboxBoard", context.SP_InboxBoard)
+            variableValues.Add("SP_AutoPilot", context.SP_AutoPilot)
+            variableValues.Add("SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools)
             variableValues.Add("SP_Chat", context.SP_Chat)
             variableValues.Add("SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands)
             variableValues.Add("SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands)
@@ -2906,6 +2918,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MergePrompt", context.SP_MergePrompt)
             variableValues.Add("SP_MergePrompt2", context.SP_MergePrompt2)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
+            variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
             variableValues.Add("ToolingMaximumIterations", context.INI_ToolingMaximumIterations)
@@ -3070,6 +3083,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_DiscussThis_SumUp") Then context.SP_DiscussThis_SumUp = CStr(updatedValues("SP_DiscussThis_SumUp"))
                 If updatedValues.ContainsKey("SP_MailMover") Then context.SP_MailMover = CStr(updatedValues("SP_MailMover"))
                 If updatedValues.ContainsKey("SP_InboxBoard") Then context.SP_InboxBoard = CStr(updatedValues("SP_InboxBoard"))
+                If updatedValues.ContainsKey("SP_AutoPilot") Then context.SP_AutoPilot = CStr(updatedValues("SP_AutoPilot"))
+                If updatedValues.ContainsKey("SP_AutoPilot_NoTools") Then context.SP_AutoPilot_NoTools = CStr(updatedValues("SP_AutoPilot_NoTools"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))
                 If updatedValues.ContainsKey("SP_Add_ChatWord_Commands") Then context.SP_Add_ChatWord_Commands = CStr(updatedValues("SP_Add_ChatWord_Commands"))
                 If updatedValues.ContainsKey("SP_Add_Chat_NoCommands") Then context.SP_Add_Chat_NoCommands = CStr(updatedValues("SP_Add_Chat_NoCommands"))
@@ -3143,6 +3158,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
                 If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                 If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
                 If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))
