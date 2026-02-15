@@ -16,10 +16,13 @@
 '  - extract_pdf_text: Extracts text content from PDF attachments, optionally
 '    running OCR when needed and available.
 '  - merge_pdfs: Merges multiple PDF attachments into a single PDF.
-'  - read_attachment: Reads the text content of any supported attachment.
+'  - read_attachment: Reads the text content of any supported attachment
+'    (DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX).
 '  - list_attachments: Lists all attachments with metadata.
 '  - describe_binary_attachment: Sends a supported binary attachment (image, audio,
 '    video) to the AI for description or transcription.
+'  - compare_word_documents: Compares two Word document attachments using Word's
+'    built-in comparison and produces a tracked-changes document.
 '
 ' Architecture:
 '  - Tools are registered as ModelConfig entries with ToolOnly=True, consistent
@@ -98,6 +101,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const AP_ToolPrefix As String = "autopilot_"
 
+    ''' <summary>
+    ''' Tool name for comparing Word documents.
+    ''' </summary>
+    Private Const AP_Tool_CompareWordDocs As String = "compare_word_documents"
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -169,10 +177,12 @@ Partial Public Class ThisAddIn
             .ModelDescription = "Read Attachment Content (built-in)",
             .ToolInstructionsPrompt =
                 AP_Tool_ReadAttachment & ": Reads and returns the text content of a supported attachment " &
-                "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, PPTX, XLSX).",
+                "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX).",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadAttachment & """," &
-                """description"":""Reads and returns the text content of an attachment file""," &
+                """description"":""Reads and returns the text content of an attachment file. " &
+                "Supports Word documents (.docx), PDFs (.pdf), Excel spreadsheets (.xlsx, .xls), " &
+                "PowerPoint presentations (.pptx), and text-based files (.txt, .csv, .html, .xml, .json, .md, .log).""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the attachment to read""}" &
                 "},""required"":[""attachment_name""]}}"
@@ -244,6 +254,34 @@ Partial Public Class ThisAddIn
                 "},""required"":[""instruction""]}}"
         })
 
+        ' ── compare_word_documents ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True,
+            .Tool = True,
+            .ToolName = AP_Tool_CompareWordDocs,
+            .ModelDescription = "Compare two Word documents (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CompareWordDocs & ": Compares exactly two Word document (.doc/.docx) attachments using Word's " &
+                "built-in comparison engine (track changes). Use 'original_filename' for the BASE/earlier/reference " &
+                "version and 'revised_filename' for the MODIFIED/newer/changed version. Returns a textual summary of " &
+                "revisions found and produces a comparison document with tracked changes attached to the reply. " &
+                "This tool requires exactly two attachments to be specified — it cannot compare more than two at once. " &
+                "If the sender provides more than two Word documents, ask which two should be compared, or run " &
+                "multiple comparisons.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CompareWordDocs & """," &
+                """description"":""Compares exactly two Word documents (.doc/.docx) using Word's built-in comparison (track changes). " &
+                "The 'original_filename' is the BASE document (the earlier or reference version). " &
+                "The 'revised_filename' is the MODIFIED document (the newer or changed version). " &
+                "Returns a textual summary of the differences found and produces a comparison document with tracked changes as a result attachment. " &
+                "IMPORTANT: 'original_filename' = the source/baseline; 'revised_filename' = the version that was changed or updated. " &
+                "This tool compares exactly two documents per call.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """original_filename"":{""type"":""string"",""description"":""Exact filename of the original/baseline/source Word attachment (the earlier version)""}," &
+                """revised_filename"":{""type"":""string"",""description"":""Exact filename of the revised/modified/updated Word attachment (the newer version)""}" &
+                "},""required"":[""original_filename"",""revised_filename""]}}"
+        })
+
         Return tools
     End Function
 
@@ -280,6 +318,9 @@ Partial Public Class ThisAddIn
 
             Case AP_Tool_CommentWordDoc
                 Return Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+
+            Case AP_Tool_CompareWordDocs
+                Return Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
 
             Case Else
                 Return Nothing ' Not our tool — let existing pipeline handle it
@@ -395,6 +436,167 @@ Partial Public Class ThisAddIn
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error adding comments to Word document(s): {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: compare_word_documents
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Compares two Word document attachments using Word's Compare feature.
+    ''' Produces a comparison .docx with tracked changes and returns a textual summary.
+    ''' </summary>
+    Private Async Function ExecuteCompareWordDocsTool(
+                toolCall As ToolCall,
+                context As ToolExecutionContext,
+                ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName,
+            .Timestamp = DateTime.UtcNow,
+            .OriginalCallJson = toolCall.RawJson
+        }
+
+        Try
+            Dim originalFilename As String = ""
+            Dim revisedFilename As String = ""
+
+            If toolCall.Arguments IsNot Nothing Then
+                If toolCall.Arguments.ContainsKey("original_filename") Then
+                    originalFilename = toolCall.Arguments("original_filename")?.ToString().Trim()
+                End If
+                If toolCall.Arguments.ContainsKey("revised_filename") Then
+                    revisedFilename = toolCall.Arguments("revised_filename")?.ToString().Trim()
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(originalFilename) OrElse String.IsNullOrWhiteSpace(revisedFilename) Then
+                response.Success = False
+                response.ErrorMessage = "Both 'original_filename' and 'revised_filename' are required."
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            If _apCurrentAttachments Is Nothing OrElse _apCurrentAttachments.Count < 2 Then
+                response.Success = False
+                response.ErrorMessage = "At least two attachments are required for comparison."
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            Dim originalAtt = _apCurrentAttachments.FirstOrDefault(
+                Function(a) a.OriginalFileName.Equals(originalFilename, StringComparison.OrdinalIgnoreCase))
+            Dim revisedAtt = _apCurrentAttachments.FirstOrDefault(
+                Function(a) a.OriginalFileName.Equals(revisedFilename, StringComparison.OrdinalIgnoreCase))
+
+            If originalAtt Is Nothing Then
+                response.Success = False
+                response.ErrorMessage = $"Original attachment '{originalFilename}' not found. Available: {String.Join(", ", _apCurrentAttachments.Select(Function(a) a.OriginalFileName))}"
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            If revisedAtt Is Nothing Then
+                response.Success = False
+                response.ErrorMessage = $"Revised attachment '{revisedFilename}' not found. Available: {String.Join(", ", _apCurrentAttachments.Select(Function(a) a.OriginalFileName))}"
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            ' Validate extensions
+            Dim origExt = IO.Path.GetExtension(originalAtt.TempFilePath).ToLowerInvariant()
+            Dim revExt = IO.Path.GetExtension(revisedAtt.TempFilePath).ToLowerInvariant()
+            Dim supportedExts = {".doc", ".docx"}
+
+            If Not supportedExts.Contains(origExt) OrElse Not supportedExts.Contains(revExt) Then
+                response.Success = False
+                response.ErrorMessage = "Both documents must be Word files (.doc or .docx)."
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            ' Build comparison output path
+            Dim compareName = $"Comparison_{IO.Path.GetFileNameWithoutExtension(originalFilename)}_vs_{IO.Path.GetFileNameWithoutExtension(revisedFilename)}.docx"
+            Dim comparePath = IO.Path.Combine(_apCurrentTempDir, compareName)
+
+            context.Log($"Comparing: {originalFilename} (original) vs {revisedFilename} (revised)")
+            ApDashboardLog($"📊 Comparing: {originalFilename} vs {revisedFilename}", "step")
+
+            ' Run the comparison on the UI/STA thread (Word COM requires it)
+            Dim success As Boolean = Await SwitchToUi(Function() CreateWordCompareDocumentForAutoPilot(
+                originalAtt.TempFilePath, revisedAtt.TempFilePath, comparePath))
+
+            If success AndAlso IO.File.Exists(comparePath) Then
+                ' Register the comparison doc as an output file so it gets attached to the reply
+                originalAtt.OutputFiles.Add(comparePath)
+
+                ' Build a textual summary of changes by reading the comparison doc's tracked changes
+                Dim summaryText As String = ""
+                Try
+                    summaryText = Await SwitchToUi(Function()
+                                                       Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
+                                                       Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+                                                       Try
+                                                           wordApp = New Microsoft.Office.Interop.Word.Application() With {.Visible = False}
+                                                           doc = wordApp.Documents.Open(comparePath, ReadOnly:=True)
+
+                                                           Dim revCount = doc.Revisions.Count
+                                                           Dim sb As New System.Text.StringBuilder()
+                                                           sb.AppendLine($"Comparison complete: {revCount} revision(s) found between '{originalFilename}' (original) and '{revisedFilename}' (revised).")
+                                                           sb.AppendLine()
+
+                                                           Dim maxRevisions = Math.Min(revCount, 50)
+                                                           For i As Integer = 1 To maxRevisions
+                                                               Dim rev = doc.Revisions(i)
+                                                               Dim revType = rev.Type.ToString()
+                                                               Dim revText = rev.Range.Text
+                                                               If revText IsNot Nothing AndAlso revText.Length > 200 Then
+                                                                   revText = revText.Substring(0, 200) & "..."
+                                                               End If
+                                                               sb.AppendLine($"  [{revType}] {revText}")
+                                                           Next
+
+                                                           If revCount > maxRevisions Then
+                                                               sb.AppendLine($"  ... and {revCount - maxRevisions} more revision(s).")
+                                                           End If
+
+                                                           Return sb.ToString()
+                                                       Finally
+                                                           Try : If doc IsNot Nothing Then doc.Close(False)
+                                                           Catch
+                                                           End Try
+                                                           Try : If wordApp IsNot Nothing Then wordApp.Quit(False)
+                                                           Catch
+                                                           End Try
+                                                       End Try
+                                                   End Function)
+                Catch ex As Exception
+                    summaryText = $"Comparison document created successfully but could not extract revision summary: {ex.Message}"
+                End Try
+
+                response.Success = True
+                response.Response = summaryText & vbCrLf & $"The comparison document '{compareName}' has been generated and will be attached to the reply."
+                ApDashboardLog($"✓ Comparison complete: {compareName}", "info")
+            Else
+                response.Success = False
+                response.ErrorMessage = "Word comparison failed. The documents may be incompatible or corrupted."
+                response.Response = response.ErrorMessage
+                ApDashboardLog($"⚠ Comparison failed for: {originalFilename} vs {revisedFilename}", "warn")
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = $"Error comparing documents: {ex.Message}"
+            response.Response = response.ErrorMessage
         End Try
 
         Return response
@@ -633,16 +835,12 @@ Partial Public Class ThisAddIn
                 Dim usedOcr As Boolean = False
 
                 ' Step 2: Determine if OCR is needed
-                ' - No text at all → OCR required
-                ' - Text exists but heuristics flag it as possibly incomplete → OCR to supplement
                 Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
                 Dim needsOcr As Boolean = False
 
                 If String.IsNullOrWhiteSpace(text) Then
                     needsOcr = True
                 ElseIf pdfResult IsNot Nothing AndAlso pdfResult.OcrWasSkippedDueToHeuristics Then
-                    ' Text was extracted but heuristics indicate scanned/image content may be missing.
-                    ' This mirrors the Freestyle logic where PdfsWithPossibleImages are flagged.
                     needsOcr = True
                 End If
 
@@ -650,8 +848,6 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"🔍 Running OCR on: {att.OriginalFileName}", "step")
                     context.Log($"OCR: {att.OriginalFileName}")
 
-                    ' Re-run with OCR enabled, AskUser=False (unattended), HideSplash via the
-                    ' ReadPdfAsTextEx → PerformOCR → LLM chain (PerformOCR calls LLM internally)
                     Dim ocrResult As PdfReadResult = Await SharedMethods.ReadPdfAsTextEx(
                         att.TempFilePath,
                         ReturnErrorInsteadOfEmpty:=True,
@@ -663,12 +859,10 @@ Partial Public Class ThisAddIn
                     Dim ocrText As String = If(ocrResult IsNot Nothing, ocrResult.Content, "")
 
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
-                        ' OCR returned content — use it (it replaces or supplements the original)
                         text = ocrText
                         usedOcr = True
                         ApDashboardLog($"✓ OCR completed for: {att.OriginalFileName} ({ocrText.Length:N0} chars)", "info")
                     Else
-                        ' OCR failed or returned empty — keep whatever we had from standard extraction
                         ApDashboardLog($"⚠ OCR returned no content for: {att.OriginalFileName}, using standard extraction", "warn")
                     End If
                 End If
@@ -896,6 +1090,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Executes the read_attachment tool for a single attachment.
+    ''' Supports Word, PDF, Excel (.xlsx/.xls), PowerPoint (.pptx), and text-based files.
     ''' </summary>
     Private Async Function ExecuteReadAttachmentTool(
             toolCall As ToolCall,
@@ -945,12 +1140,28 @@ Partial Public Class ThisAddIn
             Dim text As String = Nothing
             Dim label As String = Nothing
 
-            ' Try Office extraction first
+            ' Try Office extraction first (handles Word docs)
             Dim extracted As Boolean = False
             Try
                 extracted = TryExtractOfficeText(att.TempFilePath, text, label)
             Catch
             End Try
+
+            ' Try Excel / PowerPoint via dedicated extractors
+            If Not extracted Then
+                Dim ext = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
+                Try
+                    Select Case ext
+                        Case ".xlsx", ".xls"
+                            text = ExtractExcelText(att.TempFilePath)
+                            extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                        Case ".pptx"
+                            text = ExtractPowerPointText(att.TempFilePath)
+                            extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                    End Select
+                Catch
+                End Try
+            End If
 
             ' Try text-like files
             If Not extracted Then
@@ -1049,7 +1260,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_MergePdfs,
                  AP_Tool_ReadAttachment,
                  AP_Tool_ListAttachments,
-                 AP_Tool_DescribeBinary
+                 AP_Tool_DescribeBinary,
+                 AP_Tool_CompareWordDocs
                 Return True
             Case Else
                 Return False
