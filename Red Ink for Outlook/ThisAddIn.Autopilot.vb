@@ -87,6 +87,8 @@ Partial Public Class ThisAddIn
         "Thank you for your message. I have received it and will respond once your request has been approved. " &
         "— " & AN6
 
+    Private Const AP_MaxToolIterations As Integer = 30
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -461,6 +463,10 @@ Partial Public Class ThisAddIn
 
                 Dim response As String
 
+                ' ── Set AutoPilot-specific max tool iterations ──
+                Dim previousMaxToolIterations = MaxToolIterations
+                MaxToolIterations = AP_MaxToolIterations
+
                 Try
                     ApDashboardLog("Calling AI model...", "llm")
 
@@ -525,6 +531,8 @@ Partial Public Class ThisAddIn
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
                     _apCurrentMailInfo = Nothing
+                    MaxToolIterations = previousMaxToolIterations
+                    ClearAttachmentCaches()
                 End Try
 
                 If String.IsNullOrWhiteSpace(response) Then
@@ -591,6 +599,19 @@ Partial Public Class ThisAddIn
             If mi IsNot Nothing Then Try : Marshal.ReleaseComObject(mi) : Catch : End Try
         End Try
     End Function
+
+    ''' <summary>
+    ''' Clears all cached text data from attachment info objects for security.
+    ''' Must be called after each reply is sent or when processing is abandoned.
+    ''' </summary>
+    Private Sub ClearAttachmentCaches()
+        If _apCurrentAttachments IsNot Nothing Then
+            For Each att In _apCurrentAttachments
+                att.CachedText = Nothing
+                att.CachedDocxHint = Nothing
+            Next
+        End If
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  MAIL INFO EXTRACTION
@@ -777,6 +798,19 @@ Partial Public Class ThisAddIn
                     .SizeBytes = size,
                     .IsOverSizeLimit = (size > _apConfig.MaxAttachmentBytes)
                 }
+                ' Capture original file dates from MAPI properties (preserved from the original attachment,
+                ' unlike file system timestamps which reset to current time on SaveAsFile)
+                Try
+                    Dim pa = att.PropertyAccessor
+                    Try
+                        info.CreatedTime = CDate(pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x30070040"))
+                    Catch : End Try
+                    Try
+                        info.LastModifiedTime = CDate(pa.GetProperty("http://schemas.microsoft.com/mapi/proptag/0x30080040"))
+                    Catch : End Try
+                Catch
+                    ' Dates are optional; ignore failures
+                End Try
                 If info.IsOverSizeLimit Then
                     info.TempFilePath = Nothing
                     info.StatusMessage = $"Skipped (size {size / 1024 / 1024:F1} MB exceeds limit)"
@@ -864,7 +898,14 @@ Partial Public Class ThisAddIn
                 Dim att = attachments(i)
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
                 Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT - cannot process]", "")
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{statusStr}")
+                Dim dateStr As String = ""
+                If att.LastModifiedTime.HasValue Then
+                    dateStr &= $", modified: {att.LastModifiedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
+                End If
+                If att.CreatedTime.HasValue Then
+                    dateStr &= $", created: {att.CreatedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
+                End If
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{dateStr}{statusStr}")
             Next
             sb.AppendLine("[/ATTACHMENTS]")
             sb.AppendLine()
@@ -1390,7 +1431,12 @@ Partial Public Class ThisAddIn
         Public Property SizeBytes As Long
         Public Property IsOverSizeLimit As Boolean
         Public Property StatusMessage As String
+        Public Property CreatedTime As DateTime?
+        Public Property LastModifiedTime As DateTime?
         Public Property OutputFiles As New List(Of String)()
+        Property CachedText As String
+        Property CachedDocxHint As String
+        Public Property IsToolOutput As Boolean = False
     End Class
 
     ''' <summary>Defines supported filter rule types.</summary>
