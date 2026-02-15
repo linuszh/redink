@@ -2350,7 +2350,7 @@ Partial Public Class ThisAddIn
                                                        Try : wordApp.Quit(False) : Catch : End Try
                                                    End If
                                                End Try
-                                           End Function)mo
+                                           End Function)
 
             If success AndAlso File.Exists(outputPath) Then
                 att.OutputFiles.Add(outputPath)
