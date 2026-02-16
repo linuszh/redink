@@ -401,6 +401,42 @@ Namespace My
                 Me("AP_SelectedExternalToolNames") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardSummaryCache() As String
+            Get
+                Return CType(Me("InboxBoardSummaryCache"),String)
+            End Get
+            Set
+                Me("InboxBoardSummaryCache") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardSummaryLanguage() As String
+            Get
+                Return CType(Me("InboxBoardSummaryLanguage"),String)
+            End Get
+            Set
+                Me("InboxBoardSummaryLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property InboxBoardGroupConversations() As Boolean
+            Get
+                Return CType(Me("InboxBoardGroupConversations"),Boolean)
+            End Get
+            Set
+                Me("InboxBoardGroupConversations") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
