@@ -11,6 +11,9 @@
 ' Architecture:
 '  - Mail collection: Scans default Inbox for mails with at least one category.
 '    If >50 found, asks user how many to load via dropdown.
+'  - Conversation grouping: Mails sharing the same ConversationTopic are merged
+'    into a single card showing the latest mail, with an accurate message count.
+'    Toggle via a checkbox in the settings panel; persisted in My.Settings.
 '  - Category columns: Dynamically built from Outlook's category list. Always-
 '    present columns stored in My.Settings.InboxBoardColumns (semicolon-delimited).
 '  - Board UI: Full HTML/CSS/JS board rendered in WebView2 inside a WinForms Form.
@@ -25,9 +28,12 @@
 '    and "+" badge when Ctrl is held.
 '  - AI Summaries: Generated asynchronously in batches after the board is displayed.
 '    Uses the existing LLM() helper with a summarization system prompt.
+'    Summaries are cached in My.Settings (JSON dict, capped at 500 entries).
+'    Summary language is selectable via a dropdown, persisted in My.Settings.
 '  - Threading: All Outlook COM access on the UI thread; LLM calls are async.
 '  - Persistence: Theme, window position/size/maximized state, card field toggles,
-'    last load count, column filter and pinned columns are all persisted via
+'    last load count, column filter, pinned columns, summary cache, summary
+'    language, and conversation grouping toggle are all persisted via
 '    My.Settings (not localStorage).
 ' =============================================================================
 
@@ -65,8 +71,32 @@ Partial Public Class ThisAddIn
     ''' <summary>Maximum body excerpt length sent for summarization.</summary>
     Private Const InboxBoard_SummaryBodyCap As Integer = 2000
 
+    ''' <summary>Maximum cached summaries to persist in My.Settings.</summary>
+    Private Const InboxBoard_SummaryCacheMax As Integer = 500
+
     ''' <summary>Remembers the user's last load-count choice so Refresh reuses it.</summary>
     Private _inboxBoardLastMaxToLoad As Integer = 0
+
+    ''' <summary>In-memory summary cache: EntryID → summary text.</summary>
+    Private _inboxBoardSummaryCache As Dictionary(Of String, String) = Nothing
+
+    ''' <summary>Available languages for summary generation.</summary>
+    Private Shared ReadOnly InboxBoard_SummaryLanguages As String()() = {
+        New String() {"auto", "Auto-detect"},
+        New String() {"en", "English"},
+        New String() {"de", "Deutsch"},
+        New String() {"fr", "Français"},
+        New String() {"it", "Italiano"},
+        New String() {"es", "Español"},
+        New String() {"pt", "Português"},
+        New String() {"nl", "Nederlands"},
+        New String() {"pl", "Polski"},
+        New String() {"ru", "Русский"},
+        New String() {"ja", "日本語"},
+        New String() {"zh", "中文"},
+        New String() {"ko", "한국어"},
+        New String() {"ar", "العربية"}
+    }
 
 #End Region
 
@@ -87,6 +117,9 @@ Partial Public Class ThisAddIn
         Public Property BodyExcerpt As String
         Public Property Summary As String             ' AI-generated, initially empty
         Public Property CategoryColor As String       ' Hex color for the category
+        Public Property ConversationTopic As String   ' For conversation grouping
+        Public Property ConversationEntryIDs As List(Of String) ' All EntryIDs in this conversation group
+        Public Property IsGrouped As Boolean          ' True when this card represents a grouped conversation
     End Class
 
     ''' <summary>Represents a column (category) on the board.</summary>
@@ -95,6 +128,81 @@ Partial Public Class ThisAddIn
         Public Property Color As String               ' Hex color
         Public Property Tag As String                 ' Display tag
     End Class
+
+#End Region
+
+#Region "InboxBoard Summary Cache"
+
+    ''' <summary>
+    ''' Loads the summary cache from My.Settings into the in-memory dictionary.
+    ''' </summary>
+    Private Sub LoadSummaryCache()
+        If _inboxBoardSummaryCache IsNot Nothing Then Return
+        _inboxBoardSummaryCache = New Dictionary(Of String, String)(StringComparer.Ordinal)
+        Try
+            Dim json As String = My.Settings.InboxBoardSummaryCache
+            If Not String.IsNullOrEmpty(json) Then
+                Dim obj As JObject = JObject.Parse(json)
+                For Each prop In obj.Properties()
+                    _inboxBoardSummaryCache(prop.Name) = CStr(prop.Value)
+                Next
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Saves the in-memory summary cache to My.Settings, capping at InboxBoard_SummaryCacheMax entries.
+    ''' </summary>
+    Private Sub SaveSummaryCache()
+        Try
+            If _inboxBoardSummaryCache Is Nothing Then Return
+
+            ' If over limit, remove oldest entries (by insertion order — Dictionary preserves order in .NET 4.x)
+            While _inboxBoardSummaryCache.Count > InboxBoard_SummaryCacheMax
+                Dim firstKey As String = _inboxBoardSummaryCache.Keys.First()
+                _inboxBoardSummaryCache.Remove(firstKey)
+            End While
+
+            Dim obj As New JObject()
+            For Each kvp In _inboxBoardSummaryCache
+                obj(kvp.Key) = kvp.Value
+            Next
+            My.Settings.InboxBoardSummaryCache = obj.ToString(Formatting.None)
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Looks up a cached summary for a given EntryID.
+    ''' </summary>
+    Private Function GetCachedSummary(entryId As String) As String
+        LoadSummaryCache()
+        Dim result As String = Nothing
+        If _inboxBoardSummaryCache.TryGetValue(entryId, result) Then Return result
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Stores a summary in the cache (in-memory + persistent).
+    ''' </summary>
+    Private Sub CacheSummary(entryId As String, summary As String)
+        LoadSummaryCache()
+        _inboxBoardSummaryCache(entryId) = summary
+    End Sub
+
+    ''' <summary>
+    ''' Clears the entire summary cache (in-memory + persistent).
+    ''' </summary>
+    Private Sub ClearSummaryCache()
+        _inboxBoardSummaryCache = New Dictionary(Of String, String)(StringComparer.Ordinal)
+        Try
+            My.Settings.InboxBoardSummaryCache = ""
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
 
 #End Region
 
@@ -107,6 +215,9 @@ Partial Public Class ThisAddIn
         Try
             ' Restore last load count from settings
             Try : _inboxBoardLastMaxToLoad = My.Settings.InboxBoardLastLoadCount : Catch : End Try
+
+            ' Ensure summary cache is loaded
+            LoadSummaryCache()
 
             ' 1. Collect categorized mails from Inbox
             Dim mails As List(Of InboxBoardEntry) = CollectCategorizedInboxMails()
@@ -223,7 +334,106 @@ Partial Public Class ThisAddIn
             entries.RemoveRange(maxToLoad, entries.Count - maxToLoad)
         End If
 
+        ' Apply conversation grouping if enabled
+        Dim groupConversations As Boolean = False
+        Try : groupConversations = My.Settings.InboxBoardGroupConversations : Catch : End Try
+        If groupConversations Then
+            entries = GroupByConversation(entries)
+        End If
+
+        ' Apply cached summaries
+        For Each entry In entries
+            Dim cached As String = GetCachedSummary(entry.EntryID)
+            If Not String.IsNullOrEmpty(cached) Then
+                entry.Summary = cached
+            End If
+        Next
+
         Return entries
+    End Function
+
+    ''' <summary>
+    ''' Groups entries by ConversationTopic. For each conversation with 2+ mails,
+    ''' keeps the latest mail as the representative card. Single-topic and no-topic
+    ''' entries are preserved as individual ungrouped cards.
+    ''' </summary>
+    Private Function GroupByConversation(entries As List(Of InboxBoardEntry)) As List(Of InboxBoardEntry)
+        ' Group by ConversationTopic (case-insensitive). Mails without a topic stay ungrouped.
+        Dim grouped As New Dictionary(Of String, List(Of InboxBoardEntry))(StringComparer.OrdinalIgnoreCase)
+        Dim ungrouped As New List(Of InboxBoardEntry)()
+
+        For Each entry In entries
+            If String.IsNullOrWhiteSpace(entry.ConversationTopic) Then
+                entry.IsGrouped = False
+                ungrouped.Add(entry)
+            Else
+                Dim key As String = entry.ConversationTopic.Trim()
+                If Not grouped.ContainsKey(key) Then
+                    grouped(key) = New List(Of InboxBoardEntry)()
+                End If
+                grouped(key).Add(entry)
+            End If
+        Next
+
+        Dim result As New List(Of InboxBoardEntry)()
+
+        For Each kvp In grouped
+            Dim convMails As List(Of InboxBoardEntry) = kvp.Value
+
+            ' If only one mail shares this topic, treat it as ungrouped
+            If convMails.Count = 1 Then
+                convMails(0).IsGrouped = False
+                result.Add(convMails(0))
+                Continue For
+            End If
+
+            ' Sort by ReceivedTime descending — first item is the latest
+            convMails.Sort(Function(a, b) b.ReceivedTime.CompareTo(a.ReceivedTime))
+
+            Dim representative As InboxBoardEntry = convMails(0)
+            representative.MessageCount = convMails.Count
+            representative.IsGrouped = True
+            representative.ConversationEntryIDs = convMails.Select(Function(m) m.EntryID).ToList()
+
+            ' If any mail in the conversation is unread, mark the card as unread
+            If convMails.Any(Function(m) Not m.IsRead) Then
+                representative.IsRead = False
+            End If
+
+            ' Merge all categories from all mails in the conversation
+            Dim allCats As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            For Each m In convMails
+                If Not String.IsNullOrEmpty(m.AllCategories) Then
+                    For Each catPart In m.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                        Dim t = catPart.Trim()
+                        If Not String.IsNullOrEmpty(t) Then allCats.Add(t)
+                    Next
+                End If
+            Next
+            representative.AllCategories = String.Join(", ", allCats)
+            If allCats.Count > 0 Then representative.Categories = allCats.First()
+
+            ' Check if any mail in the conversation has a cached summary
+            If String.IsNullOrEmpty(representative.Summary) Then
+                For Each m In convMails
+                    Dim cached As String = GetCachedSummary(m.EntryID)
+                    If Not String.IsNullOrEmpty(cached) Then
+                        representative.Summary = cached
+                        Exit For
+                    End If
+                Next
+            End If
+
+            result.Add(representative)
+        Next
+
+        ' Add all ungrouped mails — these were previously lost when toggling grouping off/on
+        result.AddRange(ungrouped)
+
+        ' Re-sort by received time descending
+        result.Sort(Function(a, b) b.ReceivedTime.CompareTo(a.ReceivedTime))
+
+        Return result
     End Function
 
     ''' <summary>
@@ -242,19 +452,16 @@ Partial Public Class ThisAddIn
         entry.ReceivedTime = ComRetry(Of Date)(Function() mi.ReceivedTime)
         entry.IsRead = ComRetry(Of Boolean)(Function() Not mi.UnRead)
 
-        ' Message count from ConversationIndex
+        ' MessageCount = 1 for ungrouped cards; GroupByConversation overwrites it for grouped cards.
+        ' We no longer derive a count from ConversationIndex because that number (thread depth)
+        ' is confusing when shown alongside the grouped message count.
         entry.MessageCount = 1
-        Try
-            Dim convIdx As String = ComRetry(Of String)(Function() mi.ConversationIndex)
-            If Not String.IsNullOrEmpty(convIdx) Then
-                ' ConversationIndex is a hex string; first 44 chars = header, each 10 chars = a reply
-                Dim byteLen As Integer = convIdx.Length \ 2
-                If byteLen > 22 Then
-                    entry.MessageCount = 1 + ((byteLen - 22) \ 5)
-                End If
-            End If
-        Catch
-        End Try
+        entry.IsGrouped = False
+
+        ' ConversationTopic for grouping
+        entry.ConversationTopic = ""
+        Try : entry.ConversationTopic = ComRetry(Of String)(Function() If(mi.ConversationTopic, "")) : Catch : End Try
+        entry.ConversationEntryIDs = New List(Of String)() From {entry.EntryID}
 
         ' Categories
         Dim cats As String = ""
@@ -343,6 +550,7 @@ Partial Public Class ThisAddIn
 
         Return result
     End Function
+
 
 #End Region
 
@@ -469,6 +677,9 @@ Partial Public Class ThisAddIn
         AddHandler frm.FormClosing, Sub(s, e)
                                         summaryCts.Cancel()
 
+                                        ' Persist summary cache on close
+                                        SaveSummaryCache()
+
                                         ' Save window position, size and maximized state
                                         Try
                                             If frm.WindowState = FormWindowState.Maximized Then
@@ -556,13 +767,21 @@ Partial Public Class ThisAddIn
             Select Case action
                 Case "move"
                     ' Replace: remove all existing categories, set only the new one
+                    ' For grouped conversations, update ALL mails in the group
                     Dim entryId As String = CStr(msg("entryId"))
                     Dim newCategory As String = CStr(msg("newCategory"))
-                    UpdateMailCategory(entryId, newCategory)
 
-                    ' Update local state
                     Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
                     If entry IsNot Nothing Then
+                        ' Update all mails in the conversation group (or just the single mail)
+                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                 entry.ConversationEntryIDs,
+                                                                 New List(Of String) From {entryId})
+                        For Each id In idsToUpdate
+                            UpdateMailCategory(id, newCategory)
+                        Next
+
+                        ' Update local state
                         entry.Categories = newCategory
                         entry.AllCategories = newCategory
                         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -576,13 +795,21 @@ Partial Public Class ThisAddIn
 
                 Case "moveAdd"
                     ' Add: keep existing categories, append the new one
+                    ' For grouped conversations, update ALL mails in the group
                     Dim entryId As String = CStr(msg("entryId"))
                     Dim addCategory As String = CStr(msg("newCategory"))
-                    AddMailCategory(entryId, addCategory)
 
-                    ' Update local state
                     Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
                     If entry IsNot Nothing Then
+                        ' Update all mails in the conversation group (or just the single mail)
+                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                 entry.ConversationEntryIDs,
+                                                                 New List(Of String) From {entryId})
+                        For Each id In idsToUpdate
+                            AddMailCategory(id, addCategory)
+                        Next
+
+                        ' Update local state
                         Dim existing As New List(Of String)()
                         If Not String.IsNullOrEmpty(entry.AllCategories) Then
                             For Each part In entry.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
@@ -605,17 +832,65 @@ Partial Public Class ThisAddIn
                     PushUpdatedCardToJs(entryId, mails, webView)
 
                 Case "unmark"
-                    ' Remove all categories from the mail
+                    ' Remove ONE category from the mail(s). If the card has multiple categories,
+                    ' only the category of the column where unmark was clicked is removed.
+                    ' If it was the last category, the card is removed entirely.
+                    ' For grouped conversations, all mails in the group are updated.
                     Dim entryId As String = CStr(msg("entryId"))
-                    ClearMailCategories(entryId)
-                    mails.RemoveAll(Function(m) m.EntryID = entryId)
+                    Dim categoryToRemove As String = If(CStr(msg("category")), "")
 
-                    ' Tell JS to remove the card
-                    Try
-                        webView.CoreWebView2.PostWebMessageAsJson(
-                            JsonConvert.SerializeObject(New With {.action = "removeCard", .entryId = entryId}))
-                    Catch
-                    End Try
+                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entry Is Nothing Then Return
+
+                    ' Determine all entry IDs to process (group or single)
+                    Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                             entry.ConversationEntryIDs,
+                                                             New List(Of String) From {entryId})
+
+                    ' Check how many categories the card currently has
+                    Dim currentCats As New List(Of String)()
+                    If Not String.IsNullOrEmpty(entry.AllCategories) Then
+                        For Each part In entry.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                            Dim t = part.Trim()
+                            If Not String.IsNullOrEmpty(t) Then currentCats.Add(t)
+                        Next
+                    End If
+
+                    Dim isLastCategory As Boolean = (currentCats.Count <= 1) OrElse
+                                                     String.IsNullOrEmpty(categoryToRemove)
+
+                    If isLastCategory Then
+                        ' Last (or only) category: clear all categories from all mails, remove card
+                        For Each id In idsToUpdate
+                            ClearMailCategories(id)
+                        Next
+                        mails.RemoveAll(Function(m) m.EntryID = entryId)
+
+                        ' Tell JS to remove the card
+                        Try
+                            webView.CoreWebView2.PostWebMessageAsJson(
+                                JsonConvert.SerializeObject(New With {.action = "removeCard", .entryId = entryId}))
+                        Catch
+                        End Try
+                    Else
+                        ' Multiple categories: remove only the clicked category from all mails
+                        For Each id In idsToUpdate
+                            RemoveMailCategory(id, categoryToRemove)
+                        Next
+
+                        ' Update local state
+                        Dim remaining = currentCats.Where(Function(c) Not c.Equals(categoryToRemove, StringComparison.OrdinalIgnoreCase)).ToList()
+                        entry.AllCategories = String.Join(", ", remaining)
+                        entry.Categories = If(remaining.Count > 0, remaining(0), "")
+
+                        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+                        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+                        Dim cc = GetOutlookCategoryColors(ns)
+                        entry.CategoryColor = If(remaining.Count > 0 AndAlso cc.ContainsKey(remaining(0)), cc(remaining(0)), "#6b7280")
+
+                        ' Push updated card to JS — renderBoard will remove it from the column
+                        PushUpdatedCardToJs(entryId, mails, webView)
+                    End If
 
                 Case "open"
                     ' Open mail in Outlook Inspector
@@ -701,6 +976,95 @@ Partial Public Class ThisAddIn
                         Dim filterVal As String = CStr(msg("filter"))
                         My.Settings.InboxBoardColumnFilter = If(filterVal, "")
                         My.Settings.Save()
+                    Catch
+                    End Try
+
+                Case "setGroupConversations"
+                    ' Persist conversation grouping toggle and reload
+                    Try
+                        Dim enabled As Boolean = CBool(msg("enabled"))
+                        My.Settings.InboxBoardGroupConversations = enabled
+                        My.Settings.Save()
+                    Catch
+                    End Try
+
+                    ' Trigger a reload to apply the grouping change
+                    summaryCts.Cancel()
+                    Dim newCts2 As New CancellationTokenSource()
+                    summaryCts = newCts2
+
+                    Dim reloadMax2 As Integer = If(_inboxBoardLastMaxToLoad > 0, _inboxBoardLastMaxToLoad, 0)
+                    Dim newMails2 = CollectCategorizedInboxMails(reloadMax2)
+                    If newMails2 IsNot Nothing Then
+                        mails.Clear()
+                        mails.AddRange(newMails2)
+                        Dim newColumns2 = BuildBoardColumns(mails)
+                        columns.Clear()
+                        columns.AddRange(newColumns2)
+                        Dim dataJson2 As String = BuildBoardDataJson(mails, columns)
+                        Try
+                            webView.CoreWebView2.PostWebMessageAsJson(
+                                JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJson2}))
+                        Catch
+                        End Try
+                        Dim capturedMails2 As List(Of InboxBoardEntry) = mails
+                        Dim capturedWebView2 As WebView2 = webView
+                        Dim capturedToken2 As CancellationToken = newCts2.Token
+                        System.Threading.Tasks.Task.Run(Async Function() As System.Threading.Tasks.Task
+                                                            Await System.Threading.Tasks.Task.Delay(500)
+                                                            frm.BeginInvoke(CType(Async Sub()
+                                                                                      Await GenerateSummariesAsync(capturedMails2, capturedWebView2, capturedToken2)
+                                                                                  End Sub, System.Windows.Forms.MethodInvoker))
+                                                        End Function)
+                    End If
+
+                Case "setSummaryLanguage"
+                    ' Persist summary language selection; clear cache if language changed
+                    Try
+                        Dim lang As String = If(CStr(msg("language")), "").Trim()
+                        Dim oldLang As String = ""
+                        Try : oldLang = If(My.Settings.InboxBoardSummaryLanguage, "") : Catch : End Try
+
+                        My.Settings.InboxBoardSummaryLanguage = lang
+                        My.Settings.Save()
+
+                        ' If the language actually changed, clear the cache and re-generate
+                        If Not lang.Equals(oldLang, StringComparison.OrdinalIgnoreCase) Then
+                            ClearSummaryCache()
+
+                            ' Clear in-memory summaries so they will be re-generated
+                            For Each m In mails
+                                m.Summary = ""
+                            Next
+
+                            ' Push cleared summaries to JS so cards show "Generating…"
+                            For Each m In mails
+                                Try
+                                    webView.CoreWebView2.PostWebMessageAsJson(
+                                        JsonConvert.SerializeObject(New With {
+                                            .action = "updateSummary",
+                                            .entryId = m.EntryID,
+                                            .summary = ""
+                                        }))
+                                Catch
+                                End Try
+                            Next
+
+                            ' Restart summary generation with the new language
+                            summaryCts.Cancel()
+                            Dim newCtsLang As New CancellationTokenSource()
+                            summaryCts = newCtsLang
+
+                            Dim capturedMailsLang As List(Of InboxBoardEntry) = mails
+                            Dim capturedWebViewLang As WebView2 = webView
+                            Dim capturedTokenLang As CancellationToken = newCtsLang.Token
+                            System.Threading.Tasks.Task.Run(Async Function() As System.Threading.Tasks.Task
+                                                                Await System.Threading.Tasks.Task.Delay(500)
+                                                                frm.BeginInvoke(CType(Async Sub()
+                                                                                          Await GenerateSummariesAsync(capturedMailsLang, capturedWebViewLang, capturedTokenLang)
+                                                                                      End Sub, System.Windows.Forms.MethodInvoker))
+                                                            End Function)
+                        End If
                     Catch
                     End Try
             End Select
@@ -797,6 +1161,34 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Removes a single category from a mail item, keeping all other categories.
+    ''' </summary>
+    Private Sub RemoveMailCategory(entryId As String, categoryToRemove As String)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi IsNot Nothing Then
+                Dim existing As String = ComRetry(Of String)(Function() If(mi.Categories, ""))
+                Dim cats As New List(Of String)()
+                If Not String.IsNullOrEmpty(existing) Then
+                    For Each part In existing.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                        Dim t = part.Trim()
+                        If Not String.IsNullOrEmpty(t) AndAlso
+                           Not t.Equals(categoryToRemove, StringComparison.OrdinalIgnoreCase) Then
+                            cats.Add(t)
+                        End If
+                    Next
+                End If
+                mi.Categories = String.Join(", ", cats)
+                mi.Save()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] RemoveMailCategory error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Clears all categories from a mail item.
     ''' </summary>
     Private Sub ClearMailCategories(entryId As String)
@@ -834,7 +1226,22 @@ Partial Public Class ThisAddIn
 #Region "InboxBoard AI Summaries"
 
     ''' <summary>
+    ''' Returns the language instruction to append to the summary system prompt.
+    ''' Uses the free-text language field; empty means auto-detect.
+    ''' </summary>
+    Private Function GetSummaryLanguageInstruction() As String
+        Dim lang As String = ""
+        Try : lang = If(My.Settings.InboxBoardSummaryLanguage, "").Trim() : Catch : End Try
+
+        ' If empty, treat as auto-detect — no explicit instruction
+        If String.IsNullOrEmpty(lang) Then Return ""
+
+        Return $" Write all summaries in {lang}."
+    End Function
+
+    ''' <summary>
     ''' Generates AI summaries for mails in batches and pushes them to the board.
+    ''' Skips mails that already have a cached summary.
     ''' </summary>
     Private Async Function GenerateSummariesAsync(
         mails As List(Of InboxBoardEntry),
@@ -845,7 +1252,9 @@ Partial Public Class ThisAddIn
                                                     Not String.IsNullOrEmpty(m.BodyExcerpt)).ToList()
         If unsummarized.Count = 0 Then Return
 
+        Dim langInstruction As String = GetSummaryLanguageInstruction()
         Dim batchIndex As Integer = 0
+
         While batchIndex < unsummarized.Count
             If ct.IsCancellationRequested Then Return
 
@@ -867,8 +1276,9 @@ Partial Public Class ThisAddIn
             Next
 
             Try
+                Dim systemPrompt As String = InterpolateAtRuntime(SP_InboxBoard) & langInstruction
                 Dim response As String = Await LLM(
-                    InterpolateAtRuntime(SP_InboxBoard), userPrompt.ToString(),
+                    systemPrompt, userPrompt.ToString(),
                     "", "", 0, False, True)
 
                 If Not String.IsNullOrWhiteSpace(response) Then
@@ -880,10 +1290,14 @@ Partial Public Class ThisAddIn
 
             batchIndex = batchEnd + 1
         End While
+
+        ' Persist cache after all batches are done
+        SaveSummaryCache()
     End Function
 
     ''' <summary>
     ''' Parses summary JSON and pushes updates to the board via postMessage.
+    ''' Also caches summaries for future use.
     ''' </summary>
     Private Sub ParseAndApplySummaries(
         response As String,
@@ -912,6 +1326,9 @@ Partial Public Class ThisAddIn
                 If absoluteIndex < batchStart OrElse absoluteIndex > batchEnd OrElse absoluteIndex >= mails.Count Then Continue For
 
                 mails(absoluteIndex).Summary = summary
+
+                ' Cache the summary
+                CacheSummary(mails(absoluteIndex).EntryID, summary)
 
                 ' Push to JS
                 Try
@@ -951,10 +1368,12 @@ Partial Public Class ThisAddIn
             card("recipients") = If(m.Recipients, "")
             card("date") = m.ReceivedTime.ToString("yyyy-MM-dd HH:mm")
             card("messages") = m.MessageCount
+            card("isGrouped") = m.IsGrouped
             card("category") = If(m.Categories, "")
             card("categoryColor") = If(m.CategoryColor, "#6b7280")
             card("summary") = If(m.Summary, "")
             card("isRead") = m.IsRead
+            card("isConversation") = m.IsGrouped
 
             ' Build array of all categories with colors for multi-category badges
             Dim allCatsArr As New JArray()
@@ -1009,9 +1428,26 @@ Partial Public Class ThisAddIn
         Dim savedTheme As String = ""
         Dim savedFields As String = ""
         Dim savedColumnFilter As String = ""
+        Dim savedGroupConversations As Boolean = False
+        Dim savedSummaryLanguage As String = ""
         Try : savedTheme = If(My.Settings.InboxBoardTheme, "") : Catch : End Try
         Try : savedFields = If(My.Settings.InboxBoardFields, "") : Catch : End Try
         Try : savedColumnFilter = If(My.Settings.InboxBoardColumnFilter, "") : Catch : End Try
+        Try : savedGroupConversations = My.Settings.InboxBoardGroupConversations : Catch : End Try
+        Try : savedSummaryLanguage = If(My.Settings.InboxBoardSummaryLanguage, "") : Catch : End Try
+
+        ' If no saved language yet, default to INI_Language1 (full language name, e.g. "German")
+        ' but do NOT persist it — let the user confirm by editing the field first.
+        ' This way the field shows a sensible default without locking it in.
+        If String.IsNullOrEmpty(savedSummaryLanguage) Then
+            Try
+                Dim lang1 As String = If(_context.INI_Language1, "")
+                If Not String.IsNullOrEmpty(lang1) Then
+                    savedSummaryLanguage = lang1
+                End If
+            Catch
+            End Try
+        End If
 
         Dim sb As New StringBuilder(32000)
         sb.AppendLine("<!DOCTYPE html>")
@@ -1034,6 +1470,8 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"const SAVED_THEME = {JsonConvert.SerializeObject(savedTheme)};")
         sb.AppendLine($"const SAVED_FIELDS = {JsonConvert.SerializeObject(savedFields)};")
         sb.AppendLine($"const SAVED_COLUMN_FILTER = {JsonConvert.SerializeObject(savedColumnFilter)};")
+        sb.AppendLine($"const SAVED_GROUP_CONVERSATIONS = {If(savedGroupConversations, "true", "false")};")
+        sb.AppendLine($"const SAVED_SUMMARY_LANGUAGE = {JsonConvert.SerializeObject(savedSummaryLanguage)};")
         sb.AppendLine(GetBoardJavaScript())
         sb.AppendLine("</script>")
         sb.AppendLine("</body>")
@@ -1041,6 +1479,7 @@ Partial Public Class ThisAddIn
 
         Return sb.ToString()
     End Function
+
 
     ''' <summary>Returns the CSS for the board.</summary>
     Private Function GetBoardCss() As String
@@ -1102,7 +1541,18 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .settings-panel label { display: flex; align-items: center; gap: 6px; padding: 3px 0;
   font-size: 13px; cursor: pointer; color: var(--text); }
 .settings-panel input[type=""checkbox""] { width: 15px; height: 15px; accent-color: #3b82f6; cursor: pointer; }
+.settings-panel select { padding: 4px 6px; border: 1px solid var(--input-border); border-radius: 4px;
+  background: var(--input-bg); color: var(--text); font-size: 12px; outline: none; cursor: pointer; width: 100%; }
 .settings-panel .cat-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.lang-input-wrapper { position: relative; width: 100%; }
+.lang-input-wrapper input[type=""text""] { padding: 4px 6px; border: 1px solid var(--input-border); border-radius: 4px;
+  background: var(--input-bg); color: var(--text); font-size: 12px; outline: none; width: 100%; }
+.lang-input-wrapper input[type=""text""]:focus { border-color: #3b82f6; }
+.lang-input-wrapper .lang-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  padding: 4px 6px; font-size: 12px; color: var(--text-muted); pointer-events: none;
+  display: flex; align-items: center; opacity: 0.7; }
+.lang-input-wrapper input[type=""text""]:not([data-empty=""true""]) + .lang-overlay { display: none; }
+.lang-input-wrapper input[type=""text""]:focus + .lang-overlay { display: none; }
 .board { display: flex; gap: 14px; padding: 16px 20px; overflow-x: auto;
   min-height: calc(100vh - 56px); align-items: flex-start; }
 .column { min-width: 220px; max-width: 340px; flex: 1 1 280px; background: var(--col-bg);
@@ -1125,6 +1575,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card:hover { box-shadow: 0 3px 8px var(--card-shadow); transform: translateY(-1px); }
 .card.dragging { opacity: 0.5; cursor: grabbing; transform: rotate(2deg); }
 .card.hidden { display: none; }
+.card.conversation { border-left: 3px solid #3b82f6; }
 .card-subject { font-weight: 600; font-size: 13px; margin-bottom: 4px; color: var(--text); line-height: 1.3;
   overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .card-sender { font-size: 11px; color: var(--text-secondary); margin-bottom: 3px;
@@ -1145,6 +1596,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card-btn:hover .tip { opacity: 1; }
 .unread-dot { width: 7px; height: 7px; border-radius: 50%; background: #3b82f6;
   display: inline-block; margin-right: 4px; flex-shrink: 0; }
+.conv-icon { font-size: 10px; color: var(--text-muted); margin-right: 3px; }
 .card-categories { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
 .card-cat-badge { font-size: 9px; padding: 1px 6px; border-radius: 8px; color: #fff;
   white-space: nowrap; line-height: 1.4; font-weight: 500; }
@@ -1168,7 +1620,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 
     ''' <summary>Returns the header HTML for the board.</summary>
     Private Function GetBoardHeaderHtml() As String
-        ' Use the same branding pattern as the chatbot topbar: logo + brand + subtitle
         Dim logoDataUrl As String = GetLogoDataUrl()
         Dim brandHtml As String = System.Net.WebUtility.HtmlEncode(If(Not String.IsNullOrWhiteSpace(AN), AN, "Red Ink"))
 
@@ -1210,7 +1661,17 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Catch
         End Try
 
-        ' Field checkboxes default to checked; JS will override from SAVED_FIELDS on init
+        ' Conversation grouping checkbox
+        Dim groupChecked As String = ""
+        Try : If My.Settings.InboxBoardGroupConversations Then groupChecked = " checked"
+        Catch : End Try
+
+        ' Summary language: free text input with "Auto-detect" overlay
+        Dim savedLang As String = ""
+        Try : savedLang = If(My.Settings.InboxBoardSummaryLanguage, "") : Catch : End Try
+        Dim escapedLang As String = System.Net.WebUtility.HtmlEncode(savedLang)
+        Dim dataEmpty As String = If(String.IsNullOrEmpty(savedLang), " data-empty=""true""", "")
+
         Return $"
 <div class=""header"">
   <div class=""topline"">
@@ -1231,6 +1692,13 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         <label><input type=""checkbox"" data-field=""date"" checked> Date</label>
         <label><input type=""checkbox"" data-field=""messageCount"" checked> Message count</label>
         <label><input type=""checkbox"" data-field=""summary"" checked> AI Summary</label>
+        <h3 class=""section-divider"">Grouping</h3>
+        <label><input type=""checkbox"" id=""groupConversationsChk""{groupChecked}> Group conversations</label>
+        <h3 class=""section-divider"">Summary Language</h3>
+        <div class=""lang-input-wrapper"">
+          <input type=""text"" id=""summaryLanguageInput"" value=""{escapedLang}""{dataEmpty}>
+          <div class=""lang-overlay"">Auto-detect</div>
+        </div>
         <h3 class=""section-divider"">Pinned Columns</h3>
 {pinnedHtml.ToString().TrimEnd()}
         <h3 class=""section-divider"">Drag &amp; Drop</h3>
@@ -1251,6 +1719,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
     End Function
 
     ''' <summary>Returns the JavaScript for the board.</summary>
+    ''' <summary>Returns the JavaScript for the board.</summary>
     Private Function GetBoardJavaScript() As String
         Dim js As New StringBuilder(20000)
         js.AppendLine("// --- State ---")
@@ -1259,6 +1728,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("var fieldSettings = { sender: true, date: true, messageCount: true, summary: true };")
         js.AppendLine("var isDragging = false;")
         js.AppendLine("var ctrlHeld = false;")
+        js.AppendLine("var langCommitTimer = null;")
         js.AppendLine()
         js.AppendLine("function init(data) {")
         js.AppendLine("  try {")
@@ -1365,6 +1835,41 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("});")
         js.AppendLine()
+        js.AppendLine("// --- Group conversations toggle ---")
+        js.AppendLine("document.getElementById('groupConversationsChk').addEventListener('change', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupConversations', enabled: this.checked }));")
+        js.AppendLine("});")
+        js.AppendLine()
+        js.AppendLine("// --- Summary language (free text input with debounce) ---")
+        js.AppendLine("(function() {")
+        js.AppendLine("  var langInput = document.getElementById('summaryLanguageInput');")
+        js.AppendLine("  var lastCommitted = SAVED_SUMMARY_LANGUAGE || '';")
+        js.AppendLine("  if (SAVED_SUMMARY_LANGUAGE) { langInput.value = SAVED_SUMMARY_LANGUAGE; }")
+        js.AppendLine("  function updateEmpty() { langInput.setAttribute('data-empty', langInput.value.trim() === '' ? 'true' : 'false'); }")
+        js.AppendLine("  updateEmpty();")
+        js.AppendLine("  function commitLang() {")
+        js.AppendLine("    if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; }")
+        js.AppendLine("    var val = langInput.value.trim();")
+        js.AppendLine("    if (val !== lastCommitted) {")
+        js.AppendLine("      lastCommitted = val;")
+        js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'setSummaryLanguage', language: val }));")
+        js.AppendLine("      if (val) { showToast('Summary language: ' + val); } else { showToast('Summary language: Auto-detect'); }")
+        js.AppendLine("    }")
+        js.AppendLine("  }")
+        js.AppendLine("  langInput.addEventListener('input', function() {")
+        js.AppendLine("    updateEmpty();")
+        js.AppendLine("    if (langCommitTimer) clearTimeout(langCommitTimer);")
+        js.AppendLine("    langCommitTimer = setTimeout(commitLang, 1500);")
+        js.AppendLine("  });")
+        js.AppendLine("  langInput.addEventListener('blur', function() {")
+        js.AppendLine("    if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; }")
+        js.AppendLine("    commitLang();")
+        js.AppendLine("  });")
+        js.AppendLine("  langInput.addEventListener('keydown', function(e) {")
+        js.AppendLine("    if (e.key === 'Enter') { e.preventDefault(); if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); langInput.blur(); }")
+        js.AppendLine("  });")
+        js.AppendLine("})();")
+        js.AppendLine()
         js.AppendLine("// --- Pinned columns ---")
         js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(cb) {")
         js.AppendLine("  cb.addEventListener('change', function() {")
@@ -1427,7 +1932,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    var colEl = document.createElement('div');")
         js.AppendLine("    colEl.className = 'column';")
         js.AppendLine("    colEl.dataset.column = col.id;")
-        js.AppendLine("    // Match cards that have this column's category in their allCategories array")
         js.AppendLine("    var colCards = cards.filter(function(c) {")
         js.AppendLine("      if (c.allCategories && c.allCategories.length > 0) {")
         js.AppendLine("        return c.allCategories.some(function(ac) { return ac.name === col.id; });")
@@ -1462,7 +1966,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine()
         js.AppendLine("function createCardEl(card, col) {")
         js.AppendLine("  var el = document.createElement('div');")
-        js.AppendLine("  el.className = 'card';")
+        js.AppendLine("  el.className = 'card' + (card.isConversation ? ' conversation' : '');")
         js.AppendLine("  el.dataset.entryId = card.entryId;")
         js.AppendLine("  el.dataset.id = card.id;")
         js.AppendLine("  el.draggable = true;")
@@ -1474,10 +1978,15 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    dot.className = 'unread-dot';")
         js.AppendLine("    subjectDiv.appendChild(dot);")
         js.AppendLine("  }")
+        js.AppendLine("  if (card.isConversation) {")
+        js.AppendLine("    var convIcon = document.createElement('span');")
+        js.AppendLine("    convIcon.className = 'conv-icon';")
+        js.AppendLine("    convIcon.textContent = '\uD83D\uDCEC ';")
+        js.AppendLine("    subjectDiv.appendChild(convIcon);")
+        js.AppendLine("  }")
         js.AppendLine("  subjectDiv.appendChild(document.createTextNode(card.subject));")
         js.AppendLine("  el.appendChild(subjectDiv);")
         js.AppendLine()
-        js.AppendLine("  // Category badges — show all categories; highlight the current column's category")
         js.AppendLine("  if (card.allCategories && card.allCategories.length > 1) {")
         js.AppendLine("    var catsDiv = document.createElement('div');")
         js.AppendLine("    catsDiv.className = 'card-categories';")
@@ -1505,7 +2014,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  metaDiv.appendChild(dateSpan);")
         js.AppendLine("  var msgSpan = document.createElement('span');")
         js.AppendLine("  msgSpan.className = 'card-msg-count';")
-        js.AppendLine("  msgSpan.textContent = card.messages + ' msg' + (card.messages !== 1 ? 's' : '');")
+        js.AppendLine("  if (card.isGrouped && card.messages > 1) {")
+        js.AppendLine("    msgSpan.textContent = card.messages + ' mail' + (card.messages !== 1 ? 's' : '');")
+        js.AppendLine("  }")
         js.AppendLine("  metaDiv.appendChild(msgSpan);")
         js.AppendLine("  el.appendChild(metaDiv);")
         js.AppendLine()
@@ -1532,9 +2043,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  unmarkBtn.className = 'card-btn';")
         js.AppendLine("  unmarkBtn.dataset.action = 'unmark';")
         js.AppendLine("  unmarkBtn.dataset.entryId = card.entryId;")
-        js.AppendLine("  unmarkBtn.title = 'Remove category';")
+        js.AppendLine("  unmarkBtn.dataset.column = col.id;")
+        js.AppendLine("  unmarkBtn.title = 'Remove from ' + col.title;")
         js.AppendLine("  unmarkBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round"">' +")
-        js.AppendLine("    '<line x1=""18"" y1=""6"" x2=""6"" y2=""18""/><line x1=""6"" y1=""6"" x2=""18"" y2=""18""/></svg><span class=""tip"">Unmark</span>';")
+        js.AppendLine("    '<line x1=""18"" y1=""6"" x2=""6"" y2=""18""/><line x1=""6"" y1=""6"" x2=""18"" y2=""18""/></svg><span class=""tip"">Remove from ' + escHtml(col.title) + '</span>';")
         js.AppendLine("  footerDiv.appendChild(unmarkBtn);")
         js.AppendLine("  el.appendChild(footerDiv);")
         js.AppendLine()
@@ -1560,7 +2072,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      if (act === 'open') {")
         js.AppendLine("        window.chrome.webview.postMessage(JSON.stringify({ action: 'open', entryId: eid }));")
         js.AppendLine("      } else if (act === 'unmark') {")
-        js.AppendLine("        window.chrome.webview.postMessage(JSON.stringify({ action: 'unmark', entryId: eid }));")
+        js.AppendLine("        var colId = btn.dataset.column || '';")
+        js.AppendLine("        window.chrome.webview.postMessage(JSON.stringify({ action: 'unmark', entryId: eid, category: colId }));")
         js.AppendLine("      }")
         js.AppendLine("    });")
         js.AppendLine("  });")
@@ -1573,6 +2086,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("function setupDropZone(list) {")
         js.AppendLine("  list.addEventListener('dragover', function(e) {")
         js.AppendLine("    e.preventDefault();")
+        js.AppendLine("    ctrlHeld = e.ctrlKey;")
         js.AppendLine("    e.dataTransfer.dropEffect = ctrlHeld ? 'copy' : 'move';")
         js.AppendLine("    var col = list.closest('.column');")
         js.AppendLine("    col.classList.add('drag-over');")
@@ -1589,7 +2103,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("  list.addEventListener('drop', function(e) {")
         js.AppendLine("    e.preventDefault();")
-        js.AppendLine("    var isAddMode = ctrlHeld;")
+        js.AppendLine("    var isAddMode = e.ctrlKey;")
+        js.AppendLine("    ctrlHeld = e.ctrlKey;")
         js.AppendLine("    var column = list.closest('.column');")
         js.AppendLine("    column.classList.remove('drag-over');")
         js.AppendLine("    column.classList.remove('drag-over-add');")
@@ -1601,7 +2116,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    clearAllIndicators();")
         js.AppendLine()
         js.AppendLine("    if (oldColumnId === newColumnId && !isAddMode) {")
-        js.AppendLine("      // Reorder within same column")
         js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
         js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
         js.AppendLine("      saveState();")
@@ -1609,7 +2123,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    }")
         js.AppendLine()
         js.AppendLine("    if (isAddMode) {")
-        js.AppendLine("      // Ctrl+Drag: add category (keep card in original column)")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
         js.AppendLine("      if (card) {")
         js.AppendLine("        var alreadyHas = card.allCategories && card.allCategories.some(function(ac) { return ac.name === newColumnId; });")
@@ -1622,7 +2135,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      var addCol = COLUMNS.find(function(c) { return c.id === newColumnId; });")
         js.AppendLine("      showToast('+ Added to ' + (addCol ? addCol.title : newColumnId));")
         js.AppendLine("    } else {")
-        js.AppendLine("      // Normal drag: replace all categories")
         js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
         js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
@@ -1713,7 +2225,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      var summaryEls = document.querySelectorAll('.card-summary');")
         js.AppendLine("      summaryEls.forEach(function(el) {")
         js.AppendLine("        if (el.dataset.entryId === msg.entryId) {")
-        js.AppendLine("          el.textContent = msg.summary; el.classList.remove('loading');")
+        js.AppendLine("          if (msg.summary) { el.textContent = msg.summary; el.classList.remove('loading'); }")
+        js.AppendLine("          else { el.textContent = 'Generating summary\u2026'; el.classList.add('loading'); }")
         js.AppendLine("        }")
         js.AppendLine("      });")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; });")
@@ -1730,14 +2243,12 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      init(d);")
         js.AppendLine("      showToast('Board reloaded');")
         js.AppendLine("    } else if (msg.action === 'updateCard') {")
-        js.AppendLine("      // Refresh a card's category data after move/moveAdd")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; });")
         js.AppendLine("      if (card) {")
         js.AppendLine("        card.category = msg.category;")
         js.AppendLine("        card.categoryColor = msg.categoryColor;")
         js.AppendLine("        card.allCategories = msg.allCategories || [];")
         js.AppendLine("      }")
-        js.AppendLine("      // Re-render the entire board to reflect new category badges and column placement")
         js.AppendLine("      renderBoard();")
         js.AppendLine("    }")
         js.AppendLine("  });")
