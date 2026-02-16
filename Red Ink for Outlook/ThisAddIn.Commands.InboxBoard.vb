@@ -285,10 +285,10 @@ Partial Public Class ThisAddIn
         ' Ask how many if > threshold (and not a reload with a remembered value)
         If maxOverride = 0 AndAlso totalCategorized > InboxBoard_DefaultMax Then
             Dim items As New List(Of SelectionItem)()
-            items.Add(New SelectionItem("50 mails", 50))
-            items.Add(New SelectionItem("100 mails", 100))
-            items.Add(New SelectionItem("200 mails", 200))
-            items.Add(New SelectionItem("300 mails", 300))
+            items.Add(New SelectionItem("1000 mails", 1000))
+            items.Add(New SelectionItem("2500 mails", 2500))
+            items.Add(New SelectionItem("5000 mails", 5000))
+            items.Add(New SelectionItem("7500 mails", 7500))
             If totalCategorized > 300 Then
                 items.Add(New SelectionItem($"All ({totalCategorized} mails)", totalCategorized))
             End If

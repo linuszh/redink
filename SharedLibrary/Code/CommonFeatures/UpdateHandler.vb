@@ -248,32 +248,41 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Shows a Yes/No prompt on the UI thread (when required) and returns the underlying dialog result.
+        ''' Shows a Yes/No prompt on the UI thread (always marshaled) and returns the underlying dialog result.
         ''' </summary>
         ''' <param name="prompt">Prompt body text.</param>
         ''' <param name="caption">Dialog caption.</param>
         Private Shared Function UIInvokePrompt(prompt As String, caption As String) As Integer
-            NativeMethods.SetForegroundWindow(HostHandle)
-            If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
                 Dim result As Integer = 0
-                MainControl.Invoke(Sub() result = SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption))
+                MainControl.Invoke(
+                    Sub()
+                        NativeMethods.SetForegroundWindow(HostHandle)
+                        result = SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption)
+                    End Sub)
                 Return result
             Else
-                Return SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption)
+                ' Fallback: no UI control available — log and return "declined"
+                WriteUpdateLog($"[UIInvokePrompt] MainControl unavailable, auto-declining: {prompt}")
+                Return 0
             End If
         End Function
 
         ''' <summary>
-        ''' Shows a message box on the UI thread (when required).
+        ''' Shows a message box on the UI thread (always marshaled).
         ''' </summary>
         ''' <param name="msg">Message body.</param>
         ''' <param name="caption">Dialog caption.</param>
         Private Shared Sub UIInvokeMessage(msg As String, caption As String)
-            NativeMethods.SetForegroundWindow(HostHandle)
-            If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
-                MainControl.Invoke(Sub() SharedMethods.ShowCustomMessageBox(msg, caption))
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                MainControl.Invoke(
+                    Sub()
+                        NativeMethods.SetForegroundWindow(HostHandle)
+                        SharedMethods.ShowCustomMessageBox(msg, caption)
+                    End Sub)
             Else
-                SharedMethods.ShowCustomMessageBox(msg, caption)
+                ' Fallback: no UI control available — log only
+                WriteUpdateLog($"[UIInvokeMessage] MainControl unavailable, message suppressed: {msg}")
             End If
         End Sub
 
@@ -325,15 +334,31 @@ Namespace SharedLibrary
 
                     Dim updateAvailable As Boolean = False
                     Dim hasUpdateInfo As Boolean = False
-                    Try
-                        updateAvailable = deployment.CheckForUpdate()
-                        hasUpdateInfo = True
-                    Catch ex As Exception
-                        WriteUpdateLog("[CheckAndInstallUpdates] CheckForUpdate failed", ex)
+                    Dim lastEx As Exception = Nothing
+                    Const MaxRetries As Integer = 3
+
+                    For attempt As Integer = 1 To MaxRetries
+                        Try
+                            updateAvailable = deployment.CheckForUpdate()
+                            hasUpdateInfo = True
+                            lastEx = Nothing
+                            Exit For
+                        Catch ex As Exception
+                            lastEx = ex
+                            WriteUpdateLog($"[CheckAndInstallUpdates] CheckForUpdate attempt {attempt}/{MaxRetries} failed", ex)
+                            If attempt < MaxRetries Then
+                                Thread.Sleep(1000 * CInt(Math.Pow(2, attempt - 1))) ' 1s, 2s backoff
+                            End If
+                        End Try
+                    Next
+
+                    If lastEx IsNot Nothing Then
+                        WriteUpdateLog("[CheckAndInstallUpdates] CheckForUpdate failed after all retries", lastEx)
+                        Dim detail = If(lastEx.InnerException IsNot Nothing, lastEx.InnerException.Message, lastEx.Message)
                         UIInvokeMessage(
-                            "The update check could not complete (network or permission issue). Try again later or use a manual reinstall if problems persist.",
+                            $"The update check could not complete after {MaxRetries} attempts. Detail: {detail}{Environment.NewLine}{Environment.NewLine}Try again later or use a manual reinstall if problems persist.",
                             $"{SharedMethods.AN} Updater")
-                    End Try
+                    End If
 
                     If hasUpdateInfo AndAlso updateAvailable Then
                         Dim vstoUrl = deployment.UpdateLocation.AbsoluteUri.Replace(".application", ".vsto")
@@ -578,7 +603,7 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Shows a two-button Yes/No style dialog with custom button labels, marshaling to the UI thread when required.
+        ''' Shows a two-button Yes/No style dialog with custom button labels, always marshaled to the UI thread.
         ''' </summary>
         ''' <param name="bodyText">Dialog body text.</param>
         ''' <param name="button1Text">Text for the first button.</param>
@@ -586,21 +611,42 @@ Namespace SharedLibrary
         ''' <param name="caption">Dialog caption.</param>
         ''' <returns>Dialog result as returned by `SharedMethods.ShowCustomYesNoBox`.</returns>
         Private Shared Function UIInvokeYesNo(bodyText As String, button1Text As String, button2Text As String, caption As String) As Integer
-            Try
-                If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated AndAlso MainControl.InvokeRequired Then
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                Try
                     Return CInt(MainControl.Invoke(New Func(Of Integer)(
-                        Function() SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption))))
-                Else
-                    Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
-                End If
-            Catch
-                Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
-            End Try
+                        Function()
+                            NativeMethods.SetForegroundWindow(HostHandle)
+                            Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
+                        End Function)))
+                Catch ex As Exception
+                    WriteUpdateLog("[UIInvokeYesNo] Invoke failed", ex)
+                    Return 0
+                End Try
+            Else
+                ' Fallback: no UI control available — log and return "declined"
+                WriteUpdateLog($"[UIInvokeYesNo] MainControl unavailable, auto-declining: {bodyText}")
+                Return 0
+            End If
         End Function
 
         ''' <summary>
-        ''' Performs an automatic/periodic update check, honoring the check interval and daily retry state.
-        ''' May run an async ClickOnce check (network deployed) or run a local `.vsto` installer check (local path).
+        ''' Initial delay in milliseconds before performing the first network update check,
+        ''' giving the OS network stack time to fully initialize (VPN, proxy, Wi-Fi).
+        ''' </summary>
+        Private Const StartupDelayMs As Integer = 8000
+
+        ''' <summary>
+        ''' Maximum number of inline retries for the synchronous ClickOnce check fallback
+        ''' within <see cref="PeriodicCheckForUpdates"/>.
+        ''' </summary>
+        Private Const MaxPeriodicRetries As Integer = 3
+
+        ''' <summary>
+        ''' Performs an automatic/periodic update check on a background thread, honoring the check
+        ''' interval and daily retry state. Uses a synchronous ClickOnce check with retry and
+        ''' exponential backoff for network-deployed add-ins, or runs a local `.vsto` installer
+        ''' check for local-path deployments. All UI interactions are marshaled back to the UI
+        ''' thread via <see cref="MainControl"/>.
         ''' </summary>
         ''' <param name="checkIntervalInDays">
         ''' Interval in days between checks; 0 disables checks; -1 enables infinite retry mode for failure handling in this class.
@@ -614,10 +660,25 @@ Namespace SharedLibrary
             LocalPath As String,
             Optional context As ISharedContext = Nothing)
 
-            Dim splashManagedByOnCheck As Boolean = False
+            If checkIntervalInDays = 0 Then Return
+
+            ' Offload all blocking work (startup delay, network checks, retries, installer) to a
+            ' background thread so the Office UI thread is never blocked. All dialog/splash calls
+            ' already marshal back via MainControl.Invoke.
+            System.Threading.Tasks.Task.Run(
+                Sub() PeriodicCheckForUpdatesCore(checkIntervalInDays, appname, LocalPath, context))
+        End Sub
+
+        ''' <summary>
+        ''' Core implementation of the periodic update check. Runs entirely on a background thread.
+        ''' </summary>
+        Private Shared Sub PeriodicCheckForUpdatesCore(
+            checkIntervalInDays As Integer,
+            appname As String,
+            LocalPath As String,
+            context As ISharedContext)
 
             Try
-                If checkIntervalInDays = 0 Then Return
                 _appname = appname
                 _localPath = LocalPath
                 _checkIntervalInDays = checkIntervalInDays
@@ -647,17 +708,106 @@ Namespace SharedLibrary
                     Dim dep = ApplicationDeployment.CurrentDeployment
                     WriteUpdateLog($"[PeriodicCheck] network-deployed url='{dep.UpdateLocation}' zone='{GetUrlZoneName(dep.UpdateLocation.AbsoluteUri)}'")
 
-                    If ShowCheckingSplash Then
-                        ShowUpdatingSplash("Checking updates …")
-                        splashManagedByOnCheck = True
+                    ' --- Startup delay: give VPN/proxy/Wi-Fi time to initialize ---
+                    WriteUpdateLog($"[PeriodicCheck] waiting {StartupDelayMs}ms for network readiness")
+                    Thread.Sleep(StartupDelayMs)
+
+                    ' --- Synchronous check with retry + exponential backoff ---
+                    Dim updateAvailable As Boolean = False
+                    Dim checkSucceeded As Boolean = False
+                    Dim lastEx As Exception = Nothing
+
+                    For attempt As Integer = 1 To MaxPeriodicRetries
+                        Try
+                            updateAvailable = dep.CheckForUpdate()
+                            checkSucceeded = True
+                            lastEx = Nothing
+                            Exit For
+                        Catch ex As Exception
+                            lastEx = ex
+                            WriteUpdateLog($"[PeriodicCheck] CheckForUpdate attempt {attempt}/{MaxPeriodicRetries} failed", ex)
+                            If attempt < MaxPeriodicRetries Then
+                                Dim delayMs = 1000 * CInt(Math.Pow(2, attempt - 1)) ' 1s, 2s
+                                Thread.Sleep(delayMs)
+                            End If
+                        End Try
+                    Next
+
+                    If Not checkSucceeded Then
+                        ' All retries exhausted — handle via daily retry/prompt logic
+                        WriteUpdateLog("[PeriodicCheck] all retries exhausted", lastEx)
+
+                        ' If it's a trust issue and we can show UI, try the interactive VSTOInstaller fallback
+                        If lastEx IsNot Nothing AndAlso IsTrustNotGranted(lastEx) AndAlso CanShowInteractiveUi() Then
+                            Dim appUrl = dep.UpdateLocation.AbsoluteUri
+                            Dim vstoUrl = appUrl.Replace(".application", ".vsto")
+                            WriteUpdateLog($"[PeriodicCheck] TrustNotGranted → trying interactive VSTOInstaller on '{vstoUrl}'")
+
+                            ShowUpdatingSplash("Updating …")
+                            Try
+                                RunVstoInstaller(vstoUrl)
+                            Finally
+                                CloseUpdatingSplash()
+                            End Try
+
+                            SaveTimestamp(nowDate)
+                            Dim d As Date = Date.Today : Dim c As Integer = 0 : Dim s As Boolean = False
+                            SetRetryStateToSettings(d, c, s)
+                        Else
+                            Dim pause As Boolean = RecordCheckFailureAndMaybePrompt(
+                                If(lastEx?.InnerException IsNot Nothing, lastEx.InnerException.Message,
+                                   If(lastEx IsNot Nothing, lastEx.Message, "Unknown")))
+                            If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(nowDate)
+                        End If
                     Else
-                        splashManagedByOnCheck = False
+                        ' --- Check succeeded ---
+                        If updateAvailable Then
+                            Dim localV = dep.CurrentVersion.ToString()
+                            Dim remoteV = dep.CheckForDetailedUpdate().AvailableVersion.ToString()
+                            WriteUpdateLog($"[PeriodicCheck] update available current='{localV}' new='{remoteV}' url='{dep.UpdateLocation}'")
+
+                            Dim prompt = $"A new version is available (current: {localV}, new: {remoteV}). Do you want to install it now?"
+                            Dim choice = UIInvokePrompt(prompt, $"{SharedMethods.AN} Updater")
+
+                            If choice = 1 Then
+                                Dim appUrl = dep.UpdateLocation.AbsoluteUri
+                                Dim vstoUrl = appUrl.Replace(".application", ".vsto")
+                                WriteUpdateLog($"[PeriodicCheck] user accepted → installing '{vstoUrl}'")
+
+                                ShowUpdatingSplash("Updating …")
+                                Try
+                                    RunVstoInstaller(vstoUrl)
+                                Finally
+                                    CloseUpdatingSplash()
+                                End Try
+
+                                SaveTimestamp(nowDate)
+                            Else
+                                WriteUpdateLog("[PeriodicCheck] user declined update")
+                                If _checkIntervalInDays = -1 Then
+                                    SaveTimestamp(nowDate)
+                                ElseIf _checkIntervalInDays > 0 Then
+                                    Dim postPrompt = $"Do you want to pause update checks for {_checkIntervalInDays} days?"
+                                    Dim postChoice = UIInvokePrompt(postPrompt, $"{SharedMethods.AN} Updater")
+                                    If postChoice = 1 Then
+                                        SaveTimestamp(nowDate)
+                                    End If
+                                End If
+                            End If
+                        Else
+                            WriteUpdateLog("[PeriodicCheck] no update available")
+                            If _checkIntervalInDays > 0 Then
+                                SaveTimestamp(nowDate)
+                            End If
+                        End If
+
+                        ' Reset daily retry state on any successful check
+                        Dim day As Date = Date.Today : Dim cnt As Integer = 0 : Dim shown As Boolean = False
+                        SetRetryStateToSettings(day, cnt, shown)
                     End If
 
-                    RemoveHandler dep.CheckForUpdateCompleted, AddressOf OnCheck
-                    AddHandler dep.CheckForUpdateCompleted, AddressOf OnCheck
-                    dep.CheckForUpdateAsync()
                 Else
+                    ' --- Local path deployment ---
                     Dim vstoFile = Path.Combine(
                     Environment.ExpandEnvironmentVariables(_localPath),
                     $"{_appname.ToLowerInvariant()}\{SharedMethods.AN3} for {_appname}.vsto")
@@ -684,7 +834,8 @@ Namespace SharedLibrary
                     SetRetryStateToSettings(day, cnt, shown)
                 End If
 
-                ' === INI Configuration Updates (async path) ===
+                ' === INI Configuration Updates ===
+                ' Only run after a confirmed successful network/local check
                 If _context IsNot Nothing Then
                     Try
                         If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
@@ -693,7 +844,7 @@ Namespace SharedLibrary
                             SharedMethods.CheckForIniUpdates(_context)
                         End If
                     Catch iniEx As Exception
-                        WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
+                        WriteUpdateLog("[PeriodicCheck] INI update check failed", iniEx)
                     End Try
                 End If
 
@@ -708,9 +859,7 @@ Namespace SharedLibrary
                 If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
 
             Finally
-                If Not splashManagedByOnCheck Then
-                    CloseUpdatingSplash()
-                End If
+                CloseUpdatingSplash()
             End Try
         End Sub
 
