@@ -289,11 +289,11 @@ Partial Public Class ThisAddIn
             items.Add(New SelectionItem("2500 mails", 2500))
             items.Add(New SelectionItem("5000 mails", 5000))
             items.Add(New SelectionItem("7500 mails", 7500))
-            If totalCategorized > 300 Then
+            If totalCategorized > 7500 Then
                 items.Add(New SelectionItem($"All ({totalCategorized} mails)", totalCategorized))
             End If
 
-            Dim chosen As Integer = SelectValue(items, 50,
+            Dim chosen As Integer = SelectValue(items, 2500,
                 $"Found {totalCategorized} categorized mails in Inbox. How many should be loaded?",
                 $"{AN} - Inbox Board")
             If chosen = 0 Then Return Nothing
