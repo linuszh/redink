@@ -495,10 +495,35 @@ Public Class DiscussInky
     ''' </summary>
     ''' <param name="owner">Optional owner window.</param>
     Public Sub ShowRaised(Optional owner As IWin32Window = Nothing)
+        ' Ensure window state is normal (not minimized or hidden)
         If Me.WindowState = FormWindowState.Minimized Then Me.WindowState = FormWindowState.Normal
+
+        ' Guard against zero/corrupt size
+        If Me.Width < Me.MinimumSize.Width OrElse Me.Height < Me.MinimumSize.Height Then
+            Me.Size = New System.Drawing.Size(
+                Math.Max(Me.MinimumSize.Width, 860),
+                Math.Max(Me.MinimumSize.Height, 540))
+        End If
+
+        ' Ensure visible on at least one screen (re-check here too, not just OnLoadForm)
+        Dim isVisible = False
+        For Each scr As Screen In Screen.AllScreens
+            If scr.WorkingArea.IntersectsWith(Me.Bounds) Then
+                isVisible = True
+                Exit For
+            End If
+        Next
+        If Not isVisible Then
+            Dim area = Screen.PrimaryScreen.WorkingArea
+            Me.Location = New System.Drawing.Point(
+                area.Left + (area.Width - Me.Width) \ 2,
+                area.Top + (area.Height - Me.Height) \ 2)
+        End If
+
         If Not Me.Visible Then
             If owner IsNot Nothing Then Me.Show(owner) Else Me.Show()
         End If
+
         Me.Activate()
         _txtInput.Focus()
         _txtInput.SelectAll()
@@ -607,6 +632,23 @@ Public Class DiscussInky
             If My.Settings.DiscussFormLocation <> System.Drawing.Point.Empty AndAlso My.Settings.DiscussFormSize <> System.Drawing.Size.Empty Then
                 Me.Location = My.Settings.DiscussFormLocation
                 Me.Size = My.Settings.DiscussFormSize
+
+                ' Ensure the form is visible on at least one active screen
+                Dim isVisible = False
+                For Each scr As Screen In Screen.AllScreens
+                    If scr.WorkingArea.IntersectsWith(Me.Bounds) Then
+                        isVisible = True
+                        Exit For
+                    End If
+                Next
+                If Not isVisible Then
+                    ' Form is off-screen (e.g. disconnected monitor) — re-center on primary screen
+                    Dim area = Screen.PrimaryScreen.WorkingArea
+                    Dim w = Math.Max(Me.MinimumSize.Width, Me.Size.Width)
+                    Dim h = Math.Max(Me.MinimumSize.Height, Me.Size.Height)
+                    Me.Location = New System.Drawing.Point(area.Left + (area.Width - w) \ 2, area.Top + (area.Height - h) \ 2)
+                    Me.Size = New System.Drawing.Size(w, h)
+                End If
             Else
                 Dim area = Screen.PrimaryScreen.WorkingArea
                 Dim w = Math.Max(Me.MinimumSize.Width, 860)
