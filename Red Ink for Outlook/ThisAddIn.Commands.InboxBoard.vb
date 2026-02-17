@@ -1718,7 +1718,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 </div>"
     End Function
 
-    ''' <summary>Returns the JavaScript for the board.</summary>
+
     ''' <summary>Returns the JavaScript for the board.</summary>
     Private Function GetBoardJavaScript() As String
         Dim js As New StringBuilder(20000)
@@ -2254,9 +2254,20 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Init ---")
-        js.AppendLine("try { initTheme(); } catch(e) { console.error('initTheme error:', e); }")
-        js.AppendLine("init(INIT_DATA);")
+        js.AppendLine("// --- Init (deferred to ensure WebView2 completes first paint) ---")
+        js.AppendLine("function startBoard() {")
+        js.AppendLine("  try { initTheme(); } catch(e) { console.error('initTheme error:', e); }")
+        js.AppendLine("  requestAnimationFrame(function() {")
+        js.AppendLine("    requestAnimationFrame(function() {")
+        js.AppendLine("      init(INIT_DATA);")
+        js.AppendLine("    });")
+        js.AppendLine("  });")
+        js.AppendLine("}")
+        js.AppendLine("if (document.readyState === 'loading') {")
+        js.AppendLine("  document.addEventListener('DOMContentLoaded', startBoard);")
+        js.AppendLine("} else {")
+        js.AppendLine("  startBoard();")
+        js.AppendLine("}")
 
         Return js.ToString()
     End Function

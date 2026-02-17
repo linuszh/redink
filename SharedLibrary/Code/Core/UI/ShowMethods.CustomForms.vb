@@ -258,6 +258,11 @@ Namespace SharedLibrary
         ''' Optional extra buttons (up to 5). Each tuple is (ButtonLabel, TooltipText, PrefixToPrepend).
         ''' When clicked, the dialog returns OK and the prefix may be prepended to the final text.
         ''' </param>
+        ''' <param name="InsertButtons">
+        ''' Optional insert buttons shown only in multi-line mode. Each tuple is (ButtonLabel, TooltipText, TextToInsert).
+        ''' When clicked, the specified text is inserted at the current caret position in the input field.
+        ''' Examples: ("📄", "Insert document trigger", "{doc}"), ("📑", "Insert additional document trigger", "(adddoc)"), ("📊", "Insert worksheet trigger", "(addws)")
+        ''' </param>
         ''' <returns>
         ''' On OK: the entered (and possibly prefixed) text.
         ''' On Cancel: returns <c>"ESC"</c> for multi-line mode and <c>""</c> for single-line mode.
@@ -268,7 +273,8 @@ Namespace SharedLibrary
                                                     SimpleInput As Boolean,
                                                     Optional DefaultValue As String = "",
                                                     Optional CtrlP As String = "",
-                                                    Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing
+                                                    Optional OptionalButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing,
+                                                    Optional InsertButtons As System.Tuple(Of System.String, System.String, System.String)() = Nothing
                                                 ) As String
 
             ' Screen working area (accounts for taskbar, etc.).
@@ -410,6 +416,34 @@ Namespace SharedLibrary
                 Next
             End If
 
+            ' Insert buttons for multi-line mode: insert text at caret position.
+            If Not SimpleInput AndAlso InsertButtons IsNot Nothing AndAlso InsertButtons.Length > 0 Then
+                Dim insertTip As New System.Windows.Forms.ToolTip()
+                Dim emojiFont As New System.Drawing.Font("Segoe UI Emoji", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+                For i As Integer = 0 To InsertButtons.Length - 1
+                    Dim insertItem = InsertButtons(i)
+                    Dim insertBtn As New System.Windows.Forms.Button() With {
+                        .Text = insertItem.Item1,
+                        .AutoSize = True,
+                        .Font = emojiFont
+                    }
+                    insertTip.SetToolTip(insertBtn, insertItem.Item2)
+                    If i = 0 Then
+                        ' Add extra left margin to visually separate insert buttons from action buttons.
+                        insertBtn.Margin = New Padding(cancelButton.Margin.Left * 3, cancelButton.Margin.Top, cancelButton.Margin.Right, cancelButton.Margin.Bottom)
+                    End If
+                    Dim textToInsert As String = insertItem.Item3
+                    AddHandler insertBtn.Click,
+                        Sub()
+                            Dim selPos = inputTextBox.SelectionStart
+                            inputTextBox.Text = inputTextBox.Text.Insert(selPos, textToInsert)
+                            inputTextBox.SelectionStart = selPos + textToInsert.Length
+                            inputTextBox.Focus()
+                        End Sub
+                    bottomFlow.Controls.Add(insertBtn)
+                Next
+            End If
+
             mainLayout.Controls.Add(bottomFlow, 0, 2)
             inputForm.Controls.Add(mainLayout)
 
@@ -465,6 +499,13 @@ Namespace SharedLibrary
                                             Dim maxW As Integer = wa.Width - 40
                                             Dim maxH As Integer = wa.Height - 40
 
+                                            ' Ensure the form is wide enough to show all buttons in one row.
+                                            bottomFlow.PerformLayout()
+                                            Dim requiredButtonWidth As Integer = bottomFlow.PreferredSize.Width + mainLayout.Padding.Horizontal
+                                            Dim chromeW As Integer = inputForm.Width - inputForm.ClientSize.Width
+                                            Dim minClientW As Integer = Math.Max(inputForm.ClientSize.Width, requiredButtonWidth)
+                                            minClientW = Math.Min(minClientW, maxW - chromeW)
+
                                             ' Compute space used by non-textbox rows and window chrome.
                                             Dim chromeH As Integer = inputForm.Height - inputForm.ClientSize.Height
                                             Dim labelH As Integer = promptLabel.PreferredSize.Height
@@ -482,12 +523,13 @@ Namespace SharedLibrary
                                                 ' Set client size so all rows are visible.
                                                 Dim newClientH As Integer = Math.Min(fixedRowsH + textH, maxClientH)
 
-                                                ' Keep current width (already autosized) but clamp to screen.
-                                                Dim newClientW As Integer = Math.Min(inputForm.ClientSize.Width, maxW)
+                                                ' Use the wider of autosized width or required button width, clamped to screen.
+                                                Dim newClientW As Integer = Math.Min(minClientW, maxW)
 
                                                 inputForm.ClientSize = New Size(newClientW, newClientH)
                                             Else
-                                                ' SimpleInput: just clamp to screen.
+                                                ' SimpleInput: ensure button width is accommodated, then clamp to screen.
+                                                inputForm.ClientSize = New Size(minClientW, inputForm.ClientSize.Height)
                                                 If inputForm.Width > maxW Then inputForm.Width = maxW
                                                 If inputForm.Height > maxH Then inputForm.Height = maxH
                                             End If
@@ -509,25 +551,6 @@ Namespace SharedLibrary
             inputForm.TopMost = True
             inputForm.BringToFront()
             inputForm.Focus()
-
-            ' Show the dialog, optionally owned by Outlook.
-            'Dim Result As DialogResult
-            'If title.Contains("Browser") Then
-            'Dim outlookApp As Object = CreateObject("Outlook.Application")
-            'If outlookApp IsNot Nothing Then
-            'Dim explorer As Object = outlookApp.GetType().InvokeMember("ActiveExplorer", BindingFlags.GetProperty, Nothing, outlookApp, Nothing)
-            'If explorer IsNot Nothing Then
-            'explorer.GetType().InvokeMember("WindowState", BindingFlags.SetProperty, Nothing, explorer, New Object() {1})
-            'explorer.GetType().InvokeMember("Activate", BindingFlags.InvokeMethod, Nothing, explorer, Nothing)
-            'End If
-            'End If
-            'inputForm.Opacity = 1
-            'Dim outlookHwnd As IntPtr = FindWindow("rctrl_renwnd32", Nothing)
-            'Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
-            'Else
-            'inputForm.Opacity = 1
-            'Result = inputForm.ShowDialog()
-            'End If
 
             ' Show the dialog, must be owned by Outlook (only then the title may contains "Browser").
             Dim Result As DialogResult
@@ -560,6 +583,7 @@ Namespace SharedLibrary
                 Return If(Not SimpleInput, "ESC", "")
             End If
         End Function
+
 
         <DllImport("user32.dll")>
         Private Shared Function SetForegroundWindow(hWnd As IntPtr) As Boolean
