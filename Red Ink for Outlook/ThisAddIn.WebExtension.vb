@@ -1069,7 +1069,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("      </div>")
         html.AppendLine("    </div>")
 
-        html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"">Theme</button>")
+        html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""font-size:1.1rem;line-height:1;"">&#9790;</button>")
         html.AppendLine("  </div>")
 
         html.AppendLine("  <div id=""chat"" class=""chat""></div>")
@@ -1130,7 +1130,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __toolingLogEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
 
-        html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);} ")
+        html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);themeBtn.innerHTML=dark?'\u263E':'\u2600\uFE0F';} ")
         html.AppendLine("function forceExternalLinks(scope){try{(scope||document).querySelectorAll('a[href]').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});}catch{}}")
         html.AppendLine("function setActiveChatBtn(id){document.querySelectorAll('.chatTab').forEach(b=>b.classList.toggle('active',b.dataset.chat==String(id)));}")
         html.AppendLine("function disableChatSwitch(dis){chat1Btn.disabled=dis;chat2Btn.disabled=dis;}")

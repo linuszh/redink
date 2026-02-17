@@ -100,6 +100,9 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_SearchInAttachments As String = "search_in_attachments"
     Private Const AP_Tool_SummarizeThread As String = "summarize_thread"
     Private Const AP_Tool_PdfToWord As String = "pdf_to_word"
+    Private Const AP_Tool_CreateWordDoc As String = "create_word_document"
+    Private Const AP_Tool_CreateExcel As String = "create_excel_spreadsheet"
+    Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
@@ -416,6 +419,91 @@ Partial Public Class ThisAddIn
                 "},""required"":[""attachment_name""]}}"
         })
 
+        ' ── create_word_document ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateWordDoc,
+            .ModelDescription = "Create Word Document from Markdown (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreateWordDoc & ": Creates a new formatted Word document (.docx) from Markdown content. " &
+                "Use this when the user asks you to create, generate, or produce a new Word document from any content " &
+                "(e.g., from a PDF extract, from research results, from your own generated text, from a summary, etc.). " &
+                "Provide the content as Markdown and it will be converted to a properly formatted .docx file with " &
+                "headings, bold, italic, lists, etc. The resulting file will be attached to the reply.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreateWordDoc & """," &
+                """description"":""Creates a new formatted Word document (.docx) from Markdown content. " &
+                "Use when the user asks to create, generate, or produce a Word document from any content. " &
+                "The Markdown is converted to a properly formatted .docx with headings, bold, italic, lists, etc.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """markdown_content"":{""type"":""string"",""description"":""The full document content in Markdown format. " &
+                "Use headings (#, ##, ###), bold (**text**), italic (*text*), lists (- or 1.), etc.""}," &
+                """file_name"":{""type"":""string"",""description"":""The desired filename for the output Word document " &
+                "(without .docx extension). Defaults to 'Document' if not specified.""}" &
+                "},""required"":[""markdown_content""]}}"
+        })
+
+        ' ── create_excel_spreadsheet ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateExcel,
+            .ModelDescription = "Create Excel Spreadsheet (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreateExcel & ": Creates a new Excel spreadsheet (.xlsx) with values, formulas, and basic formatting. " &
+                "Use this when the user asks you to create, generate, or produce a spreadsheet, table, budget, calculation, " &
+                "tracker, or any tabular data as an Excel file. ALWAYS use this tool for spreadsheet/table requests — " &
+                "do NOT put tabular data into a PowerPoint or Word document instead. " &
+                "Provide cell data as a JSON array of cell objects. " &
+                "Each cell object has: 'cell' (A1-style address), and one of 'formula' (Excel formula starting with =) " &
+                "or 'value' (string or number). Optional: 'bold' (boolean), 'italic' (boolean), 'number_format' (Excel format string e.g. '#,##0.00', '0%', 'dd/mm/yyyy'). " &
+                "Formulas must use English function names and comma as separator (e.g. =SUM(A1,A2), =IF(A1>0,""Yes"",""No"")). " &
+                "You can also specify optional 'column_widths' as an object mapping column letters to widths (e.g. {""A"":25,""B"":15}), " &
+                "and 'sheet_name' for the worksheet tab name. " &
+                "Tip: build cells row by row — e.g. headers in row 1 (A1, B1, C1...), then data rows (A2, B2, C2..., A3, B3, C3..., etc.).",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreateExcel & """," &
+                """description"":""Creates a new Excel spreadsheet (.xlsx) with cell values, formulas, and basic formatting. " &
+                "Provide cell data as a JSON array. Each cell object has 'cell' (A1 address) and either 'formula' or 'value', " &
+                "plus optional 'bold', 'italic', 'number_format'. Use English formula syntax with comma separators.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """cells"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """cell"":{""type"":""string"",""description"":""Cell address in A1 notation (e.g. A1, B2, C10)""}," &
+                """value"":{""description"":""Cell value (string or number). Use this for static content.""}," &
+                """formula"":{""type"":""string"",""description"":""Excel formula starting with = (e.g. =SUM(A1:A10)). Use English function names and comma as separator.""}," &
+                """bold"":{""type"":""boolean"",""description"":""Make the cell text bold (default: false)""}," &
+                """italic"":{""type"":""boolean"",""description"":""Make the cell text italic (default: false)""}," &
+                """number_format"":{""type"":""string"",""description"":""Excel number format string (e.g. '#,##0.00', '0%', 'dd/mm/yyyy', '@' for text)""}" &
+                "}},""description"":""Array of cell objects defining the spreadsheet content""}," &
+                """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Spreadsheet')""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Worksheet tab name (default: 'Sheet1')""}," &
+                """column_widths"":{""type"":""object"",""description"":""Optional column widths as {column_letter: width} (e.g. {""A"":25,""B"":15})""}" &
+                "},""required"":[""cells""]}}"
+        })
+
+        ' ── create_powerpoint ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreatePowerPoint,
+            .ModelDescription = "Create PowerPoint Presentation (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreatePowerPoint & ": Creates a new PowerPoint presentation (.pptx) with slides containing titles, body text, and speaker notes. " &
+                "Use this when the user asks you to create, generate, or produce a presentation, slide deck, or pitch deck. " &
+                "Provide slide data as a JSON array of slide objects. Each slide object has: " &
+                "'title' (string, the slide title), 'body' (string, the main content — use newlines for bullet points), " &
+                "and optionally 'notes' (string, speaker notes for that slide). " &
+                "The first slide is typically used as a title slide with a short subtitle in 'body'.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
+                """description"":""Creates a new PowerPoint presentation (.pptx) with slides. Each slide has a title, body text (use newlines for bullets), and optional speaker notes. " &
+                "Use when the user asks to create a presentation, slide deck, or pitch deck.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """slides"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """title"":{""type"":""string"",""description"":""Slide title text""}," &
+                """body"":{""type"":""string"",""description"":""Slide body content. Use newline characters for separate bullet points.""}," &
+                """notes"":{""type"":""string"",""description"":""Optional speaker notes for this slide""}" &
+                "}},""description"":""Array of slide objects defining the presentation""}," &
+                """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Presentation')""}," &
+                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}" &
+                "},""required"":[""slides""]}}"
+        })
+
         Return tools
     End Function
 
@@ -463,6 +551,12 @@ Partial Public Class ThisAddIn
                 Return ExecuteSummarizeThreadTool(toolCall, context)
             Case AP_Tool_PdfToWord
                 Return Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreateWordDoc
+                Return Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreateExcel
+                Return Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreatePowerPoint
+                Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case Else
                 Return Nothing
         End Select
@@ -684,6 +778,537 @@ Partial Public Class ThisAddIn
             Return ""
         End Try
     End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: create_powerpoint
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCreatePowerPointTool(
+            toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            ' Parse slides array
+            Dim slidesArray As JArray = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("slides") Then
+                Dim slidesObj = toolCall.Arguments("slides")
+                If TypeOf slidesObj Is JArray Then
+                    slidesArray = DirectCast(slidesObj, JArray)
+                End If
+            End If
+
+            If slidesArray Is Nothing OrElse slidesArray.Count = 0 Then
+                response.Success = False
+                response.Response = "Missing required parameter: slides (must be a non-empty array of slide objects)"
+                Return response
+            End If
+
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            If String.IsNullOrWhiteSpace(fileName) Then fileName = "Presentation"
+
+            ' Sanitize filename
+            For Each c In Path.GetInvalidFileNameChars()
+                fileName = fileName.Replace(c, "_"c)
+            Next
+            If Not fileName.EndsWith(".pptx", StringComparison.OrdinalIgnoreCase) Then
+                fileName &= ".pptx"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
+                fileName = baseName & $"_{counter}.pptx"
+                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                counter += 1
+            End While
+
+            Dim presTitle = GetArgString(toolCall.Arguments, "title")
+
+            context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)")
+            ApDashboardLog($"📊 Creating PowerPoint: {fileName}", "step")
+
+            ' ppLayoutText = 2, ppLayoutTitleOnly = 11, ppLayoutBlank = 12, ppLayoutTitle = 1
+            Const ppLayoutTitle As Integer = 1
+            Const ppLayoutText As Integer = 2
+            ' ppSaveAsOpenXMLPresentation = 24
+            Const ppSaveAsOpenXMLPresentation As Integer = 24
+
+            Dim success = Await SwitchToUi(Function()
+                                               Dim app As Object = Nothing
+                                               Dim pres As Object = Nothing
+                                               Try
+                                                   ' Late binding: no PIAs required (same as ExtractPowerPointText)
+                                                   app = Microsoft.VisualBasic.Interaction.CreateObject("PowerPoint.Application")
+
+                                                   pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
+
+                                                   ' Set presentation title metadata if provided
+                                                   If Not String.IsNullOrWhiteSpace(presTitle) Then
+                                                       Try
+                                                           pres.BuiltInDocumentProperties("Title").Value = presTitle
+                                                       Catch
+                                                       End Try
+                                                   End If
+
+                                                   Dim slideIndex As Integer = 0
+                                                   For Each slideObj As JObject In slidesArray
+                                                       slideIndex += 1
+
+                                                       Dim title = slideObj.Value(Of String)("title")
+                                                       Dim body = slideObj.Value(Of String)("body")
+                                                       Dim notes = slideObj.Value(Of String)("notes")
+
+                                                       ' First slide uses title layout, rest use text layout
+                                                       Dim layoutType As Integer = If(slideIndex = 1, ppLayoutTitle, ppLayoutText)
+
+                                                       Dim sld As Object = Nothing
+                                                       Try
+                                                           sld = pres.Slides.Add(slideIndex, layoutType)
+
+                                                           ' Set title
+                                                           If Not String.IsNullOrWhiteSpace(title) Then
+                                                               Try
+                                                                   sld.Shapes(1).TextFrame.TextRange.Text = title
+                                                               Catch
+                                                               End Try
+                                                           End If
+
+                                                           ' Set body text (placeholder 2)
+                                                           If Not String.IsNullOrWhiteSpace(body) Then
+                                                               ' Strip Markdown bullet markers — PowerPoint already formats as bullets
+                                                               Dim cleanedLines As New List(Of String)()
+                                                               For Each bodyLine In body.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None)
+                                                                   Dim trimmed = bodyLine.TrimStart()
+                                                                   If trimmed.StartsWith("- ") Then
+                                                                       trimmed = trimmed.Substring(2)
+                                                                   ElseIf trimmed.StartsWith("* ") OrElse trimmed.StartsWith("+ ") Then
+                                                                       trimmed = trimmed.Substring(2)
+                                                                   ElseIf trimmed.Length > 2 AndAlso Char.IsDigit(trimmed(0)) Then
+                                                                       Dim dotIdx = trimmed.IndexOf(". ")
+                                                                       If dotIdx > 0 AndAlso dotIdx <= 3 Then
+                                                                           Dim prefix = trimmed.Substring(0, dotIdx)
+                                                                           Dim allDigits = True
+                                                                           For Each ch In prefix
+                                                                               If Not Char.IsDigit(ch) Then allDigits = False : Exit For
+                                                                           Next
+                                                                           If allDigits Then trimmed = trimmed.Substring(dotIdx + 2)
+                                                                       End If
+                                                                   End If
+                                                                   cleanedLines.Add(trimmed)
+                                                               Next
+                                                               body = String.Join(vbCrLf, cleanedLines)
+
+                                                               Try
+                                                                   sld.Shapes(2).TextFrame.TextRange.Text = body
+                                                               Catch
+                                                                   ' Some layouts may not have a second placeholder;
+                                                                   ' try adding as a text box instead
+                                                                   Try
+                                                                       ' AddTextbox(Orientation, Left, Top, Width, Height)
+                                                                       ' 1 = msoTextOrientationHorizontal
+                                                                       Dim tb As Object = sld.Shapes.AddTextbox(1, 50, 120, 600, 300)
+                                                                       tb.TextFrame.TextRange.Text = body
+                                                                       tb.TextFrame.WordWrap = -1 ' msoTrue
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(tb)
+                                                                       Catch : End Try
+                                                                   Catch
+                                                                   End Try
+                                                               End Try
+                                                           End If
+
+                                                           ' Set speaker notes
+                                                           If Not String.IsNullOrWhiteSpace(notes) Then
+                                                               Try
+                                                                   Dim notesPage As Object = sld.NotesPage
+                                                                   Dim notesShapes As Object = notesPage.Shapes
+                                                                   Dim nCount As Integer = System.Convert.ToInt32(notesShapes.Count,
+                                                                       Globalization.CultureInfo.InvariantCulture)
+                                                                   ' Find the body placeholder in notes (type 2 = ppPlaceholderBody)
+                                                                   For k As Integer = 1 To nCount
+                                                                       Dim nShp As Object = notesShapes(k)
+                                                                       Try
+                                                                           Dim phType As Integer = System.Convert.ToInt32(
+                                                                               nShp.PlaceholderFormat.Type,
+                                                                               Globalization.CultureInfo.InvariantCulture)
+                                                                           If phType = 2 Then ' ppPlaceholderBody
+                                                                               nShp.TextFrame.TextRange.Text = notes
+                                                                               Exit For
+                                                                           End If
+                                                                       Catch
+                                                                       Finally
+                                                                           Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(nShp)
+                                                                           Catch : End Try
+                                                                       End Try
+                                                                   Next
+                                                               Catch
+                                                               End Try
+                                                           End If
+                                                       Finally
+                                                           Try
+                                                               If sld IsNot Nothing Then System.Runtime.InteropServices.Marshal.FinalReleaseComObject(sld)
+                                                           Catch
+                                                           End Try
+                                                       End Try
+                                                   Next
+
+                                                   ' SaveAs(FileName, FileFormat)
+                                                   pres.SaveAs(outputPath, ppSaveAsOpenXMLPresentation)
+                                                   Return True
+                                               Catch ex As Exception
+                                                   Debug.WriteLine($"CreatePowerPoint error: {ex.Message}")
+                                                   Return False
+                                               Finally
+                                                   Try
+                                                       If pres IsNot Nothing Then
+                                                           Try : pres.Close() : Catch : End Try
+                                                           Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(pres)
+                                                           Catch : End Try
+                                                       End If
+                                                   Catch
+                                                   End Try
+                                                   Try
+                                                       If app IsNot Nothing Then
+                                                           Try : app.Quit() : Catch : End Try
+                                                           Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(app)
+                                                           Catch : End Try
+                                                       End If
+                                                   Catch
+                                                   End Try
+                                               End Try
+                                           End Function)
+
+            If success AndAlso File.Exists(outputPath) Then
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
+                End If
+
+                response.Success = True
+                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} slides, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ PowerPoint created: {fileName}", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create PowerPoint presentation."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error creating PowerPoint presentation: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: create_excel_spreadsheet
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCreateExcelTool(
+            toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            ' Parse cells array
+            Dim cellsArray As JArray = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("cells") Then
+                Dim cellsObj = toolCall.Arguments("cells")
+                If TypeOf cellsObj Is JArray Then
+                    cellsArray = DirectCast(cellsObj, JArray)
+                End If
+            End If
+
+            If cellsArray Is Nothing OrElse cellsArray.Count = 0 Then
+                response.Success = False
+                response.Response = "Missing required parameter: cells (must be a non-empty array of cell objects)"
+                Return response
+            End If
+
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            If String.IsNullOrWhiteSpace(fileName) Then fileName = "Spreadsheet"
+
+            ' Sanitize filename
+            For Each c In Path.GetInvalidFileNameChars()
+                fileName = fileName.Replace(c, "_"c)
+            Next
+            If Not fileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) Then
+                fileName &= ".xlsx"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
+                fileName = baseName & $"_{counter}.xlsx"
+                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                counter += 1
+            End While
+
+            Dim sheetName = GetArgString(toolCall.Arguments, "sheet_name")
+            If String.IsNullOrWhiteSpace(sheetName) Then sheetName = "Sheet1"
+
+            ' Parse column_widths
+            Dim columnWidths As Dictionary(Of String, Double) = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("column_widths") Then
+                Dim cwObj = toolCall.Arguments("column_widths")
+                If TypeOf cwObj Is JObject Then
+                    columnWidths = New Dictionary(Of String, Double)(StringComparer.OrdinalIgnoreCase)
+                    For Each prop In DirectCast(cwObj, JObject).Properties()
+                        Dim w As Double
+                        If Double.TryParse(prop.Value.ToString(), Globalization.NumberStyles.Any,
+                                          Globalization.CultureInfo.InvariantCulture, w) Then
+                            columnWidths(prop.Name.ToUpperInvariant()) = w
+                        End If
+                    Next
+                End If
+            End If
+
+            context.Log($"Creating Excel spreadsheet: {fileName} ({cellsArray.Count} cells)")
+            ApDashboardLog($"📊 Creating Excel spreadsheet: {fileName}", "step")
+
+            Dim success = Await SwitchToUi(Function()
+                                               Dim excelApp As Microsoft.Office.Interop.Excel.Application = Nothing
+                                               Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
+                                               Dim ws As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+                                               Try
+                                                   excelApp = New Microsoft.Office.Interop.Excel.Application()
+                                                   excelApp.Visible = False
+                                                   excelApp.DisplayAlerts = False
+                                                   excelApp.ScreenUpdating = False
+
+                                                   wb = excelApp.Workbooks.Add()
+                                                   ws = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
+                                                   ws.Name = sheetName
+
+                                                   ' Apply cell data
+                                                   For Each cellObj As JObject In cellsArray
+                                                       Dim addr = cellObj.Value(Of String)("cell")
+                                                       If String.IsNullOrWhiteSpace(addr) Then Continue For
+
+                                                       Dim cell As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                       Try
+                                                           cell = ws.Range(addr)
+                                                       Catch
+                                                           Continue For
+                                                       End Try
+
+                                                       ' Number format (apply before value/formula so formatting takes effect)
+                                                       Dim numFmt = cellObj.Value(Of String)("number_format")
+                                                       If Not String.IsNullOrWhiteSpace(numFmt) Then
+                                                           Try : cell.NumberFormat = numFmt : Catch : End Try
+                                                       End If
+
+                                                       ' Formula or value
+                                                       Dim formula = cellObj.Value(Of String)("formula")
+                                                       If Not String.IsNullOrWhiteSpace(formula) Then
+                                                           Try
+                                                               cell.Formula2 = formula
+                                                           Catch
+                                                               Try
+                                                                   cell.Formula = formula
+                                                               Catch ex2 As Exception
+                                                                   Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                                                               End Try
+                                                           End Try
+                                                       Else
+                                                           Dim valToken = cellObj("value")
+                                                           If valToken IsNot Nothing Then
+                                                               Dim valStr = valToken.ToString()
+                                                               Dim numVal As Double
+                                                               If Double.TryParse(valStr, Globalization.NumberStyles.Any,
+                                                                                  Globalization.CultureInfo.InvariantCulture, numVal) Then
+                                                                   cell.Value2 = numVal
+                                                               Else
+                                                                   cell.Value2 = valStr
+                                                               End If
+                                                           End If
+                                                       End If
+
+                                                       ' Bold
+                                                       Dim boldToken = cellObj("bold")
+                                                       If boldToken IsNot Nothing AndAlso boldToken.Type = JTokenType.Boolean AndAlso
+                                                          CBool(boldToken) Then
+                                                           Try : cell.Font.Bold = True : Catch : End Try
+                                                       End If
+
+                                                       ' Italic
+                                                       Dim italicToken = cellObj("italic")
+                                                       If italicToken IsNot Nothing AndAlso italicToken.Type = JTokenType.Boolean AndAlso
+                                                          CBool(italicToken) Then
+                                                           Try : cell.Font.Italic = True : Catch : End Try
+                                                       End If
+                                                   Next
+
+                                                   ' Apply column widths
+                                                   If columnWidths IsNot Nothing Then
+                                                       For Each kv In columnWidths
+                                                           Try
+                                                               Dim colRange = ws.Columns(kv.Key & ":" & kv.Key)
+                                                               colRange.ColumnWidth = kv.Value
+                                                           Catch
+                                                           End Try
+                                                       Next
+                                                   End If
+
+                                                   wb.SaveAs(outputPath, Microsoft.Office.Interop.Excel.XlFileFormat.xlOpenXMLWorkbook)
+                                                   Return True
+                                               Catch ex As Exception
+                                                   Debug.WriteLine($"CreateExcel error: {ex.Message}")
+                                                   Return False
+                                               Finally
+                                                   SafeCloseExcel(wb, excelApp)
+                                               End Try
+                                           End Function)
+
+            If success AndAlso File.Exists(outputPath) Then
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
+                End If
+
+                response.Success = True
+                response.Response = $"Excel spreadsheet created: {fileName} ({cellsArray.Count} cells, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ Excel spreadsheet created: {fileName}", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create Excel spreadsheet."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error creating Excel spreadsheet: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: create_word_document
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCreateWordDocTool(
+            toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim markdownContent = GetArgString(toolCall.Arguments, "markdown_content")
+            If String.IsNullOrWhiteSpace(markdownContent) Then
+                response.Success = False
+                response.Response = "Missing required parameter: markdown_content"
+                Return response
+            End If
+
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            If String.IsNullOrWhiteSpace(fileName) Then fileName = "Document"
+
+            ' Sanitize filename
+            For Each c In Path.GetInvalidFileNameChars()
+                fileName = fileName.Replace(c, "_"c)
+            Next
+            If Not fileName.EndsWith(".docx", StringComparison.OrdinalIgnoreCase) Then
+                fileName &= ".docx"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
+                fileName = baseName & $"_{counter}.docx"
+                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                counter += 1
+            End While
+
+            context.Log($"Creating Word document: {fileName}")
+            ApDashboardLog($"📝 Creating Word document: {fileName}", "step")
+
+            Dim success = Await SwitchToUi(Function()
+                                               Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
+                                               Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+                                               Dim weCreated As Boolean = False
+                                               Try
+                                                   Try
+                                                       wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
+                                                   Catch
+                                                       wordApp = New Microsoft.Office.Interop.Word.Application()
+                                                       wordApp.Visible = False
+                                                       weCreated = True
+                                                   End Try
+                                                   wordApp.ScreenUpdating = False
+
+                                                   doc = wordApp.Documents.Add()
+                                                   doc.Activate()
+
+                                                   ' Use the existing shared library method to insert formatted Markdown
+                                                   Dim sel As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                                                   SharedMethods.InsertTextWithMarkdown(sel, markdownContent, TrailingCR:=False)
+
+                                                   doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                                                   Return True
+                                               Catch ex As Exception
+                                                   Debug.WriteLine($"CreateWordDoc error: {ex.Message}")
+                                                   Return False
+                                               Finally
+                                                   Try : If doc IsNot Nothing Then doc.Close(False)
+                                                   Catch : End Try
+                                                   Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
+                                                   Catch : End Try
+                                                   If weCreated AndAlso wordApp IsNot Nothing Then
+                                                       Try : wordApp.Quit(False) : Catch : End Try
+                                                   End If
+                                               End Try
+                                           End Function)
+
+            If success AndAlso File.Exists(outputPath) Then
+                ' Register as output on the first attachment, or create a standalone entry
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
+                End If
+
+                response.Success = True
+                response.Response = $"Word document created: {fileName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ Word document created: {fileName}", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create Word document."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error creating Word document: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: comment_word_document
@@ -2796,7 +3421,10 @@ Partial Public Class ThisAddIn
                  AP_Tool_WordToPdf,
                  AP_Tool_SearchInAttachments,
                  AP_Tool_SummarizeThread,
-                 AP_Tool_PdfToWord
+                 AP_Tool_PdfToWord,
+                 AP_Tool_CreateWordDoc,
+                 AP_Tool_CreateExcel,
+                 AP_Tool_CreatePowerPoint
                 Return True
             Case Else
                 Return False
