@@ -112,6 +112,7 @@ Partial Class Ribbon1
         Me.RI_TimeSpan = Me.Factory.CreateRibbonButton
         Me.RI_Regex = Me.Factory.CreateRibbonButton
         Me.RI_Charting = Me.Factory.CreateRibbonButton
+        Me.RI_WebApp = Me.Factory.CreateRibbonButton
         Me.RI_Import = Me.Factory.CreateRibbonButton
         Me.RI_FlattenPDF = Me.Factory.CreateRibbonButton
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
@@ -126,7 +127,6 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
-        Me.RI_WebApp = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -684,12 +684,21 @@ Partial Class Ribbon1
         '
         'RI_Charting
         '
-        Me.RI_Charting.Label = "Edit Diagrams (draw.io)"
+        Me.RI_Charting.Label = "Edit/Create Diagrams (draw.io)"
         Me.RI_Charting.Name = "RI_Charting"
         Me.RI_Charting.OfficeImageId = "DeveloperDrawingTools"
-        Me.RI_Charting.ScreenTip = "Opens the online diagram tool draw.io (with the ability to run it entirely local)" &
-    ""
+        Me.RI_Charting.ScreenTip = "Opens the online diagram tool draw.io or creates a new one (with the ability to r" &
+    "un it entirely local)"
         Me.RI_Charting.ShowImage = True
+        '
+        'RI_WebApp
+        '
+        Me.RI_WebApp.Label = "Flowchart to Webapp"
+        Me.RI_WebApp.Name = "RI_WebApp"
+        Me.RI_WebApp.OfficeImageId = "NewHTML"
+        Me.RI_WebApp.ScreenTip = "Create a self-standing web app (in the form of a HTML page) out of your draw.io f" &
+    "lowchart"
+        Me.RI_WebApp.ShowImage = True
         '
         'RI_Import
         '
@@ -812,15 +821,6 @@ Partial Class Ribbon1
         Me.RI_Chat.OfficeImageId = "ContactUs"
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
-        '
-        'RI_WebApp
-        '
-        Me.RI_WebApp.Label = "Flowchart to Webapp"
-        Me.RI_WebApp.Name = "RI_WebApp"
-        Me.RI_WebApp.OfficeImageId = "NewHTML"
-        Me.RI_WebApp.ScreenTip = "Create a self-standing web app (in the form of a HTML page) out of your draw.io f" &
-    "lowchart"
-        Me.RI_WebApp.ShowImage = True
         '
         'Ribbon1
         '

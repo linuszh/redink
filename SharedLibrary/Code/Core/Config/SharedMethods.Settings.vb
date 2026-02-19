@@ -584,11 +584,15 @@ Namespace SharedLibrary
                                            End Sub
 
             AddHandler aboutButton.Click, Sub(sender, e)
+
                                               ShowAboutWindow(settingsForm, CapturedContext)
                                           End Sub
 
             If ApplicationDeployment.IsNetworkDeployed OrElse Not String.IsNullOrWhiteSpace(CapturedContext.INI_UpdatePath) OrElse (context.INI_UpdateIniSilentMode = 0 AndAlso context.INI_UpdateIni) Then
                 AddHandler updateButton.Click, Sub(sender, e)
+
+
+
                                                    Dim updater As New UpdateHandler()
                                                    updater.CheckAndInstallUpdates(CapturedContext.RDV, CapturedContext.INI_UpdatePath, CapturedContext)
                                                End Sub

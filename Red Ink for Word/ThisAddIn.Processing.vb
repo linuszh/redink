@@ -182,6 +182,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">Tools selected for Tooling</param>
     ''' <param name="DoChart">Create a chart</param>
+    ''' <param name="DoShowModel">Include model name in the output</param>
     ''' <returns>Empty string on completion.</returns>
     Public Async Function ProcessSelectedText(
      SysCommand As String,
@@ -210,7 +211,8 @@ Partial Public Class ThisAddIn
      Optional DoBubblesExtract As Boolean = False,
      Optional DoPushback As Boolean = False,
      Optional SelectedTools As List(Of ModelConfig) = Nothing,
-     Optional DoChart As Boolean = False) As Task(Of String)
+     Optional DoChart As Boolean = False,
+     Optional DoShowModel As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -264,7 +266,7 @@ Partial Public Class ThisAddIn
 
                 If selection.Type = WdSelectionType.wdSelectionIP Or selection.Tables.Count = 0 Or PutInClipboard Or PutInBubbles Or DoPushback Then
 
-                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
+                    Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel)
 
                 Else
 
@@ -469,7 +471,7 @@ Partial Public Class ThisAddIn
 
                     ElseIf userdialog = 1 Then
 
-                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart)
+                        Dim Result = Await TrueProcessSelectedText(SysCommand, CheckMaxToken, KeepFormat, ParaFormatInline, InPlace, DoMarkup, MarkupMethod, PutInClipboard, PutInBubbles, SelectionMandatory, UseSecondAPI, FormattingCap, DoTPMarkup, TPMarkupname, CreatePodcast, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, AddDocs, DoMyStyle, DoBubblesExtract, False, DoPushback, SelectedTools, DoChart, DoShowModel)
 
                     End If
 
@@ -525,6 +527,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoPushback">Reply to bubbles.</param>
     ''' <param name="SelectedTools">The tools selected for tooling runs</param>
     ''' <param name="DoChart">Create a chart</param>
+    ''' <param name="DoShowModel">Include model name in the output</param>
     ''' <returns>Empty string on completion.</returns>
     Private Async Function TrueProcessSelectedText(SysCommand As String,
        CheckMaxToken As Boolean,
@@ -553,7 +556,8 @@ Partial Public Class ThisAddIn
        Optional InTable As Boolean = False,
        Optional DoPushback As Boolean = False,
        Optional SelectedTools As List(Of ModelConfig) = Nothing,
-       Optional DoChart As Boolean = False) As Task(Of String)
+       Optional DoChart As Boolean = False,
+       Optional DoShowModel As Boolean = False) As Task(Of String)
 
 
         Dim application As Word.Application = Globals.ThisAddIn.Application
@@ -608,7 +612,8 @@ Partial Public Class ThisAddIn
                     vbCrLf & "DoBubblesExtract=" & DoBubblesExtract &
                     vbCrLf & "InTable=" & InTable &
                     vbCrLf & "DoPushback=" & DoPushback &
-                    vbCrLf & "DoChart=" & DoChart
+                    vbCrLf & "DoChart=" & DoChart &
+                    vbCrLf & "DoShowModel=" & DoShowModel
                 )
 
         Try
@@ -660,6 +665,8 @@ Partial Public Class ThisAddIn
 
             If ChunkSize > 0 Then
                 DoSilent = True
+                DoShowModel = False
+
                 If DoMarkup Then
                     Select Case MarkupMethod
                         Case 1
@@ -1108,6 +1115,23 @@ Partial Public Class ThisAddIn
                     Dim ClipText2 As String = "You can choose whether you want to have the original text put into the clipboard Or your text with any changes you have made (without formatting), Or you can directly insert the original text in your document. If you select Cancel, nothing will be put into the clipboard."
                     Dim PaneText2 As String = "Choose to put your edited Or original text in the clipboard, Or inserted the original with formatting; the pane will close. You can also copy & paste from the pane."
 
+                    Dim ModelName As String
+                    If UseSecondAPI Then
+                        Dim isAlternateModel As Boolean = originalConfigLoaded AndAlso
+                            Not String.IsNullOrWhiteSpace(LastAlternateModel) AndAlso
+                            Not String.Equals(INI_Model_2, originalConfig.Model, StringComparison.OrdinalIgnoreCase)
+                        If isAlternateModel Then
+                            ' (b2) Alternate model temporarily applied to secondary slot
+                            ModelName = LastAlternateModel
+                        Else
+                            ' (b1) Default secondary model
+                            ModelName = INI_Model_2 & " (as secondary model)"
+                        End If
+                    Else
+                        ' (a) Primary model
+                        ModelName = INI_Model & " (as primary model)"
+                    End If
+
                     If DoPushback Then
 
                         Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
@@ -1187,6 +1211,8 @@ Partial Public Class ThisAddIn
 
                     ElseIf DoPane AndAlso Not DoSilent Then
 
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
+
                         If _uiContext IsNot Nothing Then  ' Make sure we run in the UI Thread
                             _uiContext.Post(Sub(s)
                                                 SP_MergePrompt_Cached = SP_MergePrompt
@@ -1207,6 +1233,8 @@ Partial Public Class ThisAddIn
 
                     ElseIf DoNewDoc AndAlso Not DoSilent Then
 
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
+
                         Dim newDoc As Word.Document = Globals.ThisAddIn.Application.Documents.Add()
                         newDoc.Activate()
                         Dim newSelection As Word.Selection = Globals.ThisAddIn.Application.Selection
@@ -1219,6 +1247,8 @@ Partial Public Class ThisAddIn
                         End If
 
                     ElseIf PutInClipboard AndAlso Not DoSilent Then
+
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
                         Dim dialogResult As String = ""
 
@@ -1369,6 +1399,8 @@ Partial Public Class ThisAddIn
 
                     ElseIf MarkupMethod = 4 Then
 
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
+
                         Dim RegexResult = Await LLM(SP_MarkupRegex, "<ORIGINALTEXT>" & SelectedText & "</ORIGINALTEXT> /n <NEWTEXT>" & LLMResult & "</NEWTEXT>", "", "", 0, False)
 
                         MarkupSelectedTextWithRegex(RegexResult)
@@ -1377,6 +1409,8 @@ Partial Public Class ThisAddIn
                         Globals.ThisAddIn.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
 
                     ElseIf NoSelectedText Then
+
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
                         InsertTextWithMarkdown(selection, vbCrLf & LLMResult, trailingCR, True)
                         Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
@@ -1390,6 +1424,8 @@ Partial Public Class ThisAddIn
                         Globals.ThisAddIn.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
 
                     ElseIf KeepFormat AndAlso Not NoFormatting Then
+
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
                         SelectedText = selection.Text
                         SLib.InsertTextWithFormat(LLMResult, rng, InPlace)
@@ -1420,6 +1456,8 @@ Partial Public Class ThisAddIn
                         Globals.ThisAddIn.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
 
                     Else
+
+                        If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
                         wordApp.ScreenUpdating = False
 
@@ -3280,7 +3318,7 @@ Partial Public Class ThisAddIn
         Try
             ' Configure DragDropForm for draw.io files
             Globals.ThisAddIn.DragDropFormFilter = "draw.io files (*.drawio)|*.drawio|All files (*.*)|*.*"
-            Globals.ThisAddIn.DragDropFormLabel = "Drop a .drawio file here (or click Browse) to open it in the embedded draw.io editor."
+            Globals.ThisAddIn.DragDropFormLabel = "Drop a .drawio file here (or click Browse) to open it in the embedded draw.io editor." & vbCrLf & vbCrLf & "Close this dialog to create a new chart."
             Dim selectedPath As String = Nothing
 
             Using f As New DragDropForm(DragDropMode.FileOnly)
