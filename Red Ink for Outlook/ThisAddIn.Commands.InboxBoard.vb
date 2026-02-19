@@ -62,9 +62,6 @@ Partial Public Class ThisAddIn
 
 #Region "InboxBoard Constants"
 
-    ''' <summary>Default maximum mails to load without prompting.</summary>
-    Private Const InboxBoard_DefaultMax As Integer = 50
-
     ''' <summary>Number of mails per AI summary batch.</summary>
     Private Const InboxBoard_SummaryBatchSize As Integer = 5
 
@@ -283,7 +280,7 @@ Partial Public Class ThisAddIn
         Dim maxToLoad As Integer = If(maxOverride > 0, maxOverride, totalCategorized)
 
         ' Ask how many if > threshold (and not a reload with a remembered value)
-        If maxOverride = 0 AndAlso totalCategorized > InboxBoard_DefaultMax Then
+        If maxOverride = 0 AndAlso totalCategorized > 1000 Then
             Dim items As New List(Of SelectionItem)()
             items.Add(New SelectionItem("1000 mails", 1000))
             items.Add(New SelectionItem("2500 mails", 2500))
@@ -597,6 +594,27 @@ Partial Public Class ThisAddIn
                 .Tag = catName
             })
         Next
+
+        ' Apply saved column order from My.Settings
+        Dim savedOrder As String = ""
+        Try : savedOrder = If(My.Settings.InboxBoardColumnOrder, "") : Catch : End Try
+        If Not String.IsNullOrEmpty(savedOrder) Then
+            Dim orderList As New List(Of String)()
+            For Each part In savedOrder.Split({";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim t = part.Trim()
+                If Not String.IsNullOrEmpty(t) Then orderList.Add(t)
+            Next
+            If orderList.Count > 0 Then
+                columns.Sort(Function(a, b)
+                                 Dim idxA As Integer = orderList.FindIndex(Function(o) o.Equals(a.CategoryName, StringComparison.OrdinalIgnoreCase))
+                                 Dim idxB As Integer = orderList.FindIndex(Function(o) o.Equals(b.CategoryName, StringComparison.OrdinalIgnoreCase))
+                                 ' Columns not in the saved order go to the end, preserving their relative position
+                                 If idxA < 0 Then idxA = Integer.MaxValue
+                                 If idxB < 0 Then idxB = Integer.MaxValue
+                                 Return idxA.CompareTo(idxB)
+                             End Function)
+            End If
+        End If
 
         Return columns
     End Function
@@ -946,6 +964,38 @@ Partial Public Class ThisAddIn
                         End If
                     Catch ex2 As System.Exception
                         Debug.WriteLine($"[InboxBoard] setPinnedColumns error: {ex2.Message}")
+                    End Try
+
+                Case "setColumnOrder"
+                    ' Save user's column order to My.Settings
+                    Try
+                        Dim colsToken As JToken = msg("columns")
+                        If colsToken IsNot Nothing AndAlso colsToken.Type = JTokenType.Array Then
+                            Dim names As New List(Of String)()
+                            For Each t As JToken In colsToken
+                                Dim n As String = CStr(t)
+                                If Not String.IsNullOrWhiteSpace(n) Then names.Add(n.Trim())
+                            Next
+                            My.Settings.InboxBoardColumnOrder = String.Join(";", names)
+                            My.Settings.Save()
+
+                            ' Update in-memory column order to match
+                            Dim newOrder As New List(Of InboxBoardColumn)()
+                            For Each name In names
+                                Dim col = columns.FirstOrDefault(Function(c) c.CategoryName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                                If col IsNot Nothing Then newOrder.Add(col)
+                            Next
+                            ' Append any columns not in the saved order
+                            For Each col In columns
+                                If Not newOrder.Any(Function(c) c.CategoryName.Equals(col.CategoryName, StringComparison.OrdinalIgnoreCase)) Then
+                                    newOrder.Add(col)
+                                End If
+                            Next
+                            columns.Clear()
+                            columns.AddRange(newOrder)
+                        End If
+                    Catch ex2 As System.Exception
+                        Debug.WriteLine($"[InboxBoard] setColumnOrder error: {ex2.Message}")
                     End Try
 
                 Case "setTheme"
@@ -1615,6 +1665,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
   display: none; }
 .drag-mode-label.visible { display: block; }
 .drag-mode-label .plus { color: #22c55e; font-weight: 700; margin-right: 4px; }
+.column-header { cursor: grab; }
+.column-header:active { cursor: grabbing; }
+.column.col-dragging { opacity: 0.5; }
+.column.col-drag-over { border-left: 3px solid #3b82f6; }
 "
     End Function
 
@@ -1962,6 +2016,54 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("  applyFieldVisibility();")
         js.AppendLine("  applySearchFilter();")
+        js.AppendLine("  setupColumnDrag();")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("var colDragSrc=null;")
+        js.AppendLine("function setupColumnDrag(){")
+        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl){")
+        js.AppendLine("    var header=colEl.querySelector('.column-header');")
+        js.AppendLine("    header.draggable=true;")
+        js.AppendLine("    header.addEventListener('dragstart',function(e){")
+        js.AppendLine("      if(e.target.closest('.card')){e.preventDefault();return;}")
+        js.AppendLine("      colDragSrc=colEl;")
+        js.AppendLine("      colEl.classList.add('col-dragging');")
+        js.AppendLine("      e.dataTransfer.effectAllowed='move';")
+        js.AppendLine("      e.dataTransfer.setData('text/x-column',colEl.dataset.column);")
+        js.AppendLine("    });")
+        js.AppendLine("    header.addEventListener('dragend',function(){")
+        js.AppendLine("      colDragSrc=null;")
+        js.AppendLine("      document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');});")
+        js.AppendLine("    });")
+        js.AppendLine("    colEl.addEventListener('dragover',function(e){")
+        js.AppendLine("      if(!colDragSrc)return;")
+        js.AppendLine("      if(colDragSrc===colEl)return;")
+        js.AppendLine("      e.preventDefault();")
+        js.AppendLine("      e.dataTransfer.dropEffect='move';")
+        js.AppendLine("      document.querySelectorAll('.column.col-drag-over').forEach(function(c){c.classList.remove('col-drag-over');});")
+        js.AppendLine("      colEl.classList.add('col-drag-over');")
+        js.AppendLine("    });")
+        js.AppendLine("    colEl.addEventListener('dragleave',function(e){")
+        js.AppendLine("      if(!colEl.contains(e.relatedTarget))colEl.classList.remove('col-drag-over');")
+        js.AppendLine("    });")
+        js.AppendLine("    colEl.addEventListener('drop',function(e){")
+        js.AppendLine("      if(!colDragSrc||colDragSrc===colEl)return;")
+        js.AppendLine("      e.preventDefault();")
+        js.AppendLine("      var board=document.getElementById('board');")
+        js.AppendLine("      var allCols=[...board.querySelectorAll('.column')];")
+        js.AppendLine("      var fromIdx=allCols.indexOf(colDragSrc);")
+        js.AppendLine("      var toIdx=allCols.indexOf(colEl);")
+        js.AppendLine("      if(fromIdx<0||toIdx<0)return;")
+        js.AppendLine("      if(fromIdx<toIdx){board.insertBefore(colDragSrc,colEl.nextSibling);}else{board.insertBefore(colDragSrc,colEl);}")
+        js.AppendLine("      document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');});")
+        js.AppendLine("      colDragSrc=null;")
+        js.AppendLine("      var newOrder=[];")
+        js.AppendLine("      board.querySelectorAll('.column').forEach(function(c){newOrder.push(c.dataset.column);});")
+        js.AppendLine("      COLUMNS.sort(function(a,b){return newOrder.indexOf(a.id)-newOrder.indexOf(b.id);});")
+        js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({action:'setColumnOrder',columns:newOrder}));")
+        js.AppendLine("      showToast('Column order updated');")
+        js.AppendLine("    });")
+        js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
         js.AppendLine("function createCardEl(card, col) {")
