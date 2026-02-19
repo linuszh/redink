@@ -842,6 +842,7 @@ Partial Public Class ThisAddIn
             Dim DoBubblesExtract As Boolean = False
             Dim DoPushback As Boolean = False
             Dim DoFiles As Boolean = False
+            Dim DoShowModel As Boolean = False
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -864,7 +865,7 @@ Partial Public Class ThisAddIn
             Dim ChunkInstruct As String = $"; add '{ChunkTrigger}' for iterating through the text"
             Dim BubblesExtractInstruct As String = $"; add '{BubblesExtractTrigger}' for including bubble comments"
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
-            Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models"
+            Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models, and {ShowModel} to include the model name in the output"
             Dim ToolSelectionInstruct As String = $"; add '{ToolSelectionTrigger}' to permit {ToolFriendlyName.ToLower} selection"
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
             Dim FileObject As String = ""
@@ -1719,6 +1720,12 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' (model) trigger: Include model name in the output
+            If OtherPrompt.IndexOf(ShowModel, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                OtherPrompt = OtherPrompt.Replace(ShowModel, "").Trim()
+                DoShowModel = True
+            End If
+
             ' === Formatting override triggers ===
 
             ' No format triggers: Disable formatting preservation
@@ -2170,7 +2177,7 @@ Partial Public Class ThisAddIn
             ' === Execute LLM processing with configured parameters ===
 
             ' Invoke ProcessSelectedText with all configured options            
-            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart)
+            Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
 
             ' Restore original model configuration if alternate model was used
             If UseSecondAPI And originalConfigLoaded Then

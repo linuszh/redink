@@ -437,6 +437,18 @@ Namespace My
                 Me("InboxBoardGroupConversations") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardColumnOrder() As String
+            Get
+                Return CType(Me("InboxBoardColumnOrder"),String)
+            End Get
+            Set
+                Me("InboxBoardColumnOrder") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

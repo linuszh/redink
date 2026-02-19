@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 17.2.2026
+' 19.2.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.170226" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.190226" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -85,6 +85,7 @@ Partial Public Class ThisAddIn
     Private Const KPFTrigger2 As String = "(kpf)"
     Private Const ObjectTrigger As String = "(file)"
     Private Const ObjectTrigger2 As String = "(clip)"
+    Private Const ShowModel As String = "(model)"
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewdocPrefix As String = "Newdoc:"
     Private Const AddPrefix As String = "Append:"

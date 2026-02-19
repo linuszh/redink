@@ -747,6 +747,42 @@ Namespace My
                 Me("RTFMessageBoxBounds") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property UpdateFailureCountWord() As Integer
+            Get
+                Return CType(Me("UpdateFailureCountWord"),Integer)
+            End Get
+            Set
+                Me("UpdateFailureCountWord") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property UpdateFailureCountExcel() As Integer
+            Get
+                Return CType(Me("UpdateFailureCountExcel"),Integer)
+            End Get
+            Set
+                Me("UpdateFailureCountExcel") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property UpdateFailureCountOutlook() As Integer
+            Get
+                Return CType(Me("UpdateFailureCountOutlook"),Integer)
+            End Get
+            Set
+                Me("UpdateFailureCountOutlook") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
