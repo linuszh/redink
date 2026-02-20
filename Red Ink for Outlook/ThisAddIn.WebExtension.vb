@@ -220,6 +220,28 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' ---- InkyPlay (GET /inky/play[/]) ----------------------------------
+            If req.HttpMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (req.RawUrl.Equals(InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                req.RawUrl.Equals(InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim html As System.String = BuildInkyPlayHtmlPage()
+                Dim bufPlay() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
+
+                res.ContentType = "text/html; charset=utf-8"
+                res.AddHeader("Cache-Control", "no-store")
+                res.KeepAlive = False
+                res.Headers("Connection") = "close"
+                res.SendChunked = False
+                res.ContentLength64 = bufPlay.LongLength
+
+                Using os As System.IO.Stream = res.OutputStream
+                    Await os.WriteAsync(bufPlay, 0, bufPlay.Length).ConfigureAwait(False)
+                End Using
+                res.Close()
+                Return
+            End If
+
             ' ---- Normal flow (POST JSON / API) -----------------------------------
             Dim body As System.String = System.String.Empty
             If req.HasEntityBody Then
@@ -1069,6 +1091,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("      </div>")
         html.AppendLine("    </div>")
 
+        html.AppendLine("    <button id=""playBtn"" title=""Open mini games"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""8"" width=""18"" height=""8"" rx=""4"" ry=""4""/><circle cx=""8"" cy=""12"" r=""1""/><circle cx=""12"" cy=""12"" r=""1""/><circle cx=""16"" cy=""12"" r=""1""/></svg></button>")
         html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg id=""themeIcon"" viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/></svg></button>")
         html.AppendLine("  </div>")
 
@@ -1114,6 +1137,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const toWordBtn=document.getElementById('toWordBtn');")
         html.AppendLine("const clearBtn=document.getElementById('clearBtn');")
         html.AppendLine("const themeBtn=document.getElementById('themeBtn');")
+        html.AppendLine("const playBtn=document.getElementById('playBtn');")
         html.AppendLine("const cancelBtn=document.getElementById('cancelBtn');")
         html.AppendLine("const chat1Btn=document.getElementById('chat1Btn');")
         html.AppendLine("const chat2Btn=document.getElementById('chat2Btn');")
@@ -1172,6 +1196,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
+        html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
         html.AppendLine("themeBtn.addEventListener('click',async()=>{if(__currentJobId)return;const target=!dark;setTheme(target);const r=await api('inky_toggletheme');if(!r.ok){setTheme(!target);alert(r.error||'Theme switch failed');return;}if(typeof r.darkMode==='boolean')setTheme(r.darkMode===true);adjustModelSel();});")
         html.AppendLine("msgEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
@@ -1231,6 +1256,11 @@ Partial Public Class ThisAddIn
                 Dim cmd As System.String = j("Command")?.ToString()
 
                 Select Case cmd
+
+                                        ' ---- InkyPlay commands ----
+                    Case "inkyplay_generate", "inkyplay_gethighscores", "inkyplay_savescore", "inkyplay_clearhighscores"
+                        Dim playResult As String = Await ProcessInkyPlayCommand(cmd, j).ConfigureAwait(False)
+                        If playResult IsNot Nothing Then Return playResult
 
                     Case "inky_settoolinglog"
                         Try

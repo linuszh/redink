@@ -10,7 +10,14 @@
 '
 ' Architecture:
 '  - Mail collection: Scans default Inbox for mails with at least one category.
-'    If >50 found, asks user how many to load via dropdown.
+'    Optionally also includes flagged mails (follow-up flags). If >50 found,
+'    asks user how many to load via dropdown.
+'  - Flag support: Mails flagged for follow-up (olFlagMarked) can be included
+'    via a settings toggle. They appear in a synthetic "⚑ Flagged" column
+'    (unless they also have categories, in which case they appear in their
+'    category columns with a flag badge). The FlagRequest text (e.g. "Follow up")
+'    and optional due date are shown on the card. Completed flags (olFlagComplete)
+'    are hidden by default via a "Hide completed flags" toggle.
 '  - Conversation grouping: Mails sharing the same ConversationTopic are merged
 '    into a single card showing the latest mail, with an accurate message count.
 '    Toggle via a checkbox in the settings panel; persisted in My.Settings.
@@ -33,8 +40,8 @@
 '  - Threading: All Outlook COM access on the UI thread; LLM calls are async.
 '  - Persistence: Theme, window position/size/maximized state, card field toggles,
 '    last load count, column filter, pinned columns, summary cache, summary
-'    language, and conversation grouping toggle are all persisted via
-'    My.Settings (not localStorage).
+'    language, conversation grouping toggle, include-flagged toggle, and
+'    hide-done-flags toggle are all persisted via My.Settings (not localStorage).
 ' =============================================================================
 
 Option Explicit On
@@ -71,6 +78,12 @@ Partial Public Class ThisAddIn
     ''' <summary>Maximum cached summaries to persist in My.Settings.</summary>
     Private Const InboxBoard_SummaryCacheMax As Integer = 500
 
+    ''' <summary>Column ID used for the synthetic "Flagged" column.</summary>
+    Private Const InboxBoard_FlaggedColumnId As String = "⚑ Flagged"
+
+    ''' <summary>Color used for the synthetic "Flagged" column.</summary>
+    Private Const InboxBoard_FlaggedColumnColor As String = "#ef4444"
+
     ''' <summary>Remembers the user's last load-count choice so Refresh reuses it.</summary>
     Private _inboxBoardLastMaxToLoad As Integer = 0
 
@@ -95,6 +108,43 @@ Partial Public Class ThisAddIn
         New String() {"ar", "العربية"}
     }
 
+    ''' <summary>Column IDs for date-bucketed flagged columns.</summary>
+    Private Const InboxBoard_FlagBucket_Overdue As String = "⚑ Overdue"
+    Private Const InboxBoard_FlagBucket_Today As String = "⚑ Today"
+    Private Const InboxBoard_FlagBucket_Tomorrow As String = "⚑ Tomorrow"
+    Private Const InboxBoard_FlagBucket_ThisWeek As String = "⚑ This Week"
+    Private Const InboxBoard_FlagBucket_NextWeek As String = "⚑ Next Week"
+    Private Const InboxBoard_FlagBucket_Next4Weeks As String = "⚑ Next 4 Weeks"
+    Private Const InboxBoard_FlagBucket_Later As String = "⚑ Later"
+    Private Const InboxBoard_FlagBucket_NoDueDate As String = "⚑ Flagged"
+    Private Const InboxBoard_FlagBucket_Done As String = "✓ Done"
+
+    ''' <summary>Colors for each flag date bucket.</summary>
+    Private Shared ReadOnly InboxBoard_FlagBucketColors As Dictionary(Of String, String) = New Dictionary(Of String, String)(StringComparer.Ordinal) From {
+        {InboxBoard_FlagBucket_Overdue, "#dc2626"},
+        {InboxBoard_FlagBucket_Today, "#ef4444"},
+        {InboxBoard_FlagBucket_Tomorrow, "#f97316"},
+        {InboxBoard_FlagBucket_ThisWeek, "#eab308"},
+        {InboxBoard_FlagBucket_NextWeek, "#22c55e"},
+        {InboxBoard_FlagBucket_Next4Weeks, "#3b82f6"},
+        {InboxBoard_FlagBucket_Later, "#8b5cf6"},
+        {InboxBoard_FlagBucket_NoDueDate, "#6b7280"},
+        {InboxBoard_FlagBucket_Done, "#9ca3af"}
+    }
+
+    ''' <summary>Ordered list of all flag bucket column IDs (display order).</summary>
+    Private Shared ReadOnly InboxBoard_FlagBucketOrder As String() = {
+        InboxBoard_FlagBucket_Overdue,
+        InboxBoard_FlagBucket_Today,
+        InboxBoard_FlagBucket_Tomorrow,
+        InboxBoard_FlagBucket_ThisWeek,
+        InboxBoard_FlagBucket_NextWeek,
+        InboxBoard_FlagBucket_Next4Weeks,
+        InboxBoard_FlagBucket_Later,
+        InboxBoard_FlagBucket_NoDueDate,
+        InboxBoard_FlagBucket_Done
+    }
+
 #End Region
 
 #Region "InboxBoard Data Classes"
@@ -117,6 +167,11 @@ Partial Public Class ThisAddIn
         Public Property ConversationTopic As String   ' For conversation grouping
         Public Property ConversationEntryIDs As List(Of String) ' All EntryIDs in this conversation group
         Public Property IsGrouped As Boolean          ' True when this card represents a grouped conversation
+        Public Property IsFlagged As Boolean          ' True when mail has FlagStatus = olFlagMarked
+        Public Property IsCompleted As Boolean        ' True when mail has FlagStatus = olFlagComplete
+        Public Property FlagRequest As String         ' Flag label text (e.g. "Follow up", "Reply")
+        Public Property FlagDueDate As DateTime?      ' Optional due date from TaskDueDate
+        Public Property FlagBucket As String          ' Which date-bucket column this card belongs to (if flagged)
     End Class
 
     ''' <summary>Represents a column (category) on the board.</summary>
@@ -124,6 +179,7 @@ Partial Public Class ThisAddIn
         Public Property CategoryName As String
         Public Property Color As String               ' Hex color
         Public Property Tag As String                 ' Display tag
+        Public Property IsFlaggedColumn As Boolean    ' True for the synthetic "Flagged" column
     End Class
 
 #End Region
@@ -240,8 +296,9 @@ Partial Public Class ThisAddIn
 #Region "InboxBoard Mail Collection"
 
     ''' <summary>
-    ''' Scans the default Inbox for mails that have at least one category assigned.
-    ''' If 50 or more are found, asks the user how many to load.
+    ''' Scans the default Inbox for mails that have at least one category assigned,
+    ''' and optionally mails that are flagged for follow-up.
+    ''' If 1000 or more qualifying mails are found, asks the user how many to load.
     ''' </summary>
     Private Function CollectCategorizedInboxMails(Optional maxOverride As Integer = 0) As List(Of InboxBoardEntry)
         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -253,11 +310,17 @@ Partial Public Class ThisAddIn
             Return Nothing
         End If
 
+        ' Read flag-related settings
+        Dim includeFlagged As Boolean = False
+        Dim hideDoneFlags As Boolean = True
+        Try : includeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
+        Try : hideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+
         Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() inbox.Items)
         Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
 
-        ' Count categorized mails (manual check to avoid Restrict miscounting)
-        Dim totalCategorized As Integer = 0
+        ' Count qualifying mails (manual check to avoid Restrict miscounting)
+        Dim totalQualifying As Integer = 0
         For i As Integer = 1 To totalItems
             Try
                 Dim idx As Integer = i
@@ -267,34 +330,56 @@ Partial Public Class ThisAddIn
 
                 Dim cats As String = ""
                 Try : cats = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
-                If Not String.IsNullOrWhiteSpace(cats) Then totalCategorized += 1
+                Dim hasCats As Boolean = Not String.IsNullOrWhiteSpace(cats)
+
+                Dim qualifies As Boolean = hasCats
+                If Not qualifies AndAlso includeFlagged Then
+                    Dim flagStatus As Integer = 0
+                    Try : flagStatus = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus)) : Catch : End Try
+                    ' olFlagMarked = 2, olFlagComplete = 1
+                    If flagStatus = 2 Then
+                        qualifies = True
+                    ElseIf flagStatus = 1 AndAlso Not hideDoneFlags Then
+                        qualifies = True
+                    End If
+                End If
+
+                If qualifies Then totalQualifying += 1
             Catch
             End Try
         Next
 
-        If totalCategorized = 0 Then
+        If totalQualifying = 0 Then
             ShowCustomMessageBox("No categorized mails found in the Inbox.", $"{AN} - Inbox Board")
             Return Nothing
         End If
 
-        Dim maxToLoad As Integer = If(maxOverride > 0, maxOverride, totalCategorized)
+        Dim maxToLoad As Integer = totalQualifying
 
         ' Ask how many if > threshold (and not a reload with a remembered value)
-        If maxOverride = 0 AndAlso totalCategorized > 1000 Then
-            Dim items As New List(Of SelectionItem)()
+        If totalQualifying > 1000 Then
+            ' On reload, reuse the user's last choice if available —
+            ' but only if it was a meaningful choice (>= 1000). A small value
+            ' from a previous session with few qualifying mails must not cap
+            ' a larger session.
+            If _inboxBoardLastMaxToLoad >= 1000 Then
+                maxToLoad = _inboxBoardLastMaxToLoad
+            Else
+                Dim items As New List(Of SelectionItem)()
             items.Add(New SelectionItem("1000 mails", 1000))
             items.Add(New SelectionItem("2500 mails", 2500))
             items.Add(New SelectionItem("5000 mails", 5000))
             items.Add(New SelectionItem("7500 mails", 7500))
-            If totalCategorized > 7500 Then
-                items.Add(New SelectionItem($"All ({totalCategorized} mails)", totalCategorized))
+            If totalQualifying > 7500 Then
+                items.Add(New SelectionItem($"All ({totalQualifying} mails)", totalQualifying))
             End If
 
-            Dim chosen As Integer = SelectValue(items, 2500,
-                $"Found {totalCategorized} categorized mails in Inbox. How many should be loaded?",
-                $"{AN} - Inbox Board")
-            If chosen = 0 Then Return Nothing
-            maxToLoad = chosen
+                Dim chosen As Integer = SelectValue(items, 2500,
+                    $"Found {totalQualifying} qualifying mails in Inbox. How many should be loaded?",
+                    $"{AN} - Inbox Board")
+                If chosen = 0 Then Return Nothing
+                maxToLoad = chosen
+            End If
         End If
 
         ' Remember the effective load count for Refresh and persist
@@ -316,7 +401,7 @@ Partial Public Class ThisAddIn
                 Dim item As Object = ComRetry(Function() folderItems.Item(idx))
                 Dim mi As MailItem = TryCast(item, MailItem)
                 If mi IsNot Nothing Then
-                    Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors)
+                    Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors, includeFlagged, hideDoneFlags)
                     If entry IsNot Nothing Then entries.Add(entry)
                 End If
             Catch
@@ -397,6 +482,24 @@ Partial Public Class ThisAddIn
                 representative.IsRead = False
             End If
 
+            ' If any mail in the conversation is flagged, mark the card as flagged
+            If convMails.Any(Function(m) m.IsFlagged) Then
+                representative.IsFlagged = True
+                ' Use the flag request from the first flagged mail
+                Dim firstFlagged = convMails.FirstOrDefault(Function(m) m.IsFlagged)
+                If firstFlagged IsNot Nothing Then
+                    If String.IsNullOrEmpty(representative.FlagRequest) Then
+                        representative.FlagRequest = firstFlagged.FlagRequest
+                    End If
+                    If Not representative.FlagDueDate.HasValue AndAlso firstFlagged.FlagDueDate.HasValue Then
+                        representative.FlagDueDate = firstFlagged.FlagDueDate
+                    End If
+                End If
+            End If
+
+            ' Recompute flag bucket for the representative card
+            representative.FlagBucket = GetFlagBucket(representative)
+
             ' Merge all categories from all mails in the conversation
             Dim allCats As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             For Each m In convMails
@@ -435,8 +538,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Builds an InboxBoardEntry from a MailItem.
+    ''' Returns Nothing if the mail does not qualify for the board.
     ''' </summary>
-    Private Function BuildInboxBoardEntry(mi As MailItem, categoryColors As Dictionary(Of String, String)) As InboxBoardEntry
+    Private Function BuildInboxBoardEntry(mi As MailItem, categoryColors As Dictionary(Of String, String),
+                                          includeFlagged As Boolean, hideDoneFlags As Boolean) As InboxBoardEntry
         Dim entry As New InboxBoardEntry()
 
         entry.EntryID = ComRetry(Of String)(Function() mi.EntryID)
@@ -450,8 +555,6 @@ Partial Public Class ThisAddIn
         entry.IsRead = ComRetry(Of Boolean)(Function() Not mi.UnRead)
 
         ' MessageCount = 1 for ungrouped cards; GroupByConversation overwrites it for grouped cards.
-        ' We no longer derive a count from ConversationIndex because that number (thread depth)
-        ' is confusing when shown alongside the grouped message count.
         entry.MessageCount = 1
         entry.IsGrouped = False
 
@@ -460,12 +563,39 @@ Partial Public Class ThisAddIn
         Try : entry.ConversationTopic = ComRetry(Of String)(Function() If(mi.ConversationTopic, "")) : Catch : End Try
         entry.ConversationEntryIDs = New List(Of String)() From {entry.EntryID}
 
+        ' Flag properties
+        entry.IsFlagged = False
+        entry.IsCompleted = False
+        entry.FlagRequest = ""
+        entry.FlagDueDate = Nothing
+        Try
+            Dim flagStatus As Integer = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus))
+            ' olFlagMarked = 2, olFlagComplete = 1, olNoFlag = 0
+            If flagStatus = 2 Then
+                entry.IsFlagged = True
+            ElseIf flagStatus = 1 Then
+                entry.IsCompleted = True
+            End If
+        Catch
+        End Try
+        If entry.IsFlagged OrElse entry.IsCompleted Then
+            Try : entry.FlagRequest = ComRetry(Of String)(Function() If(mi.FlagRequest, "")) : Catch : End Try
+            Try
+                Dim dueDate As DateTime = ComRetry(Of Date)(Function() mi.TaskDueDate)
+                ' Outlook uses 1/1/4501 as "no date"
+                If dueDate.Year < 4000 Then entry.FlagDueDate = dueDate
+            Catch
+            End Try
+        End If
+
         ' Categories
         Dim cats As String = ""
         Try : cats = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
         entry.AllCategories = cats
 
-        If Not String.IsNullOrEmpty(cats) Then
+        Dim hasCats As Boolean = Not String.IsNullOrEmpty(cats)
+
+        If hasCats Then
             Dim firstCat As String = cats.Split({","c, ";"c})(0).Trim()
             entry.Categories = firstCat
             entry.CategoryColor = "#6b7280" ' default gray
@@ -473,7 +603,16 @@ Partial Public Class ThisAddIn
                 entry.CategoryColor = categoryColors(firstCat)
             End If
         Else
-            Return Nothing ' No category - should not happen due to filter
+            ' No category — only include if flagged and includeFlagged is on
+            If includeFlagged AndAlso entry.IsFlagged Then
+                entry.Categories = ""
+                entry.CategoryColor = InboxBoard_FlaggedColumnColor
+            ElseIf includeFlagged AndAlso entry.IsCompleted AndAlso Not hideDoneFlags Then
+                entry.Categories = ""
+                entry.CategoryColor = "#9ca3af" ' muted gray for completed
+            Else
+                Return Nothing ' Does not qualify
+            End If
         End If
 
         ' Body excerpt for AI summarization
@@ -490,8 +629,48 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+        ' Compute flag bucket for date-grouped flag columns
+        entry.FlagBucket = GetFlagBucket(entry)
+
         entry.Summary = ""
         Return entry
+    End Function
+
+    ''' <summary>
+    ''' Determines which flag date-bucket a mail belongs to based on its flag status
+    ''' and TaskDueDate. Returns the bucket column ID string.
+    ''' </summary>
+    Private Shared Function GetFlagBucket(entry As InboxBoardEntry) As String
+        If entry.IsCompleted Then Return InboxBoard_FlagBucket_Done
+        If Not entry.IsFlagged Then Return Nothing
+
+        If Not entry.FlagDueDate.HasValue Then Return InboxBoard_FlagBucket_NoDueDate
+
+        Dim dueDate As DateTime = entry.FlagDueDate.Value.Date
+        Dim today As DateTime = DateTime.Today
+
+        ' Overdue: before today
+        If dueDate < today Then Return InboxBoard_FlagBucket_Overdue
+
+        ' Today
+        If dueDate = today Then Return InboxBoard_FlagBucket_Today
+
+        ' Tomorrow
+        If dueDate = today.AddDays(1) Then Return InboxBoard_FlagBucket_Tomorrow
+
+        ' This week: up to end of current week (Sunday)
+        Dim endOfWeek As DateTime = today.AddDays(7 - CInt(today.DayOfWeek))
+        If dueDate <= endOfWeek Then Return InboxBoard_FlagBucket_ThisWeek
+
+        ' Next week: Monday–Sunday of next week
+        Dim endOfNextWeek As DateTime = endOfWeek.AddDays(7)
+        If dueDate <= endOfNextWeek Then Return InboxBoard_FlagBucket_NextWeek
+
+        ' Next 4 weeks: within 4 calendar weeks from today
+        If dueDate <= today.AddDays(28) Then Return InboxBoard_FlagBucket_Next4Weeks
+
+        ' Later: everything else
+        Return InboxBoard_FlagBucket_Later
     End Function
 
     ''' <summary>
@@ -555,6 +734,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Builds the list of board columns from found categories + always-present columns from settings.
+    ''' If flagged mails are included, adds a synthetic "⚑ Flagged" column.
     ''' </summary>
     Private Function BuildBoardColumns(mails As List(Of InboxBoardEntry)) As List(Of InboxBoardColumn)
         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -591,9 +771,72 @@ Partial Public Class ThisAddIn
             columns.Add(New InboxBoardColumn With {
                 .CategoryName = catName,
                 .Color = hexColor,
-                .Tag = catName
+                .Tag = catName,
+                .IsFlaggedColumn = False
             })
         Next
+
+        ' Add flagged column(s) when the setting is on
+        Dim includeFlagged As Boolean = False
+        Try : includeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
+        If includeFlagged Then
+            Dim groupByDate As Boolean = False
+            Try : groupByDate = My.Settings.InboxBoardGroupFlagsByDate : Catch : End Try
+            Dim hideDoneFlags As Boolean = True
+            Try : hideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+
+            If groupByDate Then
+                ' Add one column per date bucket that has at least one mail, plus pinned buckets
+                Dim usedBuckets As New HashSet(Of String)(StringComparer.Ordinal)
+                For Each m In mails
+                    If m.IsFlagged OrElse m.IsCompleted Then
+                        Dim bucket = GetFlagBucket(m)
+                        If bucket IsNot Nothing Then usedBuckets.Add(bucket)
+                    End If
+                Next
+
+                ' Always show Today and Tomorrow even if empty, so users can drag into them
+                usedBuckets.Add(InboxBoard_FlagBucket_Today)
+                usedBuckets.Add(InboxBoard_FlagBucket_Tomorrow)
+
+                ' Add pinned flag columns from settings (user-chosen always-visible buckets)
+                Dim pinnedFlagCols As String = ""
+                Try : pinnedFlagCols = If(My.Settings.InboxBoardPinnedFlagColumns, "") : Catch : End Try
+                If Not String.IsNullOrEmpty(pinnedFlagCols) Then
+                    For Each part In pinnedFlagCols.Split({";"c}, StringSplitOptions.RemoveEmptyEntries)
+                        Dim t = part.Trim()
+                        If Not String.IsNullOrEmpty(t) Then usedBuckets.Add(t)
+                    Next
+                End If
+
+                ' Remove Done bucket if hidden
+                If hideDoneFlags Then usedBuckets.Remove(InboxBoard_FlagBucket_Done)
+
+                ' Insert in the defined display order, at position 0 (before category columns)
+                Dim insertIdx As Integer = 0
+                For Each bucketId In InboxBoard_FlagBucketOrder
+                    If usedBuckets.Contains(bucketId) Then
+                        Dim bucketColor As String = "#6b7280"
+                        If InboxBoard_FlagBucketColors.ContainsKey(bucketId) Then bucketColor = InboxBoard_FlagBucketColors(bucketId)
+                        columns.Insert(insertIdx, New InboxBoardColumn With {
+                            .CategoryName = bucketId,
+                            .Color = bucketColor,
+                            .Tag = bucketId,
+                            .IsFlaggedColumn = True
+                        })
+                        insertIdx += 1
+                    End If
+                Next
+            Else
+                ' Single "⚑ Flagged" column (original behavior)
+                columns.Insert(0, New InboxBoardColumn With {
+                    .CategoryName = InboxBoard_FlaggedColumnId,
+                    .Color = InboxBoard_FlaggedColumnColor,
+                    .Tag = InboxBoard_FlaggedColumnId,
+                    .IsFlaggedColumn = True
+                })
+            End If
+        End If
 
         ' Apply saved column order from My.Settings
         Dim savedOrder As String = ""
@@ -789,23 +1032,98 @@ Partial Public Class ThisAddIn
                     Dim entryId As String = CStr(msg("entryId"))
                     Dim newCategory As String = CStr(msg("newCategory"))
 
-                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
-                    If entry IsNot Nothing Then
+                    ' If moving to any Flagged bucket column, set the flag + update due date
+                    If InboxBoard_FlagBucketColors.ContainsKey(newCategory) OrElse newCategory = InboxBoard_FlaggedColumnId Then
+                        Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                        If entry IsNot Nothing Then
+                            ' When moving between flag buckets, only update the representative mail's flag.
+                            ' The other mails in the conversation keep their own independent flag state.
+                            ' Only apply to all grouped mails when moving FROM a category column TO flagged.
+                            Dim movingBetweenFlagBuckets As Boolean = (entry.IsFlagged OrElse entry.IsCompleted) AndAlso String.IsNullOrEmpty(entry.AllCategories)
+                            Dim idsToUpdate As List(Of String)
+                            If movingBetweenFlagBuckets Then
+                                idsToUpdate = New List(Of String) From {entryId}
+                            Else
+                                idsToUpdate = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                 entry.ConversationEntryIDs,
+                                                 New List(Of String) From {entryId})
+                            End If
+                            Dim newDueDate As DateTime? = GetDueDateForBucket(newCategory)
+                            For Each id In idsToUpdate
+                                Try
+                                    Dim outlookAppFlag As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+                                    Dim nsFlag As Outlook.NameSpace = outlookAppFlag.GetNamespace("MAPI")
+                                    Dim miFlag As MailItem = TryCast(ComRetry(Of Object)(Function() nsFlag.GetItemFromID(id)), MailItem)
+                                    If miFlag IsNot Nothing Then
+                                        ' Only clear categories when entry actually had categories before
+                                        ' (don't wipe categories when just moving between flag buckets)
+                                        If Not String.IsNullOrEmpty(entry.AllCategories) Then
+                                            miFlag.Categories = ""
+                                        End If
+                                        If newCategory = InboxBoard_FlagBucket_Done Then
+                                            miFlag.FlagStatus = OlFlagStatus.olFlagComplete
+                                        Else
+                                            ' Always (re-)establish the flag and dates. Outlook needs
+                                            ' FlagStatus set before dates, and TaskStartDate before
+                                            ' TaskDueDate when the new start is after the current due.
+                                            miFlag.FlagStatus = OlFlagStatus.olFlagMarked
+                                            If newDueDate.HasValue Then
+                                                miFlag.TaskStartDate = newDueDate.Value
+                                                miFlag.TaskDueDate = newDueDate.Value
+                                            Else
+                                                miFlag.TaskStartDate = #1/1/4501#
+                                                miFlag.TaskDueDate = #1/1/4501#
+                                            End If
+                                        End If
+                                        miFlag.Save()
+                                    End If
+                                Catch ex As System.Exception
+                                    Debug.WriteLine($"[InboxBoard] move-to-flag error: {ex.Message}")
+                                End Try
+                            Next
+                            ' Only blank categories in local state if they were actually cleared in Outlook
+                            If Not String.IsNullOrEmpty(entry.AllCategories) Then
+                                entry.Categories = ""
+                                entry.AllCategories = ""
+                            End If
+                            If newCategory = InboxBoard_FlagBucket_Done Then
+                                entry.IsFlagged = False
+                                entry.IsCompleted = True
+                            Else
+                                entry.IsFlagged = True
+                                entry.IsCompleted = False
+                            End If
+                            entry.FlagDueDate = GetDueDateForBucket(newCategory)
+                            entry.FlagBucket = newCategory
+                            entry.CategoryColor = If(InboxBoard_FlagBucketColors.ContainsKey(newCategory), InboxBoard_FlagBucketColors(newCategory), InboxBoard_FlaggedColumnColor)
+                        End If
+                        PushUpdatedCardToJs(entryId, mails, webView)
+                        Return
+                    End If
+
+                    Dim entryMove = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entryMove IsNot Nothing Then
                         ' Update all mails in the conversation group (or just the single mail)
-                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
-                                                                 entry.ConversationEntryIDs,
+                        Dim idsToUpdate As List(Of String) = If(entryMove.IsGrouped AndAlso entryMove.ConversationEntryIDs IsNot Nothing AndAlso entryMove.ConversationEntryIDs.Count > 1,
+                                                                 entryMove.ConversationEntryIDs,
                                                                  New List(Of String) From {entryId})
                         For Each id In idsToUpdate
                             UpdateMailCategory(id, newCategory)
+                            ' If moving out of Flagged column, clear the flag
+                            If entryMove.IsFlagged Then SetMailFlag(id, False)
                         Next
 
                         ' Update local state
-                        entry.Categories = newCategory
-                        entry.AllCategories = newCategory
+                        entryMove.Categories = newCategory
+                        entryMove.AllCategories = newCategory
+                        If entryMove.IsFlagged Then
+                            entryMove.IsFlagged = False
+                            entryMove.IsCompleted = False
+                        End If
                         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
                         Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
                         Dim cc = GetOutlookCategoryColors(ns)
-                        entry.CategoryColor = If(cc.ContainsKey(newCategory), cc(newCategory), "#6b7280")
+                        entryMove.CategoryColor = If(cc.ContainsKey(newCategory), cc(newCategory), "#6b7280")
                     End If
 
                     ' Push updated card data back to JS so category badges refresh
@@ -817,11 +1135,57 @@ Partial Public Class ThisAddIn
                     Dim entryId As String = CStr(msg("entryId"))
                     Dim addCategory As String = CStr(msg("newCategory"))
 
-                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
-                    If entry IsNot Nothing Then
+                    ' If adding to any Flagged bucket column, set the flag + update due date
+                    If InboxBoard_FlagBucketColors.ContainsKey(addCategory) OrElse addCategory = InboxBoard_FlaggedColumnId Then
+                        Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                        If entry IsNot Nothing Then
+                            Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                     entry.ConversationEntryIDs,
+                                                                     New List(Of String) From {entryId})
+                            Dim newDueDate As DateTime? = GetDueDateForBucket(addCategory)
+                            For Each id In idsToUpdate
+                                Try
+                                    Dim outlookAppFlag As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+                                    Dim nsFlag As Outlook.NameSpace = outlookAppFlag.GetNamespace("MAPI")
+                                    Dim miFlag As MailItem = TryCast(ComRetry(Of Object)(Function() nsFlag.GetItemFromID(id)), MailItem)
+                                    If miFlag IsNot Nothing Then
+                                        If addCategory = InboxBoard_FlagBucket_Done Then
+                                            miFlag.FlagStatus = OlFlagStatus.olFlagComplete
+                                        Else
+                                            miFlag.FlagStatus = OlFlagStatus.olFlagMarked
+                                            If newDueDate.HasValue Then
+                                                miFlag.TaskStartDate = newDueDate.Value
+                                                miFlag.TaskDueDate = newDueDate.Value
+                                            Else
+                                                miFlag.TaskStartDate = #1/1/4501#
+                                                miFlag.TaskDueDate = #1/1/4501#
+                                            End If
+                                        End If
+                                        miFlag.Save()
+                                    End If
+                                Catch ex As System.Exception
+                                    Debug.WriteLine($"[InboxBoard] moveAdd-to-flag error: {ex.Message}")
+                                End Try
+                            Next
+                            If addCategory = InboxBoard_FlagBucket_Done Then
+                                entry.IsFlagged = False
+                                entry.IsCompleted = True
+                            Else
+                                entry.IsFlagged = True
+                                entry.IsCompleted = False
+                            End If
+                            entry.FlagDueDate = GetDueDateForBucket(addCategory)
+                            entry.FlagBucket = addCategory
+                        End If
+                        PushUpdatedCardToJs(entryId, mails, webView)
+                        Return
+                    End If
+
+                    Dim entryAdd = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entryAdd IsNot Nothing Then
                         ' Update all mails in the conversation group (or just the single mail)
-                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
-                                                                 entry.ConversationEntryIDs,
+                        Dim idsToUpdate As List(Of String) = If(entryAdd.IsGrouped AndAlso entryAdd.ConversationEntryIDs IsNot Nothing AndAlso entryAdd.ConversationEntryIDs.Count > 1,
+                                                                 entryAdd.ConversationEntryIDs,
                                                                  New List(Of String) From {entryId})
                         For Each id In idsToUpdate
                             AddMailCategory(id, addCategory)
@@ -829,8 +1193,8 @@ Partial Public Class ThisAddIn
 
                         ' Update local state
                         Dim existing As New List(Of String)()
-                        If Not String.IsNullOrEmpty(entry.AllCategories) Then
-                            For Each part In entry.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                        If Not String.IsNullOrEmpty(entryAdd.AllCategories) Then
+                            For Each part In entryAdd.AllCategories.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
                                 Dim t = part.Trim()
                                 If Not String.IsNullOrEmpty(t) Then existing.Add(t)
                             Next
@@ -838,12 +1202,12 @@ Partial Public Class ThisAddIn
                         If Not existing.Any(Function(c) c.Equals(addCategory, StringComparison.OrdinalIgnoreCase)) Then
                             existing.Add(addCategory)
                         End If
-                        entry.AllCategories = String.Join(", ", existing)
-                        entry.Categories = existing(0)
+                        entryAdd.AllCategories = String.Join(", ", existing)
+                        entryAdd.Categories = existing(0)
                         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
                         Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
                         Dim cc = GetOutlookCategoryColors(ns)
-                        entry.CategoryColor = If(cc.ContainsKey(entry.Categories), cc(entry.Categories), "#6b7280")
+                        entryAdd.CategoryColor = If(cc.ContainsKey(entryAdd.Categories), cc(entryAdd.Categories), "#6b7280")
                     End If
 
                     ' Push updated card data back to JS so category badges refresh
@@ -860,8 +1224,33 @@ Partial Public Class ThisAddIn
                     Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
                     If entry Is Nothing Then Return
 
+                    ' If unmarking from any Flagged bucket column, clear the flag
+                    If InboxBoard_FlagBucketColors.ContainsKey(categoryToRemove) OrElse categoryToRemove = InboxBoard_FlaggedColumnId Then
+                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                 entry.ConversationEntryIDs,
+                                                                 New List(Of String) From {entryId})
+                        For Each id In idsToUpdate
+                            SetMailFlag(id, False)
+                        Next
+                        entry.IsFlagged = False
+                        entry.IsCompleted = False
+
+                        ' If the card has no categories either, remove it from the board
+                        If String.IsNullOrEmpty(entry.AllCategories) Then
+                            mails.RemoveAll(Function(m) m.EntryID = entryId)
+                            Try
+                                webView.CoreWebView2.PostWebMessageAsJson(
+                                    JsonConvert.SerializeObject(New With {.action = "removeCard", .entryId = entryId}))
+                            Catch
+                            End Try
+                        Else
+                            PushUpdatedCardToJs(entryId, mails, webView)
+                        End If
+                        Return
+                    End If
+
                     ' Determine all entry IDs to process (group or single)
-                    Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                    Dim idsToProcess As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
                                                              entry.ConversationEntryIDs,
                                                              New List(Of String) From {entryId})
 
@@ -878,21 +1267,38 @@ Partial Public Class ThisAddIn
                                                      String.IsNullOrEmpty(categoryToRemove)
 
                     If isLastCategory Then
-                        ' Last (or only) category: clear all categories from all mails, remove card
-                        For Each id In idsToUpdate
-                            ClearMailCategories(id)
-                        Next
-                        mails.RemoveAll(Function(m) m.EntryID = entryId)
+                        ' If flagged, keep on board (in Flagged column) but remove categories
+                        If entry.IsFlagged Then
+                            For Each id In idsToProcess
+                                ClearMailCategories(id)
+                            Next
+                            entry.Categories = ""
+                            entry.AllCategories = ""
+                            entry.CategoryColor = InboxBoard_FlaggedColumnColor
+                            PushUpdatedCardToJs(entryId, mails, webView)
+                        Else
+                            ' Last (or only) category: clear all categories from all mails, remove card
+                            For Each id In idsToProcess
+                                ClearMailCategories(id)
+                                ' Also clear any flag so it doesn't linger in Outlook
+                                If entry.IsFlagged OrElse entry.IsCompleted Then
+                                    SetMailFlag(id, False)
+                                End If
+                            Next
+                            entry.IsFlagged = False
+                            entry.IsCompleted = False
+                            mails.RemoveAll(Function(m) m.EntryID = entryId)
 
-                        ' Tell JS to remove the card
-                        Try
-                            webView.CoreWebView2.PostWebMessageAsJson(
-                                JsonConvert.SerializeObject(New With {.action = "removeCard", .entryId = entryId}))
-                        Catch
-                        End Try
+                            ' Tell JS to remove the card
+                            Try
+                                webView.CoreWebView2.PostWebMessageAsJson(
+                                    JsonConvert.SerializeObject(New With {.action = "removeCard", .entryId = entryId}))
+                            Catch
+                            End Try
+                        End If
                     Else
                         ' Multiple categories: remove only the clicked category from all mails
-                        For Each id In idsToUpdate
+                        For Each id In idsToProcess
                             RemoveMailCategory(id, categoryToRemove)
                         Next
 
@@ -921,7 +1327,7 @@ Partial Public Class ThisAddIn
                     Dim newCts As New CancellationTokenSource()
                     summaryCts = newCts
 
-                    Dim reloadMax As Integer = If(_inboxBoardLastMaxToLoad > 0, _inboxBoardLastMaxToLoad, 0)
+                    Dim reloadMax As Integer = 0
                     Dim newMails = CollectCategorizedInboxMails(reloadMax)
                     If newMails IsNot Nothing Then
                         mails.Clear()
@@ -965,6 +1371,26 @@ Partial Public Class ThisAddIn
                     Catch ex2 As System.Exception
                         Debug.WriteLine($"[InboxBoard] setPinnedColumns error: {ex2.Message}")
                     End Try
+
+                Case "setPinnedFlagColumns"
+                    ' Save pinned flag bucket column names to My.Settings and reload
+                    Try
+                        Dim colsToken As JToken = msg("columns")
+                        If colsToken IsNot Nothing AndAlso colsToken.Type = JTokenType.Array Then
+                            Dim names As New List(Of String)()
+                            For Each t As JToken In colsToken
+                                Dim n As String = CStr(t)
+                                If Not String.IsNullOrWhiteSpace(n) Then names.Add(n.Trim())
+                            Next
+                            My.Settings.InboxBoardPinnedFlagColumns = String.Join(";", names)
+                            My.Settings.Save()
+                        End If
+                    Catch ex2 As System.Exception
+                        Debug.WriteLine($"[InboxBoard] setPinnedFlagColumns error: {ex2.Message}")
+                    End Try
+
+                    ' Trigger a reload to apply the change
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
 
                 Case "setColumnOrder"
                     ' Save user's column order to My.Settings
@@ -1039,34 +1465,43 @@ Partial Public Class ThisAddIn
                     End Try
 
                     ' Trigger a reload to apply the grouping change
-                    summaryCts.Cancel()
-                    Dim newCts2 As New CancellationTokenSource()
-                    summaryCts = newCts2
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
 
-                    Dim reloadMax2 As Integer = If(_inboxBoardLastMaxToLoad > 0, _inboxBoardLastMaxToLoad, 0)
-                    Dim newMails2 = CollectCategorizedInboxMails(reloadMax2)
-                    If newMails2 IsNot Nothing Then
-                        mails.Clear()
-                        mails.AddRange(newMails2)
-                        Dim newColumns2 = BuildBoardColumns(mails)
-                        columns.Clear()
-                        columns.AddRange(newColumns2)
-                        Dim dataJson2 As String = BuildBoardDataJson(mails, columns)
-                        Try
-                            webView.CoreWebView2.PostWebMessageAsJson(
-                                JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJson2}))
-                        Catch
-                        End Try
-                        Dim capturedMails2 As List(Of InboxBoardEntry) = mails
-                        Dim capturedWebView2 As WebView2 = webView
-                        Dim capturedToken2 As CancellationToken = newCts2.Token
-                        System.Threading.Tasks.Task.Run(Async Function() As System.Threading.Tasks.Task
-                                                            Await System.Threading.Tasks.Task.Delay(500)
-                                                            frm.BeginInvoke(CType(Async Sub()
-                                                                                      Await GenerateSummariesAsync(capturedMails2, capturedWebView2, capturedToken2)
-                                                                                  End Sub, System.Windows.Forms.MethodInvoker))
-                                                        End Function)
-                    End If
+                Case "setIncludeFlagged"
+                    ' Persist include-flagged toggle and reload
+                    Try
+                        Dim enabled As Boolean = CBool(msg("enabled"))
+                        My.Settings.InboxBoardIncludeFlagged = enabled
+                        My.Settings.Save()
+                    Catch
+                    End Try
+
+                    ' Trigger a reload to apply the change
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
+
+                Case "setHideDoneFlags"
+                    ' Persist hide-done-flags toggle and reload
+                    Try
+                        Dim enabled As Boolean = CBool(msg("enabled"))
+                        My.Settings.InboxBoardHideDoneFlags = enabled
+                        My.Settings.Save()
+                    Catch
+                    End Try
+
+                    ' Trigger a reload to apply the change
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
+
+                Case "setGroupFlagsByDate"
+                    ' Persist group-flags-by-date toggle and reload
+                    Try
+                        Dim enabled As Boolean = CBool(msg("enabled"))
+                        My.Settings.InboxBoardGroupFlagsByDate = enabled
+                        My.Settings.Save()
+                    Catch
+                    End Try
+
+                    ' Trigger a reload to apply the change
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
 
                 Case "setSummaryLanguage"
                     ' Persist summary language selection; clear cache if language changed
@@ -1125,7 +1560,47 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Pushes updated card data (allCategories, category, color) to JS after a move/moveAdd.
+    ''' Helper to trigger a full board reload (used by multiple settings toggles).
+    ''' </summary>
+    Private Sub HandleBoardReload(
+        mails As List(Of InboxBoardEntry),
+        columns As List(Of InboxBoardColumn),
+        webView As WebView2,
+        frm As Form,
+        ByRef summaryCts As CancellationTokenSource)
+
+        summaryCts.Cancel()
+        Dim newCts As New CancellationTokenSource()
+        summaryCts = newCts
+
+        Dim reloadMax As Integer = 0
+        Dim newMails = CollectCategorizedInboxMails(reloadMax)
+        If newMails IsNot Nothing Then
+            mails.Clear()
+            mails.AddRange(newMails)
+            Dim newColumns = BuildBoardColumns(mails)
+            columns.Clear()
+            columns.AddRange(newColumns)
+            Dim dataJson As String = BuildBoardDataJson(mails, columns)
+            Try
+                webView.CoreWebView2.PostWebMessageAsJson(
+                    JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJson}))
+            Catch
+            End Try
+            Dim capturedMails As List(Of InboxBoardEntry) = mails
+            Dim capturedWebView As WebView2 = webView
+            Dim capturedToken As CancellationToken = newCts.Token
+            System.Threading.Tasks.Task.Run(Async Function() As System.Threading.Tasks.Task
+                                                Await System.Threading.Tasks.Task.Delay(500)
+                                                frm.BeginInvoke(CType(Async Sub()
+                                                                          Await GenerateSummariesAsync(capturedMails, capturedWebView, capturedToken)
+                                                                      End Sub, System.Windows.Forms.MethodInvoker))
+                                            End Function)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Pushes updated card data (allCategories, category, color, flag info) to JS after a move/moveAdd.
     ''' </summary>
     Private Sub PushUpdatedCardToJs(entryId As String, mails As List(Of InboxBoardEntry), webView As WebView2)
         Try
@@ -1155,7 +1630,12 @@ Partial Public Class ThisAddIn
                     .entryId = entryId,
                     .category = entry.Categories,
                     .categoryColor = entry.CategoryColor,
-                    .allCategories = allCatsArr
+                    .allCategories = allCatsArr,
+                    .isFlagged = entry.IsFlagged,
+                    .isCompleted = entry.IsCompleted,
+                    .flagRequest = If(entry.FlagRequest, ""),
+                    .flagDueDate = If(entry.FlagDueDate.HasValue, entry.FlagDueDate.Value.ToString("yyyy-MM-dd"), ""),
+                                   .flagBucket = If(entry.FlagBucket, "")
                 }))
         Catch
         End Try
@@ -1164,6 +1644,68 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "InboxBoard Outlook COM Operations"
+
+    ''' <summary>
+    ''' Sets the TaskDueDate on a flagged mail item.
+    ''' Pass Nothing to clear the due date.
+    ''' </summary>
+    Private Sub SetMailDueDate(entryId As String, dueDate As DateTime?)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi IsNot Nothing Then
+                If dueDate.HasValue Then
+                    mi.TaskDueDate = dueDate.Value
+                    mi.TaskStartDate = dueDate.Value
+                Else
+                    ' Set to Outlook's "no date" sentinel (1/1/4501)
+                    mi.TaskDueDate = #1/1/4501#
+                    mi.TaskStartDate = #1/1/4501#
+                End If
+                mi.Save()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] SetMailDueDate error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Returns a representative due date for a given flag bucket column ID.
+    ''' Used when dragging a card into a date-bucketed column.
+    ''' Returns Nothing for the "no due date" / generic flagged bucket.
+    ''' </summary>
+    Private Shared Function GetDueDateForBucket(bucketId As String) As DateTime?
+        Dim today As DateTime = DateTime.Today
+
+        Select Case bucketId
+            Case InboxBoard_FlagBucket_Overdue
+                ' Set to yesterday (it's already overdue)
+                Return today.AddDays(-1)
+            Case InboxBoard_FlagBucket_Today
+                Return today
+            Case InboxBoard_FlagBucket_Tomorrow
+                Return today.AddDays(1)
+            Case InboxBoard_FlagBucket_ThisWeek
+                ' Set to end of current week (Friday)
+                Dim daysUntilFriday As Integer = (5 - CInt(today.DayOfWeek) + 7) Mod 7
+                If daysUntilFriday = 0 Then daysUntilFriday = 5 ' If today is Friday, keep Friday
+                Return today.AddDays(daysUntilFriday)
+            Case InboxBoard_FlagBucket_NextWeek
+                ' Set to next Monday + 4 (next Friday)
+                Dim daysUntilNextMonday As Integer = ((1 - CInt(today.DayOfWeek)) + 7) Mod 7
+                If daysUntilNextMonday = 0 Then daysUntilNextMonday = 7
+                Return today.AddDays(daysUntilNextMonday + 4) ' Next Friday
+            Case InboxBoard_FlagBucket_Next4Weeks
+                Return today.AddDays(21) ' 3 weeks out
+            Case InboxBoard_FlagBucket_Later
+                Return today.AddDays(42) ' 6 weeks out
+            Case InboxBoard_FlagBucket_Done
+                Return Nothing ' Don't change due date for completed items
+            Case Else
+                Return Nothing ' Generic flagged / no due date
+        End Select
+    End Function
 
     ''' <summary>
     ''' Changes the category on a mail item (replaces all existing categories).
@@ -1252,6 +1794,47 @@ Partial Public Class ThisAddIn
             End If
         Catch ex As System.Exception
             Debug.WriteLine($"[InboxBoard] ClearMailCategories error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Sets or clears the follow-up flag on a mail item.
+    ''' When setting, uses olFlagMarked with "Follow up" request.
+    ''' When clearing, calls ClearTaskFlag to remove all flag/task properties.
+    ''' </summary>
+    Private Sub SetMailFlag(entryId As String, flagOn As Boolean)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi IsNot Nothing Then
+                If flagOn Then
+                    mi.FlagStatus = OlFlagStatus.olFlagMarked
+                    mi.FlagRequest = "Follow up"
+                Else
+                    mi.ClearTaskFlag()
+                End If
+                mi.Save()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] SetMailFlag error: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Marks a mail item's flag as complete (olFlagComplete).
+    ''' </summary>
+    Private Sub SetMailFlagComplete(entryId As String)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi IsNot Nothing Then
+                mi.FlagStatus = OlFlagStatus.olFlagComplete
+                mi.Save()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] SetMailFlagComplete error: {ex.Message}")
         End Try
     End Sub
 
@@ -1424,6 +2007,11 @@ Partial Public Class ThisAddIn
             card("summary") = If(m.Summary, "")
             card("isRead") = m.IsRead
             card("isConversation") = m.IsGrouped
+            card("isFlagged") = m.IsFlagged
+            card("isCompleted") = m.IsCompleted
+            card("flagRequest") = If(m.FlagRequest, "")
+            card("flagDueDate") = If(m.FlagDueDate.HasValue, m.FlagDueDate.Value.ToString("yyyy-MM-dd"), "")
+            card("flagBucket") = If(m.FlagBucket, "")
 
             ' Build array of all categories with colors for multi-category badges
             Dim allCatsArr As New JArray()
@@ -1455,6 +2043,7 @@ Partial Public Class ThisAddIn
             c("title") = col.CategoryName
             c("tag") = If(col.Tag, col.CategoryName)
             c("color") = If(col.Color, "#6b7280")
+            c("isFlaggedColumn") = col.IsFlaggedColumn
             colsArr.Add(c)
         Next
 
@@ -1480,11 +2069,17 @@ Partial Public Class ThisAddIn
         Dim savedColumnFilter As String = ""
         Dim savedGroupConversations As Boolean = False
         Dim savedSummaryLanguage As String = ""
+        Dim savedIncludeFlagged As Boolean = False
+        Dim savedHideDoneFlags As Boolean = True
+        Dim savedGroupFlagsByDate As Boolean = False
         Try : savedTheme = If(My.Settings.InboxBoardTheme, "") : Catch : End Try
         Try : savedFields = If(My.Settings.InboxBoardFields, "") : Catch : End Try
         Try : savedColumnFilter = If(My.Settings.InboxBoardColumnFilter, "") : Catch : End Try
         Try : savedGroupConversations = My.Settings.InboxBoardGroupConversations : Catch : End Try
         Try : savedSummaryLanguage = If(My.Settings.InboxBoardSummaryLanguage, "") : Catch : End Try
+        Try : savedIncludeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
+        Try : savedHideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+        Try : savedGroupFlagsByDate = My.Settings.InboxBoardGroupFlagsByDate : Catch : End Try
 
         ' If no saved language yet, default to INI_Language1 (full language name, e.g. "German")
         ' but do NOT persist it — let the user confirm by editing the field first.
@@ -1522,6 +2117,10 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"const SAVED_COLUMN_FILTER = {JsonConvert.SerializeObject(savedColumnFilter)};")
         sb.AppendLine($"const SAVED_GROUP_CONVERSATIONS = {If(savedGroupConversations, "true", "false")};")
         sb.AppendLine($"const SAVED_SUMMARY_LANGUAGE = {JsonConvert.SerializeObject(savedSummaryLanguage)};")
+        sb.AppendLine($"const SAVED_INCLUDE_FLAGGED = {If(savedIncludeFlagged, "true", "false")};")
+        sb.AppendLine($"const SAVED_HIDE_DONE_FLAGS = {If(savedHideDoneFlags, "true", "false")};")
+        sb.AppendLine($"const SAVED_GROUP_FLAGS_BY_DATE = {If(savedGroupFlagsByDate, "true", "false")};")
+        sb.AppendLine($"const FLAGGED_COLUMN_ID = {JsonConvert.SerializeObject(InboxBoard_FlaggedColumnId)};")
         sb.AppendLine(GetBoardJavaScript())
         sb.AppendLine("</script>")
         sb.AppendLine("</body>")
@@ -1626,12 +2225,14 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card.dragging { opacity: 0.5; cursor: grabbing; transform: rotate(2deg); }
 .card.hidden { display: none; }
 .card.conversation { border-left: 3px solid #3b82f6; }
+.card.flagged { border-left: 3px solid #ef4444; }
+.card.conversation.flagged { border-left: 3px solid #ef4444; }
 .card-subject { font-weight: 600; font-size: 13px; margin-bottom: 4px; color: var(--text); line-height: 1.3;
   overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .card-sender { font-size: 11px; color: var(--text-secondary); margin-bottom: 3px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .card-meta { display: flex; align-items: center; gap: 8px; font-size: 10px;
-  color: var(--text-muted); margin-bottom: 3px; }
+  color: var(--text-muted); margin-bottom: 3px; flex-wrap: wrap; }
 .card-summary { font-size: 11px; color: var(--text-secondary); line-height: 1.3;
   margin-bottom: 4px; font-style: italic; min-height: 14px; }
 .card-summary.loading { color: var(--text-muted); }
@@ -1647,6 +2248,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .unread-dot { width: 7px; height: 7px; border-radius: 50%; background: #3b82f6;
   display: inline-block; margin-right: 4px; flex-shrink: 0; }
 .conv-icon { font-size: 10px; color: var(--text-muted); margin-right: 3px; }
+.flag-badge { font-size: 10px; color: #ef4444; margin-right: 3px; }
+.flag-meta { font-size: 10px; color: #ef4444; white-space: nowrap; }
+.flag-meta.completed { color: #22c55e; text-decoration: line-through; }
 .card-categories { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
 .card-cat-badge { font-size: 9px; padding: 1px 6px; border-radius: 8px; color: #fff;
   white-space: nowrap; line-height: 1.4; font-weight: 500; }
@@ -1720,6 +2324,21 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Try : If My.Settings.InboxBoardGroupConversations Then groupChecked = " checked"
         Catch : End Try
 
+        ' Include flagged checkbox
+        Dim flaggedChecked As String = ""
+        Try : If My.Settings.InboxBoardIncludeFlagged Then flaggedChecked = " checked"
+        Catch : End Try
+
+        ' Hide done flags checkbox
+        Dim hideDoneChecked As String = ""
+        Try : If My.Settings.InboxBoardHideDoneFlags Then hideDoneChecked = " checked"
+        Catch : End Try
+
+        ' Group flagged by date checkbox
+        Dim groupFlagsByDateChecked As String = ""
+        Try : If My.Settings.InboxBoardGroupFlagsByDate Then groupFlagsByDateChecked = " checked"
+        Catch : End Try
+
         ' Summary language: free text input with "Auto-detect" overlay
         Dim savedLang As String = ""
         Try : savedLang = If(My.Settings.InboxBoardSummaryLanguage, "") : Catch : End Try
@@ -1748,6 +2367,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         <label><input type=""checkbox"" data-field=""summary"" checked> AI Summary</label>
         <h3 class=""section-divider"">Grouping</h3>
         <label><input type=""checkbox"" id=""groupConversationsChk""{groupChecked}> Group conversations</label>
+        <h3 class=""section-divider"">Flags</h3>
+        <label><input type=""checkbox"" id=""includeFlaggedChk""{flaggedChecked}> Include flagged mails</label>
+        <label><input type=""checkbox"" id=""hideDoneFlagsChk""{hideDoneChecked}> Hide completed flags</label>
+        <label><input type=""checkbox"" id=""groupFlagsByDateChk""{groupFlagsByDateChecked}> Group flagged by due date</label>
         <h3 class=""section-divider"">Summary Language</h3>
         <div class=""lang-input-wrapper"">
           <input type=""text"" id=""summaryLanguageInput"" value=""{escapedLang}""{dataEmpty}>
@@ -1755,6 +2378,13 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         </div>
         <h3 class=""section-divider"">Pinned Columns</h3>
 {pinnedHtml.ToString().TrimEnd()}
+        <h3 class=""section-divider"">Pinned Flag Columns</h3>
+        <div id=""pinnedFlagColumnsSection"" style=""display:{If(groupFlagsByDateChecked <> "", "block", "none")}"">
+{GetPinnedFlagColumnsHtml()}
+        </div>
+        <div id=""pinnedFlagColumnsHint"" style=""display:{If(groupFlagsByDateChecked = "", "block", "none")};font-size:11px;color:var(--text-muted);padding:2px 0"">
+          Enable &quot;Group flagged by due date&quot; first
+        </div>
         <h3 class=""section-divider"">Drag &amp; Drop</h3>
         <div style=""font-size:11px;color:var(--text-muted);line-height:1.4;padding:2px 0"">
           <b>Drag</b> → replace all categories<br>
@@ -1770,6 +2400,32 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
     </button>
   </div>
 </div>"
+    End Function
+
+    ''' <summary>Builds checkboxes for pinning individual flag date-bucket columns.</summary>
+    Private Function GetPinnedFlagColumnsHtml() As String
+        Dim sb As New StringBuilder()
+        Dim pinnedSet As New HashSet(Of String)(StringComparer.Ordinal)
+        Try
+            Dim saved As String = If(My.Settings.InboxBoardPinnedFlagColumns, "")
+            If Not String.IsNullOrEmpty(saved) Then
+                For Each part In saved.Split({";"c}, StringSplitOptions.RemoveEmptyEntries)
+                    Dim t = part.Trim()
+                    If Not String.IsNullOrEmpty(t) Then pinnedSet.Add(t)
+                Next
+            End If
+        Catch
+        End Try
+
+        For Each bucketId In InboxBoard_FlagBucketOrder
+            Dim escapedId As String = System.Net.WebUtility.HtmlEncode(bucketId)
+            Dim bucketColor As String = "#6b7280"
+            If InboxBoard_FlagBucketColors.ContainsKey(bucketId) Then bucketColor = InboxBoard_FlagBucketColors(bucketId)
+            Dim isChecked As String = If(pinnedSet.Contains(bucketId), " checked", "")
+            sb.AppendLine($"          <label><input type=""checkbox"" data-pinned-flag=""{escapedId}""{isChecked}><span class=""cat-dot"" style=""background:{bucketColor}""></span> {escapedId}</label>")
+        Next
+
+        Return sb.ToString().TrimEnd()
     End Function
 
 
@@ -1844,7 +2500,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Theme ---")
+        ' --- Theme (unchanged) ---
         js.AppendLine("function applyTheme(theme) {")
         js.AppendLine("  document.documentElement.setAttribute('data-theme', theme);")
         js.AppendLine("  var icon = document.getElementById('themeIcon');")
@@ -1852,14 +2508,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    icon.innerHTML = '<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';")
         js.AppendLine("  } else {")
         js.AppendLine("    icon.innerHTML = '<circle cx=""12"" cy=""12"" r=""5""/>' +")
-        js.AppendLine("      '<line x1=""12"" y1=""1"" x2=""12"" y2=""3""/>' +")
-        js.AppendLine("      '<line x1=""12"" y1=""21"" x2=""12"" y2=""23""/>' +")
-        js.AppendLine("      '<line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/>' +")
-        js.AppendLine("      '<line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/>' +")
-        js.AppendLine("      '<line x1=""1"" y1=""12"" x2=""3"" y2=""12""/>' +")
-        js.AppendLine("      '<line x1=""21"" y1=""12"" x2=""23"" y2=""12""/>' +")
-        js.AppendLine("      '<line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/>' +")
-        js.AppendLine("      '<line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';")
+        js.AppendLine("      '<line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/>' +")
+        js.AppendLine("      '<line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/>' +")
+        js.AppendLine("      '<line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/>' +")
+        js.AppendLine("      '<line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';")
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine("function initTheme() {")
@@ -1874,7 +2526,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setTheme', theme: next }));")
         js.AppendLine("});")
         js.AppendLine()
-        js.AppendLine("// --- Settings panel ---")
+        ' --- Settings panel ---
         js.AppendLine("document.getElementById('settingsBtn').addEventListener('click', function(e) {")
         js.AppendLine("  e.stopPropagation(); document.getElementById('settingsPanel').classList.toggle('open');")
         js.AppendLine("});")
@@ -1889,12 +2541,22 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("});")
         js.AppendLine()
-        js.AppendLine("// --- Group conversations toggle ---")
+        ' --- Group conversations toggle ---
         js.AppendLine("document.getElementById('groupConversationsChk').addEventListener('change', function() {")
         js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupConversations', enabled: this.checked }));")
         js.AppendLine("});")
         js.AppendLine()
-        js.AppendLine("// --- Summary language (free text input with debounce) ---")
+        ' --- Include flagged toggle ---
+        js.AppendLine("document.getElementById('includeFlaggedChk').addEventListener('change', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setIncludeFlagged', enabled: this.checked }));")
+        js.AppendLine("});")
+        js.AppendLine()
+        ' --- Hide done flags toggle ---
+        js.AppendLine("document.getElementById('hideDoneFlagsChk').addEventListener('change', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setHideDoneFlags', enabled: this.checked }));")
+        js.AppendLine("});")
+        js.AppendLine()
+        ' --- Summary language (free text input with debounce) ---
         js.AppendLine("(function() {")
         js.AppendLine("  var langInput = document.getElementById('summaryLanguageInput');")
         js.AppendLine("  var lastCommitted = SAVED_SUMMARY_LANGUAGE || '';")
@@ -1910,31 +2572,31 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      if (val) { showToast('Summary language: ' + val); } else { showToast('Summary language: Auto-detect'); }")
         js.AppendLine("    }")
         js.AppendLine("  }")
-        js.AppendLine("  langInput.addEventListener('input', function() {")
-        js.AppendLine("    updateEmpty();")
-        js.AppendLine("    if (langCommitTimer) clearTimeout(langCommitTimer);")
-        js.AppendLine("    langCommitTimer = setTimeout(commitLang, 1500);")
-        js.AppendLine("  });")
-        js.AppendLine("  langInput.addEventListener('blur', function() {")
-        js.AppendLine("    if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; }")
-        js.AppendLine("    commitLang();")
-        js.AppendLine("  });")
-        js.AppendLine("  langInput.addEventListener('keydown', function(e) {")
-        js.AppendLine("    if (e.key === 'Enter') { e.preventDefault(); if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); langInput.blur(); }")
-        js.AppendLine("  });")
+        js.AppendLine("  langInput.addEventListener('input', function() { updateEmpty(); if (langCommitTimer) clearTimeout(langCommitTimer); langCommitTimer = setTimeout(commitLang, 1500); });")
+        js.AppendLine("  langInput.addEventListener('blur', function() { if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); });")
+        js.AppendLine("  langInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); langInput.blur(); } });")
         js.AppendLine("})();")
         js.AppendLine()
-        js.AppendLine("// --- Pinned columns ---")
+        ' --- Pinned columns ---
         js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(cb) {")
         js.AppendLine("  cb.addEventListener('change', function() {")
         js.AppendLine("    var pinned = [];")
-        js.AppendLine("    document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(c) {")
-        js.AppendLine("      if (c.checked) pinned.push(c.dataset.pinnedCat);")
-        js.AppendLine("    });")
+        js.AppendLine("    document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedCat); });")
         js.AppendLine("    window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedColumns', columns: pinned }));")
         js.AppendLine("    showToast('Pinned columns updated');")
         js.AppendLine("  });")
         js.AppendLine("});")
+        ' --- Pinned flag columns ---
+        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(cb) {")
+        js.AppendLine("  cb.addEventListener('change', function() {")
+        js.AppendLine("    var pinned = [];")
+        js.AppendLine("    document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedFlag); });")
+        js.AppendLine("    window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedFlagColumns', columns: pinned }));")
+        js.AppendLine("    showToast('Pinned flag columns updated');")
+        js.AppendLine("  });")
+        js.AppendLine("});")
+        js.AppendLine()
+
         js.AppendLine()
         js.AppendLine("function applyFieldVisibility() {")
         js.AppendLine("  document.querySelectorAll('.card-sender').forEach(function(el) { el.style.display = fieldSettings.sender ? '' : 'none'; });")
@@ -1943,42 +2605,38 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  document.querySelectorAll('.card-summary').forEach(function(el) { el.style.display = fieldSettings.summary ? '' : 'none'; });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Reload ---")
+        ' --- Reload ---
+        js.AppendLine("document.getElementById('groupFlagsByDateChk').addEventListener('change', function() {")
+        js.AppendLine("  var sec = document.getElementById('pinnedFlagColumnsSection'); var hint = document.getElementById('pinnedFlagColumnsHint');")
+        js.AppendLine("  if (sec) sec.style.display = this.checked ? 'block' : 'none';")
+        js.AppendLine("  if (hint) hint.style.display = this.checked ? 'none' : 'block';")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupFlagsByDate', enabled: this.checked }));")
+        js.AppendLine("});")
+        js.AppendLine()
+        ' --- Reload button ---
         js.AppendLine("document.getElementById('reloadBtn').addEventListener('click', function() {")
         js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'reload' }));")
         js.AppendLine("});")
         js.AppendLine()
-        js.AppendLine("// --- Ctrl key tracking for drag mode ---")
-        js.AppendLine("document.addEventListener('keydown', function(e) {")
-        js.AppendLine("  if (e.key === 'Control' && !ctrlHeld) { ctrlHeld = true; updateDragModeVisuals(); }")
-        js.AppendLine("});")
-        js.AppendLine("document.addEventListener('keyup', function(e) {")
-        js.AppendLine("  if (e.key === 'Control') { ctrlHeld = false; updateDragModeVisuals(); }")
-        js.AppendLine("});")
+        ' --- Ctrl key tracking for drag mode ---
+        js.AppendLine("document.addEventListener('keydown', function(e) { if (e.key === 'Control' && !ctrlHeld) { ctrlHeld = true; updateDragModeVisuals(); } });")
+        js.AppendLine("document.addEventListener('keyup', function(e) { if (e.key === 'Control') { ctrlHeld = false; updateDragModeVisuals(); } });")
         js.AppendLine("window.addEventListener('blur', function() { ctrlHeld = false; updateDragModeVisuals(); });")
         js.AppendLine()
         js.AppendLine("function updateDragModeVisuals() {")
         js.AppendLine("  var label = document.getElementById('dragModeLabel');")
         js.AppendLine("  if (isDragging && ctrlHeld) {")
         js.AppendLine("    label.classList.add('visible');")
-        js.AppendLine("    document.querySelectorAll('.column.drag-over').forEach(function(el) {")
-        js.AppendLine("      el.classList.add('drag-over-add');")
-        js.AppendLine("    });")
-        js.AppendLine("    document.querySelectorAll('.drop-indicator.visible').forEach(function(el) {")
-        js.AppendLine("      el.classList.add('add-mode');")
-        js.AppendLine("    });")
+        js.AppendLine("    document.querySelectorAll('.column.drag-over').forEach(function(el) { el.classList.add('drag-over-add'); });")
+        js.AppendLine("    document.querySelectorAll('.drop-indicator.visible').forEach(function(el) { el.classList.add('add-mode'); });")
         js.AppendLine("  } else {")
         js.AppendLine("    label.classList.remove('visible');")
-        js.AppendLine("    document.querySelectorAll('.column.drag-over-add').forEach(function(el) {")
-        js.AppendLine("      el.classList.remove('drag-over-add');")
-        js.AppendLine("    });")
-        js.AppendLine("    document.querySelectorAll('.drop-indicator.add-mode').forEach(function(el) {")
-        js.AppendLine("      el.classList.remove('add-mode');")
-        js.AppendLine("    });")
+        js.AppendLine("    document.querySelectorAll('.column.drag-over-add').forEach(function(el) { el.classList.remove('drag-over-add'); });")
+        js.AppendLine("    document.querySelectorAll('.drop-indicator.add-mode').forEach(function(el) { el.classList.remove('add-mode'); });")
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Render Board ---")
+        ' --- Render Board ---
         js.AppendLine("function renderBoard() {")
         js.AppendLine("  var board = document.getElementById('board');")
         js.AppendLine("  board.innerHTML = '';")
@@ -1987,6 +2645,12 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    colEl.className = 'column';")
         js.AppendLine("    colEl.dataset.column = col.id;")
         js.AppendLine("    var colCards = cards.filter(function(c) {")
+        js.AppendLine("      if (col.isFlaggedColumn) {")
+        js.AppendLine("        if (!(c.isFlagged || c.isCompleted)) return false;")
+        js.AppendLine("        if (col.id === FLAGGED_COLUMN_ID) return true;")
+        js.AppendLine("        if (c.flagBucket) return c.flagBucket === col.id;")
+        js.AppendLine("        return false;")
+        js.AppendLine("      }")
         js.AppendLine("      if (c.allCategories && c.allCategories.length > 0) {")
         js.AppendLine("        return c.allCategories.some(function(ac) { return ac.name === col.id; });")
         js.AppendLine("      }")
@@ -2019,46 +2683,25 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  setupColumnDrag();")
         js.AppendLine("}")
         js.AppendLine()
+        ' --- Column drag (unchanged) ---
         js.AppendLine("var colDragSrc=null;")
         js.AppendLine("function setupColumnDrag(){")
         js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl){")
         js.AppendLine("    var header=colEl.querySelector('.column-header');")
         js.AppendLine("    header.draggable=true;")
-        js.AppendLine("    header.addEventListener('dragstart',function(e){")
-        js.AppendLine("      if(e.target.closest('.card')){e.preventDefault();return;}")
-        js.AppendLine("      colDragSrc=colEl;")
-        js.AppendLine("      colEl.classList.add('col-dragging');")
-        js.AppendLine("      e.dataTransfer.effectAllowed='move';")
-        js.AppendLine("      e.dataTransfer.setData('text/x-column',colEl.dataset.column);")
-        js.AppendLine("    });")
-        js.AppendLine("    header.addEventListener('dragend',function(){")
-        js.AppendLine("      colDragSrc=null;")
-        js.AppendLine("      document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');});")
-        js.AppendLine("    });")
-        js.AppendLine("    colEl.addEventListener('dragover',function(e){")
-        js.AppendLine("      if(!colDragSrc)return;")
-        js.AppendLine("      if(colDragSrc===colEl)return;")
-        js.AppendLine("      e.preventDefault();")
-        js.AppendLine("      e.dataTransfer.dropEffect='move';")
-        js.AppendLine("      document.querySelectorAll('.column.col-drag-over').forEach(function(c){c.classList.remove('col-drag-over');});")
-        js.AppendLine("      colEl.classList.add('col-drag-over');")
-        js.AppendLine("    });")
-        js.AppendLine("    colEl.addEventListener('dragleave',function(e){")
-        js.AppendLine("      if(!colEl.contains(e.relatedTarget))colEl.classList.remove('col-drag-over');")
-        js.AppendLine("    });")
+        js.AppendLine("    header.addEventListener('dragstart',function(e){ if(e.target.closest('.card')){e.preventDefault();return;} colDragSrc=colEl; colEl.classList.add('col-dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/x-column',colEl.dataset.column); });")
+        js.AppendLine("    header.addEventListener('dragend',function(){ colDragSrc=null; document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');}); });")
+        js.AppendLine("    colEl.addEventListener('dragover',function(e){ if(!colDragSrc||colDragSrc===colEl)return; e.preventDefault(); e.dataTransfer.dropEffect='move'; document.querySelectorAll('.column.col-drag-over').forEach(function(c){c.classList.remove('col-drag-over');}); colEl.classList.add('col-drag-over'); });")
+        js.AppendLine("    colEl.addEventListener('dragleave',function(e){ if(!colEl.contains(e.relatedTarget))colEl.classList.remove('col-drag-over'); });")
         js.AppendLine("    colEl.addEventListener('drop',function(e){")
-        js.AppendLine("      if(!colDragSrc||colDragSrc===colEl)return;")
-        js.AppendLine("      e.preventDefault();")
-        js.AppendLine("      var board=document.getElementById('board');")
-        js.AppendLine("      var allCols=[...board.querySelectorAll('.column')];")
-        js.AppendLine("      var fromIdx=allCols.indexOf(colDragSrc);")
-        js.AppendLine("      var toIdx=allCols.indexOf(colEl);")
+        js.AppendLine("      if(!colDragSrc||colDragSrc===colEl)return; e.preventDefault();")
+        js.AppendLine("      var board=document.getElementById('board'); var allCols=[...board.querySelectorAll('.column')];")
+        js.AppendLine("      var fromIdx=allCols.indexOf(colDragSrc); var toIdx=allCols.indexOf(colEl);")
         js.AppendLine("      if(fromIdx<0||toIdx<0)return;")
         js.AppendLine("      if(fromIdx<toIdx){board.insertBefore(colDragSrc,colEl.nextSibling);}else{board.insertBefore(colDragSrc,colEl);}")
         js.AppendLine("      document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');});")
         js.AppendLine("      colDragSrc=null;")
-        js.AppendLine("      var newOrder=[];")
-        js.AppendLine("      board.querySelectorAll('.column').forEach(function(c){newOrder.push(c.dataset.column);});")
+        js.AppendLine("      var newOrder=[]; board.querySelectorAll('.column').forEach(function(c){newOrder.push(c.dataset.column);});")
         js.AppendLine("      COLUMNS.sort(function(a,b){return newOrder.indexOf(a.id)-newOrder.indexOf(b.id);});")
         js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({action:'setColumnOrder',columns:newOrder}));")
         js.AppendLine("      showToast('Column order updated');")
@@ -2066,60 +2709,53 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
+        ' --- Create card element (with flag support) ---
         js.AppendLine("function createCardEl(card, col) {")
         js.AppendLine("  var el = document.createElement('div');")
-        js.AppendLine("  el.className = 'card' + (card.isConversation ? ' conversation' : '');")
+        js.AppendLine("  var cls = 'card';")
+        js.AppendLine("  if (card.isConversation) cls += ' conversation';")
+        js.AppendLine("  if (card.isFlagged) cls += ' flagged';")
+        js.AppendLine("  el.className = cls;")
         js.AppendLine("  el.dataset.entryId = card.entryId;")
         js.AppendLine("  el.dataset.id = card.id;")
         js.AppendLine("  el.draggable = true;")
         js.AppendLine()
         js.AppendLine("  var subjectDiv = document.createElement('div');")
         js.AppendLine("  subjectDiv.className = 'card-subject';")
-        js.AppendLine("  if (!card.isRead) {")
-        js.AppendLine("    var dot = document.createElement('span');")
-        js.AppendLine("    dot.className = 'unread-dot';")
-        js.AppendLine("    subjectDiv.appendChild(dot);")
-        js.AppendLine("  }")
-        js.AppendLine("  if (card.isConversation) {")
-        js.AppendLine("    var convIcon = document.createElement('span');")
-        js.AppendLine("    convIcon.className = 'conv-icon';")
-        js.AppendLine("    convIcon.textContent = '\uD83D\uDCEC ';")
-        js.AppendLine("    subjectDiv.appendChild(convIcon);")
-        js.AppendLine("  }")
+        js.AppendLine("  if (!card.isRead) { var dot = document.createElement('span'); dot.className = 'unread-dot'; subjectDiv.appendChild(dot); }")
+        js.AppendLine("  if (card.isFlagged) { var fb = document.createElement('span'); fb.className = 'flag-badge'; fb.textContent = '\u2691 '; subjectDiv.appendChild(fb); }")
+        js.AppendLine("  if (card.isConversation) { var ci = document.createElement('span'); ci.className = 'conv-icon'; ci.textContent = '\uD83D\uDCEC '; subjectDiv.appendChild(ci); }")
         js.AppendLine("  subjectDiv.appendChild(document.createTextNode(card.subject));")
         js.AppendLine("  el.appendChild(subjectDiv);")
         js.AppendLine()
         js.AppendLine("  if (card.allCategories && card.allCategories.length > 1) {")
-        js.AppendLine("    var catsDiv = document.createElement('div');")
-        js.AppendLine("    catsDiv.className = 'card-categories';")
+        js.AppendLine("    var catsDiv = document.createElement('div'); catsDiv.className = 'card-categories';")
         js.AppendLine("    card.allCategories.forEach(function(ac) {")
-        js.AppendLine("      var badge = document.createElement('span');")
-        js.AppendLine("      badge.className = 'card-cat-badge';")
-        js.AppendLine("      badge.textContent = ac.name;")
-        js.AppendLine("      badge.style.background = ac.color;")
+        js.AppendLine("      var badge = document.createElement('span'); badge.className = 'card-cat-badge'; badge.textContent = ac.name; badge.style.background = ac.color;")
         js.AppendLine("      if (ac.name !== col.id) badge.style.opacity = '0.55';")
         js.AppendLine("      catsDiv.appendChild(badge);")
         js.AppendLine("    });")
         js.AppendLine("    el.appendChild(catsDiv);")
         js.AppendLine("  }")
         js.AppendLine()
-        js.AppendLine("  var senderDiv = document.createElement('div');")
-        js.AppendLine("  senderDiv.className = 'card-sender';")
+        js.AppendLine("  var senderDiv = document.createElement('div'); senderDiv.className = 'card-sender';")
         js.AppendLine("  senderDiv.textContent = card.senderName || card.senderEmail;")
         js.AppendLine("  el.appendChild(senderDiv);")
         js.AppendLine()
-        js.AppendLine("  var metaDiv = document.createElement('div');")
-        js.AppendLine("  metaDiv.className = 'card-meta';")
-        js.AppendLine("  var dateSpan = document.createElement('span');")
-        js.AppendLine("  dateSpan.className = 'card-date';")
-        js.AppendLine("  dateSpan.textContent = card.date;")
-        js.AppendLine("  metaDiv.appendChild(dateSpan);")
-        js.AppendLine("  var msgSpan = document.createElement('span');")
-        js.AppendLine("  msgSpan.className = 'card-msg-count';")
-        js.AppendLine("  if (card.isGrouped && card.messages > 1) {")
-        js.AppendLine("    msgSpan.textContent = card.messages + ' mail' + (card.messages !== 1 ? 's' : '');")
-        js.AppendLine("  }")
+        js.AppendLine("  var metaDiv = document.createElement('div'); metaDiv.className = 'card-meta';")
+        js.AppendLine("  var dateSpan = document.createElement('span'); dateSpan.className = 'card-date'; dateSpan.textContent = card.date; metaDiv.appendChild(dateSpan);")
+        js.AppendLine("  var msgSpan = document.createElement('span'); msgSpan.className = 'card-msg-count';")
+        js.AppendLine("  if (card.isGrouped && card.messages > 1) { msgSpan.textContent = card.messages + ' mail' + (card.messages !== 1 ? 's' : ''); }")
         js.AppendLine("  metaDiv.appendChild(msgSpan);")
+        ' Flag metadata (request + due date)
+        js.AppendLine("  if (card.isFlagged || card.isCompleted) {")
+        js.AppendLine("    var flagSpan = document.createElement('span');")
+        js.AppendLine("    flagSpan.className = 'flag-meta' + (card.isCompleted ? ' completed' : '');")
+        js.AppendLine("    var flagText = card.flagRequest || (card.isFlagged ? 'Flagged' : 'Done');")
+        js.AppendLine("    if (card.flagDueDate) flagText += ' \u2022 ' + card.flagDueDate;")
+        js.AppendLine("    flagSpan.textContent = flagText;")
+        js.AppendLine("    metaDiv.appendChild(flagSpan);")
+        js.AppendLine("  }")
         js.AppendLine("  el.appendChild(metaDiv);")
         js.AppendLine()
         js.AppendLine("  var summaryDiv = document.createElement('div');")
@@ -2128,55 +2764,24 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  summaryDiv.textContent = card.summary || 'Generating summary\u2026';")
         js.AppendLine("  el.appendChild(summaryDiv);")
         js.AppendLine()
-        js.AppendLine("  var footerDiv = document.createElement('div');")
-        js.AppendLine("  footerDiv.className = 'card-footer';")
-        js.AppendLine()
-        js.AppendLine("  var openBtn = document.createElement('button');")
-        js.AppendLine("  openBtn.className = 'card-btn';")
-        js.AppendLine("  openBtn.dataset.action = 'open';")
-        js.AppendLine("  openBtn.dataset.entryId = card.entryId;")
-        js.AppendLine("  openBtn.title = 'Open in Outlook';")
-        js.AppendLine("  openBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round"">' +")
-        js.AppendLine("    '<path d=""M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z""/>' +")
-        js.AppendLine("    '<polyline points=""22,6 12,13 2,6""/></svg><span class=""tip"">Open in Outlook</span>';")
+        js.AppendLine("  var footerDiv = document.createElement('div'); footerDiv.className = 'card-footer';")
+        js.AppendLine("  var openBtn = document.createElement('button'); openBtn.className = 'card-btn'; openBtn.dataset.action = 'open'; openBtn.dataset.entryId = card.entryId; openBtn.title = 'Open in Outlook';")
+        js.AppendLine("  openBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z""/><polyline points=""22,6 12,13 2,6""/></svg><span class=""tip"">Open in Outlook</span>';")
         js.AppendLine("  footerDiv.appendChild(openBtn);")
-        js.AppendLine()
-        js.AppendLine("  var unmarkBtn = document.createElement('button');")
-        js.AppendLine("  unmarkBtn.className = 'card-btn';")
-        js.AppendLine("  unmarkBtn.dataset.action = 'unmark';")
-        js.AppendLine("  unmarkBtn.dataset.entryId = card.entryId;")
-        js.AppendLine("  unmarkBtn.dataset.column = col.id;")
+        js.AppendLine("  var unmarkBtn = document.createElement('button'); unmarkBtn.className = 'card-btn'; unmarkBtn.dataset.action = 'unmark'; unmarkBtn.dataset.entryId = card.entryId; unmarkBtn.dataset.column = col.id;")
         js.AppendLine("  unmarkBtn.title = 'Remove from ' + col.title;")
-        js.AppendLine("  unmarkBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round"">' +")
-        js.AppendLine("    '<line x1=""18"" y1=""6"" x2=""6"" y2=""18""/><line x1=""6"" y1=""6"" x2=""18"" y2=""18""/></svg><span class=""tip"">Remove from ' + escHtml(col.title) + '</span>';")
+        js.AppendLine("  unmarkBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><line x1=""18"" y1=""6"" x2=""6"" y2=""18""/><line x1=""6"" y1=""6"" x2=""18"" y2=""18""/></svg><span class=""tip"">Remove from ' + escHtml(col.title) + '</span>';")
         js.AppendLine("  footerDiv.appendChild(unmarkBtn);")
         js.AppendLine("  el.appendChild(footerDiv);")
         js.AppendLine()
-        js.AppendLine("  el.addEventListener('dragstart', function(e) {")
-        js.AppendLine("    isDragging = true;")
-        js.AppendLine("    el.classList.add('dragging');")
-        js.AppendLine("    e.dataTransfer.effectAllowed = 'copyMove';")
-        js.AppendLine("    e.dataTransfer.setData('text/plain', card.entryId);")
-        js.AppendLine("    updateDragModeVisuals();")
-        js.AppendLine("  });")
-        js.AppendLine("  el.addEventListener('dragend', function() {")
-        js.AppendLine("    isDragging = false;")
-        js.AppendLine("    el.classList.remove('dragging');")
-        js.AppendLine("    clearAllIndicators();")
-        js.AppendLine("    document.getElementById('dragModeLabel').classList.remove('visible');")
-        js.AppendLine("  });")
+        js.AppendLine("  el.addEventListener('dragstart', function(e) { isDragging = true; el.classList.add('dragging'); e.dataTransfer.effectAllowed = 'copyMove'; e.dataTransfer.setData('text/plain', card.entryId); updateDragModeVisuals(); });")
+        js.AppendLine("  el.addEventListener('dragend', function() { isDragging = false; el.classList.remove('dragging'); clearAllIndicators(); document.getElementById('dragModeLabel').classList.remove('visible'); });")
         js.AppendLine()
         js.AppendLine("  el.querySelectorAll('.card-btn').forEach(function(btn) {")
         js.AppendLine("    btn.addEventListener('click', function(e) {")
-        js.AppendLine("      e.stopPropagation();")
-        js.AppendLine("      var act = btn.dataset.action;")
-        js.AppendLine("      var eid = btn.dataset.entryId;")
-        js.AppendLine("      if (act === 'open') {")
-        js.AppendLine("        window.chrome.webview.postMessage(JSON.stringify({ action: 'open', entryId: eid }));")
-        js.AppendLine("      } else if (act === 'unmark') {")
-        js.AppendLine("        var colId = btn.dataset.column || '';")
-        js.AppendLine("        window.chrome.webview.postMessage(JSON.stringify({ action: 'unmark', entryId: eid, category: colId }));")
-        js.AppendLine("      }")
+        js.AppendLine("      e.stopPropagation(); var act = btn.dataset.action; var eid = btn.dataset.entryId;")
+        js.AppendLine("      if (act === 'open') { window.chrome.webview.postMessage(JSON.stringify({ action: 'open', entryId: eid })); }")
+        js.AppendLine("      else if (act === 'unmark') { var colId = btn.dataset.column || ''; window.chrome.webview.postMessage(JSON.stringify({ action: 'unmark', entryId: eid, category: colId })); }")
         js.AppendLine("    });")
         js.AppendLine("  });")
         js.AppendLine("  return el;")
@@ -2184,65 +2789,31 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine()
         js.AppendLine("function escHtml(str) { var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }")
         js.AppendLine()
-        js.AppendLine("// --- Drag & Drop ---")
+        ' --- Drag & Drop (unchanged logic) ---
         js.AppendLine("function setupDropZone(list) {")
-        js.AppendLine("  list.addEventListener('dragover', function(e) {")
-        js.AppendLine("    e.preventDefault();")
-        js.AppendLine("    ctrlHeld = e.ctrlKey;")
-        js.AppendLine("    e.dataTransfer.dropEffect = ctrlHeld ? 'copy' : 'move';")
-        js.AppendLine("    var col = list.closest('.column');")
-        js.AppendLine("    col.classList.add('drag-over');")
-        js.AppendLine("    if (ctrlHeld) col.classList.add('drag-over-add'); else col.classList.remove('drag-over-add');")
-        js.AppendLine("    showDropIndicator(list, getDragAfterElement(list, e.clientY));")
-        js.AppendLine("  });")
-        js.AppendLine("  list.addEventListener('dragleave', function(e) {")
-        js.AppendLine("    if (!list.contains(e.relatedTarget)) {")
-        js.AppendLine("      var col = list.closest('.column');")
-        js.AppendLine("      col.classList.remove('drag-over');")
-        js.AppendLine("      col.classList.remove('drag-over-add');")
-        js.AppendLine("      clearIndicators(list);")
-        js.AppendLine("    }")
-        js.AppendLine("  });")
+        js.AppendLine("  list.addEventListener('dragover', function(e) { e.preventDefault(); ctrlHeld = e.ctrlKey; e.dataTransfer.dropEffect = ctrlHeld ? 'copy' : 'move'; var col = list.closest('.column'); col.classList.add('drag-over'); if (ctrlHeld) col.classList.add('drag-over-add'); else col.classList.remove('drag-over-add'); showDropIndicator(list, getDragAfterElement(list, e.clientY)); });")
+        js.AppendLine("  list.addEventListener('dragleave', function(e) { if (!list.contains(e.relatedTarget)) { var col = list.closest('.column'); col.classList.remove('drag-over'); col.classList.remove('drag-over-add'); clearIndicators(list); } });")
         js.AppendLine("  list.addEventListener('drop', function(e) {")
-        js.AppendLine("    e.preventDefault();")
-        js.AppendLine("    var isAddMode = e.ctrlKey;")
-        js.AppendLine("    ctrlHeld = e.ctrlKey;")
-        js.AppendLine("    var column = list.closest('.column');")
-        js.AppendLine("    column.classList.remove('drag-over');")
-        js.AppendLine("    column.classList.remove('drag-over-add');")
+        js.AppendLine("    e.preventDefault(); var isAddMode = e.ctrlKey; ctrlHeld = e.ctrlKey;")
+        js.AppendLine("    var column = list.closest('.column'); column.classList.remove('drag-over'); column.classList.remove('drag-over-add');")
         js.AppendLine("    var entryId = e.dataTransfer.getData('text/plain');")
         js.AppendLine("    var cardEl = document.querySelector('.card[data-entry-id=""' + CSS.escape(entryId) + '""]');")
         js.AppendLine("    if (!cardEl) return;")
         js.AppendLine("    var oldColumnId = cardEl.closest('.card-list').dataset.column;")
         js.AppendLine("    var newColumnId = list.dataset.column;")
         js.AppendLine("    clearAllIndicators();")
-        js.AppendLine()
-        js.AppendLine("    if (oldColumnId === newColumnId && !isAddMode) {")
-        js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
-        js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
-        js.AppendLine("      saveState();")
-        js.AppendLine("      return;")
-        js.AppendLine("    }")
-        js.AppendLine()
+        js.AppendLine("    if (oldColumnId === newColumnId && !isAddMode) { var after = getDragAfterElement(list, e.clientY); if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl); saveState(); return; }")
         js.AppendLine("    if (isAddMode) {")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
-        js.AppendLine("      if (card) {")
-        js.AppendLine("        var alreadyHas = card.allCategories && card.allCategories.some(function(ac) { return ac.name === newColumnId; });")
-        js.AppendLine("        if (alreadyHas) {")
-        js.AppendLine("          showToast('Already in ' + newColumnId);")
-        js.AppendLine("          return;")
-        js.AppendLine("        }")
-        js.AppendLine("      }")
+        js.AppendLine("      if (card && (card.isFlagged || card.isCompleted)) { var targetCol = COLUMNS.find(function(cc) { return cc.id === newColumnId; }); if (targetCol && targetCol.isFlaggedColumn && card.flagBucket === newColumnId) { showToast('Already in ' + newColumnId); return; } }")
+        js.AppendLine("      if (card && card.allCategories && card.allCategories.some(function(ac) { return ac.name === newColumnId; })) { showToast('Already in ' + newColumnId); return; }")
         js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'moveAdd', entryId: entryId, newCategory: newColumnId }));")
         js.AppendLine("      var addCol = COLUMNS.find(function(c) { return c.id === newColumnId; });")
         js.AppendLine("      showToast('+ Added to ' + (addCol ? addCol.title : newColumnId));")
         js.AppendLine("    } else {")
-        js.AppendLine("      var after = getDragAfterElement(list, e.clientY);")
-        js.AppendLine("      if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
-        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; });")
-        js.AppendLine("      if (card) card.category = newColumnId;")
-        js.AppendLine("      updateCounts();")
-        js.AppendLine("      saveState();")
+        js.AppendLine("      var after = getDragAfterElement(list, e.clientY); if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl);")
+        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === entryId; }); if (card) card.category = newColumnId;")
+        js.AppendLine("      updateCounts(); saveState();")
         js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'move', entryId: entryId, newCategory: newColumnId }));")
         js.AppendLine("      var newCol = COLUMNS.find(function(c) { return c.id === newColumnId; });")
         js.AppendLine("      showToast('Moved to ' + (newCol ? newCol.title : newColumnId));")
@@ -2250,126 +2821,61 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("function getDragAfterElement(list, y) {")
-        js.AppendLine("  var els = Array.from(list.querySelectorAll('.card:not(.dragging)'));")
-        js.AppendLine("  var closest = null, closestOffset = Number.POSITIVE_INFINITY;")
-        js.AppendLine("  els.forEach(function(child) {")
-        js.AppendLine("    var box = child.getBoundingClientRect();")
-        js.AppendLine("    var offset = y - box.top - box.height / 2;")
-        js.AppendLine("    if (offset < 0 && -offset < closestOffset) { closestOffset = -offset; closest = child; }")
-        js.AppendLine("  });")
-        js.AppendLine("  return closest;")
-        js.AppendLine("}")
-        js.AppendLine()
-        js.AppendLine("function showDropIndicator(list, after) {")
-        js.AppendLine("  clearIndicators(list);")
-        js.AppendLine("  var ind = document.createElement('div');")
-        js.AppendLine("  ind.className = 'drop-indicator visible' + (ctrlHeld ? ' add-mode' : '');")
-        js.AppendLine("  if (after) list.insertBefore(ind, after); else list.appendChild(ind);")
-        js.AppendLine("}")
+        js.AppendLine("function getDragAfterElement(list, y) { var els = Array.from(list.querySelectorAll('.card:not(.dragging)')); var closest = null, closestOffset = Number.POSITIVE_INFINITY; els.forEach(function(child) { var box = child.getBoundingClientRect(); var offset = y - box.top - box.height / 2; if (offset < 0 && -offset < closestOffset) { closestOffset = -offset; closest = child; } }); return closest; }")
+        js.AppendLine("function showDropIndicator(list, after) { clearIndicators(list); var ind = document.createElement('div'); ind.className = 'drop-indicator visible' + (ctrlHeld ? ' add-mode' : ''); if (after) list.insertBefore(ind, after); else list.appendChild(ind); }")
         js.AppendLine("function clearIndicators(list) { list.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); }); }")
-        js.AppendLine("function clearAllIndicators() {")
-        js.AppendLine("  document.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); });")
-        js.AppendLine("  document.querySelectorAll('.column.drag-over').forEach(function(el) { el.classList.remove('drag-over'); });")
-        js.AppendLine("  document.querySelectorAll('.column.drag-over-add').forEach(function(el) { el.classList.remove('drag-over-add'); });")
-        js.AppendLine("}")
+        js.AppendLine("function clearAllIndicators() { document.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); }); document.querySelectorAll('.column.drag-over').forEach(function(el) { el.classList.remove('drag-over'); }); document.querySelectorAll('.column.drag-over-add').forEach(function(el) { el.classList.remove('drag-over-add'); }); }")
         js.AppendLine()
-        js.AppendLine("function updateCounts() {")
-        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl) {")
-        js.AppendLine("    var list = colEl.querySelector('.card-list');")
-        js.AppendLine("    if (!list) return;")
-        js.AppendLine("    var count = list.querySelectorAll('.card:not(.hidden)').length;")
-        js.AppendLine("    var countEl = colEl.querySelector('.count');")
-        js.AppendLine("    if (countEl) countEl.textContent = count;")
-        js.AppendLine("  });")
-        js.AppendLine("}")
+        js.AppendLine("function updateCounts() { document.querySelectorAll('.column').forEach(function(colEl) { var list = colEl.querySelector('.card-list'); if (!list) return; var count = list.querySelectorAll('.card:not(.hidden)').length; var countEl = colEl.querySelector('.count'); if (countEl) countEl.textContent = count; }); }")
         js.AppendLine()
-        js.AppendLine("// --- Toast ---")
-        js.AppendLine("function showToast(message) {")
-        js.AppendLine("  var container = document.getElementById('toastContainer');")
-        js.AppendLine("  var toast = document.createElement('div'); toast.className = 'toast'; toast.textContent = message;")
-        js.AppendLine("  container.appendChild(toast);")
-        js.AppendLine("  setTimeout(function() { toast.classList.add('fade-out'); setTimeout(function() { toast.remove(); }, 300); }, 2500);")
-        js.AppendLine("}")
+        js.AppendLine("function showToast(message) { var container = document.getElementById('toastContainer'); var toast = document.createElement('div'); toast.className = 'toast'; toast.textContent = message; container.appendChild(toast); setTimeout(function() { toast.classList.add('fade-out'); setTimeout(function() { toast.remove(); }, 300); }, 2500); }")
         js.AppendLine()
-        js.AppendLine("// --- Search & Filter ---")
+        ' --- Search & Filter ---
         js.AppendLine("document.getElementById('searchInput').addEventListener('input', applySearchFilter);")
-        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', function() {")
-        js.AppendLine("  applySearchFilter();")
-        js.AppendLine("  var val = document.getElementById('columnFilter').value;")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setColumnFilter', filter: val }));")
-        js.AppendLine("});")
+        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', function() { applySearchFilter(); var val = document.getElementById('columnFilter').value; window.chrome.webview.postMessage(JSON.stringify({ action: 'setColumnFilter', filter: val })); });")
         js.AppendLine()
         js.AppendLine("function applySearchFilter() {")
         js.AppendLine("  var query = document.getElementById('searchInput').value.toLowerCase().trim();")
         js.AppendLine("  var colFilter = document.getElementById('columnFilter').value;")
-        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl) {")
-        js.AppendLine("    var colId = colEl.dataset.column;")
-        js.AppendLine("    colEl.style.display = (colFilter === 'all' || colFilter === colId) ? '' : 'none';")
-        js.AppendLine("  });")
+        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl) { var colId = colEl.dataset.column; colEl.style.display = (colFilter === 'all' || colFilter === colId) ? '' : 'none'; });")
         js.AppendLine("  document.querySelectorAll('.card').forEach(function(cardEl) {")
-        js.AppendLine("    var card = cards.find(function(c) { return c.entryId === cardEl.dataset.entryId; });")
-        js.AppendLine("    if (!card) return;")
+        js.AppendLine("    var card = cards.find(function(c) { return c.entryId === cardEl.dataset.entryId; }); if (!card) return;")
         js.AppendLine("    if (!query) { cardEl.classList.remove('hidden'); return; }")
-        js.AppendLine("    var match = (card.subject || '').toLowerCase().indexOf(query) >= 0 ||")
-        js.AppendLine("                (card.senderName || '').toLowerCase().indexOf(query) >= 0 ||")
-        js.AppendLine("                (card.senderEmail || '').toLowerCase().indexOf(query) >= 0;")
+        js.AppendLine("    var match = (card.subject || '').toLowerCase().indexOf(query) >= 0 || (card.senderName || '').toLowerCase().indexOf(query) >= 0 || (card.senderEmail || '').toLowerCase().indexOf(query) >= 0;")
         js.AppendLine("    if (match) cardEl.classList.remove('hidden'); else cardEl.classList.add('hidden');")
         js.AppendLine("  });")
         js.AppendLine("  updateCounts();")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Messages from VB.NET ---")
+        ' --- Messages from VB.NET ---
         js.AppendLine("if (window.chrome && window.chrome.webview) {")
         js.AppendLine("  window.chrome.webview.addEventListener('message', function(event) {")
         js.AppendLine("    var msg = (typeof event.data === 'string') ? JSON.parse(event.data) : event.data;")
         js.AppendLine("    if (msg.action === 'updateSummary') {")
-        js.AppendLine("      var summaryEls = document.querySelectorAll('.card-summary');")
-        js.AppendLine("      summaryEls.forEach(function(el) {")
-        js.AppendLine("        if (el.dataset.entryId === msg.entryId) {")
-        js.AppendLine("          if (msg.summary) { el.textContent = msg.summary; el.classList.remove('loading'); }")
-        js.AppendLine("          else { el.textContent = 'Generating summary\u2026'; el.classList.add('loading'); }")
-        js.AppendLine("        }")
-        js.AppendLine("      });")
-        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; });")
-        js.AppendLine("      if (card) card.summary = msg.summary;")
+        js.AppendLine("      document.querySelectorAll('.card-summary').forEach(function(el) { if (el.dataset.entryId === msg.entryId) { if (msg.summary) { el.textContent = msg.summary; el.classList.remove('loading'); } else { el.textContent = 'Generating summary\u2026'; el.classList.add('loading'); } } });")
+        js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; }); if (card) card.summary = msg.summary;")
         js.AppendLine("    } else if (msg.action === 'removeCard') {")
-        js.AppendLine("      document.querySelectorAll('.card').forEach(function(el) {")
-        js.AppendLine("        if (el.dataset.entryId === msg.entryId) el.remove();")
-        js.AppendLine("      });")
-        js.AppendLine("      updateCounts();")
-        js.AppendLine("      cards = cards.filter(function(c) { return c.entryId !== msg.entryId; });")
-        js.AppendLine("      showToast('Category removed');")
+        js.AppendLine("      document.querySelectorAll('.card').forEach(function(el) { if (el.dataset.entryId === msg.entryId) el.remove(); });")
+        js.AppendLine("      updateCounts(); cards = cards.filter(function(c) { return c.entryId !== msg.entryId; }); showToast('Category removed');")
         js.AppendLine("    } else if (msg.action === 'reloadData') {")
-        js.AppendLine("      var d = (typeof msg.data === 'string') ? JSON.parse(msg.data) : msg.data;")
-        js.AppendLine("      init(d);")
-        js.AppendLine("      showToast('Board reloaded');")
+        js.AppendLine("      var d = (typeof msg.data === 'string') ? JSON.parse(msg.data) : msg.data; init(d); showToast('Board reloaded');")
         js.AppendLine("    } else if (msg.action === 'updateCard') {")
         js.AppendLine("      var card = cards.find(function(c) { return c.entryId === msg.entryId; });")
-        js.AppendLine("      if (card) {")
-        js.AppendLine("        card.category = msg.category;")
-        js.AppendLine("        card.categoryColor = msg.categoryColor;")
-        js.AppendLine("        card.allCategories = msg.allCategories || [];")
-        js.AppendLine("      }")
+        js.AppendLine("      if (card) { card.category = msg.category; card.categoryColor = msg.categoryColor; card.allCategories = msg.allCategories || [];")
+        js.AppendLine("        card.isFlagged = msg.isFlagged || false; card.isCompleted = msg.isCompleted || false;")
+        js.AppendLine("        card.flagRequest = msg.flagRequest || ''; card.flagDueDate = msg.flagDueDate || '';")
+        js.AppendLine("        card.flagBucket = msg.flagBucket || ''; }")
         js.AppendLine("      renderBoard();")
         js.AppendLine("    }")
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("// --- Init (deferred to ensure WebView2 completes first paint) ---")
+        ' --- Init ---
         js.AppendLine("function startBoard() {")
         js.AppendLine("  try { initTheme(); } catch(e) { console.error('initTheme error:', e); }")
-        js.AppendLine("  requestAnimationFrame(function() {")
-        js.AppendLine("    requestAnimationFrame(function() {")
-        js.AppendLine("      init(INIT_DATA);")
-        js.AppendLine("    });")
-        js.AppendLine("  });")
+        js.AppendLine("  requestAnimationFrame(function() { requestAnimationFrame(function() { init(INIT_DATA); }); });")
         js.AppendLine("}")
-        js.AppendLine("if (document.readyState === 'loading') {")
-        js.AppendLine("  document.addEventListener('DOMContentLoaded', startBoard);")
-        js.AppendLine("} else {")
-        js.AppendLine("  startBoard();")
-        js.AppendLine("}")
+        js.AppendLine("if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', startBoard); } else { startBoard(); }")
 
         Return js.ToString()
     End Function
