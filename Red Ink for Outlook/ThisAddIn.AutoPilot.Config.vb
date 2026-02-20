@@ -226,8 +226,9 @@ Partial Public Class ThisAddIn
             "Mails from these senders will be auto-replied without approval." & vbCrLf &
             "All others will require your approval before sending." & vbCrLf & vbCrLf &
             "Examples:" & vbCrLf &
-            "  @mycompany.com" & vbCrLf &
-            "  trusted.partner@example.com" & vbCrLf & vbCrLf &
+            "  *@mycompany.com              — all senders from this domain" & vbCrLf &
+            "  trusted.partner@example.com  — specific sender" & vbCrLf &
+            "  *@*.example.com              — all subdomains" & vbCrLf & vbCrLf &
             "Leave empty to require approval for all senders.",
             $"{AN6} AutoPilot — Whitelist", False, defaultWhitelist)
         If whitelistInput Is Nothing Then Return Nothing
@@ -236,6 +237,11 @@ Partial Public Class ThisAddIn
             For Each line In whitelistInput.Split({vbCrLf, vbLf}, StringSplitOptions.RemoveEmptyEntries)
                 Dim trimmed = line.Trim()
                 If trimmed.Length > 0 AndAlso Not trimmed.StartsWith(";") Then
+                    ' Auto-correct bare @domain patterns: @domain.com → *@domain.com
+                    ' (bare @domain would fail WildcardMatch since it anchors with ^ and $)
+                    If trimmed.StartsWith("@") Then
+                        trimmed = "*" & trimmed
+                    End If
                     config.WhitelistedSenders.Add(trimmed)
                 End If
             Next
