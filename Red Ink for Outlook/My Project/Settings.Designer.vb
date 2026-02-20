@@ -449,6 +449,66 @@ Namespace My
                 Me("InboxBoardColumnOrder") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InkyPlay_HighScores() As String
+            Get
+                Return CType(Me("InkyPlay_HighScores"),String)
+            End Get
+            Set
+                Me("InkyPlay_HighScores") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property InboxBoardIncludeFlagged() As Boolean
+            Get
+                Return CType(Me("InboxBoardIncludeFlagged"),Boolean)
+            End Get
+            Set
+                Me("InboxBoardIncludeFlagged") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property InboxBoardHideDoneFlags() As Boolean
+            Get
+                Return CType(Me("InboxBoardHideDoneFlags"),Boolean)
+            End Get
+            Set
+                Me("InboxBoardHideDoneFlags") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property InboxBoardGroupFlagsByDate() As Boolean
+            Get
+                Return CType(Me("InboxBoardGroupFlagsByDate"),Boolean)
+            End Get
+            Set
+                Me("InboxBoardGroupFlagsByDate") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardPinnedFlagColumns() As String
+            Get
+                Return CType(Me("InboxBoardPinnedFlagColumns"),String)
+            End Get
+            Set
+                Me("InboxBoardPinnedFlagColumns") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
