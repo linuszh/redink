@@ -346,7 +346,10 @@ Partial Public Class ThisAddIn
                                       End Try
                                       Return Nothing
                                   End Function)
-            If mi Is Nothing Then Return
+            If mi Is Nothing Then
+                ApDashboardLog("SKIP (could not resolve mail item from EntryID — may have been moved or is not a MailItem)", "warn")
+                Return
+            End If
 
             ' Mailbox filter
             If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
@@ -369,13 +372,16 @@ Partial Public Class ThisAddIn
                 Catch
                 End Try
                 If Not _apConfig.MonitoredMailbox.Equals(recipientAddress, StringComparison.OrdinalIgnoreCase) Then
-                    ApDashboardLog("SKIP (wrong mailbox: " & recipientAddress & ")", "step")
+                    ApDashboardLog("SKIP (wrong mailbox: " & If(String.IsNullOrWhiteSpace(recipientAddress), "(empty)", recipientAddress) & ")", "step")
                     Return
                 End If
             End If
 
             Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
-            If mailInfo Is Nothing Then Return
+            If mailInfo Is Nothing Then
+                ApDashboardLog("SKIP (ExtractMailInfo returned Nothing — COM error or unexpected mail format)", "warn")
+                Return
+            End If
 
             ' ── Filter checks ──
 

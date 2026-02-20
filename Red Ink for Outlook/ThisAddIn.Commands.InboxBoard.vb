@@ -259,6 +259,7 @@ Partial Public Class ThisAddIn
 
 #End Region
 
+
 #Region "InboxBoard Entry Point"
 
     ''' <summary>
@@ -278,10 +279,7 @@ Partial Public Class ThisAddIn
 
             ' 2. Build column definitions from Outlook categories
             Dim columns As List(Of InboxBoardColumn) = BuildBoardColumns(mails)
-            If columns Is Nothing OrElse columns.Count = 0 Then
-                ShowCustomMessageBox("No categories found.", $"{AN} - Inbox Board")
-                Return
-            End If
+            If columns Is Nothing Then columns = New List(Of InboxBoardColumn)()
 
             ' 3. Show the board
             ShowInboxBoardForm(mails, columns)
@@ -320,6 +318,9 @@ Partial Public Class ThisAddIn
         Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
 
         ' Count qualifying mails (manual check to avoid Restrict miscounting)
+        ' Note: Flagged mails are ALWAYS counted here regardless of the includeFlagged
+        ' toggle, so the board opens when flagged mails exist. The toggle only controls
+        ' whether flagged mails are *displayed* (via BuildInboxBoardEntry/BuildBoardColumns).
         Dim totalQualifying As Integer = 0
         For i As Integer = 1 To totalItems
             Try
@@ -333,7 +334,10 @@ Partial Public Class ThisAddIn
                 Dim hasCats As Boolean = Not String.IsNullOrWhiteSpace(cats)
 
                 Dim qualifies As Boolean = hasCats
-                If Not qualifies AndAlso includeFlagged Then
+                If Not qualifies Then
+                    ' Always count flagged mails so the board can open.
+                    ' The includeFlagged toggle only affects display, not whether
+                    ' the board launches.
                     Dim flagStatus As Integer = 0
                     Try : flagStatus = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus)) : Catch : End Try
                     ' olFlagMarked = 2, olFlagComplete = 1
@@ -350,8 +354,29 @@ Partial Public Class ThisAddIn
         Next
 
         If totalQualifying = 0 Then
-            ShowCustomMessageBox("No categorized mails found in the Inbox.", $"{AN} - Inbox Board")
-            Return Nothing
+            ' Also allow the board to open if there are pinned columns
+            ' (even with zero qualifying mails, empty columns are useful as drop targets)
+            Dim hasPinnedColumns As Boolean = False
+            Try
+                Dim pinned As String = If(My.Settings.InboxBoardColumns, "")
+                If Not String.IsNullOrEmpty(pinned) Then hasPinnedColumns = True
+            Catch
+            End Try
+
+            Dim hasPinnedFlagColumns As Boolean = False
+            Try
+                Dim pinnedFlags As String = If(My.Settings.InboxBoardPinnedFlagColumns, "")
+                If Not String.IsNullOrEmpty(pinnedFlags) Then hasPinnedFlagColumns = True
+            Catch
+            End Try
+
+            If Not hasPinnedColumns AndAlso Not hasPinnedFlagColumns Then
+                ShowCustomMessageBox("No categorized or flagged mails found in the Inbox.", $"{AN} - Inbox Board")
+                Return Nothing
+            End If
+
+            ' Return an empty list — the board will show pinned columns with no cards
+            Return New List(Of InboxBoardEntry)()
         End If
 
         Dim maxToLoad As Integer = totalQualifying
