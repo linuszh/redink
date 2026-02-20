@@ -491,6 +491,7 @@ Partial Class Ribbon2
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
+        Me.RI_OpenChat = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
@@ -539,6 +540,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
         Me.Menu1.Items.Add(Me.RI_AutoPilot)
+        Me.Menu1.Items.Add(Me.RI_OpenChat)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
         Me.Menu1.KeyTip = "S"
@@ -726,6 +728,14 @@ Partial Class Ribbon2
         Me.RI_AutoPilot.ScreenTip = "Starts the feature that allows Inky to respond to defined emails automatically."
         Me.RI_AutoPilot.ShowImage = True
         '
+        'RI_OpenChat
+        '
+        Me.RI_OpenChat.Label = "Open Local Chat"
+        Me.RI_OpenChat.Name = "RI_OpenChat"
+        Me.RI_OpenChat.OfficeImageId = "TechnicalSupport"
+        Me.RI_OpenChat.ScreenTip = "Opens the local chat bot in your browser"
+        Me.RI_OpenChat.ShowImage = True
+        '
         'RI_HelpMe
         '
         Me.RI_HelpMe.Label = "Help me, Inky"
@@ -865,6 +875,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton
+    Friend WithEvents RI_OpenChat As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
     Friend WithEvents RI_CompareSelected As RibbonButton
 End Class

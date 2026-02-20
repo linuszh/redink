@@ -186,12 +186,29 @@ Partial Public Class ThisAddIn
             docToCompare = indexToDoc(chosenIdx)
         End If
 
+        ' Delegate to the shared comparison + display helper
+        CompareDocumentsAndShowResult(wordApp, activeDoc, docToCompare)
+    End Sub
+
+    ''' <summary>
+    ''' Performs document comparison between originalDoc and revisedDoc, exports the result to
+    ''' filtered HTML, and displays it in the HTML viewer with action buttons including
+    ''' "Switch Direction" to re-compare with swapped documents.
+    ''' </summary>
+    ''' <param name="wordApp">The Word application instance.</param>
+    ''' <param name="originalDoc">The document treated as the original (baseline).</param>
+    ''' <param name="revisedDoc">The document treated as the revised version.</param>
+    Private Shared Sub CompareDocumentsAndShowResult(
+        wordApp As Microsoft.Office.Interop.Word.Application,
+        originalDoc As Microsoft.Office.Interop.Word.Document,
+        revisedDoc As Microsoft.Office.Interop.Word.Document)
+
         ' Store document names for PDF naming
-        Dim originalDocName As String = Path.GetFileNameWithoutExtension(If(activeDoc.Name, "Original"))
-        Dim revisedDocName As String = Path.GetFileNameWithoutExtension(If(docToCompare.Name, "Revised"))
+        Dim originalDocName As String = Path.GetFileNameWithoutExtension(If(originalDoc.Name, "Original"))
+        Dim revisedDocName As String = Path.GetFileNameWithoutExtension(If(revisedDoc.Name, "Revised"))
         Dim originalDocPath As String = Nothing
         Try
-            originalDocPath = activeDoc.Path
+            originalDocPath = originalDoc.Path
         Catch
         End Try
 
@@ -217,8 +234,8 @@ Partial Public Class ThisAddIn
 
             ' Create comparison document
             compareDoc = wordApp.CompareDocuments(
-                OriginalDocument:=activeDoc,
-                RevisedDocument:=docToCompare,
+                OriginalDocument:=originalDoc,
+                RevisedDocument:=revisedDoc,
                 Destination:=WdCompareDestination.wdCompareDestinationNew,
                 Granularity:=WdGranularity.wdGranularityWordLevel,
                 CompareFormatting:=True,
@@ -278,6 +295,8 @@ Partial Public Class ThisAddIn
 
             ' Capture references for closures
             Dim capturedWordApp As Microsoft.Office.Interop.Word.Application = wordApp
+            Dim capturedOriginalDoc As Microsoft.Office.Interop.Word.Document = originalDoc
+            Dim capturedRevisedDoc As Microsoft.Office.Interop.Word.Document = revisedDoc
             Dim capturedOriginalDocName As String = originalDocName
             Dim capturedRevisedDocName As String = revisedDocName
             Dim capturedOriginalDocPath As String = originalDocPath
@@ -294,6 +313,12 @@ Partial Public Class ThisAddIn
 
             ' Build additional buttons array
             Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
+
+            ' Switch Direction button (⇄ icon via Unicode)
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "⇄",
+                Sub() CompareDocumentsAndShowResult(capturedWordApp, capturedRevisedDoc, capturedOriginalDoc),
+                True))
 
             ' Summarize Changes button
             If Not String.IsNullOrWhiteSpace(extractedChangesText) Then
@@ -407,7 +432,9 @@ Partial Public Class ThisAddIn
                     End Sub
 
             ' Show result with all buttons - cleanup happens when dialog closes
-            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
+            ' Title includes direction hint: Original → Revised
+            Dim directionHint As String = $" ({capturedOriginalDocName} → {capturedRevisedDocName})"
+            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare{directionHint}", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
 
         Catch ex As System.Exception
             ' Safety close on error
