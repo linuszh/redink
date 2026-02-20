@@ -464,7 +464,7 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
         Public Property InboxBoardIncludeFlagged() As Boolean
             Get
                 Return CType(Me("InboxBoardIncludeFlagged"),Boolean)
@@ -476,7 +476,7 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
         Public Property InboxBoardHideDoneFlags() As Boolean
             Get
                 Return CType(Me("InboxBoardHideDoneFlags"),Boolean)
@@ -488,7 +488,7 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+         Global.System.Configuration.DefaultSettingValueAttribute("True")>  _
         Public Property InboxBoardGroupFlagsByDate() As Boolean
             Get
                 Return CType(Me("InboxBoardGroupFlagsByDate"),Boolean)
