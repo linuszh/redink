@@ -722,10 +722,10 @@ Partial Class Ribbon2
         '
         'RI_AutoPilot
         '
-        Me.RI_AutoPilot.Label = "AutoPilot"
+        Me.RI_AutoPilot.Label = "AutoPilot (Experts Only)"
         Me.RI_AutoPilot.Name = "RI_AutoPilot"
         Me.RI_AutoPilot.OfficeImageId = "ResourcePoolRefresh"
-        Me.RI_AutoPilot.ScreenTip = "Starts the feature that allows Inky to respond to defined emails automatically."
+        Me.RI_AutoPilot.ScreenTip = "Starts the feature that allows Inky to respond to defined emails automatically (use only if you know what you are doing)."
         Me.RI_AutoPilot.ShowImage = True
         '
         'RI_OpenChat
