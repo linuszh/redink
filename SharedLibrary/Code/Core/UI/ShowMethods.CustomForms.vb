@@ -815,8 +815,11 @@ Namespace SharedLibrary
             messageForm.Controls.Add(mainLayout)
 
             ' Calculate final form size.
+            ' Account for the bodyScrollPanel internal padding (top PADDING + bottom BUTTON_GAP)
+            ' plus the bodyLabel offset within the panel, to ensure the last wrapped line is visible.
+            Dim bodyScrollPaddingV As Integer = bodyScrollPanel.Padding.Vertical  ' PADDING + BUTTON_GAP = 30
             Dim clientWidth As Integer = Math.Max(MIN_WIDTH, targetWidth) - chromeWidth
-            Dim clientHeight As Integer = bodyPanelHeight + buttonPanelHeight + PADDING + BUTTON_GAP
+            Dim clientHeight As Integer = bodyPanelHeight + bodyScrollPaddingV + buttonPanelHeight + PADDING + BUTTON_GAP
 
             messageForm.ClientSize = New Size(clientWidth, clientHeight)
 

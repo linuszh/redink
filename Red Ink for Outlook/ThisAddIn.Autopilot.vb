@@ -259,6 +259,8 @@ Partial Public Class ThisAddIn
         ApDashboardLog($"Mode: {If(config.RequireApprovalForNonWhitelisted, "CoPilot (approval for non-whitelisted)", "AutoPilot (auto-send all)")}", "info")
         ApDashboardLog("Watching for new mail...", "info")
 
+        CatchUpMissedMails()
+
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
         Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
     End Sub
@@ -267,6 +269,251 @@ Partial Public Class ThisAddIn
     Private Sub AutoPilot_DashboardCancelRequested(sender As Object, e As EventArgs)
         StopAutoPilot()
     End Sub
+
+    ''' <summary>
+    ''' Scans the Inbox (or monitored folder) for mails that arrived after the last
+    ''' processed timestamp, applies the full filter/trigger logic, and shows a
+    ''' preview dialog where the operator can check/uncheck individual mails.
+    ''' Only mails that have NOT already been processed (no AP_CategoryName tag) are shown.
+    ''' </summary>
+    Private Sub CatchUpMissedMails()
+        Try
+            Dim lastProcessed As DateTime = My.Settings.AP_LastProcessedTime
+            Dim isFirstRun As Boolean = False
+
+            If lastProcessed = DateTime.MinValue OrElse lastProcessed = New DateTime(1, 1, 1) Then
+                ' No previous session timestamp — default to 24 hours ago in local time.
+                ' We use local time directly because MailItem.ReceivedTime is always local,
+                ' and we want exactly 24 hours of local-time coverage.
+                lastProcessed = DateTime.Now.AddHours(-24)
+                isFirstRun = True
+                ApDashboardLog("No previous session timestamp — scanning last 24 hours for relevant mails.", "info")
+            End If
+
+            ' For persisted values: ensure we treat the stored value as UTC
+            ' (it was saved as DateTime.UtcNow) and convert to local for comparison.
+            ' For the first-run fallback: already local, skip conversion.
+            Dim lastProcessedLocal As DateTime
+            If isFirstRun Then
+                lastProcessedLocal = lastProcessed
+            Else
+                If lastProcessed.Kind = DateTimeKind.Unspecified Then
+                    lastProcessed = DateTime.SpecifyKind(lastProcessed, DateTimeKind.Utc)
+                End If
+                lastProcessedLocal = lastProcessed.ToLocalTime()
+            End If
+
+            lastProcessedLocal = DateTime.Now.AddHours(-24)
+
+            If isFirstRun Then
+                ApDashboardLog($"Scanning for mails received after: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local)", "info")
+            Else
+                ApDashboardLog($"Last processed: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local) / {lastProcessed:yyyy-MM-dd HH:mm:ss} (UTC)", "info")
+            End If
+            ApDashboardLog("Scanning inbox for newer mails...", "info")
+
+            Dim ns = Application.GetNamespace("MAPI")
+            Dim inbox As MAPIFolder = Nothing
+
+            ' Resolve the correct inbox when a specific mailbox is monitored
+            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Try
+                    For i As Integer = 1 To ns.Accounts.Count
+                        Dim acct = ns.Accounts(i)
+                        If acct.SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then
+                            Dim deliveryStore = acct.DeliveryStore
+                            If deliveryStore IsNot Nothing Then
+                                inbox = deliveryStore.GetDefaultFolder(OlDefaultFolders.olFolderInbox)
+                            End If
+                            Exit For
+                        End If
+                    Next
+                Catch
+                End Try
+            End If
+
+            ' Fallback to default inbox
+            If inbox Is Nothing Then
+                inbox = ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox)
+            End If
+
+            ' Sort descending so we process newest first and can stop early
+            ' once we hit mails older than lastProcessedLocal.
+            Dim allItems = inbox.Items
+            allItems.Sort("[ReceivedTime]", Descending:=True)
+
+            Dim candidates As New List(Of CatchUpCandidate)()
+            Dim skippedAlreadyProcessed As Integer = 0
+            Dim skippedOther As Integer = 0
+            Dim totalScanned As Integer = 0
+
+            For Each item As Object In allItems
+                If Not TypeOf item Is MailItem Then Continue For
+                Dim mi = DirectCast(item, MailItem)
+                Try
+
+                    ' MailItem.ReceivedTime is always local time.
+                    ' Stop scanning once we've gone past the cutoff.
+                    If mi.ReceivedTime <= lastProcessedLocal Then
+                        Exit For
+                    End If
+
+                    totalScanned += 1
+
+                    ' 1. Skip our own auto-replies (header on the mail itself)
+                    Try
+                        Dim prop = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
+                        If prop IsNot Nothing AndAlso prop.ToString() = AP_LoopHeaderValue Then
+                            Continue For
+                        End If
+                    Catch
+                    End Try
+
+                    ' 2. Skip mails tagged with AP category (fast check, kept as fallback)
+                    Try
+                        Dim cats = mi.Categories
+                        If cats IsNot Nothing AndAlso cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            skippedAlreadyProcessed += 1
+                            Continue For
+                        End If
+                    Catch
+                    End Try
+
+                    ' 3. Skip mails already replied to by AutoPilot — walk the conversation
+                    '    to find any reply with the X-RedInk-AutoReply header.
+                    '    This is the authoritative check and does not depend on the category tag.
+                    Try
+                        If IsPartOfAutoPilotConversation(mi) Then
+                            skippedAlreadyProcessed += 1
+                            Continue For
+                        End If
+                    Catch
+                    End Try
+
+                    ' Full pre-filter: same logic as ProcessIncomingMailAsync
+                    Dim mailInfo = ExtractMailInfo(mi)
+                    If mailInfo Is Nothing Then Continue For
+                    If mailInfo.HasAutoReplyHeader Then Continue For
+                    If IsAutoReplyOrOof(mailInfo) Then
+                        skippedOther += 1
+                        Continue For
+                    End If
+                    If Not MatchesFilterRules(mailInfo) Then
+                        skippedOther += 1
+                        Continue For
+                    End If
+                    If MatchesNegativeFilters(mailInfo) Then
+                        skippedOther += 1
+                        Continue For
+                    End If
+
+                    ' Subject trigger word check
+                    If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
+                        If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                            skippedOther += 1
+                            Continue For
+                        End If
+                    End If
+
+                    candidates.Add(New CatchUpCandidate() With {
+                        .EntryID = mi.EntryID,
+                        .SenderName = mailInfo.SenderName,
+                        .SenderEmail = mailInfo.SenderEmail,
+                        .Subject = mailInfo.Subject,
+                        .ReceivedTime = mailInfo.ReceivedTime
+                    })
+                Finally
+                    Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                End Try
+            Next
+
+            ApDashboardLog($"Scan complete: {totalScanned} mail(s) scanned, {skippedAlreadyProcessed} already processed, {skippedOther} filtered out.", "step")
+
+            If candidates.Count = 0 Then
+                ApDashboardLog("No missed mails found matching filters.", "step")
+                Return
+            End If
+
+            ' Re-sort candidates oldest-first for processing order
+            candidates.Sort(Function(a, b) a.ReceivedTime.CompareTo(b.ReceivedTime))
+
+            ApDashboardLog($"Found {candidates.Count} unprocessed mail(s) matching filters.", "info")
+
+            ' Show preview dialog using MultiModelSelectorForm pattern
+            Dim selectedEntryIds = ShowCatchUpPreviewDialog(candidates, lastProcessed)
+
+            If selectedEntryIds IsNot Nothing AndAlso selectedEntryIds.Count > 0 Then
+                For Each entryId In selectedEntryIds
+                    _apMailQueue.Enqueue(entryId)
+                Next
+                ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} missed mail(s) for processing.", "info")
+            Else
+                ApDashboardLog("Operator skipped catch-up processing.", "step")
+            End If
+
+        Catch ex As System.Exception
+            ApDashboardLog($"Catch-up scan error: {ex.Message}", "warn")
+            Debug.WriteLine($"[AutoPilot] CatchUpMissedMails error: {ex}")
+        End Try
+    End Sub
+
+    ''' <summary>Data class for catch-up preview items.</summary>
+    Private Class CatchUpCandidate
+        Public Property EntryID As String
+        Public Property SenderName As String
+        Public Property SenderEmail As String
+        Public Property Subject As String
+        Public Property ReceivedTime As DateTime
+
+        ''' <summary>Returns a display label for the checked list box.</summary>
+        Public Function ToDisplayLabel() As String
+            Dim timeStr = ReceivedTime.ToString("yyyy-MM-dd HH:mm")
+            Dim senderStr = If(Not String.IsNullOrWhiteSpace(SenderName), SenderName, SenderEmail)
+            Dim subjectStr = If(Subject.Length > 60, Subject.Substring(0, 57) & "...", Subject)
+            Return $"[{timeStr}]  {senderStr}  —  {subjectStr}"
+        End Function
+    End Class
+
+    ''' <summary>
+    ''' Shows a preview dialog listing all catch-up candidate mails with checkboxes.
+    ''' All items are pre-checked. The operator can uncheck mails to exclude them.
+    ''' Returns the list of EntryIDs for checked items, or Nothing if cancelled.
+    ''' </summary>
+    Private Function ShowCatchUpPreviewDialog(candidates As List(Of CatchUpCandidate), lastProcessed As DateTime) As List(Of String)
+        ' Build ModelConfig list to feed into MultiModelSelectorForm
+        ' We repurpose ModelDescription as the display label and Model as the EntryID
+        Dim items As New List(Of ModelConfig)()
+        For Each c In candidates
+            items.Add(New ModelConfig() With {
+                .ModelDescription = c.ToDisplayLabel(),
+                .Model = c.EntryID
+            })
+        Next
+
+        ' Pre-select all items by their display labels
+        Dim allLabels = items.Select(Function(m) m.ModelDescription).ToList()
+
+        Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
+            items, Nothing,
+            title:=$"{AN6} AutoPilot — Catch-Up ({candidates.Count} mail(s) since {lastProcessed:yyyy-MM-dd HH:mm})",
+            resetChecked:=False,
+            preselectMany:=allLabels,
+            instruction:=$"The following {candidates.Count} mail(s) arrived while AutoPilot was inactive. Select the mails to process:")
+
+            ' Center on screen since there is no parent form in this context
+            dlg.StartPosition = FormStartPosition.CenterScreen
+
+            If dlg.ShowDialog() = DialogResult.OK Then
+                Dim selected = dlg.SelectedModels
+                If selected IsNot Nothing AndAlso selected.Count > 0 Then
+                    Return selected.Select(Function(m) m.Model).ToList()
+                End If
+                Return New List(Of String)()
+            End If
+        End Using
+
+        Return Nothing
+    End Function
 
     ''' <summary>Queues newly received mail entry IDs for processing.</summary>
     Private Sub AutoPilot_NewMailEx(ByVal EntryIDCollection As String)
@@ -573,20 +820,23 @@ Partial Public Class ThisAddIn
                     Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
                     If approved Then
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                        Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail)
+                        RecordLastProcessedTime()
                         ApDashboardLog("✓ APPROVED & SENT reply to: " & mailInfo.SenderEmail, "info")
                     Else
                         ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
                     End If
                 Else
                     Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
+                    Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordLastProcessedTime()
                     TrackAutoPilotConversation(mi)
                     ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
                 End If
-
             Finally
                 ' ── SECURITY: Clean up temp directory ──
                 Try
@@ -617,6 +867,26 @@ Partial Public Class ThisAddIn
                 att.CachedDocxHint = Nothing
             Next
         End If
+    End Sub
+
+    ''' <summary>
+    ''' Tags the original incoming mail with the AP_CategoryName category so that
+    ''' the catch-up scan can identify it as already processed.
+    ''' </summary>
+    Private Sub TagOriginalMailAsProcessed(mi As MailItem)
+        Try
+            Dim existing = mi.Categories
+            If String.IsNullOrWhiteSpace(existing) Then
+                mi.Categories = AP_CategoryName
+            ElseIf existing.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) < 0 Then
+                mi.Categories = existing & ", " & AP_CategoryName
+            Else
+                Return ' Already tagged
+            End If
+            mi.Save()
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] TagOriginalMailAsProcessed error: {ex.Message}")
+        End Try
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -1085,6 +1355,21 @@ Partial Public Class ThisAddIn
                 End If
             End If
         Catch
+        End Try
+    End Sub
+
+
+    ''' <summary>
+    ''' Records the current UTC time as the last successfully processed timestamp.
+    ''' Uses wall-clock time (not the mail's ReceivedTime) to avoid losing mails
+    ''' received at the exact same second as the last processed mail.
+    ''' </summary>
+    Private Sub RecordLastProcessedTime()
+        Try
+            My.Settings.AP_LastProcessedTime = DateTime.UtcNow
+            My.Settings.Save()
+        Catch ex As System.Exception
+            Debug.WriteLine($"[AutoPilot] Failed to save last processed time: {ex.Message}")
         End Try
     End Sub
 
