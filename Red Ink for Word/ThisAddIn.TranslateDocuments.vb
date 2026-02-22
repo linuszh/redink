@@ -96,11 +96,18 @@ Partial Public Class ThisAddIn
     Private Const RunBoundaryMarker As String = "|"
 
     ''' <summary>
+    ''' Marker inserted at footnote/endnote reference boundaries in text sent to the LLM.
+    ''' U+2016 DOUBLE VERTICAL LINE — virtually never appears in legal documents.
+    ''' </summary>
+    Private Const NoteRefMarker As String = "‖"
+
+    ''' <summary>
     ''' Represents a text run (w:t element) with its content and XML reference.
     ''' </summary>
     Private Class TranslateTextRunInfo
         Public Property TextNode As System.Xml.XmlNode
         Public Property OriginalText As String
+        Public Property HasNoteReferenceBefore As Boolean
     End Class
 
     ''' <summary>
@@ -959,11 +966,15 @@ Partial Public Class ThisAddIn
             Next
         Next
     End Function
+
+
     ''' <summary>
     ''' Extracts paragraph information from document XML.
     ''' Only extracts plain text - no formatting codes sent to LLM.
     ''' Preserves space information for accurate redistribution.
     ''' When formatting markers are enabled, also builds marker-annotated text.
+    ''' Detects footnote/endnote references AND complex field boundaries (cross-references,
+    ''' merge fields, etc.) so that text redistribution never shifts content across them.
     ''' </summary>
     Private Function ExtractTranslateParagraphsFromXml(xmlDoc As System.Xml.XmlDocument, nsMgr As System.Xml.XmlNamespaceManager) As List(Of TranslateParagraphInfo)
         Dim paragraphs As New List(Of TranslateParagraphInfo)()
@@ -980,37 +991,176 @@ Partial Public Class ThisAddIn
             .MarkerText = Nothing
         }
 
+            ' Build a set of w:t nodes that must be excluded from processing because
+            ' they belong to or are immediately adjacent to footnote/endnote reference elements
+            ' INSIDE footnotes.xml / endnotes.xml (w:footnoteRef / w:endnoteRef).
+            Dim refNodes As New HashSet(Of System.Xml.XmlNode)()
+
+            Dim noteRefElements As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:r[w:footnoteRef or w:endnoteRef]", nsMgr)
+            For Each refRunNode As System.Xml.XmlNode In noteRefElements
+                ' Skip any w:t inside the same run as the ref (usually none, but be safe)
+                For Each tInRef As System.Xml.XmlNode In refRunNode.SelectNodes(".//w:t", nsMgr)
+                    refNodes.Add(tInRef)
+                Next
+                ' Also skip the w:t in the immediately following sibling run if it is
+                ' just whitespace (the separator space between the sign and the text)
+                Dim nextSibling As System.Xml.XmlNode = refRunNode.NextSibling
+                While nextSibling IsNot Nothing AndAlso nextSibling.NodeType <> System.Xml.XmlNodeType.Element
+                    nextSibling = nextSibling.NextSibling
+                End While
+                If nextSibling IsNot Nothing AndAlso nextSibling.LocalName = "r" Then
+                    Dim siblingTexts As System.Xml.XmlNodeList = nextSibling.SelectNodes(".//w:t", nsMgr)
+                    If siblingTexts.Count = 1 Then
+                        Dim sibText As String = siblingTexts(0).InnerText
+                        If String.IsNullOrWhiteSpace(sibText) AndAlso sibText.Length <= 2 Then
+                            refNodes.Add(siblingTexts(0))
+                        End If
+                    End If
+                End If
+            Next
+
+            ' Build a set of w:r nodes that contain a w:footnoteReference or w:endnoteReference
+            ' (document body references). These runs have no w:t but act as positional anchors.
+            ' We need to know when a w:t run is preceded by such a reference so that redistribution
+            ' does not shift text (especially spaces) across the reference boundary.
+            Dim bodyRefRunNodes As New HashSet(Of System.Xml.XmlNode)()
+            Dim bodyRefElements As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:r[w:footnoteReference or w:endnoteReference]", nsMgr)
+            For Each refRunNode As System.Xml.XmlNode In bodyRefElements
+                bodyRefRunNodes.Add(refRunNode)
+            Next
+
+            ' ─── Complex field detection ───
+            ' Complex fields (cross-references, merge fields, etc.) use w:fldChar elements:
+            '   <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+            '   <w:r><w:instrText>REF _Ref123 \h</w:instrText></w:r>
+            '   <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+            '   <w:r><w:t>displayed value</w:t></w:r>     ← this w:t IS extracted
+            '   <w:r><w:fldChar w:fldCharType="end"/></w:r>
+            '
+            ' The w:r containing fldChar begin/separate/end have no w:t and sit between
+            ' text runs — exactly like footnote references. We treat them as boundaries
+            ' so that text redistribution never shifts content across a field.
+            '
+            ' We also skip w:t nodes that are inside the field code region (between begin
+            ' and separate) — these contain instrText-like content that should not be processed.
+            ' Note: w:instrText uses a different element name and is already excluded by
+            ' the ".//w:t" selector, but some generators put field codes in w:t nodes.
+            Dim fldCharRuns As New HashSet(Of System.Xml.XmlNode)()
+            Dim fldCharElements As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:r[w:fldChar]", nsMgr)
+            For Each fldCharRunNode As System.Xml.XmlNode In fldCharElements
+                fldCharRuns.Add(fldCharRunNode)
+            Next
+
+            ' Track field nesting to identify w:t nodes inside field code regions
+            ' (between fldChar begin and fldChar separate) — these must be excluded.
+            ' Also track w:t nodes inside field result regions (between separate and end)
+            ' — these are displayed values that we extract but treat as bounded.
+            If fldCharRuns.Count > 0 Then
+                Dim fieldDepth As Integer = 0
+                Dim inFieldCode As Boolean = False ' between begin and separate at depth 1+
+
+                For Each childNode As System.Xml.XmlNode In paraNode.ChildNodes
+                    If childNode.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    If childNode.LocalName <> "r" Then Continue For
+
+                    ' Check for fldChar in this run
+                    Dim fldChar As System.Xml.XmlNode = childNode.SelectSingleNode("w:fldChar", nsMgr)
+                    If fldChar IsNot Nothing Then
+                        Dim fldType As String = ""
+                        Dim fldTypeAttr = fldChar.Attributes("w:fldCharType")
+                        If fldTypeAttr IsNot Nothing Then fldType = fldTypeAttr.Value
+
+                        Select Case fldType
+                            Case "begin"
+                                fieldDepth += 1
+                                inFieldCode = True
+                            Case "separate"
+                                inFieldCode = False
+                            Case "end"
+                                fieldDepth -= 1
+                                If fieldDepth <= 0 Then
+                                    fieldDepth = 0
+                                    inFieldCode = False
+                                End If
+                        End Select
+                        Continue For ' fldChar runs have no w:t to process
+                    End If
+
+                    ' If we're inside a field code region, exclude any w:t in this run
+                    If inFieldCode Then
+                        For Each tNode As System.Xml.XmlNode In childNode.SelectNodes(".//w:t", nsMgr)
+                            refNodes.Add(tNode)
+                        Next
+                    End If
+                Next
+            End If
+
             ' Find all w:t (text) elements within this paragraph
             Dim textNodes As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:t", nsMgr)
             Dim fullTextBuilder As New StringBuilder()
 
             For Each textNode As System.Xml.XmlNode In textNodes
+                ' Skip text nodes that belong to the footnote/endnote reference sign or its separator,
+                ' or that are inside a complex field code region
+                If refNodes.Contains(textNode) Then Continue For
+
                 Dim text As String = textNode.InnerText
 
-                ' Check if this run needs a space before it
-                ' Word sometimes splits "word1 word2" into separate runs without explicit space
+                ' Determine if a footnoteReference/endnoteReference run OR a fldChar run
+                ' exists between the previous w:t's w:r and this w:t's w:r.
+                ' Walk backward from this run's parent through preceding sibling w:r elements.
+                Dim hasNoteRefBefore As Boolean = False
+                If paraInfo.TextRuns.Count > 0 AndAlso (bodyRefRunNodes.Count > 0 OrElse fldCharRuns.Count > 0) Then
+                    Dim thisRun As System.Xml.XmlNode = textNode.ParentNode ' w:r containing this w:t
+                    ' Walk backward through preceding sibling elements
+                    Dim prevEl As System.Xml.XmlNode = thisRun.PreviousSibling
+                    While prevEl IsNot Nothing
+                        If prevEl.NodeType = System.Xml.XmlNodeType.Element Then
+                            If prevEl.LocalName = "r" Then
+                                If bodyRefRunNodes.Contains(prevEl) OrElse fldCharRuns.Contains(prevEl) Then
+                                    ' Found a reference or field run between previous text run and this one
+                                    hasNoteRefBefore = True
+                                    Exit While
+                                End If
+                                ' Found a normal w:r — check if it contains a w:t that is in our TextRuns
+                                Dim prevTexts As System.Xml.XmlNodeList = prevEl.SelectNodes(".//w:t", nsMgr)
+                                Dim foundPrevTextRun As Boolean = False
+                                For Each pt As System.Xml.XmlNode In prevTexts
+                                    If Not refNodes.Contains(pt) Then
+                                        foundPrevTextRun = True
+                                        Exit For
+                                    End If
+                                Next
+                                If foundPrevTextRun Then
+                                    ' Reached the previous text-bearing run without hitting a reference
+                                    Exit While
+                                End If
+                            End If
+                        End If
+                        prevEl = prevEl.PreviousSibling
+                    End While
+                End If
+
                 If fullTextBuilder.Length > 0 AndAlso text.Length > 0 Then
                     Dim lastChar As Char = fullTextBuilder(fullTextBuilder.Length - 1)
                     Dim firstChar As Char = text(0)
 
-                    ' If previous text doesn't end with space/punctuation and current doesn't start with space/punctuation,
-                    ' check if we need to infer a space based on the XML structure
                     If Not Char.IsWhiteSpace(lastChar) AndAlso Not Char.IsWhiteSpace(firstChar) Then
-                        ' Check xml:space attribute - if "preserve" is set, spaces are explicit
                         Dim xmlSpaceAttr = textNode.Attributes("xml:space")
                         Dim preserveSpace As Boolean = xmlSpaceAttr IsNot Nothing AndAlso xmlSpaceAttr.Value = "preserve"
-
-                        ' If not preserving space and the run is in a new w:r element, 
-                        ' Word may have intended a space (common when formatting changes mid-word)
-                        ' However, we should NOT add a space if the original didn't have one
-                        ' The issue is the REVERSE - we're losing spaces that WERE there
                     End If
                 End If
 
                 paraInfo.TextRuns.Add(New TranslateTextRunInfo() With {
-                .TextNode = textNode,
-                .OriginalText = text
-            })
+                    .TextNode = textNode,
+                    .OriginalText = text,
+                    .HasNoteReferenceBefore = hasNoteRefBefore
+                })
+                ' Insert note-reference marker into FullText at the boundary
+                If hasNoteRefBefore Then
+                    fullTextBuilder.Append(NoteRefMarker)
+                End If
+
                 fullTextBuilder.Append(text)
             Next
 
@@ -1018,7 +1168,6 @@ Partial Public Class ThisAddIn
             paraInfo.IsEmpty = String.IsNullOrWhiteSpace(paraInfo.FullText)
 
             ' Build marker-annotated text when formatting markers are enabled
-            ' Only meaningful for multi-run paragraphs with non-empty runs
             If _useFormattingMarkers AndAlso Not paraInfo.IsEmpty AndAlso paraInfo.TextRuns.Count > 1 Then
                 paraInfo.MarkerText = BuildMarkerAnnotatedText(paraInfo.TextRuns)
             End If
@@ -1033,6 +1182,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Builds a marker-annotated version of a paragraph's text by inserting | at run boundaries.
     ''' Only inserts markers between non-empty runs where formatting actually changes.
+    ''' Also preserves ‖ (note-reference) markers at footnote/endnote boundaries.
     ''' </summary>
     ''' <param name="textRuns">The text runs of the paragraph.</param>
     ''' <returns>The annotated text with | markers, or Nothing if only one effective run.</returns>
@@ -1044,6 +1194,12 @@ Partial Public Class ThisAddIn
 
         For i As Integer = 0 To textRuns.Count - 1
             Dim runText As String = textRuns(i).OriginalText
+
+            ' Insert ‖ marker BEFORE the | marker if this run has a note reference before it.
+            ' The ‖ must appear in the text sent to the LLM so it can preserve it.
+            If textRuns(i).HasNoteReferenceBefore Then
+                sb.Append(NoteRefMarker)
+            End If
 
             ' Insert marker between runs, but only when both sides are non-empty
             ' (empty runs don't carry visible formatting, so a marker would be misleading)
@@ -1100,6 +1256,16 @@ Partial Public Class ThisAddIn
             systemPrompt = systemPrompt & vbCrLf & vbCrLf & SP_Add_Markers
         End If
 
+        ' Append note-reference marker instruction if any paragraphs contain them
+        Dim hasNoteRefMarkers As Boolean = processableParagraphs.Any(Function(p) p.FullText.Contains(NoteRefMarker))
+        If hasNoteRefMarkers Then
+            systemPrompt = systemPrompt & vbCrLf & vbCrLf &
+                "Some paragraphs contain the character ‖ (double vertical line). " &
+                "This marks the position of a footnote or endnote reference. " &
+                "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
+                "Do NOT move, add, or remove any ‖ characters."
+        End If
+
         Dim batchIndex As Integer = 0
         Dim totalBatches As Integer = CInt(Math.Ceiling(processableParagraphs.Count / TranslateParagraphsPerBatch))
         Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", "Correcting")
@@ -1136,6 +1302,9 @@ Partial Public Class ThisAddIn
                     If _useFormattingMarkers AndAlso contextText IsNot Nothing Then
                         contextText = contextText.Replace(RunBoundaryMarker, "")
                     End If
+                    If contextText IsNot Nothing Then
+                        contextText = contextText.Replace(NoteRefMarker, "")
+                    End If
                     promptBuilder.AppendLine(contextText)
                 Next
                 promptBuilder.AppendLine()
@@ -1160,7 +1329,11 @@ Partial Public Class ThisAddIn
             If contextAfterEnd > batchEnd Then
                 promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
                 For j As Integer = batchEnd + 1 To contextAfterEnd
-                    promptBuilder.AppendLine(processableParagraphs(j).FullText)
+                    Dim ctxAfterText As String = processableParagraphs(j).FullText
+                    If ctxAfterText IsNot Nothing Then
+                        ctxAfterText = ctxAfterText.Replace(NoteRefMarker, "")
+                    End If
+                    promptBuilder.AppendLine(ctxAfterText)
                 Next
             End If
 
@@ -1233,9 +1406,13 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Applies translated/corrected text back to XML nodes, preserving all formatting.
-    ''' When formatting markers are enabled and the LLM returned the correct number of | markers,
-    ''' uses marker-based splitting for precise formatting alignment.
-    ''' Otherwise falls back to character-based proportional distribution.
+    ''' Partitions runs at footnote/endnote reference boundaries so that text
+    ''' redistribution never moves content across a reference anchor.
+    ''' When the LLM preserves ‖ markers, splits directly at their position (they are
+    ''' authoritative). Falls back to anchor + word-boundary logic only when ‖ markers
+    ''' are missing. The ‖ character is purely a positional placeholder — it indicates
+    ''' where a footnote/endnote/field reference sits but does not create an additional
+    ''' formatting split beyond the existing run partition.
     ''' </summary>
     Private Sub ApplyTranslationsToXml(paragraphs As List(Of TranslateParagraphInfo))
         For Each para In paragraphs
@@ -1246,119 +1423,484 @@ Partial Public Class ThisAddIn
 
             ' Simple case: only one run
             If para.TextRuns.Count = 1 Then
-                ' Strip any markers that might have leaked into single-run paragraphs
                 If _useFormattingMarkers Then
                     translatedText = translatedText.Replace(RunBoundaryMarker, "")
                 End If
+                translatedText = translatedText.Replace(NoteRefMarker, "")
                 SetTextNodeWithSpacePreserve(para.TextRuns(0).TextNode, translatedText)
                 Continue For
+            End If
+
+            ' ─── Check if any note-reference boundaries exist ───
+            Dim hasNoteRefBoundaries As Boolean = para.TextRuns.Any(Function(r) r.HasNoteReferenceBefore)
+
+            ' ─── DIAGNOSTIC: Log paragraph state ───
+            If hasNoteRefBoundaries Then
+                Debug.WriteLine($"")
+                Debug.WriteLine($"══════════════════════════════════════════════════")
+                Debug.WriteLine($"NOTEREF DIAG - Paragraph {para.Index}, Runs={para.TextRuns.Count}, HasNoteRefBoundaries={hasNoteRefBoundaries}")
+                Debug.WriteLine($"  FullText:       [{para.FullText}]")
+                Debug.WriteLine($"  MarkerText:     [{para.MarkerText}]")
+                Debug.WriteLine($"  TranslatedText: [{translatedText}]")
+                For ri As Integer = 0 To para.TextRuns.Count - 1
+                    Debug.WriteLine($"  Run[{ri}]: HasNoteRefBefore={para.TextRuns(ri).HasNoteReferenceBefore}, OrigText=[{para.TextRuns(ri).OriginalText}]")
+                Next
             End If
 
             ' Try marker-based distribution if formatting markers were used
-            If _useFormattingMarkers AndAlso para.MarkerText IsNot Nothing Then
-                Dim markerApplied As Boolean = TryApplyMarkerBasedDistribution(para, translatedText)
-                If markerApplied Then Continue For
-                ' If marker parsing failed (wrong count, etc.), fall through to proportional
-                ' Strip markers before proportional fallback
-                translatedText = translatedText.Replace(RunBoundaryMarker, "")
-            End If
+            ' BUT only when NO footnote boundaries exist — otherwise the | markers
+            ' are unaware of footnote positions and will shift text across them.
+            If Not hasNoteRefBoundaries Then
+                If _useFormattingMarkers AndAlso para.MarkerText IsNot Nothing Then
+                    Dim markerApplied As Boolean = TryApplyMarkerBasedDistribution(para, translatedText)
+                    If markerApplied Then Continue For
+                    translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                End If
 
-            Dim totalOriginalLength As Integer = para.FullText.Length
-            If totalOriginalLength = 0 Then
-                SetTextNodeWithSpacePreserve(para.TextRuns(0).TextNode, translatedText)
-                For idx As Integer = 1 To para.TextRuns.Count - 1
-                    SetTextNodeWithSpacePreserve(para.TextRuns(idx).TextNode, "")
-                Next
+                If _useFormattingMarkers Then
+                    translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                End If
+
+                ' No footnote boundaries: proportional distribution across all runs
+                translatedText = translatedText.Replace(NoteRefMarker, "")
+                DistributeProportional(para, translatedText)
                 Continue For
             End If
 
-            ' Character-based proportional distribution
-            Dim translatedLength As Integer = translatedText.Length
-            Dim currentPos As Integer = 0
-            Dim cumulativeOriginal As Integer = 0
+            ' ─── From here: paragraph HAS footnote/endnote reference boundaries ───
+            ' Strip formatting markers — the ‖ partitioning handles distribution
+            If _useFormattingMarkers Then
+                translatedText = translatedText.Replace(RunBoundaryMarker, "")
+                Debug.WriteLine($"  After stripping |: [{translatedText}]")
+            End If
+
+            ' Partition runs into segments at note-reference boundaries
+            Dim segments As New List(Of List(Of Integer))()
+            Dim currentSegment As New List(Of Integer)()
 
             For runIdx As Integer = 0 To para.TextRuns.Count - 1
-                Dim run = para.TextRuns(runIdx)
-                Dim originalRunLength As Integer = run.OriginalText.Length
-                cumulativeOriginal += originalRunLength
+                If para.TextRuns(runIdx).HasNoteReferenceBefore AndAlso currentSegment.Count > 0 Then
+                    segments.Add(currentSegment)
+                    currentSegment = New List(Of Integer)()
+                End If
+                currentSegment.Add(runIdx)
+            Next
+            If currentSegment.Count > 0 Then segments.Add(currentSegment)
 
-                If runIdx = para.TextRuns.Count - 1 Then
-                    ' Last run gets everything remaining
-                    Dim remaining As String = If(currentPos < translatedLength,
-                                           translatedText.Substring(currentPos),
-                                           "")
-                    SetTextNodeWithSpacePreserve(run.TextNode, remaining)
+            Debug.WriteLine($"  Segments: {segments.Count} (expected ‖ count: {segments.Count - 1})")
+            For si As Integer = 0 To segments.Count - 1
+                Dim runList As String = String.Join(",", segments(si))
+                Dim segOrigText As New StringBuilder()
+                For Each ri In segments(si)
+                    segOrigText.Append(para.TextRuns(ri).OriginalText)
+                Next
+                Debug.WriteLine($"    Segment[{si}]: Runs=[{runList}], OrigText=[{segOrigText}]")
+            Next
+
+            ' Safety: if partitioning produced only 1 segment, fall back to proportional
+            If segments.Count <= 1 Then
+                Debug.WriteLine($"  → Only 1 segment, falling back to proportional")
+                translatedText = translatedText.Replace(NoteRefMarker, "")
+                DistributeProportional(para, translatedText)
+                Continue For
+            End If
+
+            ' ─── Split translated text across segments ───
+            Dim expectedNoteRefCount As Integer = segments.Count - 1
+            Dim actualNoteRefCount As Integer = 0
+            For Each ch As Char In translatedText
+                If ch = NoteRefMarker(0) Then actualNoteRefCount += 1
+            Next
+
+            Debug.WriteLine($"  ‖ count: expected={expectedNoteRefCount}, actual={actualNoteRefCount}")
+
+            Dim segmentTexts As String() = Nothing
+
+            If actualNoteRefCount = expectedNoteRefCount Then
+                segmentTexts = translatedText.Split(New String() {NoteRefMarker}, StringSplitOptions.None)
+
+                Debug.WriteLine($"  Split on ‖ produced {segmentTexts.Length} pieces (need {segments.Count})")
+                For pi As Integer = 0 To segmentTexts.Length - 1
+                    Debug.WriteLine($"    Piece[{pi}]: [{segmentTexts(pi)}]")
+                Next
+
+                If segmentTexts.Length = segments.Count Then
+                    ' Normalize spaces at segment boundaries
+                    For segIdx As Integer = 0 To segmentTexts.Length - 2
+                        Dim nextSegFirstRunIdx As Integer = segments(segIdx + 1)(0)
+                        Dim nextRunOriginal As String = para.TextRuns(nextSegFirstRunIdx).OriginalText
+                        If nextRunOriginal.Length > 0 AndAlso Char.IsWhiteSpace(nextRunOriginal(0)) Then
+                            Dim curSeg As String = segmentTexts(segIdx)
+                            If curSeg.Length > 0 AndAlso curSeg(curSeg.Length - 1) = " "c Then
+                                Dim trimmed As String = curSeg.TrimEnd(" "c)
+                                Dim movedSpaces As String = curSeg.Substring(trimmed.Length)
+                                segmentTexts(segIdx) = trimmed
+                                segmentTexts(segIdx + 1) = movedSpaces & segmentTexts(segIdx + 1)
+                                Debug.WriteLine($"    Space normalize: moved trailing space from Piece[{segIdx}] to Piece[{segIdx + 1}]")
+                            End If
+                        End If
+                    Next
                 Else
-                    ' Calculate end position based on cumulative proportion
-                    Dim proportion As Double = cumulativeOriginal / CDbl(totalOriginalLength)
-                    Dim targetEndPos As Integer = CInt(Math.Round(proportion * translatedLength))
-                    targetEndPos = Math.Min(targetEndPos, translatedLength)
+                    Debug.WriteLine($"  → Piece count mismatch! Falling to anchor fallback.")
+                    segmentTexts = Nothing
+                End If
+            End If
 
-                    ' Don't go backwards
-                    If targetEndPos <= currentPos Then
-                        SetTextNodeWithSpacePreserve(run.TextNode, "")
-                        Continue For
+            If segmentTexts Is Nothing Then
+                Debug.WriteLine($"  → Using ANCHOR FALLBACK")
+                translatedText = translatedText.Replace(NoteRefMarker, "")
+
+                Dim totalOrigLen As Integer = para.FullText.Replace(NoteRefMarker, "").Length
+                Dim translatedLen As Integer = translatedText.Length
+
+                If totalOrigLen = 0 Then
+                    SetTextNodeWithSpacePreserve(para.TextRuns(0).TextNode, translatedText)
+                    For idx As Integer = 1 To para.TextRuns.Count - 1
+                        SetTextNodeWithSpacePreserve(para.TextRuns(idx).TextNode, "")
+                    Next
+                    Continue For
+                End If
+
+                Dim segmentOrigTexts As New List(Of String)()
+                For Each seg In segments
+                    Dim sb As New StringBuilder()
+                    For Each ri In seg
+                        sb.Append(para.TextRuns(ri).OriginalText)
+                    Next
+                    segmentOrigTexts.Add(sb.ToString())
+                Next
+
+                Dim splitPoints As New List(Of Integer)()
+                Dim searchFrom As Integer = 0
+
+                For segIdx As Integer = 0 To segments.Count - 2
+                    Dim segOrigText As String = segmentOrigTexts(segIdx)
+                    Dim nextSegOrigText As String = segmentOrigTexts(segIdx + 1)
+                    Dim cumulativeOrigLen As Integer = 0
+                    For si As Integer = 0 To segIdx
+                        cumulativeOrigLen += segmentOrigTexts(si).Length
+                    Next
+                    Dim proportion As Double = cumulativeOrigLen / CDbl(totalOrigLen)
+                    Dim proportionalEnd As Integer = CInt(Math.Round(proportion * translatedLen))
+                    proportionalEnd = Math.Min(proportionalEnd, translatedLen)
+
+                    Dim splitPos As Integer = FindNoteRefSplitPos(
+                        translatedText, segOrigText, searchFrom, proportionalEnd, translatedLen, nextSegOrigText)
+                    splitPos = Math.Min(splitPos, translatedLen)
+
+                    If splitPos > searchFrom AndAlso splitPos <= translatedLen Then
+                        Dim nextSegFirstRunIdx As Integer = segments(segIdx + 1)(0)
+                        Dim nextRunOriginal As String = para.TextRuns(nextSegFirstRunIdx).OriginalText
+                        If nextRunOriginal.Length > 0 AndAlso Char.IsWhiteSpace(nextRunOriginal(0)) Then
+                            While splitPos > searchFrom AndAlso translatedText(splitPos - 1) = " "c
+                                splitPos -= 1
+                            End While
+                        End If
                     End If
 
-                    ' Try to break at a word boundary (space)
-                    Dim endPos As Integer = targetEndPos
-                    Dim foundSpace As Boolean = False
+                    Debug.WriteLine($"    Anchor split[{segIdx}]: pos={splitPos}, searchFrom={searchFrom}, proportionalEnd={proportionalEnd}")
+                    splitPoints.Add(splitPos)
+                    searchFrom = splitPos
+                Next
+                splitPoints.Add(translatedLen)
 
-                    If endPos < translatedLength AndAlso endPos > currentPos Then
-                        ' Check if we're already at a space
-                        If translatedText(endPos) = " "c Then
-                            endPos = endPos + 1  ' Include the space
-                            foundSpace = True
+                segmentTexts = New String(segments.Count - 1) {}
+                Dim st As Integer = 0
+                For i As Integer = 0 To segments.Count - 1
+                    Dim en As Integer = splitPoints(i)
+                    segmentTexts(i) = If(en > st, translatedText.Substring(st, en - st), "")
+                    st = en
+                Next
+
+                For pi As Integer = 0 To segmentTexts.Length - 1
+                    Debug.WriteLine($"    FallbackPiece[{pi}]: [{segmentTexts(pi)}]")
+                Next
+            End If
+
+            ' ─── Distribute text within each segment independently ───
+            For segIdx As Integer = 0 To segments.Count - 1
+                Dim segText As String = segmentTexts(segIdx)
+                Dim segRunIndices As List(Of Integer) = segments(segIdx)
+
+                If segRunIndices.Count = 1 Then
+                    Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{segRunIndices(0)}]: [{segText}]")
+                    SetTextNodeWithSpacePreserve(para.TextRuns(segRunIndices(0)).TextNode, segText)
+                Else
+                    Dim segOrigLen As Integer = 0
+                    For Each ri In segRunIndices
+                        segOrigLen += para.TextRuns(ri).OriginalText.Length
+                    Next
+                    Dim segTransLen As Integer = segText.Length
+                    Dim segCurrentPos As Integer = 0
+                    Dim segCumOrig As Integer = 0
+
+                    For ri As Integer = 0 To segRunIndices.Count - 1
+                        Dim runIdx As Integer = segRunIndices(ri)
+                        Dim run = para.TextRuns(runIdx)
+                        segCumOrig += run.OriginalText.Length
+
+                        If ri = segRunIndices.Count - 1 Then
+                            Dim remaining As String = If(segCurrentPos < segTransLen,
+                                                         segText.Substring(segCurrentPos), "")
+                            Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{runIdx}] (last): [{remaining}]")
+                            SetTextNodeWithSpacePreserve(run.TextNode, remaining)
                         Else
-                            ' Search forward first (up to 15 chars)
-                            For searchPos As Integer = endPos To Math.Min(endPos + 15, translatedLength - 1)
+                            If segOrigLen = 0 Then
+                                Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{runIdx}]: [] (segOrigLen=0)")
+                                SetTextNodeWithSpacePreserve(run.TextNode, "")
+                                Continue For
+                            End If
+
+                            Dim prop As Double = segCumOrig / CDbl(segOrigLen)
+                            Dim tgtEnd As Integer = CInt(Math.Round(prop * segTransLen))
+                            tgtEnd = Math.Min(tgtEnd, segTransLen)
+
+                            If tgtEnd <= segCurrentPos Then
+                                Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{runIdx}]: [] (tgtEnd<=currentPos)")
+                                SetTextNodeWithSpacePreserve(run.TextNode, "")
+                                Continue For
+                            End If
+
+                            Dim endPos As Integer = tgtEnd
+                            Dim foundSpace As Boolean = False
+
+                            If endPos < segTransLen AndAlso endPos > segCurrentPos Then
+                                If segText(endPos) = " "c Then
+                                    endPos += 1
+                                    foundSpace = True
+                                Else
+                                    Dim searchMax As Integer = Math.Min(endPos + 15, segTransLen - 1)
+                                    For sp As Integer = endPos To searchMax
+                                        If segText(sp) = " "c Then
+                                            endPos = sp + 1
+                                            foundSpace = True
+                                            Exit For
+                                        End If
+                                    Next
+                                    If Not foundSpace Then
+                                        For sp As Integer = endPos - 1 To segCurrentPos Step -1
+                                            If segText(sp) = " "c Then
+                                                endPos = sp + 1
+                                                foundSpace = True
+                                                Exit For
+                                            End If
+                                        Next
+                                    End If
+                                    If Not foundSpace Then
+                                        Dim we As Integer = endPos
+                                        While we < segTransLen AndAlso segText(we) <> " "c
+                                            we += 1
+                                        End While
+                                        endPos = we
+                                    End If
+                                End If
+                            End If
+
+                            endPos = Math.Min(endPos, segTransLen)
+                            Dim assignedText As String = segText.Substring(segCurrentPos, endPos - segCurrentPos)
+                            Debug.WriteLine($"  Assign Segment[{segIdx}] → Run[{runIdx}]: [{assignedText}]")
+                            SetTextNodeWithSpacePreserve(run.TextNode, assignedText)
+                            segCurrentPos = endPos
+                        End If
+                    Next
+                End If
+            Next
+
+            Debug.WriteLine($"══════════════════════════════════════════════════")
+
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Proportional distribution fallback when no note-reference boundaries exist.
+    ''' </summary>
+    Private Sub DistributeProportional(para As TranslateParagraphInfo, translatedText As String)
+        Dim totalOrigLen As Integer = para.FullText.Length
+        Dim translatedLen As Integer = translatedText.Length
+
+        If totalOrigLen = 0 Then
+            SetTextNodeWithSpacePreserve(para.TextRuns(0).TextNode, translatedText)
+            For idx As Integer = 1 To para.TextRuns.Count - 1
+                SetTextNodeWithSpacePreserve(para.TextRuns(idx).TextNode, "")
+            Next
+            Return
+        End If
+
+        Dim currentPos As Integer = 0
+        Dim cumulativeOriginal As Integer = 0
+
+        For runIdx As Integer = 0 To para.TextRuns.Count - 1
+            Dim run = para.TextRuns(runIdx)
+            cumulativeOriginal += run.OriginalText.Length
+
+            If runIdx = para.TextRuns.Count - 1 Then
+                Dim remaining = If(currentPos < translatedLen, translatedText.Substring(currentPos), "")
+                SetTextNodeWithSpacePreserve(run.TextNode, remaining)
+            Else
+                Dim proportion As Double = cumulativeOriginal / CDbl(totalOrigLen)
+                Dim targetEndPos = CInt(Math.Round(proportion * translatedLen))
+                targetEndPos = Math.Min(targetEndPos, translatedLen)
+
+                If targetEndPos <= currentPos Then
+                    SetTextNodeWithSpacePreserve(run.TextNode, "")
+                    Continue For
+                End If
+
+                Dim endPos As Integer = targetEndPos
+                Dim foundSpace As Boolean = False
+
+                If endPos < translatedLen AndAlso endPos > currentPos Then
+                    If translatedText(endPos) = " "c Then
+                        endPos += 1
+                        foundSpace = True
+                    Else
+                        Dim searchMax As Integer = Math.Min(endPos + 15, translatedLen - 1)
+                        For searchPos As Integer = endPos To searchMax
+                            If translatedText(searchPos) = " "c Then
+                                endPos = searchPos + 1
+                                foundSpace = True
+                                Exit For
+                            End If
+                        Next
+                        If Not foundSpace Then
+                            For searchPos As Integer = endPos - 1 To currentPos Step -1
                                 If translatedText(searchPos) = " "c Then
-                                    endPos = searchPos + 1  ' Include the space
+                                    endPos = searchPos + 1
                                     foundSpace = True
                                     Exit For
                                 End If
                             Next
-
-                            ' If not found forward, search backward
-                            If Not foundSpace Then
-                                For searchPos As Integer = endPos - 1 To currentPos Step -1
-                                    If translatedText(searchPos) = " "c Then
-                                        endPos = searchPos + 1  ' Include the space
-                                        foundSpace = True
-                                        Exit For
-                                    End If
-                                Next
-                            End If
-
-                            ' Extend forward to include the entire current word (until next space or end)
-                            If Not foundSpace Then
-                                ' Find the end of the current word
-                                Dim wordEnd As Integer = endPos
-                                While wordEnd < translatedLength AndAlso translatedText(wordEnd) <> " "c
-                                    wordEnd += 1
-                                End While
-                                ' Include the space after the word if present
-                                If wordEnd < translatedLength AndAlso translatedText(wordEnd) = " "c Then
-                                    endPos = wordEnd + 1
-                                Else
-                                    endPos = wordEnd
-                                End If
+                        End If
+                        If Not foundSpace Then
+                            Dim wordEnd As Integer = endPos
+                            While wordEnd < translatedLen AndAlso translatedText(wordEnd) <> " "c
+                                wordEnd += 1
+                            End While
+                            If wordEnd < translatedLen AndAlso translatedText(wordEnd) = " "c Then
+                                endPos = wordEnd + 1
+                            Else
+                                endPos = wordEnd
                             End If
                         End If
                     End If
-
-                    endPos = Math.Min(endPos, translatedLength)
-                    Dim runText As String = translatedText.Substring(currentPos, endPos - currentPos)
-                    SetTextNodeWithSpacePreserve(run.TextNode, runText)
-                    currentPos = endPos
                 End If
-            Next
 
-            ' Final pass removed - it was incorrectly adding spaces between runs
-            ' that were legitimately split mid-formatting (e.g., bold changes within a word)
-            ' The fix above ensures we never split mid-word, so this is no longer needed
+                endPos = Math.Min(endPos, translatedLen)
+                SetTextNodeWithSpacePreserve(run.TextNode, translatedText.Substring(currentPos, endPos - currentPos))
+                currentPos = endPos
+            End If
         Next
     End Sub
+
+    ''' <summary>
+    ''' Finds the best split position in the translated text for a note-reference boundary
+    ''' by anchoring on the last word(s) of the original segment text, or the first word(s)
+    ''' of the next segment text. Falls back to proportional position with backward
+    ''' word-boundary seeking if both anchoring strategies fail.
+    ''' </summary>
+    ''' <param name="translatedText">The full translated paragraph text.</param>
+    ''' <param name="originalSegText">The original text of the segment before the note reference.</param>
+    ''' <param name="currentPos">Start of the current unassigned region in translatedText.</param>
+    ''' <param name="targetEndPos">Proportional end position (fallback).</param>
+    ''' <param name="translatedLength">Total length of translatedText.</param>
+    ''' <param name="nextSegOrigText">The original text of the segment after the note reference (Nothing if unavailable).</param>
+    ''' <returns>The character index in translatedText where the split should occur.</returns>
+    Private Shared Function FindNoteRefSplitPos(
+            translatedText As String,
+            originalSegText As String,
+            currentPos As Integer,
+            targetEndPos As Integer,
+            translatedLength As Integer,
+            Optional nextSegOrigText As String = Nothing) As Integer
+
+        ' ── Strategy 1: Anchor on the LAST word(s) of the current segment ──
+        ' The original segment ended with specific text before the footnote reference.
+        ' Find that same trailing text in the translated text to locate where the
+        ' footnote should be placed. Try progressively shorter trailing fragments.
+
+        If Not String.IsNullOrWhiteSpace(originalSegText) AndAlso originalSegText.Length >= 2 Then
+            Dim origTrimmed As String = originalSegText.TrimEnd()
+            If origTrimmed.Length >= 2 Then
+                Dim words As String() = origTrimmed.Split(" "c)
+                Dim maxWords As Integer = Math.Min(words.Length, 3)
+
+                For tryWords As Integer = maxWords To 1 Step -1
+                    Dim fragment As String = String.Join(" ", words, words.Length - tryWords, tryWords)
+                    If fragment.Length < 2 Then Continue For
+
+                    Dim searchRegion As String = translatedText.Substring(currentPos)
+                    Dim fragIdx As Integer = searchRegion.IndexOf(fragment, StringComparison.OrdinalIgnoreCase)
+
+                    If fragIdx >= 0 Then
+                        Dim splitPos As Integer = currentPos + fragIdx + fragment.Length
+                        ' Verify it's at a word boundary
+                        If splitPos >= translatedLength OrElse
+                           translatedText(splitPos) = " "c OrElse
+                           Char.IsPunctuation(translatedText(splitPos)) Then
+                            Return splitPos
+                        End If
+                    End If
+                Next
+            End If
+        End If
+
+        ' ── Strategy 2: Anchor on the FIRST word(s) of the NEXT segment ──
+        ' If the trailing text was deleted/changed by the LLM, look for the start
+        ' of the next segment's text and split just before it.
+
+        If Not String.IsNullOrWhiteSpace(nextSegOrigText) AndAlso nextSegOrigText.Length >= 2 Then
+            Dim nextTrimmed As String = nextSegOrigText.TrimStart()
+            If nextTrimmed.Length >= 2 Then
+                Dim nextWords As String() = nextTrimmed.Split(" "c)
+                Dim maxNextWords As Integer = Math.Min(nextWords.Length, 3)
+
+                For tryWords As Integer = maxNextWords To 1 Step -1
+                    Dim fragment As String = String.Join(" ", nextWords, 0, tryWords)
+                    If fragment.Length < 2 Then Continue For
+
+                    ' Search forward from a reasonable position (don't match too early)
+                    ' Use half the proportional position as the earliest plausible start
+                    Dim earliestSearch As Integer = Math.Max(currentPos, CInt(currentPos + (targetEndPos - currentPos) * 0.4))
+                    If earliestSearch >= translatedLength Then Continue For
+
+                    Dim searchRegion As String = translatedText.Substring(earliestSearch)
+                    Dim fragIdx As Integer = searchRegion.IndexOf(fragment, StringComparison.OrdinalIgnoreCase)
+
+                    If fragIdx >= 0 Then
+                        Dim matchStart As Integer = earliestSearch + fragIdx
+                        ' Split just before this fragment — walk back over any whitespace
+                        Dim splitPos As Integer = matchStart
+                        While splitPos > currentPos AndAlso translatedText(splitPos - 1) = " "c
+                            splitPos -= 1
+                        End While
+                        ' Verify the character before the split is a word boundary
+                        If splitPos <= currentPos Then Continue For
+                        If splitPos >= translatedLength OrElse
+                           Char.IsWhiteSpace(translatedText(splitPos)) OrElse
+                           (splitPos > 0 AndAlso (Char.IsPunctuation(translatedText(splitPos - 1)) OrElse
+                                                   Char.IsWhiteSpace(translatedText(splitPos - 1)))) Then
+                            Return splitPos
+                        End If
+                    End If
+                Next
+            End If
+        End If
+
+        ' ── Fallback: backward word-boundary search from proportional position ──
+        Dim endPos As Integer = Math.Min(targetEndPos, translatedLength)
+        If endPos > currentPos AndAlso endPos < translatedLength Then
+            If translatedText(endPos) = " "c Then Return endPos
+
+            For searchPos As Integer = endPos - 1 To currentPos Step -1
+                If translatedText(searchPos) = " "c Then
+                    Return searchPos + 1
+                End If
+            Next
+        End If
+
+        Return endPos
+    End Function
+
 
     ''' <summary>
     ''' Attempts to distribute translated text across runs using | markers from the LLM response.

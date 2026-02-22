@@ -509,6 +509,18 @@ Namespace My
                 Me("InboxBoardPinnedFlagColumns") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("01/01/0001 00:00:00")>  _
+        Public Property AP_LastProcessedTime() As Date
+            Get
+                Return CType(Me("AP_LastProcessedTime"),Date)
+            End Get
+            Set
+                Me("AP_LastProcessedTime") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

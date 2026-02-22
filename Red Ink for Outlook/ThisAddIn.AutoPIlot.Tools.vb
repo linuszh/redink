@@ -103,6 +103,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreateWordDoc As String = "create_word_document"
     Private Const AP_Tool_CreateExcel As String = "create_excel_spreadsheet"
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
+    Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
@@ -504,6 +505,33 @@ Partial Public Class ThisAddIn
                 "},""required"":[""slides""]}}"
         })
 
+        ' ── create_code_file ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateCodeFile,
+            .ModelDescription = "Create Code/Script File (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CreateCodeFile & ": Creates a new code, script, or data file with the specified content. " &
+                "Use this when the user asks you to create, generate, write, or produce any code file, script, " &
+                "configuration file, or structured data file. Examples: HTML pages, Python scripts, JavaScript files, " &
+                "JSON/YAML/XML data files, CSS stylesheets, SQL scripts, shell scripts (.sh/.bat/.ps1), " &
+                "Markdown documents, CSV files, INI/TOML/ENV config files, Dockerfiles, etc. " &
+                "You MUST determine the appropriate file extension based on the content and language. " &
+                "You MUST provide the complete, functional, ready-to-execute file content — do NOT use placeholders " &
+                "or incomplete code. The resulting file will be attached to the reply email so the user can save and run it.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CreateCodeFile & """," &
+                """description"":""Creates a new code, script, or data file with the specified content and attaches it to the reply. " &
+                "Supports any text-based file format: HTML, Python, JavaScript, TypeScript, JSON, YAML, XML, CSS, SQL, " &
+                "shell scripts, batch files, PowerShell, Markdown, CSV, INI, TOML, Dockerfiles, and more. " &
+                "Determine the correct filename and extension based on the content and user request.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """file_name"":{""type"":""string"",""description"":""Full filename including extension (e.g. 'index.html', 'analysis.py', 'config.json', 'setup.sh'). " &
+                "Choose a descriptive name and the correct extension for the language/format.""}," &
+                """content"":{""type"":""string"",""description"":""The complete file content. Must be functional and ready to use — no placeholders or TODOs.""}," &
+                """description"":{""type"":""string"",""description"":""Optional brief description of what the file does, shown to the user in the response.""}" &
+                "},""required"":[""file_name"",""content""]}}"
+        })
+
         Return tools
     End Function
 
@@ -557,6 +585,8 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreatePowerPoint
                 Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreateCodeFile
+                Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
             Case Else
                 Return Nothing
         End Select
@@ -777,6 +807,111 @@ Partial Public Class ThisAddIn
             att.CachedDocxHint = ""
             Return ""
         End Try
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: create_code_file
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCreateCodeFileTool(
+            toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            Dim content = GetArgString(toolCall.Arguments, "content")
+            Dim description = GetArgString(toolCall.Arguments, "description")
+
+            If String.IsNullOrWhiteSpace(fileName) Then
+                response.Success = False
+                response.Response = "Missing required parameter: file_name"
+                Return response
+            End If
+
+            If String.IsNullOrWhiteSpace(content) Then
+                response.Success = False
+                response.Response = "Missing required parameter: content"
+                Return response
+            End If
+
+            ' Sanitize filename — preserve the extension but clean invalid chars
+            For Each c In Path.GetInvalidFileNameChars()
+                fileName = fileName.Replace(c, "_"c)
+            Next
+            fileName = fileName.Trim()
+
+            ' Ensure the file has an extension; default to .txt if none provided
+            If String.IsNullOrWhiteSpace(Path.GetExtension(fileName)) Then
+                fileName &= ".txt"
+            End If
+
+            ' Guard against binary/Office extensions that should use dedicated tools
+            Dim ext = Path.GetExtension(fileName).ToLowerInvariant()
+            Dim blockedExtensions = {".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt", ".pdf", ".exe", ".dll", ".zip", ".rar"}
+            If blockedExtensions.Contains(ext) Then
+                response.Success = False
+                response.Response = $"Cannot create binary file with extension '{ext}' using this tool. " &
+                    "Use the dedicated tools (create_word_document, create_excel_spreadsheet, create_powerpoint, create_pdf_from_text) instead."
+                Return response
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
+                Dim extension = Path.GetExtension(fileName)
+                fileName = baseName & $"_{counter}{extension}"
+                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                counter += 1
+            End While
+
+            context.Log($"Creating code file: {fileName}")
+            ApDashboardLog($"💻 Creating code file: {fileName}", "step")
+
+            ' Write the file with UTF-8 encoding (with BOM for maximum compatibility)
+            Await Task.Run(Sub() File.WriteAllText(outputPath, content, Encoding.UTF8), ct)
+
+            If File.Exists(outputPath) Then
+                ' Register as output on the first attachment if available
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(outputPath)
+                End If
+
+                Dim sizeKb = New FileInfo(outputPath).Length / 1024
+                Dim lineCount = content.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None).Length
+
+                Dim resultMsg As New StringBuilder()
+                resultMsg.Append($"Code file created: {fileName} ({lineCount} lines, {sizeKb:F0} KB)")
+                If Not String.IsNullOrWhiteSpace(description) Then
+                    resultMsg.Append($". {description}")
+                End If
+                resultMsg.Append(". The file will be attached to the reply.")
+
+                response.Success = True
+                response.Response = resultMsg.ToString()
+                ApDashboardLog($"✓ Code file created: {fileName} ({lineCount} lines)", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create code file."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error creating code file: {ex.Message}"
+        End Try
+
+        Return response
     End Function
 
 
@@ -3424,7 +3559,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_PdfToWord,
                  AP_Tool_CreateWordDoc,
                  AP_Tool_CreateExcel,
-                 AP_Tool_CreatePowerPoint
+                 AP_Tool_CreatePowerPoint,
+                 AP_Tool_CreateCodeFile
                 Return True
             Case Else
                 Return False

@@ -131,6 +131,10 @@ Namespace SharedLibrary
         ' Track if form is closing
         Private _isClosing As Boolean = False
 
+        ' Track original background colors to prevent flash race conditions
+        Private _flashOriginalColors As New Dictionary(Of Control, Color)
+
+
         ''' <summary>
         ''' Creates a new <see cref="QuickTranslateWidget"/>.
         ''' </summary>
@@ -1092,7 +1096,11 @@ Namespace SharedLibrary
         Private Sub FlashControl(ctrl As Control)
             If _isClosing OrElse ctrl Is Nothing OrElse ctrl.IsDisposed Then Return
 
-            Dim original As Color = ctrl.BackColor
+            ' Only capture the original color on the first (non-overlapping) flash
+            If Not _flashOriginalColors.ContainsKey(ctrl) Then
+                _flashOriginalColors(ctrl) = ctrl.BackColor
+            End If
+
             ctrl.BackColor = Color.LightGreen
 
             Dim flashTimer As New System.Windows.Forms.Timer() With {.Interval = 200}
@@ -1101,7 +1109,11 @@ Namespace SharedLibrary
                                             flashTimer.Dispose()
                                             Try
                                                 If Not _isClosing AndAlso ctrl IsNot Nothing AndAlso Not ctrl.IsDisposed Then
-                                                    ctrl.BackColor = original
+                                                    Dim orig As Color
+                                                    If _flashOriginalColors.TryGetValue(ctrl, orig) Then
+                                                        ctrl.BackColor = orig
+                                                        _flashOriginalColors.Remove(ctrl)
+                                                    End If
                                                 End If
                                             Catch
                                             End Try
