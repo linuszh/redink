@@ -50,7 +50,13 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Maximum characters intended for a single LLM batch.
     ''' </summary>
-    Private Const AP_CommentMaxCharsPerBatch As Integer = 30000
+    Private Const AP_CommentMaxCharsPerBatch As Integer = 15000
+
+    ''' <summary>
+    ''' Number of paragraph texts to include as context before/after each batch
+    ''' when using batched comment processing.
+    ''' </summary>
+    Private Const AP_CommentContextParagraphs As Integer = 3
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASS
@@ -84,11 +90,16 @@ Partial Public Class ThisAddIn
         Dim usePrefix As Boolean = Not effectiveAuthor.Equals(AN6, StringComparison.OrdinalIgnoreCase)
 
         Try
+            ApDashboardLog("CommentProcessor: starting comment processing", "step")
+
             File.Copy(inputPath, outputPath, overwrite:=True)
             ZipFile.ExtractToDirectory(outputPath, tempDir)
 
             Dim documentXmlPath = Path.Combine(tempDir, "word", "document.xml")
-            If Not File.Exists(documentXmlPath) Then Return False
+            If Not File.Exists(documentXmlPath) Then
+                ApDashboardLog("CommentProcessor: document.xml not found", "error")
+                Return False
+            End If
 
             Dim xmlDoc As New System.Xml.XmlDocument()
             xmlDoc.PreserveWhitespace = True
@@ -101,11 +112,32 @@ Partial Public Class ThisAddIn
 
             ' Extract full document text for the LLM
             Dim fullText = APExtractFullText(xmlDoc, nsMgr)
-            If String.IsNullOrWhiteSpace(fullText) Then Return False
+            If String.IsNullOrWhiteSpace(fullText) Then
+                ApDashboardLog("CommentProcessor: document contains no text", "warn")
+                Return False
+            End If
 
-            ' Call LLM with the bubbles prompt
-            Dim comments = Await APGetCommentsFromLLM(fullText, instruction, ct)
-            If comments Is Nothing OrElse comments.Count = 0 Then Return False
+            ApDashboardLog($"CommentProcessor: extracted {fullText.Length} characters of document text", "step")
+
+            ' Decide strategy: single-pass vs batched
+            Dim comments As List(Of APCommentEntry) = Nothing
+
+            If fullText.Length <= AP_CommentMaxCharsPerBatch Then
+                ' Small enough — single-pass
+                ApDashboardLog("CommentProcessor: using single-pass mode", "step")
+                comments = Await APGetCommentsFromLLM(fullText, instruction, ct)
+            Else
+                ' Too large — try batched processing
+                ApDashboardLog($"CommentProcessor: document text ({fullText.Length} chars) exceeds single-pass limit ({AP_CommentMaxCharsPerBatch}), using batched mode", "step")
+                comments = Await APGetCommentsFromLLMBatched(xmlDoc, nsMgr, instruction, ct)
+            End If
+
+            If comments Is Nothing OrElse comments.Count = 0 Then
+                ApDashboardLog("CommentProcessor: LLM returned no comments", "warn")
+                Return False
+            End If
+
+            ApDashboardLog($"CommentProcessor: {comments.Count} comments to insert", "step")
 
             ' Insert comments into the OpenXML
             Dim commentsXmlPath = Path.Combine(tempDir, "word", "comments.xml")
@@ -116,10 +148,12 @@ Partial Public Class ThisAddIn
             File.Delete(outputPath)
             ZipFile.CreateFromDirectory(tempDir, outputPath, CompressionLevel.Optimal, False)
 
+            ApDashboardLog("CommentProcessor: comment processing complete", "success")
             Return True
 
         Catch ex As System.Exception
             Debug.WriteLine("CommentDocxForAutoPilot error: " & ex.Message)
+            ApDashboardLog("CommentProcessor: error - " & ex.Message, "error")
             Return False
         Finally
             If Directory.Exists(tempDir) Then
@@ -154,8 +188,30 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    ''' <summary>
+    ''' Extracts paragraph texts as a list of strings (one per w:p element that has text).
+    ''' Used by the batched comment processor to build paragraph-level windows.
+    ''' </summary>
+    Private Function APExtractParagraphTexts(xmlDoc As System.Xml.XmlDocument,
+                                              nsMgr As System.Xml.XmlNamespaceManager) As List(Of String)
+        Dim result As New List(Of String)()
+        Dim paraNodes = xmlDoc.SelectNodes("//w:p", nsMgr)
+
+        For Each paraNode As System.Xml.XmlNode In paraNodes
+            Dim textNodes = paraNode.SelectNodes(".//w:t", nsMgr)
+            Dim paraText As New StringBuilder()
+            For Each textNode As System.Xml.XmlNode In textNodes
+                paraText.Append(textNode.InnerText)
+            Next
+            ' Include even empty paragraphs to preserve index alignment
+            result.Add(paraText.ToString())
+        Next
+
+        Return result
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  LLM CALL
+    '  LLM CALL — SINGLE PASS
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
@@ -182,14 +238,169 @@ Partial Public Class ThisAddIn
         ' Build user prompt — batch if text is very large
         Dim userPrompt As String = "[TEXTTOPROCESS]" & vbCrLf & fullText & vbCrLf & "[/TEXTTOPROCESS]"
 
+        ApDashboardLog("CommentProcessor: calling LLM (single-pass)", "step")
+
         Dim llmResponse = Await LLM(systemPrompt, userPrompt,
                                      UseSecondAPI:=False,
                                      HideSplash:=True, EnsureUI:=False,
                                      cancellationToken:=ct)
 
-        If String.IsNullOrWhiteSpace(llmResponse) Then Return Nothing
+        If String.IsNullOrWhiteSpace(llmResponse) Then
+            ApDashboardLog("CommentProcessor: LLM returned empty response", "warn")
+            Return Nothing
+        End If
 
-        Return APParseBubblesResponse(llmResponse)
+        Dim results = APParseBubblesResponse(llmResponse)
+        ApDashboardLog($"CommentProcessor: parsed {results.Count} comments from LLM response", "step")
+        Return results
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  LLM CALL — BATCHED (for large documents)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Processes the document in batches of paragraphs, sending each batch to the LLM
+    ''' with surrounding context paragraphs (read-only) so the LLM understands the flow.
+    ''' Collects all comment entries across batches before returning them for insertion.
+    ''' </summary>
+    Private Async Function APGetCommentsFromLLMBatched(xmlDoc As System.Xml.XmlDocument,
+                                                       nsMgr As System.Xml.XmlNamespaceManager,
+                                                       instruction As String,
+                                                       ct As CancellationToken) As Task(Of List(Of APCommentEntry))
+        Dim paragraphTexts = APExtractParagraphTexts(xmlDoc, nsMgr)
+        Dim allComments As New List(Of APCommentEntry)()
+
+        ' Build the system prompt once
+        Dim bubblesPrompt As String = InterpolateAtRuntime(SP_Add_Bubbles)
+        bubblesPrompt = bubblesPrompt.Replace("{FormatInstruction}",
+            "Provide each comment as plain text without any markdown formatting.")
+
+        Dim systemPrompt As String =
+            "You are a professional document reviewer. " &
+            "Apply the following instruction to the document text provided." & vbCrLf & vbCrLf &
+            "INSTRUCTION: " & instruction & vbCrLf & vbCrLf &
+            bubblesPrompt & vbCrLf & vbCrLf &
+            "IMPORTANT: The text between [TEXTTOPROCESS] and [/TEXTTOPROCESS] is the section you must review and comment on. " &
+            "Text between [CONTEXT_BEFORE] and [/CONTEXT_BEFORE] or [CONTEXT_AFTER] and [/CONTEXT_AFTER] is provided " &
+            "for context only — do NOT comment on context sections."
+
+        ' Determine non-empty paragraph indices for batching
+        Dim nonEmptyIndices As New List(Of Integer)()
+        For i = 0 To paragraphTexts.Count - 1
+            If Not String.IsNullOrWhiteSpace(paragraphTexts(i)) Then
+                nonEmptyIndices.Add(i)
+            End If
+        Next
+
+        If nonEmptyIndices.Count = 0 Then Return Nothing
+
+        ' Pre-calculate total batch count for dashboard logging
+        Dim totalChars As Integer = 0
+        For Each idx In nonEmptyIndices
+            totalChars += paragraphTexts(idx).Length
+        Next
+        Dim estimatedBatches As Integer = CInt(Math.Ceiling(totalChars / CDbl(AP_CommentMaxCharsPerBatch)))
+
+        ApDashboardLog($"CommentProcessor: {nonEmptyIndices.Count} non-empty paragraphs to process (~{estimatedBatches} batches)", "step")
+
+        ' Build batches respecting character limits
+        Dim batchStart As Integer = 0
+        Dim currentBatch As Integer = 0
+
+        While batchStart < nonEmptyIndices.Count
+            ct.ThrowIfCancellationRequested()
+
+            currentBatch += 1
+
+            ' Determine batch end by accumulating characters
+            Dim batchEnd As Integer = batchStart
+            Dim charCount As Integer = 0
+
+            While batchEnd < nonEmptyIndices.Count
+                Dim paraLen = paragraphTexts(nonEmptyIndices(batchEnd)).Length
+                If charCount + paraLen > AP_CommentMaxCharsPerBatch AndAlso batchEnd > batchStart Then
+                    Exit While
+                End If
+                charCount += paraLen
+                batchEnd += 1
+            End While
+
+            ' batchEnd is now exclusive
+            Dim firstParaIdx = nonEmptyIndices(batchStart)
+            Dim lastParaIdx = nonEmptyIndices(batchEnd - 1)
+
+            ApDashboardLog($"CommentProcessor: batch {currentBatch}/{estimatedBatches} (paragraphs {firstParaIdx + 1}-{lastParaIdx + 1}, {charCount} chars)", "step")
+
+            ' Build context before
+            Dim contextBefore As New StringBuilder()
+            Dim ctxBeforeStart = Math.Max(0, firstParaIdx - AP_CommentContextParagraphs)
+            For i = ctxBeforeStart To firstParaIdx - 1
+                If Not String.IsNullOrWhiteSpace(paragraphTexts(i)) Then
+                    contextBefore.AppendLine(paragraphTexts(i))
+                End If
+            Next
+
+            ' Build main text
+            Dim mainText As New StringBuilder()
+            For i = firstParaIdx To lastParaIdx
+                If Not String.IsNullOrWhiteSpace(paragraphTexts(i)) Then
+                    mainText.AppendLine(paragraphTexts(i))
+                End If
+            Next
+
+            ' Build context after
+            Dim contextAfter As New StringBuilder()
+            Dim ctxAfterEnd = Math.Min(paragraphTexts.Count - 1, lastParaIdx + AP_CommentContextParagraphs)
+            For i = lastParaIdx + 1 To ctxAfterEnd
+                If Not String.IsNullOrWhiteSpace(paragraphTexts(i)) Then
+                    contextAfter.AppendLine(paragraphTexts(i))
+                End If
+            Next
+
+            ' Assemble user prompt with context markers
+            Dim userPrompt As New StringBuilder()
+            If contextBefore.Length > 0 Then
+                userPrompt.AppendLine("[CONTEXT_BEFORE]")
+                userPrompt.Append(contextBefore.ToString())
+                userPrompt.AppendLine("[/CONTEXT_BEFORE]")
+                userPrompt.AppendLine()
+            End If
+
+            userPrompt.AppendLine("[TEXTTOPROCESS]")
+            userPrompt.Append(mainText.ToString())
+            userPrompt.AppendLine("[/TEXTTOPROCESS]")
+
+            If contextAfter.Length > 0 Then
+                userPrompt.AppendLine()
+                userPrompt.AppendLine("[CONTEXT_AFTER]")
+                userPrompt.Append(contextAfter.ToString())
+                userPrompt.AppendLine("[/CONTEXT_AFTER]")
+            End If
+
+            ' Call LLM for this batch
+            Dim llmResponse = Await LLM(systemPrompt, userPrompt.ToString(),
+                                         UseSecondAPI:=False,
+                                         HideSplash:=True, EnsureUI:=False,
+                                         cancellationToken:=ct)
+
+            If Not String.IsNullOrWhiteSpace(llmResponse) Then
+                Dim batchComments = APParseBubblesResponse(llmResponse)
+                If batchComments IsNot Nothing AndAlso batchComments.Count > 0 Then
+                    allComments.AddRange(batchComments)
+                    ApDashboardLog($"CommentProcessor: batch {currentBatch} returned {batchComments.Count} comments", "step")
+                Else
+                    ApDashboardLog($"CommentProcessor: batch {currentBatch} returned no comments", "warn")
+                End If
+            Else
+                ApDashboardLog($"CommentProcessor: batch {currentBatch} returned empty response", "warn")
+            End If
+
+            batchStart = batchEnd
+        End While
+
+        ApDashboardLog($"CommentProcessor: all {currentBatch} batches completed, {allComments.Count} total comments collected", "success")
+        Return allComments
     End Function
 
     ''' <summary>
@@ -213,6 +424,21 @@ Partial Public Class ThisAddIn
                 Dim quotedText = pair.Substring(0, delimIdx).Trim()
                 Dim commentText = pair.Substring(delimIdx + AP_CommentDelimiter.Length).Trim()
 
+                ' Strip surrounding quotes that LLMs often wrap around quoted text
+                If quotedText.Length >= 2 Then
+                    ' Handle straight double quotes
+                    If (quotedText.StartsWith("""") AndAlso quotedText.EndsWith("""")) Then
+                        quotedText = quotedText.Substring(1, quotedText.Length - 2).Trim()
+                        ' Handle curly/smart double quotes (common in German and other locales)
+                    ElseIf (quotedText(0) = ChrW(&H201C) OrElse quotedText(0) = ChrW(&H201E)) AndAlso
+                           (quotedText(quotedText.Length - 1) = ChrW(&H201D) OrElse quotedText(quotedText.Length - 1) = ChrW(&H201C)) Then
+                        quotedText = quotedText.Substring(1, quotedText.Length - 2).Trim()
+                        ' Handle guillemets «»
+                    ElseIf quotedText(0) = ChrW(&HAB) AndAlso quotedText(quotedText.Length - 1) = ChrW(&HBB) Then
+                        quotedText = quotedText.Substring(1, quotedText.Length - 2).Trim()
+                    End If
+                End If
+
                 If Not String.IsNullOrWhiteSpace(quotedText) AndAlso Not String.IsNullOrWhiteSpace(commentText) Then
                     results.Add(New APCommentEntry() With {
                         .QuotedText = quotedText,
@@ -232,6 +458,9 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Inserts Word comments into the DOCX by locating quoted text spans and
     ''' adding commentRangeStart/End markers plus a comments.xml part.
+    ''' Unmatched comments (where the quoted text cannot be located in the document)
+    ''' are anchored to a new paragraph appended at the end of the document body
+    ''' so they are not lost.
     ''' </summary>
     ''' <param name="commentAuthor">The author name to set on each comment.</param>
     ''' <param name="prefixComments">If True, each comment body is prefixed with "RI: " (AN5).</param>
@@ -296,6 +525,7 @@ Partial Public Class ThisAddIn
         Dim commentPrefix As String = If(prefixComments, AN5 & ": ", "")
 
         Dim insertedCount As Integer = 0
+        Dim unmatchedEntries As New List(Of APCommentEntry)()
 
         For Each entry In comments
             Dim commentId = nextCommentId
@@ -304,6 +534,7 @@ Partial Public Class ThisAddIn
             ' Find the quoted text in the document
             Dim span = APFindTextSpan(textNodeMap, entry.QuotedText)
             If span Is Nothing Then
+                unmatchedEntries.Add(entry)
                 Debug.WriteLine("CommentProcessor: Could not find quoted text: " & entry.QuotedText.Substring(0, Math.Min(60, entry.QuotedText.Length)))
                 Continue For
             End If
@@ -344,42 +575,126 @@ Partial Public Class ThisAddIn
             endRun.ParentNode.InsertAfter(refRun, rangeEnd)
 
             ' Add the comment element to comments.xml
-            Dim commentEl = commentsXmlDoc.CreateElement("w", "comment", wNs)
-            Dim cmtIdAttr = commentsXmlDoc.CreateAttribute("w", "id", wNs)
-            cmtIdAttr.Value = commentId.ToString()
-            commentEl.Attributes.Append(cmtIdAttr)
-
-            Dim authorAttr = commentsXmlDoc.CreateAttribute("w", "author", wNs)
-            authorAttr.Value = commentAuthor
-            commentEl.Attributes.Append(authorAttr)
-
-            Dim dateAttr = commentsXmlDoc.CreateAttribute("w", "date", wNs)
-            dateAttr.Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            commentEl.Attributes.Append(dateAttr)
-
-            Dim initialsAttr = commentsXmlDoc.CreateAttribute("w", "initials", wNs)
-            initialsAttr.Value = initials
-            commentEl.Attributes.Append(initialsAttr)
-
-            ' Build comment body: w:p > w:r > w:t
-            Dim cmtPara = commentsXmlDoc.CreateElement("w", "p", wNs)
-            Dim cmtRun = commentsXmlDoc.CreateElement("w", "r", wNs)
-            Dim cmtText = commentsXmlDoc.CreateElement("w", "t", wNs)
-
-            Dim spaceAttr = commentsXmlDoc.CreateAttribute("xml", "space", "http://www.w3.org/XML/1998/namespace")
-            spaceAttr.Value = "preserve"
-            cmtText.Attributes.Append(spaceAttr)
-            cmtText.InnerText = commentPrefix & entry.CommentText
-
-            cmtRun.AppendChild(cmtText)
-            cmtPara.AppendChild(cmtRun)
-            commentEl.AppendChild(cmtPara)
-            commentsRoot.AppendChild(commentEl)
+            APAddCommentElement(commentsXmlDoc, commentsRoot, wNs, commentId,
+                                commentAuthor, initials, commentPrefix & entry.CommentText)
 
             insertedCount += 1
         Next
 
-        If insertedCount = 0 Then Return
+        ' ─── Anchor unmatched comments to the end of the document body ───
+        If unmatchedEntries.Count > 0 Then
+            Dim bodyNode = xmlDoc.SelectSingleNode("//w:body", nsMgr)
+            If bodyNode IsNot Nothing Then
+                ' Find the insertion point: before w:sectPr if present, otherwise append
+                Dim sectPr = bodyNode.SelectSingleNode("w:sectPr", nsMgr)
+
+                ' Create an anchor paragraph with a small label so the user can see where these live
+                Dim anchorPara = xmlDoc.CreateElement("w", "p", wNs)
+
+                ' Paragraph properties: small, grey text
+                Dim anchorPPr = xmlDoc.CreateElement("w", "pPr", wNs)
+                Dim anchorPRPr = xmlDoc.CreateElement("w", "rPr", wNs)
+                Dim anchorSz = xmlDoc.CreateElement("w", "sz", wNs)
+                Dim szAttr = xmlDoc.CreateAttribute("w", "val", wNs)
+                szAttr.Value = "16" ' 8pt
+                anchorSz.Attributes.Append(szAttr)
+                anchorPRPr.AppendChild(anchorSz)
+                Dim anchorColor = xmlDoc.CreateElement("w", "color", wNs)
+                Dim colorAttr = xmlDoc.CreateAttribute("w", "val", wNs)
+                colorAttr.Value = "999999"
+                anchorColor.Attributes.Append(colorAttr)
+                anchorPRPr.AppendChild(anchorColor)
+                anchorPPr.AppendChild(anchorPRPr)
+                anchorPara.AppendChild(anchorPPr)
+
+                ' Label run
+                Dim labelRun = xmlDoc.CreateElement("w", "r", wNs)
+                Dim labelRPr = xmlDoc.CreateElement("w", "rPr", wNs)
+                Dim labelSz = xmlDoc.CreateElement("w", "sz", wNs)
+                Dim labelSzAttr = xmlDoc.CreateAttribute("w", "val", wNs)
+                labelSzAttr.Value = "16"
+                labelSz.Attributes.Append(labelSzAttr)
+                labelRPr.AppendChild(labelSz)
+                Dim labelColor = xmlDoc.CreateElement("w", "color", wNs)
+                Dim labelColorAttr = xmlDoc.CreateAttribute("w", "val", wNs)
+                labelColorAttr.Value = "999999"
+                labelColor.Attributes.Append(labelColorAttr)
+                labelRPr.AppendChild(labelColor)
+                labelRun.AppendChild(labelRPr)
+                Dim labelText = xmlDoc.CreateElement("w", "t", wNs)
+                Dim labelSpaceAttr = xmlDoc.CreateAttribute("xml", "space", "http://www.w3.org/XML/1998/namespace")
+                labelSpaceAttr.Value = "preserve"
+                labelText.Attributes.Append(labelSpaceAttr)
+                labelText.InnerText = "[Unmatched review comments]"
+                labelRun.AppendChild(labelText)
+                anchorPara.AppendChild(labelRun)
+
+                ' Add commentRangeStart/End and commentReference for each unmatched entry
+                For Each unmatchedEntry In unmatchedEntries
+                    Dim commentId = nextCommentId
+                    nextCommentId += 1
+
+                    ' commentRangeStart — before the label run
+                    Dim rangeStart = xmlDoc.CreateElement("w", "commentRangeStart", wNs)
+                    Dim rsIdAttr = xmlDoc.CreateAttribute("w", "id", wNs)
+                    rsIdAttr.Value = commentId.ToString()
+                    rangeStart.Attributes.Append(rsIdAttr)
+                    anchorPara.InsertBefore(rangeStart, labelRun)
+
+                    ' commentRangeEnd — after the label run
+                    Dim rangeEnd = xmlDoc.CreateElement("w", "commentRangeEnd", wNs)
+                    Dim reIdAttr = xmlDoc.CreateAttribute("w", "id", wNs)
+                    reIdAttr.Value = commentId.ToString()
+                    rangeEnd.Attributes.Append(reIdAttr)
+                    anchorPara.AppendChild(rangeEnd)
+
+                    ' w:r > w:commentReference
+                    Dim refRun = xmlDoc.CreateElement("w", "r", wNs)
+                    Dim refRunRPr = xmlDoc.CreateElement("w", "rPr", wNs)
+                    Dim refRunStyle = xmlDoc.CreateElement("w", "rStyle", wNs)
+                    Dim refStyleAttr = xmlDoc.CreateAttribute("w", "val", wNs)
+                    refStyleAttr.Value = "CommentReference"
+                    refRunStyle.Attributes.Append(refStyleAttr)
+                    refRunRPr.AppendChild(refRunStyle)
+                    refRun.AppendChild(refRunRPr)
+                    Dim commentRef = xmlDoc.CreateElement("w", "commentReference", wNs)
+                    Dim crIdAttr = xmlDoc.CreateAttribute("w", "id", wNs)
+                    crIdAttr.Value = commentId.ToString()
+                    commentRef.Attributes.Append(crIdAttr)
+                    refRun.AppendChild(commentRef)
+                    anchorPara.AppendChild(refRun)
+
+                    ' Build comment body with the original quoted text included for context
+                    Dim quotedExcerpt = unmatchedEntry.QuotedText
+                    If quotedExcerpt.Length > 200 Then
+                        quotedExcerpt = quotedExcerpt.Substring(0, 200) & "..."
+                    End If
+                    Dim commentBody = commentPrefix & unmatchedEntry.CommentText &
+                                      vbCrLf & vbCrLf & "[Referenced text not found: """ & quotedExcerpt & """]"
+
+                    APAddCommentElement(commentsXmlDoc, commentsRoot, wNs, commentId,
+                                        commentAuthor, initials, commentBody)
+
+                    insertedCount += 1
+                Next
+
+                ' Insert the anchor paragraph into the document body
+                If sectPr IsNot Nothing Then
+                    bodyNode.InsertBefore(anchorPara, sectPr)
+                Else
+                    bodyNode.AppendChild(anchorPara)
+                End If
+
+                ApDashboardLog($"CommentProcessor: {unmatchedEntries.Count} unmatched comments anchored to end of document", "step")
+            End If
+        End If
+
+        If insertedCount = 0 Then
+            ApDashboardLog("CommentProcessor: no comments could be matched to document text", "warn")
+            Return
+        End If
+
+        ApDashboardLog($"CommentProcessor: {insertedCount} comments inserted into document", "step")
 
         ' Save document.xml and comments.xml
         xmlDoc.Save(documentXmlPath)
@@ -388,6 +703,52 @@ Partial Public Class ThisAddIn
         ' Ensure the comments.xml part is referenced in [Content_Types].xml and document.xml.rels
         APEnsureCommentsRelationship(tempDir)
     End Sub
+
+    ''' <summary>
+    ''' Creates a w:comment element and appends it to the comments root.
+    ''' Shared by both matched and unmatched comment insertion paths.
+    ''' </summary>
+    Private Shared Sub APAddCommentElement(commentsXmlDoc As System.Xml.XmlDocument,
+                                            commentsRoot As System.Xml.XmlNode,
+                                            wNs As String,
+                                            commentId As Integer,
+                                            commentAuthor As String,
+                                            initials As String,
+                                            commentBody As String)
+        Dim commentEl = commentsXmlDoc.CreateElement("w", "comment", wNs)
+
+        Dim cmtIdAttr = commentsXmlDoc.CreateAttribute("w", "id", wNs)
+        cmtIdAttr.Value = commentId.ToString()
+        commentEl.Attributes.Append(cmtIdAttr)
+
+        Dim authorAttr = commentsXmlDoc.CreateAttribute("w", "author", wNs)
+        authorAttr.Value = commentAuthor
+        commentEl.Attributes.Append(authorAttr)
+
+        Dim dateAttr = commentsXmlDoc.CreateAttribute("w", "date", wNs)
+        dateAttr.Value = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        commentEl.Attributes.Append(dateAttr)
+
+        Dim initialsAttr = commentsXmlDoc.CreateAttribute("w", "initials", wNs)
+        initialsAttr.Value = initials
+        commentEl.Attributes.Append(initialsAttr)
+
+        ' Build comment body: w:p > w:r > w:t
+        Dim cmtPara = commentsXmlDoc.CreateElement("w", "p", wNs)
+        Dim cmtRun = commentsXmlDoc.CreateElement("w", "r", wNs)
+        Dim cmtText = commentsXmlDoc.CreateElement("w", "t", wNs)
+
+        Dim spaceAttr = commentsXmlDoc.CreateAttribute("xml", "space", "http://www.w3.org/XML/1998/namespace")
+        spaceAttr.Value = "preserve"
+        cmtText.Attributes.Append(spaceAttr)
+        cmtText.InnerText = commentBody
+
+        cmtRun.AppendChild(cmtText)
+        cmtPara.AppendChild(cmtRun)
+        commentEl.AppendChild(cmtPara)
+        commentsRoot.AppendChild(commentEl)
+    End Sub
+
 
     ''' <summary>
     ''' Derives initials from an author name. For multi-word names, takes the first letter

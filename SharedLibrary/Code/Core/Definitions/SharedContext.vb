@@ -222,6 +222,7 @@ Namespace SharedLibrary
             Property SP_DiscussThis_SumUp As String
             Property SP_MailMover As String
             Property SP_InboxBoard As String
+            Property SP_SplitPDF As String
             Property SP_AutoPilot As String
             Property SP_AutoPilot_NoTools As String
 
@@ -516,6 +517,7 @@ Namespace SharedLibrary
         Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
         Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
         Public Property SP_InboxBoard As String Implements ISharedContext.SP_InboxBoard
+        Public Property SP_SplitPDF As String Implements ISharedContext.SP_SplitPDF
         Public Property SP_AutoPilot As String Implements ISharedContext.SP_AutoPilot
         Public Property SP_AutoPilot_NoTools As String Implements ISharedContext.SP_AutoPilot_NoTools
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands

@@ -1772,6 +1772,7 @@ Namespace SharedLibrary
                     {"SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp},
                     {"SP_MailMover", context.SP_MailMover},
                     {"SP_InboxBoard", context.SP_InboxBoard},
+                    {"SP_SplitPDF", context.SP_SplitPDF},
                     {"SP_AutoPilot", context.SP_AutoPilot},
                     {"SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools},
                     {"SP_Chat", context.SP_Chat},
@@ -1876,6 +1877,7 @@ Namespace SharedLibrary
                     {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
                     {"SP_MailMover", Default_SP_MailMover},
                     {"SP_InboxBoard", Default_SP_InboxBoard},
+                    {"SP_SplitPDF", Default_SP_SplitPDF},
                     {"SP_AutoPilot", Default_SP_AutoPilot},
                     {"SP_AutoPilot_NoTools", Default_SP_AutoPilot_NoTools},
                     {"SP_Chat", Default_SP_Chat},
@@ -2436,6 +2438,7 @@ Namespace SharedLibrary
 
             Dim btnSaveClose As New System.Windows.Forms.Button() With {.Text = "Save && Close", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnEditIni As New System.Windows.Forms.Button() With {.Text = "Edit .ini Files", .AutoSize = True, .Margin = New Padding(10)}
+            Dim btnEditLibFiles As New System.Windows.Forms.Button() With {.Text = "Edit Lib Files", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnCancel As New System.Windows.Forms.Button() With {.Text = "Cancel", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnImportIni As New System.Windows.Forms.Button() With {.Text = "Load Settings From A Source", .AutoSize = True, .Margin = New Padding(10)}
 
@@ -2452,7 +2455,7 @@ Namespace SharedLibrary
                     .Padding = New Padding(15, 15, 15, 15),
                     .WrapContents = False
                 }
-            pnlButtons.Controls.AddRange({btnCancel, btnSaveClose, btnEditIni, btnImportIni})
+            pnlButtons.Controls.AddRange({btnCancel, btnSaveClose, btnEditIni, btnEditLibFiles, btnImportIni})
 
             pnlGridHost.Controls.Add(dgv)
             form.Controls.Add(pnlGridHost)
@@ -2652,6 +2655,140 @@ Namespace SharedLibrary
                     End If
 
                 End Sub
+
+            AddHandler btnEditLibFiles.Click,
+                            Sub()
+                                ' Build selectable library file list from configured path variables in context.
+                                ' Each entry: (FriendlyName, PathPropertyValue, IsFullPath, FilePrefix, FileExtension).
+                                '   IsFullPath = True  → the variable holds the direct path to a single .txt/.json file
+                                '   IsFullPath = False → the variable holds a directory; scan for files matching prefix/extension
+                                '   FilePrefix         → e.g. "redink-lib-", "redink-dc-", "redink-ag-", "redink-ds-"
+                                '   FileExtension      → e.g. ".txt", ".json"
+
+                                Dim entries As New List(Of Tuple(Of String, String, Boolean, String, String)) From {
+                                    Tuple.Create("Prompt Library", context.INI_PromptLibPath, True, "", ""),
+                                    Tuple.Create("Prompt Library (Local)", context.INI_PromptLibPathLocal, True, "", ""),
+                                    Tuple.Create("Prompt Library (Transcript)", context.INI_PromptLibPath_Transcript, True, "", ""),
+                                    Tuple.Create("My Style", context.INI_MyStylePath, True, "", ""),
+                                    Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
+                                    Tuple.Create("Discuss Personas (Local)", context.INI_DiscussInkyPathLocal, True, "", ""),
+                                    Tuple.Create("Extractor Library", context.INI_ExtractorPath, True, "", ""),
+                                    Tuple.Create("Extractor Library (Local)", context.INI_ExtractorPathLocal, True, "", ""),
+                                    Tuple.Create("Rename Library", context.INI_RenameLibPath, True, "", ""),
+                                    Tuple.Create("Rename Library (Local)", context.INI_RenameLibPathLocal, True, "", ""),
+                                    Tuple.Create("Snapshot Library", context.INI_SnapshotLibPath, True, "", ""),
+                                    Tuple.Create("Snapshot Library (Local)", context.INI_SnapshotLibPathLocal, True, "", ""),
+                                    Tuple.Create("Redaction Instructions", context.INI_RedactionInstructionsPath, True, "", ""),
+                                    Tuple.Create("Redaction Instructions (Local)", context.INI_RedactionInstructionsPathLocal, True, "", ""),
+                                    Tuple.Create("Mail Mover", context.INI_MailMoverPath, True, "", ""),
+                                    Tuple.Create("Mail Mover (Local)", context.INI_MailMoverPathLocal, True, "", ""),
+                                    Tuple.Create("Help Me", context.INI_HelpMeInkyPath, True, "", ""),
+                                    Tuple.Create("AutoPilot", context.INI_AutoPilot, True, "", ""),
+                                    Tuple.Create("Find Clause", context.INI_FindClausePath, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("Find Clause (Local)", context.INI_FindClausePathLocal, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("DocCheck", context.INI_DocCheckPath, False, AN2 & "-dc-", ".txt"),
+                                    Tuple.Create("DocCheck (Local)", context.INI_DocCheckPathLocal, False, AN2 & "-dc-", ".txt"),
+                                    Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
+                                    Tuple.Create("DocStyle (Local)", context.INI_DocStylePathLocal, False, AN2 & "-ds-", ".json"),
+                                    Tuple.Create("WebAgent", context.INI_WebAgentPath, False, AN2 & "-ag-", ".json"),
+                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json")
+                                }
+
+                                Dim fileMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+                                For Each entry In entries
+                                    Dim friendlyName As String = entry.Item1
+                                    Dim rawPath As String = entry.Item2
+                                    Dim isFullPath As Boolean = entry.Item3
+                                    Dim filePrefix As String = entry.Item4
+                                    Dim fileExt As String = entry.Item5
+
+                                    If String.IsNullOrWhiteSpace(rawPath) Then Continue For
+
+                                    Dim expandedPath As String = ExpandEnvironmentVariables(rawPath.Trim())
+
+                                    If isFullPath Then
+                                        ' Path points to a single file
+                                        If System.IO.File.Exists(expandedPath) Then
+                                            Dim label As String = $"{friendlyName} - {System.IO.Path.GetFileName(expandedPath)}"
+                                            If Not fileMap.ContainsKey(label) AndAlso Not fileMap.ContainsValue(expandedPath) Then
+                                                fileMap.Add(label, expandedPath)
+                                            End If
+                                        End If
+                                    Else
+                                        ' Path points to a directory — scan for files matching the specific prefix and extension
+                                        If System.IO.Directory.Exists(expandedPath) Then
+                                            Try
+                                                Dim searchPattern As String = filePrefix & "*" & fileExt
+                                                Dim files = System.IO.Directory.GetFiles(expandedPath, searchPattern, System.IO.SearchOption.TopDirectoryOnly) _
+                                                    .OrderBy(Function(f) System.IO.Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+
+                                                For Each filePath In files
+                                                    Dim fileName As String = System.IO.Path.GetFileName(filePath)
+                                                    Dim label As String = $"{friendlyName}/{fileName}"
+                                                    If Not fileMap.ContainsKey(label) AndAlso Not fileMap.ContainsValue(filePath) Then
+                                                        fileMap.Add(label, filePath)
+                                                    End If
+                                                Next
+                                            Catch ex As Exception
+                                                Debug.WriteLine($"Error scanning directory '{expandedPath}': {ex.Message}")
+                                            End Try
+                                        End If
+                                    End If
+                                Next
+
+                                If fileMap.Count = 0 Then
+                                    ShowCustomMessageBox("No library files found. Make sure the relevant paths are configured in your settings and the files exist.", AN)
+                                    Exit Sub
+                                End If
+
+                                ' Z-order fix: temporarily disable form so selection UI is not blocked
+                                Dim wasTopMost = form.TopMost
+                                form.TopMost = False
+                                form.Enabled = False
+                                System.Windows.Forms.Application.DoEvents()
+
+                                Dim choice As String = Nothing
+                                Try
+                                    choice = ShowSelectionForm("Select a library file to edit (ESC to cancel):", "Library Files", fileMap.Keys)
+                                Finally
+                                    form.Enabled = True
+                                    form.TopMost = wasTopMost
+                                    form.Activate()
+                                End Try
+
+                                If String.IsNullOrWhiteSpace(choice) OrElse Not fileMap.ContainsKey(choice) Then Exit Sub
+                                Dim selectedPath = fileMap(choice)
+
+                                Try
+                                    Dim forceJson As Boolean = selectedPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+
+                                    ' If not already a .json file, peek at the content to detect embedded JSON
+                                    If Not forceJson Then
+                                        Try
+                                            Dim peek As String = System.IO.File.ReadAllText(selectedPath, System.Text.Encoding.UTF8)
+                                            If peek IsNot Nothing Then
+                                                Dim openCount As Integer = 0
+                                                Dim closeCount As Integer = 0
+                                                For Each ch As Char In peek
+                                                    If ch = "{"c Then openCount += 1
+                                                    If ch = "}"c Then closeCount += 1
+                                                Next
+                                                ' Multiple matched braces strongly suggest embedded JSON
+                                                If openCount >= 2 AndAlso closeCount >= 2 Then
+                                                    forceJson = True
+                                                End If
+                                            End If
+                                        Catch
+                                            ' Non-fatal: if read fails, just open without JSON mode
+                                        End Try
+                                    End If
+
+                                    ShowTextFileEditor(selectedPath, "Editing " & System.IO.Path.GetFileName(selectedPath), forceJson, context)
+                                Catch ex As Exception
+                                    ShowCustomMessageBox("Could not open editor: " & ex.Message, AN)
+                                End Try
+                            End Sub
 
 
             AddHandler btnSaveClose.Click,
@@ -2910,6 +3047,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp)
             variableValues.Add("SP_MailMover", context.SP_MailMover)
             variableValues.Add("SP_InboxBoard", context.SP_InboxBoard)
+            variableValues.Add("SP_SplitPDF", context.SP_SplitPDF)
             variableValues.Add("SP_AutoPilot", context.SP_AutoPilot)
             variableValues.Add("SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools)
             variableValues.Add("SP_Chat", context.SP_Chat)
@@ -3087,6 +3225,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_DiscussThis_SumUp") Then context.SP_DiscussThis_SumUp = CStr(updatedValues("SP_DiscussThis_SumUp"))
                 If updatedValues.ContainsKey("SP_MailMover") Then context.SP_MailMover = CStr(updatedValues("SP_MailMover"))
                 If updatedValues.ContainsKey("SP_InboxBoard") Then context.SP_InboxBoard = CStr(updatedValues("SP_InboxBoard"))
+                If updatedValues.ContainsKey("SP_SplitPDF") Then context.SP_SplitPDF = CStr(updatedValues("SP_SplitPDF"))
                 If updatedValues.ContainsKey("SP_AutoPilot") Then context.SP_AutoPilot = CStr(updatedValues("SP_AutoPilot"))
                 If updatedValues.ContainsKey("SP_AutoPilot_NoTools") Then context.SP_AutoPilot_NoTools = CStr(updatedValues("SP_AutoPilot_NoTools"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))

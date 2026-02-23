@@ -1100,4 +1100,217 @@ Partial Public Class ThisAddIn
         End If
     End Function
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  UNIFIED ENTRY POINT (DOCX + PPTX)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Processes a document file (DOCX or PPTX) by applying the given instruction via LLM.
+    ''' Dispatches to the correct processor based on file extension.
+    ''' </summary>
+    Private Async Function ProcessDocumentForAutoPilot(inputPath As String, outputPath As String,
+                                                       instruction As String, ct As CancellationToken) As Task(Of Boolean)
+        Dim ext As String = Path.GetExtension(inputPath).ToLowerInvariant()
+
+        Select Case ext
+            Case ".pptx"
+                Return Await ProcessPptxForAutoPilot(inputPath, outputPath, instruction, ct)
+            Case ".docx", ".doc"
+                Return Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
+            Case Else
+                ApDashboardLog($"DocProcessor: unsupported file type '{ext}'", "error")
+                Return False
+        End Select
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  PPTX PROCESSING
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Processes a PPTX file by applying the given instruction via LLM to all text paragraphs.
+    ''' PPTX uses DrawingML namespace (a:) with a:p → a:r → a:t structure.
+    ''' </summary>
+    Private Async Function ProcessPptxForAutoPilot(inputPath As String, outputPath As String,
+                                                    instruction As String, ct As CancellationToken) As Task(Of Boolean)
+        Dim tempDir As String = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "pptx_" & Guid.NewGuid().ToString("N"))
+
+        Try
+            ApDashboardLog("DocProcessor: starting PowerPoint processing", "step")
+
+            ' Copy input to output (we modify the copy)
+            File.Copy(inputPath, outputPath, overwrite:=True)
+
+            ' Extract PPTX (ZIP)
+            ZipFile.ExtractToDirectory(outputPath, tempDir)
+
+            Dim pptDir As String = Path.Combine(tempDir, "ppt")
+            If Not Directory.Exists(pptDir) Then
+                ApDashboardLog("DocProcessor: invalid PPTX structure - ppt directory not found", "error")
+                Return False
+            End If
+
+            ' === Collect all slide parts ===
+            Dim slidesDir As String = Path.Combine(pptDir, "slides")
+            Dim notesDir As String = Path.Combine(pptDir, "notesSlides")
+            Dim slideCount As Integer = 0
+
+            If Directory.Exists(slidesDir) Then
+                Dim slideFiles = Directory.GetFiles(slidesDir, "slide*.xml").
+                    OrderBy(Function(f)
+                                Dim m = Regex.Match(Path.GetFileNameWithoutExtension(f), "\d+")
+                                Return If(m.Success, Integer.Parse(m.Value), 0)
+                            End Function).ToArray()
+
+                slideCount = slideFiles.Length
+                ApDashboardLog($"DocProcessor: found {slideCount} slide(s) to process", "step")
+
+                For Each slideFile In slideFiles
+                    ct.ThrowIfCancellationRequested()
+
+                    Dim slideNum As String = Regex.Match(Path.GetFileNameWithoutExtension(slideFile), "\d+").Value
+                    Dim slideLabel As String = If(slideNum.Length > 0, $"Slide {slideNum}", Path.GetFileNameWithoutExtension(slideFile))
+
+                    ApDashboardLog($"DocProcessor: processing {slideLabel}", "step")
+                    Await APProcessPptxXmlPart(slideFile, instruction, ct)
+                Next
+            End If
+
+            ' === Process notes slides ===
+            If Directory.Exists(notesDir) Then
+                For Each notesFile In Directory.GetFiles(notesDir, "notesSlide*.xml")
+                    ct.ThrowIfCancellationRequested()
+
+                    Dim notesNum As String = Regex.Match(Path.GetFileNameWithoutExtension(notesFile), "\d+").Value
+                    Dim notesLabel As String = If(notesNum.Length > 0, $"Notes {notesNum}", Path.GetFileNameWithoutExtension(notesFile))
+
+                    ApDashboardLog($"DocProcessor: processing {notesLabel}", "step")
+                    Await APProcessPptxXmlPart(notesFile, instruction, ct)
+                Next
+            End If
+
+            ' Repack PPTX
+            File.Delete(outputPath)
+            ZipFile.CreateFromDirectory(tempDir, outputPath, CompressionLevel.Optimal, False)
+
+            ApDashboardLog($"DocProcessor: PowerPoint processing complete ({slideCount} slides)", "success")
+            Return True
+
+        Catch ex As OperationCanceledException
+            Throw
+        Catch ex As System.Exception
+            Debug.WriteLine("ProcessPptxForAutoPilot error: " & ex.Message)
+            ApDashboardLog("DocProcessor: error - " & ex.Message, "error")
+            Return False
+        Finally
+            If Directory.Exists(tempDir) Then
+                Try : Directory.Delete(tempDir, recursive:=True) : Catch : End Try
+            End If
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Processes a single PPTX XML part (slide, notes slide) by extracting
+    ''' DrawingML paragraphs, sending text to the LLM, and writing back.
+    ''' </summary>
+    Private Async Function APProcessPptxXmlPart(xmlPath As String, instruction As String, ct As CancellationToken) As Task(Of Boolean)
+        Try
+            Dim xmlDoc As New System.Xml.XmlDocument()
+            xmlDoc.PreserveWhitespace = True
+            xmlDoc.Load(xmlPath)
+
+            Dim nsMgr As New System.Xml.XmlNamespaceManager(xmlDoc.NameTable)
+            nsMgr.AddNamespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+            nsMgr.AddNamespace("p", "http://schemas.openxmlformats.org/presentationml/2006/main")
+            nsMgr.AddNamespace("r", "http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+
+            ' Extract paragraphs using DrawingML structure
+            Dim paragraphs As List(Of APParagraphInfo) = APExtractPptxParagraphs(xmlDoc, nsMgr)
+
+            Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
+            If processable.Count = 0 Then Return True
+
+            ' Process paragraphs in batches (reuses the same LLM batching as DOCX)
+            Dim success As Boolean = Await APProcessBatches(paragraphs, instruction, ct)
+            If Not success Then Return False
+
+            ' Apply processed text back to XML nodes (reuses the same redistribution logic)
+            APApplyTranslations(paragraphs)
+
+            ' Save modified XML
+            xmlDoc.Save(xmlPath)
+            Return True
+
+        Catch ex As OperationCanceledException
+            Throw
+        Catch ex As System.Exception
+            Debug.WriteLine($"APProcessPptxXmlPart error for {Path.GetFileName(xmlPath)}: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Extracts paragraph information from a PPTX XML part (slide, notes, etc.).
+    ''' DrawingML uses a:p → a:r → a:t structure instead of WordprocessingML's w:p → w:r → w:t.
+    ''' Skips a:t nodes inside a:fld (field) elements — auto-generated content like slide numbers.
+    ''' </summary>
+    Private Function APExtractPptxParagraphs(xmlDoc As System.Xml.XmlDocument,
+                                              nsMgr As System.Xml.XmlNamespaceManager) As List(Of APParagraphInfo)
+        Dim paragraphs As New List(Of APParagraphInfo)()
+
+        Dim paraNodes As System.Xml.XmlNodeList = xmlDoc.SelectNodes("//a:p", nsMgr)
+        Dim paraIndex As Integer = 0
+
+        For Each paraNode As System.Xml.XmlNode In paraNodes
+            Dim paraInfo As New APParagraphInfo() With {
+                .Index = paraIndex,
+                .TextRuns = New List(Of APTextRunInfo)(),
+                .TranslatedText = Nothing,
+                .MarkerText = Nothing
+            }
+
+            ' Find all a:t (text) elements within a:r (run) elements
+            Dim textNodes As System.Xml.XmlNodeList = paraNode.SelectNodes(".//a:r/a:t", nsMgr)
+            Dim fullTextBuilder As New StringBuilder()
+
+            ' Build a set of a:t nodes inside field elements to exclude
+            Dim fieldTextNodes As New HashSet(Of System.Xml.XmlNode)()
+            Dim fieldNodes As System.Xml.XmlNodeList = paraNode.SelectNodes(".//a:fld//a:t", nsMgr)
+            For Each fldTextNode As System.Xml.XmlNode In fieldNodes
+                fieldTextNodes.Add(fldTextNode)
+            Next
+
+            For Each textNode As System.Xml.XmlNode In textNodes
+                ' Skip text inside field elements (slide numbers, dates, etc.)
+                If fieldTextNodes.Contains(textNode) Then Continue For
+
+                Dim text As String = textNode.InnerText
+
+                paraInfo.TextRuns.Add(New APTextRunInfo() With {
+                    .TextNode = textNode,
+                    .OriginalText = text,
+                    .HasNoteReferenceBefore = False  ' PPTX doesn't have footnote references
+                })
+
+                fullTextBuilder.Append(text)
+            Next
+
+            paraInfo.FullText = fullTextBuilder.ToString()
+            paraInfo.IsEmpty = String.IsNullOrWhiteSpace(paraInfo.FullText)
+
+            ' Build marker-annotated text for multi-run paragraphs
+            If paraInfo.TextRuns.Count > 1 AndAlso Not paraInfo.IsEmpty Then
+                paraInfo.MarkerText = APBuildMarkerAnnotatedText(paraInfo.TextRuns)
+            Else
+                paraInfo.MarkerText = Nothing
+            End If
+
+            paragraphs.Add(paraInfo)
+            paraIndex += 1
+        Next
+
+        Return paragraphs
+    End Function
+
+
 End Class

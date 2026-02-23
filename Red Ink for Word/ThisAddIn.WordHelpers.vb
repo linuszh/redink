@@ -77,7 +77,21 @@ Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports Slib = SharedLibrary.SharedLibrary.SharedMethods
 
+
+
 Partial Public Class ThisAddIn
+
+    ''' <summary>
+    ''' Represents a segment of a PDF to be extracted as a separate exhibit file.
+    ''' </summary>
+    Friend Class SplitSegment
+        ''' <summary>1-based start page number.</summary>
+        Public Property StartPage As Integer
+        ''' <summary>1-based end page number (inclusive).</summary>
+        Public Property EndPage As Integer
+        ''' <summary>Descriptive name for the exhibit.</summary>
+        Public Property Name As String
+    End Class
 
     ''' <summary>
     ''' CSS styling applied to all HTML summary windows for consistent formatting of LLM-generated content.
@@ -1934,7 +1948,7 @@ Partial Public Class ThisAddIn
 
                     Dim llmResult As String = String.Empty
                     Try
-                        llmResult = SharedMethods.LLM(
+                        llmResult = LLM(
                             _context,
                             systemPrompt,
                             userPrompt,
@@ -3467,4 +3481,445 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    ''' <summary>
+    ''' Reads a PDF page by page, extracts text (with OCR if needed), sends the page texts
+    ''' to the LLM to determine how to split the PDF into separate exhibits/documents,
+    ''' and saves each split segment into a new subdirectory alongside the source PDF.
+    ''' Output filenames follow the pattern "Exhibit 01 - Brief Description.pdf".
+    ''' Shows a progress bar and supports cancellation.
+    ''' </summary>
+    Public Async Sub SplitPdfByExhibits()
+        Dim selectedPath As String = ""
+
+        ' Show DragDropForm for PDF file selection
+        Globals.ThisAddIn.DragDropFormLabel = "Select a PDF file to split into exhibits"
+
+        Try
+            Using frm As New DragDropForm(DragDropMode.FileOnly)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(selectedPath) Then
+            Return
+        End If
+
+        If Not IO.File.Exists(selectedPath) Then
+            ShowCustomMessageBox("The selected file does not exist.", AN)
+            Return
+        End If
+
+        Dim ext As String = IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+        If ext <> ".pdf" Then
+            ShowCustomMessageBox($"File type '{ext}' is not supported. Only PDF files can be split.", AN)
+            Return
+        End If
+
+        ' Determine OCR availability and ask user
+        Dim doOcr As Boolean = False
+        If SharedMethods.IsOcrAvailable(_context) Then
+            Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                "Some pages may contain scanned content that requires OCR (optical character recognition) to extract text." & vbCrLf & vbCrLf &
+                "Do you want to enable OCR for pages where text extraction yields little or no content?",
+                "Yes, enable OCR",
+                "No, skip OCR",
+                AN & " Split PDF by Exhibits")
+            If ocrChoice = 0 Then
+                Return ' User cancelled
+            End If
+            doOcr = (ocrChoice = 1)
+        End If
+
+        ' Prompt user for output language for file descriptions
+        ' If empty, no description will be added to filenames (just 01.pdf, 02.pdf, etc.)
+        Dim useDescription As Boolean = True
+        Dim languageInput As String = ShowCustomInputBox(
+            "Enter the language for exhibit descriptions in the filenames (e.g., English, German, French)." & vbCrLf & vbCrLf &
+            "Leave empty if you do not want descriptions added to the filenames (files will be named 01.pdf, 02.pdf, etc.).",
+            AN & " Split PDF by Exhibits",
+            True,
+            INI_Language1)
+
+        If languageInput Is Nothing Then
+            Return ' User cancelled (pressed Cancel/Esc)
+        End If
+
+        languageInput = languageInput.Trim()
+
+        If String.IsNullOrEmpty(languageInput) Then
+            ' No description wanted; set OutputLanguage to English for internal LLM use
+            OutputLanguage = "English"
+            useDescription = False
+        Else
+            OutputLanguage = languageInput
+            useDescription = True
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 1: Extract text page by page
+        ' ─────────────────────────────────────────────────────────────────
+        Dim pageCount As Integer = 0
+
+        ' Get page count first
+        Try
+            Using pdfDoc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(selectedPath)
+                pageCount = pdfDoc.NumberOfPages
+            End Using
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to open PDF: {ex.Message}", AN)
+            Return
+        End Try
+
+        If pageCount = 0 Then
+            ShowCustomMessageBox("The PDF has no pages.", AN)
+            Return
+        End If
+
+        If pageCount = 1 Then
+            ShowCustomMessageBox("The PDF has only one page and cannot be split.", AN)
+            Return
+        End If
+
+        ' Show progress bar for text extraction
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = pageCount
+        ProgressBarModule.GlobalProgressLabel = "Extracting text from pages..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Split PDF by Exhibits", "Reading PDF pages...")
+
+        Dim pageTexts As New Dictionary(Of Integer, String)()
+        Dim ocrWasUsed As Boolean = False
+
+        Try
+            ' Extract text using PdfPig page by page
+            Using pdfDoc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(selectedPath)
+                For pageIdx As Integer = 1 To pdfDoc.NumberOfPages
+                    If ProgressBarModule.CancelOperation Then Exit For
+
+                    ProgressBarModule.GlobalProgressValue = pageIdx
+                    ProgressBarModule.GlobalProgressLabel = $"Extracting text from page {pageIdx} of {pdfDoc.NumberOfPages}..."
+
+                    Dim pageText As String = String.Empty
+
+                    Try
+                        Dim page = pdfDoc.GetPage(pageIdx)
+                        pageText = String.Join(" ", page.GetWords().Select(Function(w) w.Text))
+                    Catch
+                        ' Page text extraction failed
+                    End Try
+
+                    ' If text is sparse and OCR is enabled, use OCR for this page
+                    If doOcr AndAlso (String.IsNullOrWhiteSpace(pageText) OrElse pageText.Trim().Length < 50) Then
+                        Try
+                            ProgressBarModule.GlobalProgressLabel = $"OCR processing page {pageIdx} of {pdfDoc.NumberOfPages}..."
+
+                            ' Extract single page to temp PDF for OCR
+                            Dim tempPagePdf As String = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_splitocr_{Guid.NewGuid():N}.pdf")
+                            Try
+                                Await System.Threading.Tasks.Task.Run(Sub() ExtractSinglePagePdf(selectedPath, pageIdx, tempPagePdf))
+
+                                Dim ocrResult As String = Await ReadPdfAsText(tempPagePdf, False, True, False, _context)
+                                If Not String.IsNullOrWhiteSpace(ocrResult) AndAlso ocrResult.Trim().Length > pageText.Trim().Length Then
+                                    pageText = ocrResult
+                                    ocrWasUsed = True
+                                End If
+                            Finally
+                                Try
+                                    If IO.File.Exists(tempPagePdf) Then IO.File.Delete(tempPagePdf)
+                                Catch
+                                End Try
+                            End Try
+                        Catch
+                            ' OCR failed for this page; use whatever text we have
+                        End Try
+                    End If
+
+                    pageTexts(pageIdx) = If(pageText, String.Empty)
+                Next
+            End Using
+
+        Catch ex As Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Failed to extract text from PDF: {ex.Message}", AN)
+            Return
+        End Try
+
+        ' Close extraction progress
+        ProgressBarModule.CancelOperation = True
+
+        If pageTexts.Count = 0 Then
+            ShowCustomMessageBox("No text could be extracted from the PDF.", AN)
+            Return
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 2: Send page texts to LLM for split analysis
+        ' ─────────────────────────────────────────────────────────────────
+
+        ' Build the page-by-page content for the LLM
+        Dim pageContentSb As New System.Text.StringBuilder()
+
+        ' Dynamically scale per-page character budget to stay within token limits
+        ' Target: ~200K chars total (~50K tokens) to leave room for system prompt + response
+        Const MaxTotalChars As Integer = 200000
+        Dim charsPerPage As Integer = Math.Max(300, MaxTotalChars \ Math.Max(1, pageTexts.Count))
+        ' Cap at 2250 so small documents still get the full truncation treatment
+        charsPerPage = Math.Min(charsPerPage, 2250)
+        ' Reserve 250 chars for the tail portion; the rest goes to the head
+        Dim tailChars As Integer = Math.Min(250, charsPerPage \ 4)
+        Dim headChars As Integer = charsPerPage - tailChars
+
+        For Each kvp In pageTexts.OrderBy(Function(k) k.Key)
+            Dim truncatedText As String = kvp.Value
+            ' Truncate pages that exceed the per-page budget, keeping head + tail
+            If truncatedText.Length > charsPerPage Then
+                truncatedText = truncatedText.Substring(0, headChars) & " [...] " & truncatedText.Substring(truncatedText.Length - tailChars)
+            End If
+            pageContentSb.AppendLine($"--- PAGE {kvp.Key} ---")
+            pageContentSb.AppendLine(If(String.IsNullOrWhiteSpace(truncatedText), "[No text extracted from this page]", truncatedText))
+            pageContentSb.AppendLine()
+        Next
+
+        Dim systemPrompt As String = SP_SplitPDF
+
+        Dim userPrompt As String = $"The PDF has {pageCount} pages. Here is the text content page by page:" & vbCrLf & vbCrLf & pageContentSb.ToString()
+
+        Dim llmResponse As String = String.Empty
+        Try
+            llmResponse = Await SharedMethods.LLM(
+                _context,
+                InterpolateAtRuntime(systemPrompt),
+                userPrompt,
+                "",
+                "",
+                0,
+                False,
+                False)
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to analyze PDF structure: {ex.Message}", AN)
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(llmResponse) Then
+            ShowCustomMessageBox("The AI did not return a response. Unable to determine how to split the PDF.", AN)
+            Return
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 3: Parse LLM response into split segments
+        ' ─────────────────────────────────────────────────────────────────
+        Dim segments As New List(Of SplitSegment)()
+
+        Try
+            ' Clean response: strip code fences if present
+            Dim cleanedResponse As String = llmResponse.Trim()
+            If cleanedResponse.StartsWith("```") Then
+                Dim firstNewline As Integer = cleanedResponse.IndexOf(vbLf)
+                If firstNewline >= 0 Then
+                    cleanedResponse = cleanedResponse.Substring(firstNewline + 1)
+                End If
+                If cleanedResponse.EndsWith("```") Then
+                    cleanedResponse = cleanedResponse.Substring(0, cleanedResponse.Length - 3).Trim()
+                End If
+            End If
+
+            Dim jsonArray As Newtonsoft.Json.Linq.JArray = Newtonsoft.Json.Linq.JArray.Parse(cleanedResponse)
+
+            For Each item As Newtonsoft.Json.Linq.JObject In jsonArray
+                Dim seg As New SplitSegment()
+                seg.StartPage = CInt(item("start_page"))
+                seg.EndPage = CInt(item("end_page"))
+                seg.Name = CStr(If(item("name"), "Unnamed"))
+                segments.Add(seg)
+            Next
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to parse the AI response as valid JSON: {ex.Message}" & vbCrLf & vbCrLf &
+                                 "Raw response:" & vbCrLf & llmResponse, AN)
+            Return
+        End Try
+
+        If segments.Count = 0 Then
+            ShowCustomMessageBox("The AI returned no segments. Unable to split the PDF.", AN)
+            Return
+        End If
+
+        ' Validate segments
+        For Each seg In segments
+            If seg.StartPage < 1 OrElse seg.EndPage > pageCount OrElse seg.StartPage > seg.EndPage Then
+                ShowCustomMessageBox($"Invalid page range detected: pages {seg.StartPage}-{seg.EndPage} for '{seg.Name}'. Total pages: {pageCount}.", AN)
+                Return
+            End If
+        Next
+
+        ' Sort by start page
+        segments.Sort(Function(a, b) a.StartPage.CompareTo(b.StartPage))
+
+        If segments.Count = 1 Then
+            ShowCustomMessageBox("The AI determined this PDF is a single coherent document and cannot be meaningfully split." & vbCrLf & vbCrLf &
+                                 $"Document: {segments(0).Name} (pages {segments(0).StartPage}-{segments(0).EndPage})", AN)
+            Return
+        End If
+
+        ' Show proposed split to user for confirmation
+        Dim previewSb As New System.Text.StringBuilder()
+        previewSb.AppendLine($"The AI proposes splitting this {pageCount}-page PDF into {segments.Count} parts:")
+        previewSb.AppendLine()
+        For i As Integer = 0 To segments.Count - 1
+            Dim seg = segments(i)
+            Dim pageInfo As String = If(seg.StartPage = seg.EndPage, $"page {seg.StartPage}", $"pages {seg.StartPage}-{seg.EndPage}")
+            previewSb.AppendLine($"  {(i + 1):D2}. {seg.Name} ({pageInfo})")
+        Next
+        previewSb.AppendLine()
+        previewSb.AppendLine("Do you want to proceed with this split?")
+
+        Dim confirmChoice As Integer = ShowCustomYesNoBox(
+            previewSb.ToString(),
+            "Yes, split PDF",
+            "No, cancel",
+            AN & " Split PDF by Exhibits")
+        If confirmChoice <> 1 Then
+            Return
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 4: Split the PDF using PdfSharp
+        ' ─────────────────────────────────────────────────────────────────
+        Dim pdfDir As String = IO.Path.GetDirectoryName(selectedPath)
+        Dim pdfBaseName As String = IO.Path.GetFileNameWithoutExtension(selectedPath)
+        Dim outputDir As String = IO.Path.Combine(pdfDir, SanitizeFileName(pdfBaseName) & "_split")
+
+        ' Ensure unique output directory
+        If IO.Directory.Exists(outputDir) Then
+            Dim counter As Integer = 1
+            While IO.Directory.Exists(outputDir & $"_{counter}")
+                counter += 1
+            End While
+            outputDir = outputDir & $"_{counter}"
+        End If
+
+        Try
+            IO.Directory.CreateDirectory(outputDir)
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to create output directory: {ex.Message}", AN)
+            Return
+        End Try
+
+        ' Show progress bar for splitting
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = segments.Count
+        ProgressBarModule.GlobalProgressLabel = "Splitting PDF..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Split PDF by Exhibits", "Splitting PDF into exhibits...")
+
+        Dim successCount As Integer = 0
+        Dim failedSegments As New List(Of String)()
+
+        Try
+            ' Load the source PDF once with PdfSharp
+            Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(selectedPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+
+                For i As Integer = 0 To segments.Count - 1
+                    If ProgressBarModule.CancelOperation Then Exit For
+
+                    Dim seg = segments(i)
+                    ProgressBarModule.GlobalProgressValue = i + 1
+                    ProgressBarModule.GlobalProgressLabel = $"Creating exhibit {i + 1} of {segments.Count}: {seg.Name}..."
+
+                    Try
+                        ' Build filename based on whether descriptions are wanted
+                        Dim outputFileName As String
+                        If useDescription Then
+                            Dim sanitizedName As String = SanitizeFileName(seg.Name)
+                            outputFileName = $"{(i + 1):D2} - {sanitizedName}.pdf"
+                        Else
+                            outputFileName = $"{(i + 1):D2}.pdf"
+                        End If
+                        Dim outputPath As String = IO.Path.Combine(outputDir, outputFileName)
+
+                        ' Create a new document with just the pages for this segment
+                        Using outDoc As New PdfSharp.Pdf.PdfDocument()
+                            For pageNum As Integer = seg.StartPage To seg.EndPage
+                                ' PdfSharp uses 0-based indexing
+                                Dim srcPage As PdfSharp.Pdf.PdfPage = srcDoc.Pages(pageNum - 1)
+                                outDoc.AddPage(srcPage)
+                            Next
+
+                            outDoc.Save(outputPath)
+                        End Using
+
+                        successCount += 1
+
+                    Catch ex As Exception
+                        failedSegments.Add($"{seg.Name}: {ex.Message}")
+                    End Try
+                Next
+            End Using
+
+        Catch ex As Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Failed to split PDF: {ex.Message}", AN)
+            Return
+        Finally
+            ProgressBarModule.CancelOperation = True
+        End Try
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 5: Show summary
+        ' ─────────────────────────────────────────────────────────────────
+        Dim summary As New System.Text.StringBuilder()
+        summary.AppendLine($"Successfully created {successCount} exhibit file(s).")
+        summary.AppendLine($"Output directory: {outputDir}")
+
+        If ocrWasUsed Then
+            summary.AppendLine("OCR was used for some pages with little or no text.")
+        End If
+
+        If failedSegments.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"Failed: {failedSegments.Count} segment(s)")
+            For Each f In failedSegments
+                summary.AppendLine($"  • {f}")
+            Next
+        End If
+
+        ' Ask if user wants to open the output directory
+        Dim openChoice As Integer = ShowCustomYesNoBox(
+            summary.ToString() & vbCrLf & vbCrLf & "Do you want to open the output directory?",
+            "Yes, open directory",
+            "No",
+            AN & " Split PDF by Exhibits")
+
+        If openChoice = 1 Then
+            Try
+                System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo(outputDir) With {.UseShellExecute = True})
+            Catch ex As Exception
+                ShowCustomMessageBox($"Could not open directory: {ex.Message}", AN)
+            End Try
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Extracts a single page from a PDF file and saves it as a separate PDF.
+    ''' Used for per-page OCR processing during exhibit splitting.
+    ''' </summary>
+    ''' <param name="inputPath">Source PDF file path.</param>
+    ''' <param name="pageNumber">1-based page number to extract.</param>
+    ''' <param name="outputPath">Destination PDF file path for the single page.</param>
+    Private Shared Sub ExtractSinglePagePdf(inputPath As String, pageNumber As Integer, outputPath As String)
+        Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+            Using outDoc As New PdfSharp.Pdf.PdfDocument()
+                outDoc.AddPage(srcDoc.Pages(pageNumber - 1))
+                outDoc.Save(outputPath)
+            End Using
+        End Using
+    End Sub
+
 End Class
+
+
+
+
