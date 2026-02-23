@@ -127,6 +127,7 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
+        Me.RI_SplitPDF = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -632,6 +633,7 @@ Partial Class Ribbon1
         Me.Menu2.Items.Add(Me.RI_Import)
         Me.Menu2.Items.Add(Me.RI_FlattenPDF)
         Me.Menu2.Items.Add(Me.RI_ConvertDocToTxt)
+        Me.Menu2.Items.Add(Me.RI_SplitPDF)
         Me.Menu2.Items.Add(Me.RI_Markdown)
         Me.Menu2.Items.Add(Me.RI_ContentControls)
         Me.Menu2.Items.Add(Me.RI_Remove)
@@ -821,6 +823,15 @@ Partial Class Ribbon1
         Me.RI_Chat.OfficeImageId = "ContactUs"
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
+        '
+        'RI_SplitPDF
+        '
+        Me.RI_SplitPDF.Label = "Split PDF with AI"
+        Me.RI_SplitPDF.Name = "RI_SplitPDF"
+        Me.RI_SplitPDF.OfficeImageId = "TaskSplit"
+        Me.RI_SplitPDF.ScreenTip = "Split a PDF containing several documents into separate exhibits based on their co" &
+    "ntent"
+        Me.RI_SplitPDF.ShowImage = True
         '
         'Ribbon1
         '
@@ -1108,6 +1119,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Snapshot As RibbonButton
     Friend WithEvents RI_Remove As RibbonButton
     Friend WithEvents RI_WebApp As RibbonButton
+    Friend WithEvents RI_SplitPDF As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

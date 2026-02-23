@@ -635,6 +635,7 @@
     <Compile Include="ThisAddIn.TextToSpeech.Form.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.vb" />
     <Compile Include="ThisAddIn.Transcriptor.vb" />
+    <Compile Include="ThisAddIn.TranslatePresentations.vb" />
     <Compile Include="ThisAddIn.vb">
       <SubType>Code</SubType>
     </Compile>

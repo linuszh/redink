@@ -1062,6 +1062,7 @@ Partial Public Class ThisAddIn
                 AddItem("applydocstyle", "Apply a style template.")
                 AddItem("findclause", "Search for a clause in the clause library/database.")
                 AddItem("addclause", "Add a clause to the clause library/database.")
+                AddItem("splitpdf", "Split a PDF into separate exhibits based on its content.")
 
                 ' WEB AGENT
                 AddItem("webagentcreator", "Create/modify web agent scripts.")
@@ -1444,6 +1445,11 @@ Partial Public Class ThisAddIn
             ' Open the centralized usage Log File
             If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
                 SharedLogger.AnalyzeLogs(_context)
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "splitpdf", StringComparison.OrdinalIgnoreCase) Then
+                Globals.ThisAddIn.SplitPdfByExhibits()
                 Return
             End If
 

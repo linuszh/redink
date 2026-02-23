@@ -104,6 +104,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreateExcel As String = "create_excel_spreadsheet"
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
+    Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
@@ -115,17 +116,18 @@ Partial Public Class ThisAddIn
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
-            .ModelDescription = "Process Word Document (built-in)",
+            .ModelDescription = "Process Word/PowerPoint Document (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ProcessWordDoc & ": Processes one or more Word document (.docx) attachments by applying a prompt/instruction. " &
+                AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx) or PowerPoint (.pptx) attachments by applying a prompt/instruction. " &
                 "Use this for translation, correction, proofreading, anonymization, or any text transformation. " &
-                "Returns both a clean version and a compare document showing changes.",
+                "For Word documents, returns both a clean version and a compare document showing changes. " &
+                "For PowerPoint files, returns the processed version (no compare document).",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
-                """description"":""Applies a text processing instruction to Word document attachments. Supports translation, correction, anonymization, and freestyle text operations. Produces clean output and a compare document with tracked changes.""," &
+                """description"":""Applies a text processing instruction to Word (.docx) or PowerPoint (.pptx) attachments. Supports translation, correction, anonymization, and freestyle text operations. For Word documents, produces clean output and a compare document with tracked changes. For PowerPoint, produces the processed file only.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """instruction"":{""type"":""string"",""description"":""The instruction to apply to the document (e.g., 'Translate to German', 'Correct spelling and grammar', 'Anonymize all personal names')""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the Word document attachments to process. If empty or omitted, processes all .docx attachments.""}" &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the Word (.docx) or PowerPoint (.pptx) attachments to process. If empty or omitted, processes all .docx and .pptx attachments.""}" &
                 "},""required"":[""instruction""]}}"
         })
 
@@ -532,6 +534,37 @@ Partial Public Class ThisAddIn
                 "},""required"":[""file_name"",""content""]}}"
         })
 
+        ' ── comment_pdf_document ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CommentPdf,
+            .ModelDescription = "Comment PDF Document (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_CommentPdf & ": Adds review comments as highlight annotations with popups to a PDF attachment. " &
+                "Use this ONLY when the user explicitly asks to ADD, INSERT, or PLACE comments, annotations, " &
+                "review notes, or feedback INSIDE a PDF file — i.e. the user wants the PDF itself modified with " &
+                "embedded annotation bubbles. " &
+                "Do NOT use this tool when the user asks to READ, EXTRACT, SUMMARIZE, or UNDERSTAND existing " &
+                "comments or content from a PDF — use extract_pdf_text or read_attachment for that instead. " &
+                "Do NOT use this tool when the user wants a textual summary or analysis of a PDF — only when " &
+                "annotations should appear as highlight + popup comment pairs within the PDF itself. " &
+                "Supports an optional author parameter: if the user asks for comments under a specific name " &
+                "(e.g. the sender's name), pass it as author. If not specified, comments are authored as 'Inky'. " &
+                "Comments that cannot be matched to specific text in the PDF are placed as sticky notes " &
+                "at the top-right corner of the first page.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_CommentPdf & """," &
+                """description"":""Adds review comments as highlight annotations with popup bubbles directly inside a PDF file. " &
+                "Use ONLY when the user wants to ADD or INSERT comments/annotations/review feedback INTO the PDF. " &
+                "Do NOT use when the user wants to READ or EXTRACT existing content or comments from a PDF. " &
+                "Matched text is highlighted in yellow with a popup comment; unmatched comments become sticky notes.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """instruction"":{""type"":""string"",""description"":""The review instruction (e.g., 'Review for legal risks', 'Check for inconsistencies', 'Suggest improvements')""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to annotate. If empty or omitted, annotates all PDF attachments.""}," &
+                """author"":{""type"":""string"",""description"":""Optional author name for the annotations. Use this when the user requests a specific name. If omitted, defaults to 'Inky'.""}" &
+                "},""required"":[""instruction""]}}"
+        })
+
+
         Return tools
     End Function
 
@@ -559,6 +592,8 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
             Case AP_Tool_CommentWordDoc
                 Return Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CommentPdf
+                Return Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_CompareWordDocs
                 Return Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReadWordDocDetails
@@ -807,6 +842,104 @@ Partial Public Class ThisAddIn
             att.CachedDocxHint = ""
             Return ""
         End Try
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: comment_pdf_document
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCommentPdfTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim instruction = GetArgString(toolCall.Arguments, "instruction")
+            If String.IsNullOrWhiteSpace(instruction) Then
+                response.Success = False
+                response.ErrorMessage = "Missing required parameter: instruction"
+                response.Response = response.ErrorMessage
+                Return response
+            End If
+
+            Dim author = GetArgString(toolCall.Arguments, "author")
+            Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+
+            Dim toProcess As List(Of AutoPilotAttachmentInfo)
+            If targetNames.Count > 0 Then
+                toProcess = _apCurrentAttachments?.Where(
+                    Function(a) targetNames.Any(
+                        Function(n) a.OriginalFileName.Equals(n, StringComparison.OrdinalIgnoreCase)
+                    ) AndAlso Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing
+                ).ToList()
+            Else
+                toProcess = _apCurrentAttachments?.Where(
+                    Function(a) a.Extension = ".pdf" AndAlso
+                                Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing
+                ).ToList()
+            End If
+
+            If toProcess Is Nothing OrElse toProcess.Count = 0 Then
+                response.Success = False
+                response.Response = "No processable PDF attachments found."
+                Return response
+            End If
+
+            Dim effectiveAuthor = If(String.IsNullOrWhiteSpace(author), AN6, author.Trim())
+            Dim authorNote = If(effectiveAuthor.Equals(AN6, StringComparison.OrdinalIgnoreCase), "", $" (author: {effectiveAuthor})")
+            Dim resultMessages As New List(Of String)()
+
+            For Each att In toProcess
+                context.Log($"Adding PDF comments to: {att.OriginalFileName} with instruction: {instruction}{authorNote}")
+                ApDashboardLog($"💬 Adding PDF comments to: {att.OriginalFileName}{authorNote}", "step")
+
+                If Not att.TempFilePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                    resultMessages.Add($"✗ {att.OriginalFileName}: Only PDF files are supported for PDF comment insertion.")
+                    Continue For
+                End If
+
+                Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_commented.pdf"
+                Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+
+                ' Prevent filename collision
+                Dim counter = 1
+                While File.Exists(outputPath)
+                    outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_commented_{counter}.pdf"
+                    outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                    counter += 1
+                End While
+
+                Dim success = Await CommentPdfForAutoPilot(att.TempFilePath, outputPath, instruction, ct, author)
+
+                If success Then
+                    att.OutputFiles.Add(outputPath)
+                    resultMessages.Add($"✓ {att.OriginalFileName}: PDF comments added successfully. Output: {outputName}")
+                    ApDashboardLog($"✓ PDF comments added to: {att.OriginalFileName}", "info")
+                Else
+                    resultMessages.Add($"✗ {att.OriginalFileName}: Failed to add PDF comments (document may be empty, image-only, or unsupported).")
+                    ApDashboardLog($"⚠ Failed to add PDF comments to: {att.OriginalFileName}", "warn")
+                End If
+            Next
+
+            response.Success = resultMessages.Any(Function(m) m.StartsWith("✓"))
+            response.Response = String.Join(vbCrLf, resultMessages)
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error adding comments to PDF(s): {ex.Message}"
+        End Try
+
+        Return response
     End Function
 
 
@@ -1720,14 +1853,14 @@ Partial Public Class ThisAddIn
                 Next
             Else
                 toProcess = _apCurrentAttachments?.Where(
-                    Function(a) (a.Extension = ".docx" OrElse a.Extension = ".doc") AndAlso
+                    Function(a) (a.Extension = ".docx" OrElse a.Extension = ".doc" OrElse a.Extension = ".pptx") AndAlso
                                 Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing
                 ).ToList()
             End If
 
             If toProcess Is Nothing OrElse toProcess.Count = 0 Then
                 response.Success = False
-                response.Response = "No processable Word document attachments found."
+                response.Response = "No processable Word or PowerPoint attachments found."
                 Return response
             End If
 
@@ -1741,20 +1874,23 @@ Partial Public Class ThisAddIn
 
             For Each att In toProcess
                 context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction}")
+
                 Dim inputPath = att.TempFilePath
-                Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed.docx"
+                Dim isPptx As Boolean = att.Extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
+                Dim outputExt As String = If(isPptx, ".pptx", ".docx")
+                Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed" & outputExt
                 Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
 
                 ' Prevent filename collision when re-processing: if the output already exists,
                 ' append a counter to avoid overwriting a previous result
                 Dim counter = 1
                 While File.Exists(outputPath)
-                    outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_processed_{counter}.docx"
+                    outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_processed_{counter}" & outputExt
                     outputPath = Path.Combine(_apCurrentTempDir, outputName)
                     counter += 1
                 End While
 
-                Dim success = Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
+                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct)
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -1766,22 +1902,27 @@ Partial Public Class ThisAddIn
 
                     registrationTarget.OutputFiles.Add(outputPath)
 
-                    Dim comparePath = Path.Combine(_apCurrentTempDir,
-                        Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
-                    ' Prevent compare filename collision too
-                    Dim cmpCounter = 1
-                    While File.Exists(comparePath)
-                        comparePath = Path.Combine(_apCurrentTempDir,
-                            Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
-                        cmpCounter += 1
-                    End While
+                    ' Compare document only for Word files (Word's CompareDocuments doesn't support PPTX)
+                    If Not isPptx Then
+                        Dim comparePath = Path.Combine(_apCurrentTempDir,
+                            Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
+                        ' Prevent compare filename collision too
+                        Dim cmpCounter = 1
+                        While File.Exists(comparePath)
+                            comparePath = Path.Combine(_apCurrentTempDir,
+                                Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_compare_{cmpCounter}.docx")
+                            cmpCounter += 1
+                        End While
 
-                    Dim compareSuccess = Await SwitchToUi(Function() CreateWordCompareDocumentForAutoPilot(inputPath, outputPath, comparePath))
-                    If compareSuccess Then
-                        registrationTarget.OutputFiles.Add(comparePath)
-                        resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} + compare document.")
+                        Dim compareSuccess = Await SwitchToUi(Function() CreateWordCompareDocumentForAutoPilot(inputPath, outputPath, comparePath))
+                        If compareSuccess Then
+                            registrationTarget.OutputFiles.Add(comparePath)
+                            resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} + compare document.")
+                        Else
+                            resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} (compare document creation failed).")
+                        End If
                     Else
-                        resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName} (compare document creation failed).")
+                        resultMessages.Add($"✓ {att.OriginalFileName}: Processed successfully. Output: {outputName}")
                     End If
                 Else
                     resultMessages.Add($"✗ {att.OriginalFileName}: Processing failed.")
@@ -1794,7 +1935,7 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             response.Success = False
             response.ErrorMessage = ex.Message
-            response.Response = $"Error processing Word document(s): {ex.Message}"
+            response.Response = $"Error processing document(s): {ex.Message}"
         End Try
 
         Return response
@@ -3560,7 +3701,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_CreateWordDoc,
                  AP_Tool_CreateExcel,
                  AP_Tool_CreatePowerPoint,
-                 AP_Tool_CreateCodeFile
+                 AP_Tool_CreateCodeFile,
+                 AP_Tool_CommentPdf
                 Return True
             Case Else
                 Return False

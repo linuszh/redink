@@ -1313,6 +1313,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_SplitPDF As String
+        Get
+            Return _context.SP_SplitPDF
+        End Get
+        Set(value As String)
+            _context.SP_SplitPDF = value
+        End Set
+    End Property
+
     Public Shared Property SP_AutoPilot As String
         Get
             Return _context.SP_AutoPilot

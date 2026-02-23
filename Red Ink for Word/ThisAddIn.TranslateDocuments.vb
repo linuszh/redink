@@ -206,6 +206,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Main processing method that handles both translation and correction modes.
+    ''' Supports both Word (.doc/.docx) and PowerPoint (.pptx) files with automatic dispatch.
     ''' </summary>
     ''' <param name="mode">The processing mode (Translate or Correct).</param>
     Private Async Function ProcessWordDocuments(mode As DocumentProcessMode) As System.Threading.Tasks.Task
@@ -217,8 +218,8 @@ Partial Public Class ThisAddIn
 
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
-        Globals.ThisAddIn.DragDropFormLabel = $"Select a Word document or folder to {modeVerb}"
-        Globals.ThisAddIn.DragDropFormFilter = "Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc"
+        Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+        Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
@@ -243,11 +244,11 @@ Partial Public Class ThisAddIn
 
         ' Collect files
         Dim filesToProcess As New List(Of String)()
-        Dim wordExtensions As String() = {".doc", ".docx"}
+        Dim supportedExtensions As String() = {".doc", ".docx", ".pptx"}
 
         If isFile Then
             Dim ext As String = Path.GetExtension(selectedPath).ToLowerInvariant()
-            If wordExtensions.Contains(ext) Then
+            If supportedExtensions.Contains(ext) Then
                 filesToProcess.Add(selectedPath)
             Else
                 ShowCustomMessageBox($"File type '{ext}' is not supported.")
@@ -255,7 +256,7 @@ Partial Public Class ThisAddIn
             End If
         Else
             Dim recurseChoice As Integer = ShowCustomYesNoBox(
-                $"Include Word documents from subdirectories?",
+                $"Include documents from subdirectories?",
                 "Yes, include subdirectories", "No, top directory only")
             If recurseChoice = 0 Then Exit Function
 
@@ -265,13 +266,13 @@ Partial Public Class ThisAddIn
             Dim allFiles = Directory.GetFiles(selectedPath, "*.*", searchOption)
             For Each f In allFiles
                 Dim ext As String = Path.GetExtension(f).ToLowerInvariant()
-                If ext = ".doc" OrElse ext = ".docx" Then
+                If ext = ".doc" OrElse ext = ".docx" OrElse ext = ".pptx" Then
                     filesToProcess.Add(f)
                 End If
             Next
 
             If filesToProcess.Count = 0 Then
-                ShowCustomMessageBox("No Word documents found.")
+                ShowCustomMessageBox("No Word or PowerPoint documents found.")
                 Exit Function
             End If
         End If
@@ -284,7 +285,7 @@ Partial Public Class ThisAddIn
             Dim defaultLanguage As String = If(String.IsNullOrWhiteSpace(INI_Language1), "English", INI_Language1)
             targetLanguage = ShowCustomInputBox(
                 "Enter your target language (e.g., English, German, French):",
-                AN & " Translate Word Files", True, defaultLanguage)
+                AN & " Translate Files", True, defaultLanguage)
 
             If String.IsNullOrWhiteSpace(targetLanguage) Then Exit Function
             targetLanguage = targetLanguage.Trim()
@@ -305,7 +306,9 @@ Partial Public Class ThisAddIn
 
         For Each f In filesToProcess
             Dim ext As String = Path.GetExtension(f)
-            If Not ext.Equals(".doc", StringComparison.OrdinalIgnoreCase) AndAlso Not ext.Equals(".docx", StringComparison.OrdinalIgnoreCase) Then Continue For
+            If Not ext.Equals(".doc", StringComparison.OrdinalIgnoreCase) AndAlso
+               Not ext.Equals(".docx", StringComparison.OrdinalIgnoreCase) AndAlso
+               Not ext.Equals(".pptx", StringComparison.OrdinalIgnoreCase) Then Continue For
 
             Dim dir As String = Path.GetDirectoryName(f)
             Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(f)
@@ -463,9 +466,17 @@ Partial Public Class ThisAddIn
 
         ' Confirm if many files to process
         If filesToProcess.Count > 10 Then
+            ' Count file types for informative message
+            Dim wordCount As Integer = filesToProcess.Where(Function(f) Not Path.GetExtension(f).Equals(".pptx", StringComparison.OrdinalIgnoreCase)).Count
+            Dim pptxCount As Integer = filesToProcess.Where(Function(f) Path.GetExtension(f).Equals(".pptx", StringComparison.OrdinalIgnoreCase)).Count
+            Dim fileDesc As String = $"{filesToProcess.Count} document(s)"
+            If wordCount > 0 AndAlso pptxCount > 0 Then
+                fileDesc = $"{filesToProcess.Count} document(s) ({wordCount} Word, {pptxCount} PowerPoint)"
+            End If
+
             Dim confirmMsg As String = If(mode = DocumentProcessMode.Translate,
-                $"Ready to translate {filesToProcess.Count} document(s) to {targetLanguage}. Continue?",
-                $"Ready to correct {filesToProcess.Count} document(s). Continue?")
+                $"Ready to translate {fileDesc} to {targetLanguage}. Continue?",
+                $"Ready to correct {fileDesc}. Continue?")
             Dim confirm As Integer = ShowCustomYesNoBox(confirmMsg, "Yes, continue", "No, abort")
             If confirm <> 1 Then Exit Function
         End If
@@ -486,6 +497,8 @@ Partial Public Class ThisAddIn
 
                 Dim filePath As String = filesToProcess(i)
                 Dim fileName As String = Path.GetFileName(filePath)
+                Dim fileExt As String = Path.GetExtension(filePath).ToLowerInvariant()
+                Dim isPptx As Boolean = (fileExt = ".pptx")
 
                 ProgressBarModule.GlobalProgressValue = i
                 ProgressBarModule.GlobalProgressLabel = $"{modeVerbGerund} {i + 1}/{filesToProcess.Count}: {fileName}"
@@ -493,19 +506,29 @@ Partial Public Class ThisAddIn
                 Try
                     Dim dir As String = Path.GetDirectoryName(filePath)
                     Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(filePath)
+                    Dim outputExt As String = If(isPptx, ".pptx", ".docx")
                     Dim outputPath As String
 
                     If mode = DocumentProcessMode.Translate Then
-                        outputPath = Path.Combine(dir, $"{nameWithoutExt}_{targetLanguageToken}.docx")
+                        outputPath = Path.Combine(dir, $"{nameWithoutExt}_{targetLanguageToken}{outputExt}")
                     Else
-                        outputPath = Path.Combine(dir, $"{nameWithoutExt}{effectiveCorrectedSuffix}.docx")
+                        outputPath = Path.Combine(dir, $"{nameWithoutExt}{effectiveCorrectedSuffix}{outputExt}")
                     End If
 
-                    Dim success As Boolean = Await ProcessDocumentViaOpenXml(filePath, outputPath, targetLanguage, mode)
+                    Dim success As Boolean
+
+                    If isPptx Then
+                        ' PowerPoint: copy then process via PPTX OpenXML pipeline
+                        File.Copy(filePath, outputPath, overwrite:=True)
+                        success = Await ProcessPptxOpenXml(outputPath, targetLanguage, mode)
+                    Else
+                        ' Word: existing pipeline (handles .doc → .docx conversion)
+                        success = Await ProcessDocumentViaOpenXml(filePath, outputPath, targetLanguage, mode)
+                    End If
 
                     If success Then
-                        ' For correction mode, create compare document
-                        If mode = DocumentProcessMode.Correct Then
+                        ' For correction mode on Word docs, create compare document
+                        If mode = DocumentProcessMode.Correct AndAlso Not isPptx Then
                             Dim compareSuccess As Boolean = CreateWordCompareDocument(filePath, outputPath)
                             If Not compareSuccess Then
                                 failedFiles.Add($"{fileName}: Corrected but compare document creation failed")
@@ -539,7 +562,11 @@ Partial Public Class ThisAddIn
         If mode = DocumentProcessMode.Translate Then
             summary.AppendLine($"Target language: {targetLanguage}")
         Else
-            summary.AppendLine($"Compare documents created with tracked changes")
+            ' Only mention compare documents if any Word files were processed
+            Dim hasWordFiles As Boolean = filesToProcess.Any(Function(f) Not Path.GetExtension(f).Equals(".pptx", StringComparison.OrdinalIgnoreCase))
+            If hasWordFiles Then
+                summary.AppendLine($"Compare documents created with tracked changes")
+            End If
         End If
 
         If failedFiles.Count > 0 Then
