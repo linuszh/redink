@@ -2227,25 +2227,45 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
   display: flex; align-items: center; opacity: 0.7; }
 .lang-input-wrapper input[type=""text""]:not([data-empty=""true""]) + .lang-overlay { display: none; }
 .lang-input-wrapper input[type=""text""]:focus + .lang-overlay { display: none; }
-.board { display: flex; gap: 14px; padding: 16px 20px; overflow-x: auto;
-  min-height: calc(100vh - 56px); align-items: flex-start; }
-.column { min-width: 220px; max-width: 340px; flex: 1 1 280px; background: var(--col-bg);
-  border: 1px solid var(--col-border); border-radius: 10px; display: flex; flex-direction: column; }
+.board { display: flex; gap: 14px; padding: 16px 20px; overflow-x: auto; overflow-y: hidden;
+  min-height: calc(100vh - 56px); align-items: flex-start; cursor: default; }
+.board.panning { cursor: grabbing; user-select: none; }
+.column { min-width: 220px; max-width: 340px; flex: 0 0 280px; background: var(--col-bg);
+  border: 1px solid var(--col-border); border-radius: 10px; display: flex; flex-direction: column;
+  max-height: calc(100vh - 90px); }
 .column.drag-over { background: var(--drop-highlight); }
 .column.drag-over-add { background: var(--drop-highlight-add); }
 .column-header { padding: 10px 12px; font-weight: 600; font-size: 13px; display: flex;
-  align-items: center; gap: 6px; border-bottom: 1px solid var(--col-border); user-select: none; }
+  align-items: center; gap: 6px; border-bottom: 1px solid var(--col-border); user-select: none;
+  flex-shrink: 0; }
 .column-header .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .column-header .count { margin-left: auto; background: var(--input-bg); color: var(--text-muted);
   font-size: 11px; font-weight: 500; padding: 1px 7px; border-radius: 10px; }
-.card-list { padding: 6px; flex: 1; min-height: 50px; display: flex; flex-direction: column; gap: 0; }
+.column-header .sort-btn { background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 14px; padding: 2px 4px; border-radius: 4px; display: flex; align-items: center;
+  justify-content: center; position: relative; margin-left: 4px; flex-shrink: 0; }
+.column-header .sort-btn:hover { color: #3b82f6; background: var(--drop-highlight); }
+.sort-dropdown { position: absolute; top: 100%; right: 0; background: var(--settings-bg);
+  border: 1px solid var(--settings-border); border-radius: 6px; padding: 4px 0;
+  min-width: 160px; box-shadow: 0 4px 12px var(--card-shadow); z-index: 300; display: none; }
+.sort-dropdown.open { display: block; }
+.sort-dropdown .sort-option { padding: 5px 12px; font-size: 12px; color: var(--text);
+  cursor: pointer; white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+.sort-dropdown .sort-option:hover { background: var(--drop-highlight); }
+.sort-dropdown .sort-option .sort-check { width: 14px; font-size: 11px; color: #3b82f6; }
+.card-list { padding: 6px; flex: 1; min-height: 50px; display: flex; flex-direction: column; gap: 0;
+  overflow-y: auto; overflow-x: hidden; }
+.card-list::-webkit-scrollbar { width: 5px; }
+.card-list::-webkit-scrollbar-track { background: transparent; }
+.card-list::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 3px; opacity: 0.4; }
+.card-list::-webkit-scrollbar-thumb:hover { opacity: 0.7; }
 .drop-indicator { height: 3px; background: var(--drop-line); border-radius: 2px;
   margin: 2px 4px; opacity: 0; flex-shrink: 0; }
 .drop-indicator.visible { opacity: 1; }
 .drop-indicator.add-mode { background: var(--drop-line-add); }
 .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
   padding: 9px 11px; cursor: grab; box-shadow: 0 1px 3px var(--card-shadow);
-  user-select: none; margin-bottom: 6px; transition: box-shadow 0.2s, transform 0.15s; }
+  user-select: none; margin-bottom: 6px; transition: box-shadow 0.2s, transform 0.15s; flex-shrink: 0; }
 .card:hover { box-shadow: 0 3px 8px var(--card-shadow); transform: translateY(-1px); }
 .card.dragging { opacity: 0.5; cursor: grabbing; transform: rotate(2deg); }
 .card.hidden { display: none; }
@@ -2464,6 +2484,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("var isDragging = false;")
         js.AppendLine("var ctrlHeld = false;")
         js.AppendLine("var langCommitTimer = null;")
+        js.AppendLine("var columnSortState = {};") ' Track sort per column
         js.AppendLine()
         js.AppendLine("function init(data) {")
         js.AppendLine("  try {")
@@ -2499,6 +2520,56 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    applySearchFilter();")
         js.AppendLine("  }")
         js.AppendLine("}")
+        js.AppendLine()
+        ' --- Board panning (middle-click / right-click drag) ---
+        js.AppendLine("// --- Board panning ---")
+        js.AppendLine("(function() {")
+        js.AppendLine("  var board = null;")
+        js.AppendLine("  var isPanning = false;")
+        js.AppendLine("  var startX = 0, startY = 0, scrollLeftStart = 0, scrollTopStart = 0;")
+        js.AppendLine()
+        js.AppendLine("  function getBoard() { if (!board) board = document.getElementById('board'); return board; }")
+        js.AppendLine()
+        js.AppendLine("  document.addEventListener('mousedown', function(e) {")
+        js.AppendLine("    var b = getBoard(); if (!b) return;")
+        js.AppendLine("    // Middle button (1) or right button (2) on board background")
+        js.AppendLine("    if (e.button !== 1 && e.button !== 2) return;")
+        js.AppendLine("    // Only start panning if clicking on board or column background, not on cards/buttons")
+        js.AppendLine("    var target = e.target;")
+        js.AppendLine("    if (target.closest('.card') || target.closest('.card-btn') || target.closest('.sort-dropdown') || target.closest('.header')) return;")
+        js.AppendLine("    // Must be inside the board area")
+        js.AppendLine("    if (!target.closest('.board') && !target.closest('.column') && target !== b) return;")
+        js.AppendLine("    e.preventDefault();")
+        js.AppendLine("    isPanning = true;")
+        js.AppendLine("    startX = e.clientX;")
+        js.AppendLine("    startY = e.clientY;")
+        js.AppendLine("    scrollLeftStart = b.scrollLeft;")
+        js.AppendLine("    scrollTopStart = window.scrollY;")
+        js.AppendLine("    b.classList.add('panning');")
+        js.AppendLine("  });")
+        js.AppendLine()
+        js.AppendLine("  document.addEventListener('mousemove', function(e) {")
+        js.AppendLine("    if (!isPanning) return;")
+        js.AppendLine("    var b = getBoard(); if (!b) return;")
+        js.AppendLine("    e.preventDefault();")
+        js.AppendLine("    var dx = e.clientX - startX;")
+        js.AppendLine("    var dy = e.clientY - startY;")
+        js.AppendLine("    b.scrollLeft = scrollLeftStart - dx;")
+        js.AppendLine("    window.scrollTo(window.scrollX, scrollTopStart - dy);")
+        js.AppendLine("  });")
+        js.AppendLine()
+        js.AppendLine("  document.addEventListener('mouseup', function(e) {")
+        js.AppendLine("    if (!isPanning) return;")
+        js.AppendLine("    isPanning = false;")
+        js.AppendLine("    var b = getBoard(); if (b) b.classList.remove('panning');")
+        js.AppendLine("  });")
+        js.AppendLine()
+        js.AppendLine("  // Suppress context menu when right-click panning")
+        js.AppendLine("  document.addEventListener('contextmenu', function(e) {")
+        js.AppendLine("    var target = e.target;")
+        js.AppendLine("    if (target.closest('.board') || target.closest('.column')) { e.preventDefault(); }")
+        js.AppendLine("  });")
+        js.AppendLine("})();")
         js.AppendLine()
         js.AppendLine("// --- Persistence via My.Settings (postMessage to VB.NET) ---")
         js.AppendLine("function saveState() {")
@@ -2558,6 +2629,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("document.addEventListener('click', function(e) {")
         js.AppendLine("  var p = document.getElementById('settingsPanel');")
         js.AppendLine("  if (!p.contains(e.target) && e.target !== document.getElementById('settingsBtn')) p.classList.remove('open');")
+        js.AppendLine("  // Close any open sort dropdowns")
+        js.AppendLine("  if (!e.target.closest('.sort-btn') && !e.target.closest('.sort-dropdown')) {")
+        js.AppendLine("    document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { dd.classList.remove('open'); });")
+        js.AppendLine("  }")
         js.AppendLine("});")
         js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) {")
         js.AppendLine("  cb.addEventListener('change', function() {")
@@ -2661,6 +2736,47 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine()
+        ' --- Column sort functions ---
+        js.AppendLine("// --- Column sorting ---")
+        js.AppendLine("var SORT_OPTIONS = [")
+        js.AppendLine("  { key: 'date-desc', label: 'Date (newest first)' },")
+        js.AppendLine("  { key: 'date-asc', label: 'Date (oldest first)' },")
+        js.AppendLine("  { key: 'subject-asc', label: 'Subject (A\u2013Z)' },")
+        js.AppendLine("  { key: 'subject-desc', label: 'Subject (Z\u2013A)' },")
+        js.AppendLine("  { key: 'sender-asc', label: 'Sender (A\u2013Z)' },")
+        js.AppendLine("  { key: 'sender-desc', label: 'Sender (Z\u2013A)' },")
+        js.AppendLine("  { key: 'unread', label: 'Unread first' }")
+        js.AppendLine("];")
+        js.AppendLine()
+        js.AppendLine("function sortColumnCards(colId, sortKey) {")
+        js.AppendLine("  columnSortState[colId] = sortKey;")
+        js.AppendLine("  var colEl = document.querySelector('.column[data-column=""' + CSS.escape(colId) + '""]');")
+        js.AppendLine("  if (!colEl) return;")
+        js.AppendLine("  var list = colEl.querySelector('.card-list');")
+        js.AppendLine("  if (!list) return;")
+        js.AppendLine("  var cardEls = Array.from(list.querySelectorAll('.card'));")
+        js.AppendLine("  cardEls.sort(function(a, b) {")
+        js.AppendLine("    var ca = cards.find(function(c) { return c.entryId === a.dataset.entryId; });")
+        js.AppendLine("    var cb = cards.find(function(c) { return c.entryId === b.dataset.entryId; });")
+        js.AppendLine("    if (!ca || !cb) return 0;")
+        js.AppendLine("    switch (sortKey) {")
+        js.AppendLine("      case 'date-desc': return (cb.date || '').localeCompare(ca.date || '');")
+        js.AppendLine("      case 'date-asc': return (ca.date || '').localeCompare(cb.date || '');")
+        js.AppendLine("      case 'subject-asc': return (ca.subject || '').localeCompare(cb.subject || '', undefined, { sensitivity: 'base' });")
+        js.AppendLine("      case 'subject-desc': return (cb.subject || '').localeCompare(ca.subject || '', undefined, { sensitivity: 'base' });")
+        js.AppendLine("      case 'sender-asc': return (ca.senderName || '').localeCompare(cb.senderName || '', undefined, { sensitivity: 'base' });")
+        js.AppendLine("      case 'sender-desc': return (cb.senderName || '').localeCompare(ca.senderName || '', undefined, { sensitivity: 'base' });")
+        js.AppendLine("      case 'unread': return (ca.isRead === cb.isRead) ? 0 : (ca.isRead ? 1 : -1);")
+        js.AppendLine("      default: return 0;")
+        js.AppendLine("    }")
+        js.AppendLine("  });")
+        js.AppendLine("  cardEls.forEach(function(el) { list.appendChild(el); });")
+        js.AppendLine("  // Update sort checkmarks in dropdown")
+        js.AppendLine("  var dd = colEl.querySelector('.sort-dropdown');")
+        js.AppendLine("  if (dd) { dd.querySelectorAll('.sort-check').forEach(function(ck) { ck.textContent = ck.parentElement.dataset.sortKey === sortKey ? '\u2713' : ''; }); }")
+        js.AppendLine("  showToast('Sorted by ' + SORT_OPTIONS.find(function(o) { return o.key === sortKey; }).label);")
+        js.AppendLine("}")
+        js.AppendLine()
         ' --- Render Board ---
         js.AppendLine("function renderBoard() {")
         js.AppendLine("  var board = document.getElementById('board');")
@@ -2694,6 +2810,41 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    headerDiv.appendChild(dot);")
         js.AppendLine("    headerDiv.appendChild(titleSpan);")
         js.AppendLine("    headerDiv.appendChild(countSpan);")
+        js.AppendLine()
+        ' --- Sort button in column header ---
+        js.AppendLine("    var sortBtnWrapper = document.createElement('div');")
+        js.AppendLine("    sortBtnWrapper.style.position = 'relative'; sortBtnWrapper.style.display = 'inline-flex';")
+        js.AppendLine("    var sortBtn = document.createElement('button');")
+        js.AppendLine("    sortBtn.className = 'sort-btn';")
+        js.AppendLine("    sortBtn.title = 'Sort cards';")
+        js.AppendLine("    sortBtn.innerHTML = '<svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M7 15l5 5 5-5""/><path d=""M7 9l5-5 5 5""/></svg>';")
+        js.AppendLine("    var sortDD = document.createElement('div');")
+        js.AppendLine("    sortDD.className = 'sort-dropdown';")
+        js.AppendLine("    var currentSort = columnSortState[col.id] || '';")
+        js.AppendLine("    SORT_OPTIONS.forEach(function(opt) {")
+        js.AppendLine("      var item = document.createElement('div');")
+        js.AppendLine("      item.className = 'sort-option';")
+        js.AppendLine("      item.dataset.sortKey = opt.key;")
+        js.AppendLine("      var check = document.createElement('span'); check.className = 'sort-check'; check.textContent = (opt.key === currentSort) ? '\u2713' : '';")
+        js.AppendLine("      var labelSpan = document.createElement('span'); labelSpan.textContent = opt.label;")
+        js.AppendLine("      item.appendChild(check); item.appendChild(labelSpan);")
+        js.AppendLine("      item.addEventListener('click', function(e) {")
+        js.AppendLine("        e.stopPropagation();")
+        js.AppendLine("        sortColumnCards(col.id, opt.key);")
+        js.AppendLine("        sortDD.classList.remove('open');")
+        js.AppendLine("      });")
+        js.AppendLine("      sortDD.appendChild(item);")
+        js.AppendLine("    });")
+        js.AppendLine("    sortBtn.addEventListener('click', function(e) {")
+        js.AppendLine("      e.stopPropagation();")
+        js.AppendLine("      // Close all other dropdowns first")
+        js.AppendLine("      document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { if (dd !== sortDD) dd.classList.remove('open'); });")
+        js.AppendLine("      sortDD.classList.toggle('open');")
+        js.AppendLine("    });")
+        js.AppendLine("    sortBtnWrapper.appendChild(sortBtn);")
+        js.AppendLine("    sortBtnWrapper.appendChild(sortDD);")
+        js.AppendLine("    headerDiv.appendChild(sortBtnWrapper);")
+        js.AppendLine()
         js.AppendLine("    colEl.appendChild(headerDiv);")
         js.AppendLine("    var list = document.createElement('div');")
         js.AppendLine("    list.className = 'card-list';")
@@ -2702,6 +2853,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    colCards.forEach(function(card) { list.appendChild(createCardEl(card, col)); });")
         js.AppendLine("    setupDropZone(list);")
         js.AppendLine("    board.appendChild(colEl);")
+        js.AppendLine()
+        js.AppendLine("    // Re-apply column sort if one was previously set")
+        js.AppendLine("    if (columnSortState[col.id]) { sortColumnCards(col.id, columnSortState[col.id]); }")
         js.AppendLine("  });")
         js.AppendLine("  applyFieldVisibility();")
         js.AppendLine("  applySearchFilter();")
@@ -2714,7 +2868,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl){")
         js.AppendLine("    var header=colEl.querySelector('.column-header');")
         js.AppendLine("    header.draggable=true;")
-        js.AppendLine("    header.addEventListener('dragstart',function(e){ if(e.target.closest('.card')){e.preventDefault();return;} colDragSrc=colEl; colEl.classList.add('col-dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/x-column',colEl.dataset.column); });")
+        js.AppendLine("    header.addEventListener('dragstart',function(e){ if(e.target.closest('.card') || e.target.closest('.sort-btn') || e.target.closest('.sort-dropdown')){e.preventDefault();return;} colDragSrc=colEl; colEl.classList.add('col-dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/x-column',colEl.dataset.column); });")
         js.AppendLine("    header.addEventListener('dragend',function(){ colDragSrc=null; document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');}); });")
         js.AppendLine("    colEl.addEventListener('dragover',function(e){ if(!colDragSrc||colDragSrc===colEl)return; e.preventDefault(); e.dataTransfer.dropEffect='move'; document.querySelectorAll('.column.col-drag-over').forEach(function(c){c.classList.remove('col-drag-over');}); colEl.classList.add('col-drag-over'); });")
         js.AppendLine("    colEl.addEventListener('dragleave',function(e){ if(!colEl.contains(e.relatedTarget))colEl.classList.remove('col-drag-over'); });")

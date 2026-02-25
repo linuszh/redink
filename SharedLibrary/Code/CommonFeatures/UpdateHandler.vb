@@ -1446,7 +1446,7 @@ Namespace SharedLibrary
                 ' Success: close splash, inform user
                 CloseUpdatingSplash()
                 UIInvokeMessage(
-                       "Update completed. It will be active the next time you restart your application.",
+                       "Update completed. It will be active the next time you restart your application (until you do so, your add-in may not work correctly anymore).",
                       $"{SharedMethods.AN} Updater")
                 Return
             End If
@@ -1504,7 +1504,7 @@ Namespace SharedLibrary
 
                     If p.ExitCode = 0 Then
                         UIInvokeMessage(
-                            "Update completed. It will be active the next time you restart your application.",
+                            "Update completed. It will be active the next time you restart your application (until you do so, your add-in may not work correctly anymore).",
                             $"{SharedMethods.AN} Updater")
                     Else
                         UIInvokeMessage(
