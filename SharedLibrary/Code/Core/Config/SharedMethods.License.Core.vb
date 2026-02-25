@@ -202,6 +202,9 @@ Namespace SharedLibrary
         ' Current license state
         Private Shared _currentLicenseState As LicenseState = LicenseState.None
 
+        ' Tracks whether a registry backup restore occurred during this startup
+        Private Shared _restoredFromRegistryBackup As Boolean = False
+
         ''' <summary>
         ''' Gets the current license state as determined by `LicenseOK` and subsequent processing.
         ''' </summary>
@@ -1077,7 +1080,7 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    If Not autoModeSilent Then
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
                     End If
 
@@ -1138,7 +1141,7 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    If Not autoModeSilent Then
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
                     End If
 
@@ -1170,7 +1173,7 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    If Not autoModeSilent Then
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
                         ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
                     End If
 

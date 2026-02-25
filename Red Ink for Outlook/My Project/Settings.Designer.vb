@@ -511,14 +511,49 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("01/01/0001 00:00:00")>  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
         Public Property AP_LastProcessedTime() As Date
             Get
                 Return CType(Me("AP_LastProcessedTime"),Date)
             End Get
             Set
                 Me("AP_LastProcessedTime") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardFolders() As String
+            Get
+                Return CType(Me("InboxBoardFolders"),String)
+            End Get
+            Set
+                Me("InboxBoardFolders") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardExpandedFolders() As String
+            Get
+                Return CType(Me("InboxBoardExpandedFolders"),String)
+            End Get
+            Set
+                Me("InboxBoardExpandedFolders") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardLoadThreshold() As Integer
+            Get
+                Return CType(Me("InboxBoardLoadThreshold"),Integer)
+            End Get
+            Set
+                Me("InboxBoardLoadThreshold") = value
             End Set
         End Property
     End Class

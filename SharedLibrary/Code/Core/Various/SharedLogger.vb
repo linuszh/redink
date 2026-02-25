@@ -29,6 +29,9 @@ Imports System.IO
 Imports System.Security.Cryptography
 Imports System.Text
 Imports System.Threading
+Imports NAudio
+Imports Org.BouncyCastle.Utilities
+Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -155,13 +158,13 @@ Public Module SharedLogger
     ''' </summary>
     ''' <param name="context">Shared context providing the log directory path.</param>
     ''' <remarks>
-    ''' The analysis groups by:
-    ''' - unique users (hashed identifier),
-    ''' - version usage,
-    ''' - invoked function usage,
-    ''' - other log line usage,
-    ''' - invoked usage per day,
-    ''' and also produces per-host (Word/Excel/Outlook/Unknown) breakdowns based on the log file naming convention.
+    ''' The analysis produces the following sections (both overall and per add-in):
+    ''' 1. Summary: total users, total log entries, date range observed, active days.
+    ''' 2. Version adoption: all versions ever seen (with counts and users) plus the "current"
+    '''    version per user (only the latest version for each user).
+    ''' 3. Feature usage: per feature total count, unique users, per-user average, and per-day average.
+    ''' 4. Daily activity: invocations and unique users per calendar day.
+    ''' 5. Top users: most active users by invocation count (privacy-preserving hashes).
     ''' </remarks>
     Public Sub AnalyzeLogs(context As ISharedContext)
         Try
@@ -195,64 +198,27 @@ Public Module SharedLogger
             SharedLibrary.ProgressBarModule.GlobalProgressLabel = "Initializing..."
             SharedLibrary.ProgressBarModule.ShowProgressBarInSeparateThread($"{AN} Log Statistics", "Analyzing log files...")
 
-            ' Overall aggregates.
-            Dim allUsers As New HashSet(Of String)()
+            ' ----- Data structures: "OVERALL" scope -----
+            Dim allStats As New AnalysisScope()
 
-            Dim allInvokedUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-            Dim allInvokedUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-            Dim allOtherUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-            Dim allOtherUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-            Dim allInvokedUsageByDay As New Dictionary(Of String, Dictionary(Of Date, HashSet(Of String)))(StringComparer.Ordinal)
-
-            Dim allVersionUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-            Dim allVersionUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-            ' Per app (by file name suffix: WD / XL / OL / UK).
-            Dim appUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.OrdinalIgnoreCase)
-
-            Dim appInvokedUsage As New Dictionary(Of String, Dictionary(Of String, Integer))(StringComparer.OrdinalIgnoreCase)
-            Dim appInvokedUsers As New Dictionary(Of String, Dictionary(Of String, HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
-
-            Dim appOtherUsage As New Dictionary(Of String, Dictionary(Of String, Integer))(StringComparer.OrdinalIgnoreCase)
-            Dim appOtherUsers As New Dictionary(Of String, Dictionary(Of String, HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
-
-            Dim appVersionUsage As New Dictionary(Of String, Dictionary(Of String, Integer))(StringComparer.OrdinalIgnoreCase)
-            Dim appVersionUsers As New Dictionary(Of String, Dictionary(Of String, HashSet(Of String)))(StringComparer.OrdinalIgnoreCase)
-
-            Dim appInvokedUsageByDay As New Dictionary(Of String, Dictionary(Of String, Dictionary(Of Date, HashSet(Of String))))(StringComparer.OrdinalIgnoreCase)
+            ' ----- Data structures: per-app scope (keyed by app code: WD/XL/OL/UK) -----
+            Dim perApp As New Dictionary(Of String, AnalysisScope)(StringComparer.OrdinalIgnoreCase)
 
             Dim fileIndex As Integer = 0
             For Each file As String In files
-                ' Check for cancellation.
                 If SharedLibrary.ProgressBarModule.CancelOperation Then
                     SharedLibrary.ProgressBarModule.CancelOperation = True
                     ShowCustomMessageBox("Analysis cancelled by user.")
                     Exit Sub
                 End If
 
-                ' Update progress.
                 fileIndex += 1
                 SharedLibrary.ProgressBarModule.GlobalProgressValue = fileIndex
                 SharedLibrary.ProgressBarModule.GlobalProgressLabel = $"Processing file {fileIndex} of {files.Length}..."
 
                 Dim appCode As String = ExtractAppCode(file)
-
-                If Not appUsers.ContainsKey(appCode) Then appUsers(appCode) = New HashSet(Of String)()
-
-                If Not appInvokedUsage.ContainsKey(appCode) Then appInvokedUsage(appCode) = New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-                If Not appInvokedUsers.ContainsKey(appCode) Then appInvokedUsers(appCode) = New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-                If Not appOtherUsage.ContainsKey(appCode) Then appOtherUsage(appCode) = New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-                If Not appOtherUsers.ContainsKey(appCode) Then appOtherUsers(appCode) = New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-                If Not appVersionUsage.ContainsKey(appCode) Then appVersionUsage(appCode) = New Dictionary(Of String, Integer)(StringComparer.Ordinal)
-                If Not appVersionUsers.ContainsKey(appCode) Then appVersionUsers(appCode) = New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
-
-                If Not appInvokedUsageByDay.ContainsKey(appCode) Then
-                    appInvokedUsageByDay(appCode) = New Dictionary(Of String, Dictionary(Of Date, HashSet(Of String)))(StringComparer.Ordinal)
-                End If
+                If Not perApp.ContainsKey(appCode) Then perApp(appCode) = New AnalysisScope()
+                Dim appStats As AnalysisScope = perApp(appCode)
 
                 For Each line As String In System.IO.File.ReadLines(file, Encoding.UTF8)
                     Dim parsed As ParsedLine = ParseLogLine(line)
@@ -261,102 +227,42 @@ Public Module SharedLogger
                     If startDate.HasValue AndAlso parsed.Time < startDate.Value Then Continue For
                     If endDate.HasValue AndAlso parsed.Time > endDate.Value Then Continue For
 
-                    allUsers.Add(parsed.UserHash)
-                    appUsers(appCode).Add(parsed.UserHash)
-
-                    ' Version stats (overall + per-app).
-                    If Not String.IsNullOrWhiteSpace(parsed.Version) Then
-                        Dim v As String = parsed.Version.Trim()
-
-                        If Not allVersionUsage.ContainsKey(v) Then allVersionUsage(v) = 0
-                        allVersionUsage(v) += 1
-                        If Not allVersionUsers.ContainsKey(v) Then allVersionUsers(v) = New HashSet(Of String)()
-                        allVersionUsers(v).Add(parsed.UserHash)
-
-                        If Not appVersionUsage(appCode).ContainsKey(v) Then appVersionUsage(appCode)(v) = 0
-                        appVersionUsage(appCode)(v) += 1
-                        If Not appVersionUsers(appCode).ContainsKey(v) Then appVersionUsers(appCode)(v) = New HashSet(Of String)()
-                        appVersionUsers(appCode)(v).Add(parsed.UserHash)
-                    End If
-
-                    If parsed.IsInvoked Then
-                        ' Invoked stats (overall + per-app).
-                        If Not allInvokedUsage.ContainsKey(parsed.Key) Then allInvokedUsage(parsed.Key) = 0
-                        allInvokedUsage(parsed.Key) += 1
-                        If Not allInvokedUsers.ContainsKey(parsed.Key) Then allInvokedUsers(parsed.Key) = New HashSet(Of String)()
-                        allInvokedUsers(parsed.Key).Add(parsed.UserHash)
-
-                        If Not appInvokedUsage(appCode).ContainsKey(parsed.Key) Then appInvokedUsage(appCode)(parsed.Key) = 0
-                        appInvokedUsage(appCode)(parsed.Key) += 1
-                        If Not appInvokedUsers(appCode).ContainsKey(parsed.Key) Then appInvokedUsers(appCode)(parsed.Key) = New HashSet(Of String)()
-                        appInvokedUsers(appCode)(parsed.Key).Add(parsed.UserHash)
-
-                        ' Per-day (overall).
-                        Dim day As Date = parsed.Time.Date
-                        If Not allInvokedUsageByDay.ContainsKey(parsed.Key) Then
-                            allInvokedUsageByDay(parsed.Key) = New Dictionary(Of Date, HashSet(Of String))()
-                        End If
-                        If Not allInvokedUsageByDay(parsed.Key).ContainsKey(day) Then
-                            allInvokedUsageByDay(parsed.Key)(day) = New HashSet(Of String)()
-                        End If
-                        allInvokedUsageByDay(parsed.Key)(day).Add(parsed.UserHash)
-
-                        ' Per-day (per app).
-                        If Not appInvokedUsageByDay(appCode).ContainsKey(parsed.Key) Then
-                            appInvokedUsageByDay(appCode)(parsed.Key) = New Dictionary(Of Date, HashSet(Of String))()
-                        End If
-                        If Not appInvokedUsageByDay(appCode)(parsed.Key).ContainsKey(day) Then
-                            appInvokedUsageByDay(appCode)(parsed.Key)(day) = New HashSet(Of String)()
-                        End If
-                        appInvokedUsageByDay(appCode)(parsed.Key)(day).Add(parsed.UserHash)
-
-                    Else
-                        ' Other lines (overall + per-app).
-                        If Not allOtherUsage.ContainsKey(parsed.Key) Then allOtherUsage(parsed.Key) = 0
-                        allOtherUsage(parsed.Key) += 1
-                        If Not allOtherUsers.ContainsKey(parsed.Key) Then allOtherUsers(parsed.Key) = New HashSet(Of String)()
-                        allOtherUsers(parsed.Key).Add(parsed.UserHash)
-
-                        If Not appOtherUsage(appCode).ContainsKey(parsed.Key) Then appOtherUsage(appCode)(parsed.Key) = 0
-                        appOtherUsage(appCode)(parsed.Key) += 1
-                        If Not appOtherUsers(appCode).ContainsKey(parsed.Key) Then appOtherUsers(appCode)(parsed.Key) = New HashSet(Of String)()
-                        appOtherUsers(appCode)(parsed.Key).Add(parsed.UserHash)
-                    End If
+                    AccumulateLine(allStats, parsed)
+                    AccumulateLine(appStats, parsed)
                 Next
             Next
 
             ' Close progress bar.
             SharedLibrary.ProgressBarModule.CancelOperation = True
 
+            ' ----- Build output -----
             Dim sb As New StringBuilder()
 
-            Dim appNameMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
-            {"WD", "Word"},
-            {"XL", "Excel"},
-            {"OL", "Outlook"},
-            {"UK", "Unknown"}
-        }
-
-            sb.AppendLine("=== RED INK LOG ANALYSIS ===")
-            sb.AppendLine("Log path: " & context.INI_LogPath)
-            sb.AppendLine("Date range: " &
-                      If(startDate.HasValue, startDate.Value.ToString("yyyy-MM-dd"), "N/A") & " to " &
-                      If(endDate.HasValue, endDate.Value.ToString("yyyy-MM-dd"), "N/A"))
+            sb.AppendLine("# RED INK LOG ANALYSIS")
+            sb.AppendLine()
+            sb.AppendLine("| Setting | Value |")
+            sb.AppendLine("| --- | --- |")
+            sb.AppendLine($"| Log path | {context.INI_LogPath} |")
+            sb.AppendLine($"| Date range filter | {If(startDate.HasValue, startDate.Value.ToString("yyyy-MM-dd"), "(open)")} to {If(endDate.HasValue, endDate.Value.ToString("yyyy-MM-dd"), "(open)")} |")
+            sb.AppendLine($"| Files scanned | {files.Length} |")
             sb.AppendLine()
 
-            AppendSection(sb, "OVERALL", allUsers, allVersionUsage, allVersionUsers,
-                          allInvokedUsage, allInvokedUsers, allOtherUsage, allOtherUsers,
-                          allInvokedUsageByDay)
+            AppendSection(sb, "OVERALL", allStats)
 
-            For Each appCode In appUsers.Keys.OrderBy(Function(x) x)
-                AppendSection(sb, FormatAppName(appCode), appUsers(appCode),
-                              appVersionUsage(appCode), appVersionUsers(appCode),
-                              appInvokedUsage(appCode), appInvokedUsers(appCode),
-                              appOtherUsage(appCode), appOtherUsers(appCode),
-                              appInvokedUsageByDay(appCode))
+            For Each appCode In perApp.Keys.OrderBy(Function(x) x)
+                AppendSection(sb, FormatAppName(appCode), perApp(appCode))
             Next
 
-            ShowCustomWindow($"The following log statistics were compiled based on the content found in {context.INI_LogPath}", sb.ToString(), "", $"{AN} Log Statistics")
+            Dim FinalText = ShowCustomWindow(
+                $"The following log statistics were compiled based on the content found in {context.INI_LogPath}",
+                sb.ToString(), "", $"{AN} Log Statistics")
+
+            If FinalText = "" Then
+                PutInClipboard(MarkdownToRtfConverter.Convert(sb.ToString()))
+            Else
+                FinalText = FinalText.Trim()
+                PutInClipboard(FinalText)
+            End If
 
         Catch ex As System.Exception
             SharedLibrary.ProgressBarModule.CancelOperation = True
@@ -365,7 +271,113 @@ Public Module SharedLogger
     End Sub
 
     '==============================
-    ' INTERNAL HELPERS
+    ' ANALYSIS HELPER TYPES
+    '==============================
+
+    ''' <summary>
+    ''' Holds all aggregated statistics for one scope (overall or a single app code).
+    ''' </summary>
+    Private Class AnalysisScope
+        ' Users.
+        Public Users As New HashSet(Of String)()
+        Public TotalLines As Integer = 0
+
+        ' Version stats: version -> count; version -> set of users.
+        Public VersionUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+        Public VersionUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
+
+        ' Latest version per user (user hash -> latest timestamp, version string).
+        Public UserLatestVersion As New Dictionary(Of String, KeyValuePair(Of DateTime, String))(StringComparer.Ordinal)
+
+        ' Feature (invoked) stats: feature -> count; feature -> set of users.
+        Public FeatureUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+        Public FeatureUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
+
+        ' Feature usage per day: feature -> (date -> set of users).
+        Public FeatureByDay As New Dictionary(Of String, Dictionary(Of Date, HashSet(Of String)))(StringComparer.Ordinal)
+
+        ' Feature usage per user: feature -> (user -> count).
+        Public FeatureByUser As New Dictionary(Of String, Dictionary(Of String, Integer))(StringComparer.Ordinal)
+
+        ' Daily activity (all features combined): date -> (total count, set of users).
+        Public DailyCount As New Dictionary(Of Date, Integer)()
+        Public DailyUsers As New Dictionary(Of Date, HashSet(Of String))()
+
+        ' Other (non-invoked) lines: key -> count; key -> set of users.
+        Public OtherUsage As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+        Public OtherUsers As New Dictionary(Of String, HashSet(Of String))(StringComparer.Ordinal)
+    End Class
+
+    ''' <summary>
+    ''' Accumulates a single parsed log line into the given analysis scope.
+    ''' </summary>
+    Private Sub AccumulateLine(scope As AnalysisScope, parsed As ParsedLine)
+        scope.TotalLines += 1
+        scope.Users.Add(parsed.UserHash)
+
+        ' Version tracking.
+        If Not String.IsNullOrWhiteSpace(parsed.Version) Then
+            Dim v As String = parsed.Version.Trim()
+
+            If Not scope.VersionUsage.ContainsKey(v) Then scope.VersionUsage(v) = 0
+            scope.VersionUsage(v) += 1
+            If Not scope.VersionUsers.ContainsKey(v) Then scope.VersionUsers(v) = New HashSet(Of String)()
+            scope.VersionUsers(v).Add(parsed.UserHash)
+
+            ' Track latest version per user.
+            If scope.UserLatestVersion.ContainsKey(parsed.UserHash) Then
+                If parsed.Time > scope.UserLatestVersion(parsed.UserHash).Key Then
+                    scope.UserLatestVersion(parsed.UserHash) = New KeyValuePair(Of DateTime, String)(parsed.Time, v)
+                End If
+            Else
+                scope.UserLatestVersion(parsed.UserHash) = New KeyValuePair(Of DateTime, String)(parsed.Time, v)
+            End If
+        End If
+
+        Dim day As Date = parsed.Time.Date
+
+        If parsed.IsInvoked Then
+            ' Feature usage.
+            If Not scope.FeatureUsage.ContainsKey(parsed.Key) Then scope.FeatureUsage(parsed.Key) = 0
+            scope.FeatureUsage(parsed.Key) += 1
+            If Not scope.FeatureUsers.ContainsKey(parsed.Key) Then scope.FeatureUsers(parsed.Key) = New HashSet(Of String)()
+            scope.FeatureUsers(parsed.Key).Add(parsed.UserHash)
+
+            ' Feature by day.
+            If Not scope.FeatureByDay.ContainsKey(parsed.Key) Then
+                scope.FeatureByDay(parsed.Key) = New Dictionary(Of Date, HashSet(Of String))()
+            End If
+            If Not scope.FeatureByDay(parsed.Key).ContainsKey(day) Then
+                scope.FeatureByDay(parsed.Key)(day) = New HashSet(Of String)()
+            End If
+            scope.FeatureByDay(parsed.Key)(day).Add(parsed.UserHash)
+
+            ' Feature by user.
+            If Not scope.FeatureByUser.ContainsKey(parsed.Key) Then
+                scope.FeatureByUser(parsed.Key) = New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+            End If
+            If Not scope.FeatureByUser(parsed.Key).ContainsKey(parsed.UserHash) Then
+                scope.FeatureByUser(parsed.Key)(parsed.UserHash) = 0
+            End If
+            scope.FeatureByUser(parsed.Key)(parsed.UserHash) += 1
+
+            ' Daily totals (all features combined).
+            If Not scope.DailyCount.ContainsKey(day) Then scope.DailyCount(day) = 0
+            scope.DailyCount(day) += 1
+            If Not scope.DailyUsers.ContainsKey(day) Then scope.DailyUsers(day) = New HashSet(Of String)()
+            scope.DailyUsers(day).Add(parsed.UserHash)
+
+        Else
+            ' Other (non-invoked) lines.
+            If Not scope.OtherUsage.ContainsKey(parsed.Key) Then scope.OtherUsage(parsed.Key) = 0
+            scope.OtherUsage(parsed.Key) += 1
+            If Not scope.OtherUsers.ContainsKey(parsed.Key) Then scope.OtherUsers(parsed.Key) = New HashSet(Of String)()
+            scope.OtherUsers(parsed.Key).Add(parsed.UserHash)
+        End If
+    End Sub
+
+    '==============================
+    ' OUTPUT FORMATTING
     '==============================
 
     ''' <summary>
@@ -382,57 +394,162 @@ Public Module SharedLogger
     End Function
 
     ''' <summary>
-    ''' Appends a formatted statistics section to the output StringBuilder.
+    ''' Appends a complete formatted statistics section to the output StringBuilder.
     ''' </summary>
-    Private Sub AppendSection(
-    sb As StringBuilder,
-    title As String,
-    users As HashSet(Of String),
-    versionUsage As Dictionary(Of String, Integer),
-    versionUsers As Dictionary(Of String, HashSet(Of String)),
-    invokedUsage As Dictionary(Of String, Integer),
-    invokedUsers As Dictionary(Of String, HashSet(Of String)),
-    otherUsage As Dictionary(Of String, Integer),
-    otherUsers As Dictionary(Of String, HashSet(Of String)),
-    invokedByDay As Dictionary(Of String, Dictionary(Of Date, HashSet(Of String))))
-
-        sb.AppendLine("=== " & title & " ===")
-        sb.AppendLine("Total users: " & users.Count)
+    Private Sub AppendSection(sb As StringBuilder, title As String, scope As AnalysisScope)
 
         sb.AppendLine()
-        sb.AppendLine("Version usage (count; unique users):")
-        For Each kvp In versionUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-            Dim u As Integer = If(versionUsers.ContainsKey(kvp.Key), versionUsers(kvp.Key).Count, 0)
-            sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
+        sb.AppendLine("## " & title)
+        sb.AppendLine()
+
+        ' --- 1. Summary ---
+        Dim totalInvocations As Integer = 0
+        For Each kvp In scope.FeatureUsage
+            totalInvocations += kvp.Value
         Next
+        Dim activeDays As Integer = scope.DailyCount.Count
 
         sb.AppendLine()
-        sb.AppendLine("Functions invoked: count; unique users")
-        For Each kvp In invokedUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-            Dim u As Integer = If(invokedUsers.ContainsKey(kvp.Key), invokedUsers(kvp.Key).Count, 0)
-            sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
-        Next
+        sb.AppendLine("### Summary")
+        sb.AppendLine()
+        sb.AppendLine("| Metric | Value |")
+        sb.AppendLine("| --- | --- |")
+        sb.AppendLine($"| Total users | {scope.Users.Count} |")
+        sb.AppendLine($"| Total log entries | {scope.TotalLines} |")
+        sb.AppendLine($"| Total feature invocations | {totalInvocations} |")
+        sb.AppendLine($"| Active days | {activeDays} |")
+        If activeDays > 0 Then
+            sb.AppendLine($"| Avg invocations/day | {(totalInvocations / activeDays):F1} |")
+            sb.AppendLine($"| Avg users/day | {(scope.DailyUsers.Values.Sum(Function(s) s.Count) / CDbl(activeDays)):F1} |")
+        End If
+        If scope.DailyCount.Count > 0 Then
+            Dim minDay As Date = scope.DailyCount.Keys.Min()
+            Dim maxDay As Date = scope.DailyCount.Keys.Max()
+            sb.AppendLine($"| Date range observed | {minDay:yyyy-MM-dd} to {maxDay:yyyy-MM-dd} |")
+        End If
+        sb.AppendLine()
 
-        If otherUsage.Count > 0 Then
-            sb.AppendLine()
-            sb.AppendLine("Other log lines (not ending with 'invoked'): count; unique users")
-            For Each kvp In otherUsage.OrderByDescending(Function(x) x.Value).ThenBy(Function(x) x.Key)
-                Dim u As Integer = If(otherUsers.ContainsKey(kvp.Key), otherUsers(kvp.Key).Count, 0)
-                sb.AppendLine($"{kvp.Key}: {kvp.Value}; users: {u}")
+        ' --- 2. Version adoption ---
+        sb.AppendLine()
+        sb.AppendLine("### Version History (all versions ever seen)")
+        sb.AppendLine()
+        If scope.VersionUsage.Count = 0 Then
+            sb.AppendLine("(no version data)")
+        Else
+            sb.AppendLine("| Version | Count | Users |")
+            sb.AppendLine("| --- | --- | --- |")
+            For Each kvp In scope.VersionUsage.OrderByDescending(Function(x) x.Value)
+                Dim u As Integer = If(scope.VersionUsers.ContainsKey(kvp.Key), scope.VersionUsers(kvp.Key).Count, 0)
+                sb.AppendLine($"| {kvp.Key} | {kvp.Value} | {u} |")
             Next
         End If
-
         sb.AppendLine()
-        sb.AppendLine("Functions invoked per day (unique users):")
-        For Each fn In invokedByDay.Keys.OrderBy(Function(x) x)
-            For Each usageDay As Date In invokedByDay(fn).Keys.OrderBy(Function(d) d)
-                sb.AppendLine(fn & " | " & usageDay.ToString("yyyy-MM-dd") &
-                          " | users: " & invokedByDay(fn)(usageDay).Count)
+
+        ' Current version adoption (latest version per user).
+        sb.AppendLine()
+        sb.AppendLine("### Current Versions (latest version per user)")
+        sb.AppendLine()
+        If scope.UserLatestVersion.Count = 0 Then
+            sb.AppendLine("(no version data)")
+        Else
+            Dim currentVersionCounts As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+            For Each kvp In scope.UserLatestVersion
+                Dim v As String = kvp.Value.Value
+                If Not currentVersionCounts.ContainsKey(v) Then currentVersionCounts(v) = 0
+                currentVersionCounts(v) += 1
+            Next
+            Dim totalUsersWithVersion As Integer = scope.UserLatestVersion.Count
+            sb.AppendLine("| Version | Users | % of total |")
+            sb.AppendLine("| --- | --- | --- |")
+            For Each kvp In currentVersionCounts.OrderByDescending(Function(x) x.Value)
+                Dim pct As Double = If(totalUsersWithVersion > 0, (kvp.Value / CDbl(totalUsersWithVersion)) * 100, 0)
+                sb.AppendLine($"| {kvp.Key} | {kvp.Value} | {pct:F1}% |")
+            Next
+        End If
+        sb.AppendLine()
+
+        ' --- 3. Feature usage ---
+        sb.AppendLine()
+        sb.AppendLine("### Feature Usage")
+        sb.AppendLine()
+        If scope.FeatureUsage.Count = 0 Then
+            sb.AppendLine("(no feature data)")
+        Else
+            sb.AppendLine("| Feature | Total | Users | Avg/user | Avg/day | Days used |")
+            sb.AppendLine("| --- | --- | --- | --- | --- | --- |")
+            For Each kvp In scope.FeatureUsage.OrderByDescending(Function(x) x.Value)
+                Dim fn As String = kvp.Key
+                Dim total As Integer = kvp.Value
+                Dim users As Integer = If(scope.FeatureUsers.ContainsKey(fn), scope.FeatureUsers(fn).Count, 0)
+                Dim avgPerUser As Double = If(users > 0, total / CDbl(users), 0)
+                Dim daysUsed As Integer = If(scope.FeatureByDay.ContainsKey(fn), scope.FeatureByDay(fn).Count, 0)
+                Dim avgPerDay As Double = If(daysUsed > 0, total / CDbl(daysUsed), 0)
+                sb.AppendLine($"| {fn} | {total} | {users} | {avgPerUser:F1} | {avgPerDay:F1} | {daysUsed} |")
+            Next
+        End If
+        sb.AppendLine()
+
+        ' --- 4. Daily activity ---
+        sb.AppendLine()
+        sb.AppendLine("### Daily Activity (all features combined)")
+        sb.AppendLine()
+        If scope.DailyCount.Count = 0 Then
+            sb.AppendLine("(no daily data)")
+        Else
+            sb.AppendLine("| Date | Invocations | Unique users |")
+            sb.AppendLine("| --- | --- | --- |")
+            For Each logDay In scope.DailyCount.Keys.OrderBy(Function(d) d)
+                Dim cnt As Integer = scope.DailyCount(logDay)
+                Dim u As Integer = If(scope.DailyUsers.ContainsKey(logDay), scope.DailyUsers(logDay).Count, 0)
+                sb.AppendLine($"| {logDay:yyyy-MM-dd} | {cnt} | {u} |")
+            Next
+        End If
+        sb.AppendLine()
+
+        ' --- 5. Top users ---
+        sb.AppendLine()
+        sb.AppendLine("### Top 20 Users (by total feature invocations)")
+        sb.AppendLine()
+        Dim userTotals As New Dictionary(Of String, Integer)(StringComparer.Ordinal)
+        For Each feat In scope.FeatureByUser
+            For Each ukvp In feat.Value
+                If Not userTotals.ContainsKey(ukvp.Key) Then userTotals(ukvp.Key) = 0
+                userTotals(ukvp.Key) += ukvp.Value
             Next
         Next
-
+        If userTotals.Count = 0 Then
+            sb.AppendLine("(no user data)")
+        Else
+            sb.AppendLine("| User hash | Invocations | Features used |")
+            sb.AppendLine("| --- | --- | --- |")
+            For Each kvp In userTotals.OrderByDescending(Function(x) x.Value).Take(20)
+                Dim featuresUsed As Integer = 0
+                For Each feat In scope.FeatureByUser
+                    If feat.Value.ContainsKey(kvp.Key) Then featuresUsed += 1
+                Next
+                sb.AppendLine($"| {kvp.Key} | {kvp.Value} | {featuresUsed} |")
+            Next
+        End If
         sb.AppendLine()
+
+        ' --- 6. Other log lines ---
+        If scope.OtherUsage.Count > 0 Then
+            sb.AppendLine()
+            sb.AppendLine("### Other Log Entries (non-invoked)")
+            sb.AppendLine()
+            sb.AppendLine("| Entry | Count | Users |")
+            sb.AppendLine("| --- | --- | --- |")
+            For Each kvp In scope.OtherUsage.OrderByDescending(Function(x) x.Value)
+                Dim u As Integer = If(scope.OtherUsers.ContainsKey(kvp.Key), scope.OtherUsers(kvp.Key).Count, 0)
+                sb.AppendLine($"| {kvp.Key} | {kvp.Value} | {u} |")
+            Next
+            sb.AppendLine()
+        End If
     End Sub
+
+    '==============================
+    ' LOGGING HELPERS
+    '==============================
 
     ''' <summary>
     ''' Determines a short application code (WD/XL/OL/UK) from a host descriptor string.
