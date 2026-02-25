@@ -316,7 +316,8 @@ Namespace SharedLibrary
 
 
         ''' <summary>
-        ''' Converts a Markdig table block to RTF using tab-separated cell content.
+        ''' Converts a Markdig table block to RTF using proper RTF table constructs
+        ''' (\trowd / \cellx / \cell / \row) so that columns align correctly.
         ''' </summary>
         ''' <param name="rtf">Target RTF builder.</param>
         ''' <param name="table">Table to convert.</param>
@@ -329,11 +330,66 @@ fnDefs As Dictionary(Of String, Markdig.Extensions.Footnotes.Footnote)
             ' Normalize to equal-width rows (ensures consistent cell counts).
             table.NormalizeUsingMaxWidth()
 
+            ' --- Measure column widths (in characters) ---
+            Dim colCount As Integer = 0
             For Each row As Markdig.Extensions.Tables.TableRow In table
-                rtf.Append("\pard\sa100\fs20 ")
+                If row.Count > colCount Then colCount = row.Count
+            Next
+            If colCount = 0 Then Return
 
+            ' Collect plain-text length per column to determine relative widths.
+            Dim colMaxLen(colCount - 1) As Integer
+            For Each row As Markdig.Extensions.Tables.TableRow In table
+                Dim colIdx As Integer = 0
                 For Each cell As Markdig.Extensions.Tables.TableCell In row
-                    ' Render all blocks contained in this cell.
+                    Dim cellText As String = GetCellPlainText(cell)
+                    If cellText.Length > colMaxLen(colIdx) Then
+                        colMaxLen(colIdx) = cellText.Length
+                    End If
+                    colIdx += 1
+                Next
+            Next
+
+            ' Ensure minimum column width of 6 characters.
+            For i As Integer = 0 To colCount - 1
+                If colMaxLen(i) < 6 Then colMaxLen(i) = 6
+            Next
+
+            ' Total available width in twips (assuming ~9000 twips usable page width).
+            Const totalWidthTwips As Integer = 9000
+            Dim totalChars As Integer = 0
+            For i As Integer = 0 To colCount - 1
+                totalChars += colMaxLen(i)
+            Next
+            If totalChars = 0 Then totalChars = 1
+
+            ' Compute cumulative cell boundary positions (\cellxN values).
+            Dim cellBoundaries(colCount - 1) As Integer
+            Dim cumulative As Integer = 0
+            For i As Integer = 0 To colCount - 1
+                cumulative += CInt(Math.Round(colMaxLen(i) / CDbl(totalChars) * totalWidthTwips))
+                cellBoundaries(i) = cumulative
+            Next
+            ' Snap last boundary to exact total width.
+            cellBoundaries(colCount - 1) = totalWidthTwips
+
+            ' --- Emit RTF table rows ---
+            For Each row As Markdig.Extensions.Tables.TableRow In table
+                ' Row header: define cell boundaries.
+                rtf.Append("\trowd\trgaph108 ")
+                For i As Integer = 0 To colCount - 1
+                    rtf.Append($"\cellx{cellBoundaries(i)} ")
+                Next
+
+                ' Bold for header rows.
+                Dim isHeader As Boolean = row.IsHeader
+                If isHeader Then rtf.Append("\b ")
+
+                rtf.Append("\pard\intbl\fs20 ")
+
+                Dim cellIdx As Integer = 0
+                For Each cell As Markdig.Extensions.Tables.TableCell In row
+                    ' Render cell content.
                     For Each subBlock As Markdig.Syntax.Block In cell
                         Select Case True
                             Case TypeOf subBlock Is Markdig.Syntax.ParagraphBlock
@@ -349,20 +405,71 @@ fnDefs As Dictionary(Of String, Markdig.Extensions.Footnotes.Footnote)
 
                             Case TypeOf subBlock Is Markdig.Syntax.CodeBlock
                                 ConvertCodeBlock(rtf, CType(subBlock, Markdig.Syntax.CodeBlock))
-
-                                ' Additional block types (e.g., QuoteBlock) are not handled here.
                         End Select
                     Next
 
-                    ' Cell separator.
-                    rtf.Append("\tab ")
+                    rtf.Append("\cell ")
+                    cellIdx += 1
                 Next
 
-                rtf.AppendLine("\par")
+                ' Pad any missing cells (if row has fewer cells than colCount).
+                While cellIdx < colCount
+                    rtf.Append("\cell ")
+                    cellIdx += 1
+                End While
+
+                If isHeader Then rtf.Append("\b0 ")
+
+                rtf.AppendLine("\row")
             Next
         End Sub
 
+        ''' <summary>
+        ''' Extracts plain text from a table cell for column-width measurement.
+        ''' Recursively walks all inline types to capture text inside emphasis, links, code spans, etc.
+        ''' </summary>
+        ''' <param name="cell">The table cell to measure.</param>
+        ''' <returns>The concatenated plain-text content of the cell.</returns>
+        Private Function GetCellPlainText(cell As Markdig.Extensions.Tables.TableCell) As String
+            Dim textSb As New StringBuilder()
+            For Each subBlock As Markdig.Syntax.Block In cell
+                If TypeOf subBlock Is Markdig.Syntax.LeafBlock Then
+                    Dim leaf As Markdig.Syntax.LeafBlock = CType(subBlock, Markdig.Syntax.LeafBlock)
+                    If leaf.Inline IsNot Nothing Then
+                        CollectInlineText(textSb, leaf.Inline)
+                    End If
+                End If
+            Next
+            Return textSb.ToString()
+        End Function
 
+        ''' <summary>
+        ''' Recursively collects all literal text from an inline tree.
+        ''' Handles <see cref="Markdig.Syntax.Inlines.LiteralInline"/>,
+        ''' <see cref="Markdig.Syntax.Inlines.CodeInline"/>,
+        ''' and any <see cref="Markdig.Syntax.Inlines.ContainerInline"/> (emphasis, links, etc.).
+        ''' </summary>
+        ''' <param name="textSb">Target string builder.</param>
+        ''' <param name="inline">The inline element to process.</param>
+        Private Sub CollectInlineText(textSb As StringBuilder, inline As Markdig.Syntax.Inlines.Inline)
+            If inline Is Nothing Then Return
+
+            If TypeOf inline Is Markdig.Syntax.Inlines.LiteralInline Then
+                textSb.Append(CType(inline, Markdig.Syntax.Inlines.LiteralInline).Content.ToString())
+
+            ElseIf TypeOf inline Is Markdig.Syntax.Inlines.CodeInline Then
+                textSb.Append(CType(inline, Markdig.Syntax.Inlines.CodeInline).Content)
+
+            ElseIf TypeOf inline Is Markdig.Syntax.Inlines.ContainerInline Then
+                ' Recurse into emphasis, links, and any other container inline.
+                For Each child In CType(inline, Markdig.Syntax.Inlines.ContainerInline)
+                    CollectInlineText(textSb, child)
+                Next
+
+            ElseIf TypeOf inline Is Markdig.Syntax.Inlines.LineBreakInline Then
+                textSb.Append(" ")
+            End If
+        End Sub
 
 
         ''' <summary>
@@ -376,7 +483,9 @@ fnDefs As Dictionary(Of String, Markdig.Extensions.Footnotes.Footnote)
             Dim level As Integer = headingBlock.Level
             Dim size As Integer = headingSizes(System.Math.Min(level, headingSizes.Length) - 1)
 
-            rtf.Append($"\pard\sa180\fs{size} \b ")
+            ' \sb360 = 360 twips (~6mm) space before the heading.
+            ' \sa180 = 180 twips (~3mm) space after the heading.
+            rtf.Append($"\pard\sb360\sa180\fs{size} \b ")
             ConvertInline(rtf, headingBlock.Inline, fnDefs)
             rtf.AppendLine(" \b0\par")
         End Sub

@@ -116,8 +116,17 @@
     <Setting Name="InboxBoardPinnedFlagColumns" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
-	  <Setting Name="AP_LastProcessedTime" Type="System.DateTime" Scope="User">
-		  <Value Profile="(Default)">01/01/0001 00:00:00</Value>
-	  </Setting>
+    <Setting Name="AP_LastProcessedTime" Type="System.DateTime" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="InboxBoardFolders" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="InboxBoardExpandedFolders" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="InboxBoardLoadThreshold" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">0</Value>
+    </Setting>
   </Settings>
 </SettingsFile>

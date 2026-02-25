@@ -84,29 +84,20 @@ Partial Public Class ThisAddIn
     ''' <summary>Color used for the synthetic "Flagged" column.</summary>
     Private Const InboxBoard_FlaggedColumnColor As String = "#ef4444"
 
+    ''' <summary>Default load threshold: prompt user when qualifying mails exceed this number.</summary>
+    Private Const InboxBoard_DefaultLoadThreshold As Integer = 500
+
     ''' <summary>Remembers the user's last load-count choice so Refresh reuses it.</summary>
     Private _inboxBoardLastMaxToLoad As Integer = 0
 
     ''' <summary>In-memory summary cache: EntryID → summary text.</summary>
     Private _inboxBoardSummaryCache As Dictionary(Of String, String) = Nothing
 
-    ''' <summary>Available languages for summary generation.</summary>
-    Private Shared ReadOnly InboxBoard_SummaryLanguages As String()() = {
-        New String() {"auto", "Auto-detect"},
-        New String() {"en", "English"},
-        New String() {"de", "Deutsch"},
-        New String() {"fr", "Français"},
-        New String() {"it", "Italiano"},
-        New String() {"es", "Español"},
-        New String() {"pt", "Português"},
-        New String() {"nl", "Nederlands"},
-        New String() {"pl", "Polski"},
-        New String() {"ru", "Русский"},
-        New String() {"ja", "日本語"},
-        New String() {"zh", "中文"},
-        New String() {"ko", "한국어"},
-        New String() {"ar", "العربية"}
-    }
+    ''' <summary>MAPI UserProperty name for board folder assignment.</summary>
+    Private Const InboxBoard_FolderPropertyName As String = "RedInkBoardFolder"
+
+    ''' <summary>Maximum number of board folders a user can create.</summary>
+    Private Const InboxBoard_MaxFolders As Integer = 20
 
     ''' <summary>Column IDs for date-bucketed flagged columns.</summary>
     Private Const InboxBoard_FlagBucket_Overdue As String = "⚑ Overdue"
@@ -172,6 +163,8 @@ Partial Public Class ThisAddIn
         Public Property FlagRequest As String         ' Flag label text (e.g. "Follow up", "Reply")
         Public Property FlagDueDate As DateTime?      ' Optional due date from TaskDueDate
         Public Property FlagBucket As String          ' Which date-bucket column this card belongs to (if flagged)
+        Public Property BoardFolder As String             ' Board folder name (from UserProperty), empty = not in a folder
+
     End Class
 
     ''' <summary>Represents a column (category) on the board.</summary>
@@ -225,6 +218,8 @@ Partial Public Class ThisAddIn
             My.Settings.Save()
         Catch
         End Try
+
+
     End Sub
 
     ''' <summary>
@@ -260,6 +255,219 @@ Partial Public Class ThisAddIn
 #End Region
 
 
+#Region "InboxBoard Folder Operations"
+
+    Private Function GetMailBoardFolder(mi As MailItem) As String
+        Try
+            Dim prop As Outlook.UserProperty = Nothing
+            Try
+                prop = mi.UserProperties.Find(InboxBoard_FolderPropertyName)
+            Catch ex As System.Exception
+                Debug.WriteLine($"[InboxBoard] GetMailBoardFolder Find error: {ex.Message}")
+            End Try
+            If prop IsNot Nothing Then
+                Dim val As String = CStr(prop.Value)
+                Debug.WriteLine($"[InboxBoard] GetMailBoardFolder: Found '{val}' on '{mi.Subject}'")
+                If Not String.IsNullOrWhiteSpace(val) Then Return val.Trim()
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] GetMailBoardFolder error: {ex.Message}")
+        End Try
+        Return ""
+    End Function
+
+    Private Sub SetMailBoardFolder(entryId As String, folderName As String)
+        Try
+            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            Dim mi As MailItem = TryCast(ComRetry(Of Object)(Function() ns.GetItemFromID(entryId)), MailItem)
+            If mi Is Nothing Then
+                Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: Could not resolve entryId {entryId}")
+                Return
+            End If
+
+            ' Always remove any existing property first to avoid stale COM references
+            Try
+                Dim existing As Outlook.UserProperty = Nothing
+                Try
+                    existing = mi.UserProperties.Find(InboxBoard_FolderPropertyName)
+                Catch ex As System.Exception
+                    Debug.WriteLine($"[InboxBoard] SetMailBoardFolder Find error: {ex.Message}")
+                End Try
+                If existing IsNot Nothing Then
+                    Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: Deleting existing prop, old value = '{existing.Value}'")
+                    existing.Delete()
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[InboxBoard] SetMailBoardFolder Delete error: {ex.Message}")
+            End Try
+
+            If Not String.IsNullOrWhiteSpace(folderName) Then
+                ' Add a fresh property — use True for AddToFolderFields so Exchange
+                ' cached mode stores persist the property reliably
+                Dim prop As Outlook.UserProperty = mi.UserProperties.Add(
+                    InboxBoard_FolderPropertyName, OlUserPropertyType.olText, True)
+                prop.Value = folderName.Trim()
+                Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: Added prop '{InboxBoard_FolderPropertyName}' = '{folderName.Trim()}' on '{mi.Subject}'")
+            Else
+                Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: Cleared prop on '{mi.Subject}'")
+            End If
+
+            mi.Save()
+            Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: Save() succeeded for '{mi.Subject}'")
+
+            ' Verify the property was persisted by re-reading it
+            Dim verify As Outlook.UserProperty = Nothing
+            Try
+                verify = mi.UserProperties.Find(InboxBoard_FolderPropertyName)
+            Catch
+            End Try
+            If Not String.IsNullOrWhiteSpace(folderName) Then
+                If verify IsNot Nothing Then
+                    Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: VERIFIED value = '{verify.Value}'")
+                Else
+                    Debug.WriteLine($"[InboxBoard] SetMailBoardFolder: *** VERIFY FAILED — property not found after Save! ***")
+                End If
+            End If
+        Catch ex As System.Exception
+            Debug.WriteLine($"[InboxBoard] SetMailBoardFolder error: {ex.Message}")
+            Debug.WriteLine($"[InboxBoard] SetMailBoardFolder stack: {ex.StackTrace}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Returns the list of user-defined board folder names from My.Settings.
+    ''' </summary>
+    Private Function GetBoardFolderNames() As List(Of String)
+        Dim result As New List(Of String)()
+        Try
+            Dim saved As String = If(My.Settings.InboxBoardFolders, "")
+            If Not String.IsNullOrEmpty(saved) Then
+                For Each part In saved.Split({";"c}, StringSplitOptions.RemoveEmptyEntries)
+                    Dim t = part.Trim()
+                    If Not String.IsNullOrEmpty(t) AndAlso Not result.Any(Function(f) f.Equals(t, StringComparison.OrdinalIgnoreCase)) Then
+                        result.Add(t)
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Saves the board folder names list to My.Settings.
+    ''' </summary>
+    Private Sub SaveBoardFolderNames(names As List(Of String))
+        Try
+            My.Settings.InboxBoardFolders = String.Join(";", names)
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Returns the set of currently expanded folder names from My.Settings.
+    ''' </summary>
+    Private Function GetExpandedFolders() As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Try
+            Dim saved As String = If(My.Settings.InboxBoardExpandedFolders, "")
+            If Not String.IsNullOrEmpty(saved) Then
+                For Each part In saved.Split({";"c}, StringSplitOptions.RemoveEmptyEntries)
+                    Dim t = part.Trim()
+                    If Not String.IsNullOrEmpty(t) Then result.Add(t)
+                Next
+            End If
+        Catch
+        End Try
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Saves the expanded folder set to My.Settings.
+    ''' </summary>
+    Private Sub SaveExpandedFolders(expanded As HashSet(Of String))
+        Try
+            My.Settings.InboxBoardExpandedFolders = String.Join(";", expanded)
+            My.Settings.Save()
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Renames a board folder: updates UserProperty on all affected mails
+    ''' and updates My.Settings.
+    ''' </summary>
+    Private Sub RenameBoardFolder(oldName As String, newName As String, mails As List(Of InboxBoardEntry))
+        If String.IsNullOrWhiteSpace(oldName) OrElse String.IsNullOrWhiteSpace(newName) Then Return
+        If oldName.Equals(newName, StringComparison.OrdinalIgnoreCase) Then Return
+
+        ' Update all mails in the folder
+        For Each m In mails
+            If Not String.IsNullOrEmpty(m.BoardFolder) AndAlso
+               m.BoardFolder.Equals(oldName, StringComparison.OrdinalIgnoreCase) Then
+                ' Update all entry IDs in the group
+                Dim idsToUpdate As List(Of String) = If(m.IsGrouped AndAlso m.ConversationEntryIDs IsNot Nothing AndAlso m.ConversationEntryIDs.Count > 1,
+                                                        m.ConversationEntryIDs,
+                                                        New List(Of String) From {m.EntryID})
+                For Each id In idsToUpdate
+                    SetMailBoardFolder(id, newName)
+                Next
+                m.BoardFolder = newName
+            End If
+        Next
+
+        ' Update settings
+        Dim folders = GetBoardFolderNames()
+        Dim idx = folders.FindIndex(Function(f) f.Equals(oldName, StringComparison.OrdinalIgnoreCase))
+        If idx >= 0 Then
+            folders(idx) = newName
+        Else
+            folders.Add(newName)
+        End If
+        SaveBoardFolderNames(folders)
+
+        ' Update expanded state
+        Dim expanded = GetExpandedFolders()
+        If expanded.Remove(oldName) Then expanded.Add(newName)
+        SaveExpandedFolders(expanded)
+    End Sub
+
+    ''' <summary>
+    ''' Deletes a board folder: clears UserProperty on all affected mails
+    ''' (releasing them back to the main board) and removes from My.Settings.
+    ''' </summary>
+    Private Sub DeleteBoardFolder(folderName As String, mails As List(Of InboxBoardEntry))
+        If String.IsNullOrWhiteSpace(folderName) Then Return
+
+        ' Clear folder assignment on all mails
+        For Each m In mails
+            If Not String.IsNullOrEmpty(m.BoardFolder) AndAlso
+               m.BoardFolder.Equals(folderName, StringComparison.OrdinalIgnoreCase) Then
+                Dim idsToUpdate As List(Of String) = If(m.IsGrouped AndAlso m.ConversationEntryIDs IsNot Nothing AndAlso m.ConversationEntryIDs.Count > 1,
+                                                        m.ConversationEntryIDs,
+                                                        New List(Of String) From {m.EntryID})
+                For Each id In idsToUpdate
+                    SetMailBoardFolder(id, "")
+                Next
+                m.BoardFolder = ""
+            End If
+        Next
+
+        ' Remove from settings
+        Dim folders = GetBoardFolderNames()
+        folders.RemoveAll(Function(f) f.Equals(folderName, StringComparison.OrdinalIgnoreCase))
+        SaveBoardFolderNames(folders)
+
+        ' Remove from expanded
+        Dim expanded = GetExpandedFolders()
+        expanded.Remove(folderName)
+        SaveExpandedFolders(expanded)
+    End Sub
+
+#End Region
+
 #Region "InboxBoard Entry Point"
 
     ''' <summary>
@@ -267,12 +475,13 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Sub InboxBoard()
         Try
-            ' Restore last load count from settings
-            Try : _inboxBoardLastMaxToLoad = My.Settings.InboxBoardLastLoadCount : Catch : End Try
+            ' _inboxBoardLastMaxToLoad starts at 0 each session so the user is
+            ' always prompted on first launch when mails exceed the threshold.
+            ' It is only set after the user makes a selection, allowing in-session
+            ' reloads (Refresh button) to reuse the choice without re-prompting.
 
             ' Ensure summary cache is loaded
             LoadSummaryCache()
-
             ' 1. Collect categorized mails from Inbox
             Dim mails As List(Of InboxBoardEntry) = CollectCategorizedInboxMails()
             If mails Is Nothing Then Return
@@ -296,7 +505,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Scans the default Inbox for mails that have at least one category assigned,
     ''' and optionally mails that are flagged for follow-up.
-    ''' If 1000 or more qualifying mails are found, asks the user how many to load.
+    ''' If qualifying mails exceed the user's load threshold, asks how many to load.
     ''' </summary>
     Private Function CollectCategorizedInboxMails(Optional maxOverride As Integer = 0) As List(Of InboxBoardEntry)
         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -313,6 +522,11 @@ Partial Public Class ThisAddIn
         Dim hideDoneFlags As Boolean = True
         Try : includeFlagged = My.Settings.InboxBoardIncludeFlagged : Catch : End Try
         Try : hideDoneFlags = My.Settings.InboxBoardHideDoneFlags : Catch : End Try
+
+        ' Read user-configurable load threshold (0 = use default)
+        Dim loadThreshold As Integer = 0
+        Try : loadThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
+        If loadThreshold <= 0 Then loadThreshold = InboxBoard_DefaultLoadThreshold
 
         Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() inbox.Items)
         Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
@@ -381,26 +595,31 @@ Partial Public Class ThisAddIn
 
         Dim maxToLoad As Integer = totalQualifying
 
-        ' Ask how many if > threshold (and not a reload with a remembered value)
-        If totalQualifying > 1000 Then
-            ' On reload, reuse the user's last choice if available —
-            ' but only if it was a meaningful choice (>= 1000). A small value
-            ' from a previous session with few qualifying mails must not cap
-            ' a larger session.
-            If _inboxBoardLastMaxToLoad >= 1000 Then
+        ' Prompt user if qualifying mails exceed the threshold
+        If totalQualifying > loadThreshold Then
+            ' On reload within the same session, reuse the user's last choice
+            ' without re-prompting. _inboxBoardLastMaxToLoad is only set to a
+            ' non-zero value after the user has made a choice in this session.
+            If _inboxBoardLastMaxToLoad > 0 Then
                 maxToLoad = _inboxBoardLastMaxToLoad
             Else
+                ' Build selection options: threshold, then 2x, 5x, and All
                 Dim items As New List(Of SelectionItem)()
-            items.Add(New SelectionItem("1000 mails", 1000))
-            items.Add(New SelectionItem("2500 mails", 2500))
-            items.Add(New SelectionItem("5000 mails", 5000))
-            items.Add(New SelectionItem("7500 mails", 7500))
-            If totalQualifying > 7500 Then
+                items.Add(New SelectionItem($"{loadThreshold} mails", loadThreshold))
+                If loadThreshold * 2 < totalQualifying Then
+                    items.Add(New SelectionItem($"{loadThreshold * 2} mails", loadThreshold * 2))
+                End If
+                If loadThreshold * 5 < totalQualifying Then
+                    items.Add(New SelectionItem($"{loadThreshold * 5} mails", loadThreshold * 5))
+                End If
+                If loadThreshold * 10 < totalQualifying Then
+                    items.Add(New SelectionItem($"{loadThreshold * 10} mails", loadThreshold * 10))
+                End If
                 items.Add(New SelectionItem($"All ({totalQualifying} mails)", totalQualifying))
-            End If
 
-                Dim chosen As Integer = SelectValue(items, 2500,
-                    $"Found {totalQualifying} qualifying mails in Inbox. How many should be loaded?",
+                Dim chosen As Integer = SelectValue(items, loadThreshold,
+                    $"Found {totalQualifying} qualifying mails in Inbox (threshold: {loadThreshold})." & vbCrLf &
+                    "How many should be loaded?",
                     $"{AN} - Inbox Board")
                 If chosen = 0 Then Return Nothing
                 maxToLoad = chosen
@@ -455,6 +674,20 @@ Partial Public Class ThisAddIn
                 entry.Summary = cached
             End If
         Next
+
+        ' Auto-register any orphaned board folder names found on mails
+        ' (e.g. folder was deleted from settings but the UserProperty remains)
+        Dim knownFolders = GetBoardFolderNames()
+        Dim foldersChanged As Boolean = False
+        For Each entry In entries
+            If Not String.IsNullOrEmpty(entry.BoardFolder) Then
+                If Not knownFolders.Any(Function(f) f.Equals(entry.BoardFolder, StringComparison.OrdinalIgnoreCase)) Then
+                    knownFolders.Add(entry.BoardFolder)
+                    foldersChanged = True
+                End If
+            End If
+        Next
+        If foldersChanged Then SaveBoardFolderNames(knownFolders)
 
         Return entries
     End Function
@@ -537,6 +770,16 @@ Partial Public Class ThisAddIn
             Next
             representative.AllCategories = String.Join(", ", allCats)
             If allCats.Count > 0 Then representative.Categories = allCats.First()
+
+            ' Use board folder from the latest mail that has one set
+            If String.IsNullOrEmpty(representative.BoardFolder) Then
+                For Each m In convMails
+                    If Not String.IsNullOrEmpty(m.BoardFolder) Then
+                        representative.BoardFolder = m.BoardFolder
+                        Exit For
+                    End If
+                Next
+            End If
 
             ' Check if any mail in the conversation has a cached summary
             If String.IsNullOrEmpty(representative.Summary) Then
@@ -653,6 +896,12 @@ Partial Public Class ThisAddIn
             End If
         Catch
         End Try
+
+        ' Compute flag bucket for date-grouped flag columns
+        entry.FlagBucket = GetFlagBucket(entry)
+
+        ' Board folder assignment (UserProperty)
+        entry.BoardFolder = GetMailBoardFolder(mi)
 
         ' Compute flag bucket for date-grouped flag columns
         entry.FlagBucket = GetFlagBucket(entry)
@@ -1577,6 +1826,120 @@ Partial Public Class ThisAddIn
                         End If
                     Catch
                     End Try
+                Case "moveToFolder"
+                    ' Drag card into a board folder
+                    Dim entryId As String = CStr(msg("entryId"))
+                    Dim folderName As String = CStr(msg("folderName"))
+                    If String.IsNullOrWhiteSpace(folderName) Then Return
+
+                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entry IsNot Nothing Then
+                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                 entry.ConversationEntryIDs,
+                                                                 New List(Of String) From {entryId})
+                        For Each id In idsToUpdate
+                            SetMailBoardFolder(id, folderName)
+                        Next
+                        entry.BoardFolder = folderName
+                    End If
+
+                    ' Push full reload so folder tile counts update and card moves
+                    Dim dataJsonFolder As String = BuildBoardDataJson(mails, columns)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJsonFolder}))
+                    Catch
+                    End Try
+
+                Case "removeFromFolder"
+                    ' Drag card out of a folder (or click remove)
+                    Dim entryId As String = CStr(msg("entryId"))
+
+                    Dim entry = mails.FirstOrDefault(Function(m) m.EntryID = entryId)
+                    If entry IsNot Nothing Then
+                        Dim idsToUpdate As List(Of String) = If(entry.IsGrouped AndAlso entry.ConversationEntryIDs IsNot Nothing AndAlso entry.ConversationEntryIDs.Count > 1,
+                                                                 entry.ConversationEntryIDs,
+                                                                 New List(Of String) From {entryId})
+                        For Each id In idsToUpdate
+                            SetMailBoardFolder(id, "")
+                        Next
+                        entry.BoardFolder = ""
+                    End If
+
+                    Dim dataJsonUnfolder As String = BuildBoardDataJson(mails, columns)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJsonUnfolder}))
+                    Catch
+                    End Try
+
+                Case "createFolder"
+                    Dim folderName As String = If(CStr(msg("name")), "").Trim()
+                    If String.IsNullOrWhiteSpace(folderName) Then Return
+
+                    Dim folders = GetBoardFolderNames()
+                    If folders.Count >= InboxBoard_MaxFolders Then Return
+                    If folders.Any(Function(f) f.Equals(folderName, StringComparison.OrdinalIgnoreCase)) Then Return
+
+                    folders.Add(folderName)
+                    SaveBoardFolderNames(folders)
+
+                    Dim dataJsonCreate As String = BuildBoardDataJson(mails, columns)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJsonCreate}))
+                    Catch
+                    End Try
+
+                Case "renameFolder"
+                    Dim oldName As String = If(CStr(msg("oldName")), "").Trim()
+                    Dim newName As String = If(CStr(msg("newName")), "").Trim()
+                    If String.IsNullOrWhiteSpace(oldName) OrElse String.IsNullOrWhiteSpace(newName) Then Return
+
+                    RenameBoardFolder(oldName, newName, mails)
+
+                    Dim dataJsonRename As String = BuildBoardDataJson(mails, columns)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJsonRename}))
+                    Catch
+                    End Try
+
+                Case "deleteFolder"
+                    Dim folderName As String = If(CStr(msg("name")), "").Trim()
+                    If String.IsNullOrWhiteSpace(folderName) Then Return
+
+                    DeleteBoardFolder(folderName, mails)
+
+                    Dim dataJsonDelete As String = BuildBoardDataJson(mails, columns)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {.action = "reloadData", .data = dataJsonDelete}))
+                    Catch
+                    End Try
+
+                Case "setLoadThreshold"
+                    ' Persist user-configurable load threshold
+                    Try
+                        Dim threshold As Integer = CInt(msg("threshold"))
+                        If threshold < 0 Then threshold = 0
+                        My.Settings.InboxBoardLoadThreshold = threshold
+                        My.Settings.Save()
+                        ' Reset remembered load count so next reload uses the new threshold
+                        _inboxBoardLastMaxToLoad = 0
+                    Catch
+                    End Try
+
+                Case "toggleFolderExpand"
+                    Dim folderName As String = If(CStr(msg("name")), "").Trim()
+                    Dim expanded As Boolean = CBool(msg("expanded"))
+                    Dim expandedSet = GetExpandedFolders()
+                    If expanded Then
+                        expandedSet.Add(folderName)
+                    Else
+                        expandedSet.Remove(folderName)
+                    End If
+                    SaveExpandedFolders(expandedSet)
             End Select
 
         Catch ex As System.Exception
@@ -1660,7 +2023,8 @@ Partial Public Class ThisAddIn
                     .isCompleted = entry.IsCompleted,
                     .flagRequest = If(entry.FlagRequest, ""),
                     .flagDueDate = If(entry.FlagDueDate.HasValue, entry.FlagDueDate.Value.ToString("yyyy-MM-dd"), ""),
-                                   .flagBucket = If(entry.FlagBucket, "")
+                    .flagBucket = If(entry.FlagBucket, ""),
+                    .boardFolder = If(entry.BoardFolder, "")
                 }))
         Catch
         End Try
@@ -2037,6 +2401,7 @@ Partial Public Class ThisAddIn
             card("flagRequest") = If(m.FlagRequest, "")
             card("flagDueDate") = If(m.FlagDueDate.HasValue, m.FlagDueDate.Value.ToString("yyyy-MM-dd"), "")
             card("flagBucket") = If(m.FlagBucket, "")
+            card("boardFolder") = If(m.BoardFolder, "")
 
             ' Build array of all categories with colors for multi-category badges
             Dim allCatsArr As New JArray()
@@ -2075,6 +2440,20 @@ Partial Public Class ThisAddIn
         Dim root As New JObject()
         root("cards") = cardsArr
         root("columns") = colsArr
+
+        ' Board folders
+        Dim foldersArr As New JArray()
+        Dim folderNames = GetBoardFolderNames()
+        Dim expandedFolders = GetExpandedFolders()
+        For Each fn In folderNames
+            Dim fo As New JObject()
+            fo("name") = fn
+            fo("count") = mails.Where(Function(m) Not String.IsNullOrEmpty(m.BoardFolder) AndAlso m.BoardFolder.Equals(fn, StringComparison.OrdinalIgnoreCase)).Count()
+            fo("expanded") = expandedFolders.Contains(fn)
+            foldersArr.Add(fo)
+        Next
+        root("folders") = foldersArr
+
         Return root.ToString(Formatting.None)
     End Function
 
@@ -2119,6 +2498,22 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
+        ' Build folder definitions for JS
+        Dim savedFoldersJson As String = "[]"
+        Try
+            Dim folderNames = GetBoardFolderNames()
+            Dim expandedFolders = GetExpandedFolders()
+            Dim fArr As New JArray()
+            For Each fn In folderNames
+                Dim fo As New JObject()
+                fo("name") = fn
+                fo("expanded") = expandedFolders.Contains(fn)
+                fArr.Add(fo)
+            Next
+            savedFoldersJson = fArr.ToString(Formatting.None)
+        Catch
+        End Try
+
         Dim sb As New StringBuilder(32000)
         sb.AppendLine("<!DOCTYPE html>")
         sb.AppendLine("<html lang=""en"">")
@@ -2146,6 +2541,7 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"const SAVED_HIDE_DONE_FLAGS = {If(savedHideDoneFlags, "true", "false")};")
         sb.AppendLine($"const SAVED_GROUP_FLAGS_BY_DATE = {If(savedGroupFlagsByDate, "true", "false")};")
         sb.AppendLine($"const FLAGGED_COLUMN_ID = {JsonConvert.SerializeObject(InboxBoard_FlaggedColumnId)};")
+        sb.AppendLine($"const SAVED_FOLDERS = {savedFoldersJson};")
         sb.AppendLine(GetBoardJavaScript())
         sb.AppendLine("</script>")
         sb.AppendLine("</body>")
@@ -2154,8 +2550,6 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
-
-    ''' <summary>Returns the CSS for the board.</summary>
     Private Function GetBoardCss() As String
         Return "
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2269,6 +2663,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card:hover { box-shadow: 0 3px 8px var(--card-shadow); transform: translateY(-1px); }
 .card.dragging { opacity: 0.5; cursor: grabbing; transform: rotate(2deg); }
 .card.hidden { display: none; }
+.card.folder-hidden { display: none; }
 .card.conversation { border-left: 3px solid #3b82f6; }
 .card.flagged { border-left: 3px solid #ef4444; }
 .card.conversation.flagged { border-left: 3px solid #ef4444; }
@@ -2290,6 +2685,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
   color: var(--toast-text); font-size: 10px; padding: 3px 6px; border-radius: 4px;
   white-space: nowrap; opacity: 0; pointer-events: none; margin-bottom: 3px; }
 .card-btn:hover .tip { opacity: 1; }
+.card-btn.folder-remove-btn:hover { color: #ef4444; }
 .unread-dot { width: 7px; height: 7px; border-radius: 50%; background: #3b82f6;
   display: inline-block; margin-right: 4px; flex-shrink: 0; }
 .conv-icon { font-size: 10px; color: var(--text-muted); margin-right: 3px; }
@@ -2299,6 +2695,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card-categories { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
 .card-cat-badge { font-size: 9px; padding: 1px 6px; border-radius: 8px; color: #fff;
   white-space: nowrap; line-height: 1.4; font-weight: 500; }
+.card-folder-badge { font-size: 10px; color: #8b5cf6; margin-bottom: 3px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
 .toast-container { position: fixed; bottom: 16px; right: 16px; display: flex;
   flex-direction: column-reverse; gap: 6px; z-index: 1000; pointer-events: none; }
 .toast { background: var(--toast-bg); color: var(--toast-text); padding: 8px 14px;
@@ -2318,6 +2716,28 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .column-header:active { cursor: grabbing; }
 .column.col-dragging { opacity: 0.5; }
 .column.col-drag-over { border-left: 3px solid #3b82f6; }
+.column.folder-column { flex: 0 0 220px; min-width: 180px; max-width: 240px; }
+.column.folder-column .column-header { cursor: default; }
+.folder-tile { background: var(--col-bg); border: 2px dashed var(--col-border); border-radius: 8px;
+  padding: 9px 11px; cursor: pointer; user-select: none; margin-bottom: 6px;
+  transition: background 0.2s, border-color 0.2s; display: flex; align-items: center; gap: 8px; }
+.folder-tile:hover { border-color: #3b82f6; background: var(--drop-highlight); }
+.folder-tile.drag-over { border-color: #3b82f6; background: var(--drop-highlight); border-style: solid; }
+.folder-tile.selected { border-color: #8b5cf6; background: rgba(139,92,246,0.15); border-style: solid; }
+.folder-tile.show-all { border-color: var(--text-muted); }
+.folder-tile.show-all:hover { border-color: #ef4444; }
+.folder-tile.show-foldered-toggle { border-color: var(--text-muted); border-style: dashed; }
+.folder-tile.show-foldered-toggle:hover { border-color: #8b5cf6; }
+.folder-tile .folder-icon { font-size: 16px; flex-shrink: 0; }
+.folder-tile .folder-name { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.folder-tile .folder-count { font-size: 11px; color: var(--text-muted); background: var(--input-bg);
+  padding: 1px 7px; border-radius: 10px; }
+.folder-manage-item { display: flex; align-items: center; gap: 4px; padding: 2px 0; font-size: 12px; }
+.folder-manage-item .folder-manage-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.folder-manage-item button { background: none; border: none; color: var(--text-muted); cursor: pointer;
+  font-size: 12px; padding: 2px 4px; border-radius: 3px; }
+.folder-manage-item button:hover { color: #ef4444; background: var(--drop-highlight); }
 "
     End Function
 
@@ -2390,6 +2810,11 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Dim escapedLang As String = System.Net.WebUtility.HtmlEncode(savedLang)
         Dim dataEmpty As String = If(String.IsNullOrEmpty(savedLang), " data-empty=""true""", "")
 
+        ' Load threshold setting
+        Dim savedThreshold As Integer = 0
+        Try : savedThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
+        If savedThreshold <= 0 Then savedThreshold = InboxBoard_DefaultLoadThreshold
+
         Return $"
 <div class=""header"">
   <div class=""topline"">
@@ -2421,6 +2846,12 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
           <input type=""text"" id=""summaryLanguageInput"" value=""{escapedLang}""{dataEmpty}>
           <div class=""lang-overlay"">Auto-detect</div>
         </div>
+        <h3 class=""section-divider"">Load Limit</h3>
+        <div style=""font-size:11px;color:var(--text-muted);line-height:1.4;padding:0 0 4px 0"">
+          Prompt when qualifying mails exceed this number. Takes effect on next Reload.
+        </div>
+        <input type=""number"" id=""loadThresholdInput"" value=""{savedThreshold}"" min=""50"" max=""50000"" step=""50""
+          style=""padding:4px 6px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;outline:none;width:100%"">
         <h3 class=""section-divider"">Pinned Columns</h3>
 {pinnedHtml.ToString().TrimEnd()}
         <h3 class=""section-divider"">Pinned Flag Columns</h3>
@@ -2430,10 +2861,19 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         <div id=""pinnedFlagColumnsHint"" style=""display:{If(groupFlagsByDateChecked = "", "block", "none")};font-size:11px;color:var(--text-muted);padding:2px 0"">
           Enable &quot;Group flagged by due date&quot; first
         </div>
+        <h3 class=""section-divider"">Board Folders</h3>
+        <div id=""folderManageSection"">
+          <div style=""display:flex;gap:4px;margin-bottom:6px"">
+            <input type=""text"" id=""newFolderInput"" placeholder=""New folder name…"" style=""flex:1;padding:4px 6px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;outline:none"">
+            <button id=""addFolderBtn"" style=""padding:4px 8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;cursor:pointer"">+</button>
+          </div>
+          <div id=""folderList""></div>
+        </div>
         <h3 class=""section-divider"">Drag &amp; Drop</h3>
         <div style=""font-size:11px;color:var(--text-muted);line-height:1.4;padding:2px 0"">
           <b>Drag</b> → replace all categories<br>
-          <b>Ctrl + Drag</b> → add category
+          <b>Ctrl + Drag</b> → add category<br>
+          <b>Drag onto 📁</b> → move to folder
         </div>
       </div>
     </div>
@@ -2476,7 +2916,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 
     ''' <summary>Returns the JavaScript for the board.</summary>
     Private Function GetBoardJavaScript() As String
-        Dim js As New StringBuilder(20000)
+        Dim js As New StringBuilder(30000)
         js.AppendLine("// --- State ---")
         js.AppendLine("var cards = [];")
         js.AppendLine("var COLUMNS = [];")
@@ -2484,13 +2924,17 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("var isDragging = false;")
         js.AppendLine("var ctrlHeld = false;")
         js.AppendLine("var langCommitTimer = null;")
-        js.AppendLine("var columnSortState = {};") ' Track sort per column
+        js.AppendLine("var columnSortState = {};")
+        js.AppendLine("var boardFolders = (typeof SAVED_FOLDERS !== 'undefined') ? SAVED_FOLDERS : [];")
+        js.AppendLine("var selectedFolder = null;")
+        js.AppendLine("var hideFoldered = true;")
         js.AppendLine()
         js.AppendLine("function init(data) {")
         js.AppendLine("  try {")
         js.AppendLine("    var d = (typeof data === 'string') ? JSON.parse(data) : data;")
         js.AppendLine("    COLUMNS = d.columns || [];")
         js.AppendLine("    cards = (d.cards || []).map(function(c, i) { return Object.assign({}, c, { id: i + 1 }); });")
+        js.AppendLine("    if (d.folders) { boardFolders = d.folders; }")
         js.AppendLine("    console.log('InboxBoard init: ' + cards.length + ' cards, ' + COLUMNS.length + ' columns');")
         js.AppendLine("    populateColumnFilter();")
         js.AppendLine("    renderBoard();")
@@ -2521,57 +2965,29 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Board panning (middle-click / right-click drag) ---
-        js.AppendLine("// --- Board panning ---")
+        ' --- Board panning ---
         js.AppendLine("(function() {")
-        js.AppendLine("  var board = null;")
-        js.AppendLine("  var isPanning = false;")
-        js.AppendLine("  var startX = 0, startY = 0, scrollLeftStart = 0, scrollTopStart = 0;")
-        js.AppendLine()
+        js.AppendLine("  var board = null, isPanning = false, startX = 0, startY = 0, scrollLeftStart = 0, scrollTopStart = 0;")
         js.AppendLine("  function getBoard() { if (!board) board = document.getElementById('board'); return board; }")
-        js.AppendLine()
         js.AppendLine("  document.addEventListener('mousedown', function(e) {")
         js.AppendLine("    var b = getBoard(); if (!b) return;")
-        js.AppendLine("    // Middle button (1) or right button (2) on board background")
         js.AppendLine("    if (e.button !== 1 && e.button !== 2) return;")
-        js.AppendLine("    // Only start panning if clicking on board or column background, not on cards/buttons")
         js.AppendLine("    var target = e.target;")
         js.AppendLine("    if (target.closest('.card') || target.closest('.card-btn') || target.closest('.sort-dropdown') || target.closest('.header')) return;")
-        js.AppendLine("    // Must be inside the board area")
         js.AppendLine("    if (!target.closest('.board') && !target.closest('.column') && target !== b) return;")
-        js.AppendLine("    e.preventDefault();")
-        js.AppendLine("    isPanning = true;")
-        js.AppendLine("    startX = e.clientX;")
-        js.AppendLine("    startY = e.clientY;")
-        js.AppendLine("    scrollLeftStart = b.scrollLeft;")
-        js.AppendLine("    scrollTopStart = window.scrollY;")
-        js.AppendLine("    b.classList.add('panning');")
+        js.AppendLine("    e.preventDefault(); isPanning = true; startX = e.clientX; startY = e.clientY;")
+        js.AppendLine("    scrollLeftStart = b.scrollLeft; scrollTopStart = window.scrollY; b.classList.add('panning');")
         js.AppendLine("  });")
-        js.AppendLine()
         js.AppendLine("  document.addEventListener('mousemove', function(e) {")
-        js.AppendLine("    if (!isPanning) return;")
-        js.AppendLine("    var b = getBoard(); if (!b) return;")
-        js.AppendLine("    e.preventDefault();")
-        js.AppendLine("    var dx = e.clientX - startX;")
-        js.AppendLine("    var dy = e.clientY - startY;")
-        js.AppendLine("    b.scrollLeft = scrollLeftStart - dx;")
-        js.AppendLine("    window.scrollTo(window.scrollX, scrollTopStart - dy);")
+        js.AppendLine("    if (!isPanning) return; var b = getBoard(); if (!b) return; e.preventDefault();")
+        js.AppendLine("    b.scrollLeft = scrollLeftStart - (e.clientX - startX);")
+        js.AppendLine("    window.scrollTo(window.scrollX, scrollTopStart - (e.clientY - startY));")
         js.AppendLine("  });")
-        js.AppendLine()
-        js.AppendLine("  document.addEventListener('mouseup', function(e) {")
-        js.AppendLine("    if (!isPanning) return;")
-        js.AppendLine("    isPanning = false;")
-        js.AppendLine("    var b = getBoard(); if (b) b.classList.remove('panning');")
-        js.AppendLine("  });")
-        js.AppendLine()
-        js.AppendLine("  // Suppress context menu when right-click panning")
-        js.AppendLine("  document.addEventListener('contextmenu', function(e) {")
-        js.AppendLine("    var target = e.target;")
-        js.AppendLine("    if (target.closest('.board') || target.closest('.column')) { e.preventDefault(); }")
-        js.AppendLine("  });")
+        js.AppendLine("  document.addEventListener('mouseup', function() { if (!isPanning) return; isPanning = false; var b = getBoard(); if (b) b.classList.remove('panning'); });")
+        js.AppendLine("  document.addEventListener('contextmenu', function(e) { if (e.target.closest('.board') || e.target.closest('.column')) e.preventDefault(); });")
         js.AppendLine("})();")
         js.AppendLine()
-        js.AppendLine("// --- Persistence via My.Settings (postMessage to VB.NET) ---")
+        ' --- Persistence ---
         js.AppendLine("function saveState() {")
         js.AppendLine("  try {")
         js.AppendLine("    var state = COLUMNS.map(function(col) {")
@@ -2585,127 +3001,35 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  } catch(err) { console.error('saveState error:', err); }")
         js.AppendLine("}")
         js.AppendLine()
-        js.AppendLine("function saveFieldSettings() {")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setFieldSettings', fields: JSON.stringify(fieldSettings) }));")
-        js.AppendLine("}")
-        js.AppendLine()
+        js.AppendLine("function saveFieldSettings() { window.chrome.webview.postMessage(JSON.stringify({ action: 'setFieldSettings', fields: JSON.stringify(fieldSettings) })); }")
         js.AppendLine("function loadFieldSettings() {")
         js.AppendLine("  if (SAVED_FIELDS) { try { fieldSettings = JSON.parse(SAVED_FIELDS); } catch(e) {} }")
-        js.AppendLine("  document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) {")
-        js.AppendLine("    cb.checked = fieldSettings[cb.dataset.field] !== false;")
-        js.AppendLine("  });")
+        js.AppendLine("  document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) { cb.checked = fieldSettings[cb.dataset.field] !== false; });")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Theme (unchanged) ---
+        ' --- Theme ---
         js.AppendLine("function applyTheme(theme) {")
         js.AppendLine("  document.documentElement.setAttribute('data-theme', theme);")
         js.AppendLine("  var icon = document.getElementById('themeIcon');")
-        js.AppendLine("  if (theme === 'dark') {")
-        js.AppendLine("    icon.innerHTML = '<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';")
-        js.AppendLine("  } else {")
-        js.AppendLine("    icon.innerHTML = '<circle cx=""12"" cy=""12"" r=""5""/>' +")
-        js.AppendLine("      '<line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/>' +")
-        js.AppendLine("      '<line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/>' +")
-        js.AppendLine("      '<line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/>' +")
-        js.AppendLine("      '<line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';")
-        js.AppendLine("  }")
+        js.AppendLine("  if (theme === 'dark') { icon.innerHTML = '<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>'; }")
+        js.AppendLine("  else { icon.innerHTML = '<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>'; }")
         js.AppendLine("}")
-        js.AppendLine("function initTheme() {")
-        js.AppendLine("  var theme = SAVED_THEME || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');")
-        js.AppendLine("  applyTheme(theme);")
-        js.AppendLine("}")
-        js.AppendLine()
-        js.AppendLine("document.getElementById('themeToggle').addEventListener('click', function() {")
-        js.AppendLine("  var cur = document.documentElement.getAttribute('data-theme');")
-        js.AppendLine("  var next = cur === 'dark' ? 'light' : 'dark';")
-        js.AppendLine("  applyTheme(next);")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setTheme', theme: next }));")
-        js.AppendLine("});")
+        js.AppendLine("function initTheme() { var theme = SAVED_THEME || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'); applyTheme(theme); }")
+        js.AppendLine("document.getElementById('themeToggle').addEventListener('click', function() { var cur = document.documentElement.getAttribute('data-theme'); var next = cur === 'dark' ? 'light' : 'dark'; applyTheme(next); window.chrome.webview.postMessage(JSON.stringify({ action: 'setTheme', theme: next })); });")
         js.AppendLine()
         ' --- Settings panel ---
-        js.AppendLine("document.getElementById('settingsBtn').addEventListener('click', function(e) {")
-        js.AppendLine("  e.stopPropagation(); document.getElementById('settingsPanel').classList.toggle('open');")
-        js.AppendLine("});")
+        js.AppendLine("document.getElementById('settingsBtn').addEventListener('click', function(e) { e.stopPropagation(); document.getElementById('settingsPanel').classList.toggle('open'); });")
         js.AppendLine("document.addEventListener('click', function(e) {")
         js.AppendLine("  var p = document.getElementById('settingsPanel');")
         js.AppendLine("  if (!p.contains(e.target) && e.target !== document.getElementById('settingsBtn')) p.classList.remove('open');")
-        js.AppendLine("  // Close any open sort dropdowns")
-        js.AppendLine("  if (!e.target.closest('.sort-btn') && !e.target.closest('.sort-dropdown')) {")
-        js.AppendLine("    document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { dd.classList.remove('open'); });")
-        js.AppendLine("  }")
+        js.AppendLine("  if (!e.target.closest('.sort-btn') && !e.target.closest('.sort-dropdown')) document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { dd.classList.remove('open'); });")
         js.AppendLine("});")
-        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) {")
-        js.AppendLine("  cb.addEventListener('change', function() {")
-        js.AppendLine("    fieldSettings[cb.dataset.field] = cb.checked;")
-        js.AppendLine("    saveFieldSettings(); applyFieldVisibility();")
-        js.AppendLine("  });")
-        js.AppendLine("});")
+        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-field]').forEach(function(cb) { cb.addEventListener('change', function() { fieldSettings[cb.dataset.field] = cb.checked; saveFieldSettings(); applyFieldVisibility(); }); });")
         js.AppendLine()
-        ' --- Group conversations toggle ---
-        js.AppendLine("document.getElementById('groupConversationsChk').addEventListener('change', function() {")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupConversations', enabled: this.checked }));")
-        js.AppendLine("});")
-        js.AppendLine()
-        ' --- Include flagged toggle ---
-        js.AppendLine("document.getElementById('includeFlaggedChk').addEventListener('change', function() {")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setIncludeFlagged', enabled: this.checked }));")
-        js.AppendLine("});")
-        js.AppendLine()
-        ' --- Hide done flags toggle ---
-        js.AppendLine("document.getElementById('hideDoneFlagsChk').addEventListener('change', function() {")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setHideDoneFlags', enabled: this.checked }));")
-        js.AppendLine("});")
-        js.AppendLine()
-        ' --- Summary language (free text input with debounce) ---
-        js.AppendLine("(function() {")
-        js.AppendLine("  var langInput = document.getElementById('summaryLanguageInput');")
-        js.AppendLine("  var lastCommitted = SAVED_SUMMARY_LANGUAGE || '';")
-        js.AppendLine("  if (SAVED_SUMMARY_LANGUAGE) { langInput.value = SAVED_SUMMARY_LANGUAGE; }")
-        js.AppendLine("  function updateEmpty() { langInput.setAttribute('data-empty', langInput.value.trim() === '' ? 'true' : 'false'); }")
-        js.AppendLine("  updateEmpty();")
-        js.AppendLine("  function commitLang() {")
-        js.AppendLine("    if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; }")
-        js.AppendLine("    var val = langInput.value.trim();")
-        js.AppendLine("    if (val !== lastCommitted) {")
-        js.AppendLine("      lastCommitted = val;")
-        js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({ action: 'setSummaryLanguage', language: val }));")
-        js.AppendLine("      if (val) { showToast('Summary language: ' + val); } else { showToast('Summary language: Auto-detect'); }")
-        js.AppendLine("    }")
-        js.AppendLine("  }")
-        js.AppendLine("  langInput.addEventListener('input', function() { updateEmpty(); if (langCommitTimer) clearTimeout(langCommitTimer); langCommitTimer = setTimeout(commitLang, 1500); });")
-        js.AppendLine("  langInput.addEventListener('blur', function() { if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); });")
-        js.AppendLine("  langInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); langInput.blur(); } });")
-        js.AppendLine("})();")
-        js.AppendLine()
-        ' --- Pinned columns ---
-        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(cb) {")
-        js.AppendLine("  cb.addEventListener('change', function() {")
-        js.AppendLine("    var pinned = [];")
-        js.AppendLine("    document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedCat); });")
-        js.AppendLine("    window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedColumns', columns: pinned }));")
-        js.AppendLine("    showToast('Pinned columns updated');")
-        js.AppendLine("  });")
-        js.AppendLine("});")
-        ' --- Pinned flag columns ---
-        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(cb) {")
-        js.AppendLine("  cb.addEventListener('change', function() {")
-        js.AppendLine("    var pinned = [];")
-        js.AppendLine("    document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedFlag); });")
-        js.AppendLine("    window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedFlagColumns', columns: pinned }));")
-        js.AppendLine("    showToast('Pinned flag columns updated');")
-        js.AppendLine("  });")
-        js.AppendLine("});")
-        js.AppendLine()
-
-        js.AppendLine()
-        js.AppendLine("function applyFieldVisibility() {")
-        js.AppendLine("  document.querySelectorAll('.card-sender').forEach(function(el) { el.style.display = fieldSettings.sender ? '' : 'none'; });")
-        js.AppendLine("  document.querySelectorAll('.card-meta .card-date').forEach(function(el) { el.style.display = fieldSettings.date ? '' : 'none'; });")
-        js.AppendLine("  document.querySelectorAll('.card-meta .card-msg-count').forEach(function(el) { el.style.display = fieldSettings.messageCount ? '' : 'none'; });")
-        js.AppendLine("  document.querySelectorAll('.card-summary').forEach(function(el) { el.style.display = fieldSettings.summary ? '' : 'none'; });")
-        js.AppendLine("}")
-        js.AppendLine()
-        ' --- Reload ---
+        ' --- Toggles ---
+        js.AppendLine("document.getElementById('groupConversationsChk').addEventListener('change', function() { window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupConversations', enabled: this.checked })); });")
+        js.AppendLine("document.getElementById('includeFlaggedChk').addEventListener('change', function() { window.chrome.webview.postMessage(JSON.stringify({ action: 'setIncludeFlagged', enabled: this.checked })); });")
+        js.AppendLine("document.getElementById('hideDoneFlagsChk').addEventListener('change', function() { window.chrome.webview.postMessage(JSON.stringify({ action: 'setHideDoneFlags', enabled: this.checked })); });")
         js.AppendLine("document.getElementById('groupFlagsByDateChk').addEventListener('change', function() {")
         js.AppendLine("  var sec = document.getElementById('pinnedFlagColumnsSection'); var hint = document.getElementById('pinnedFlagColumnsHint');")
         js.AppendLine("  if (sec) sec.style.display = this.checked ? 'block' : 'none';")
@@ -2713,12 +3037,135 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setGroupFlagsByDate', enabled: this.checked }));")
         js.AppendLine("});")
         js.AppendLine()
-        ' --- Reload button ---
-        js.AppendLine("document.getElementById('reloadBtn').addEventListener('click', function() {")
-        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'reload' }));")
-        js.AppendLine("});")
+        ' --- Summary language ---
+        js.AppendLine("(function() {")
+        js.AppendLine("  var langInput = document.getElementById('summaryLanguageInput');")
+        js.AppendLine("  var lastCommitted = SAVED_SUMMARY_LANGUAGE || '';")
+        js.AppendLine("  if (SAVED_SUMMARY_LANGUAGE) langInput.value = SAVED_SUMMARY_LANGUAGE;")
+        js.AppendLine("  function updateEmpty() { langInput.setAttribute('data-empty', langInput.value.trim() === '' ? 'true' : 'false'); }")
+        js.AppendLine("  updateEmpty();")
+        js.AppendLine("  function commitLang() { if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } var val = langInput.value.trim(); if (val !== lastCommitted) { lastCommitted = val; window.chrome.webview.postMessage(JSON.stringify({ action: 'setSummaryLanguage', language: val })); showToast(val ? 'Summary language: ' + val : 'Summary language: Auto-detect'); } }")
+        js.AppendLine("  langInput.addEventListener('input', function() { updateEmpty(); if (langCommitTimer) clearTimeout(langCommitTimer); langCommitTimer = setTimeout(commitLang, 1500); });")
+        js.AppendLine("  langInput.addEventListener('blur', function() { if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); });")
+        js.AppendLine("  langInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); if (langCommitTimer) { clearTimeout(langCommitTimer); langCommitTimer = null; } commitLang(); langInput.blur(); } });")
+        js.AppendLine("})();")
         js.AppendLine()
-        ' --- Ctrl key tracking for drag mode ---
+        ' --- Pinned columns ---
+        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(cb) { cb.addEventListener('change', function() { var pinned = []; document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-cat]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedCat); }); window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedColumns', columns: pinned })); showToast('Pinned columns updated'); }); });")
+        js.AppendLine("document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(cb) { cb.addEventListener('change', function() { var pinned = []; document.querySelectorAll('#settingsPanel input[type=""checkbox""][data-pinned-flag]').forEach(function(c) { if (c.checked) pinned.push(c.dataset.pinnedFlag); }); window.chrome.webview.postMessage(JSON.stringify({ action: 'setPinnedFlagColumns', columns: pinned })); showToast('Pinned flag columns updated'); }); });")
+        js.AppendLine()
+        ' --- Board folder management in settings ---
+        js.AppendLine("function renderFolderManageList() {")
+        js.AppendLine("  var listEl = document.getElementById('folderList'); if (!listEl) return;")
+        js.AppendLine("  listEl.innerHTML = '';")
+        js.AppendLine("  var allNames = getAllFolderNames();")
+        js.AppendLine("  allNames.forEach(function(fn){")
+        js.AppendLine("    var item = document.createElement('div'); item.className = 'folder-manage-item';")
+        js.AppendLine("    var nameSpan = document.createElement('span'); nameSpan.className = 'folder-manage-name'; nameSpan.textContent = '\uD83D\uDCC1 ' + fn;")
+        js.AppendLine("    var renameBtn = document.createElement('button'); renameBtn.title = 'Rename'; renameBtn.textContent = '\u270E';")
+        js.AppendLine("    renameBtn.addEventListener('click', function(){ showPrompt('Rename folder \u0022' + fn + '\u0022 to:', fn, function(nn){ if(nn && nn.trim() && nn.trim()!==fn) window.chrome.webview.postMessage(JSON.stringify({action:'renameFolder',oldName:fn,newName:nn.trim()})); }); });")
+        js.AppendLine("    var deleteBtn = document.createElement('button'); deleteBtn.title = 'Delete'; deleteBtn.textContent = '\u2716';")
+        js.AppendLine("    deleteBtn.addEventListener('click', function(){ showConfirm('Delete folder \u0022' + fn + '\u0022? Cards will return to the main board.', function(){ window.chrome.webview.postMessage(JSON.stringify({action:'deleteFolder',name:fn})); }); });")
+        js.AppendLine("    item.appendChild(nameSpan); item.appendChild(renameBtn); item.appendChild(deleteBtn);")
+        js.AppendLine("    listEl.appendChild(item);")
+        js.AppendLine("  });")
+        js.AppendLine("  if(allNames.length===0){ var hint=document.createElement('div'); hint.style.cssText='font-size:11px;color:var(--text-muted);padding:2px 0'; hint.textContent='No folders yet. Create one above.'; listEl.appendChild(hint); }")
+        js.AppendLine("}")
+        js.AppendLine("document.getElementById('addFolderBtn').addEventListener('click', function(){ var input = document.getElementById('newFolderInput'); var name = input.value.trim(); if(!name) return; window.chrome.webview.postMessage(JSON.stringify({action:'createFolder',name:name})); input.value = ''; showToast('\uD83D\uDCC1 Folder ""' + name + '"" created'); });")
+        js.AppendLine("document.getElementById('newFolderInput').addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault(); document.getElementById('addFolderBtn').click();} });")
+        js.AppendLine()
+        ' --- Load threshold setting ---
+        js.AppendLine("(function() {")
+        js.AppendLine("  var threshInput = document.getElementById('loadThresholdInput'); if (!threshInput) return;")
+        js.AppendLine("  var threshTimer = null;")
+        js.AppendLine("  function commitThreshold() { if (threshTimer) { clearTimeout(threshTimer); threshTimer = null; } var val = parseInt(threshInput.value, 10); if (isNaN(val) || val < 50) val = 50; if (val > 50000) val = 50000; threshInput.value = val; window.chrome.webview.postMessage(JSON.stringify({ action: 'setLoadThreshold', threshold: val })); showToast('Load threshold: ' + val + ' mails (active on next Reload)'); }")
+        js.AppendLine("  threshInput.addEventListener('input', function() { if (threshTimer) clearTimeout(threshTimer); threshTimer = setTimeout(commitThreshold, 1500); });")
+        js.AppendLine("  threshInput.addEventListener('blur', function() { if (threshTimer) { clearTimeout(threshTimer); threshTimer = null; } commitThreshold(); });")
+        js.AppendLine("  threshInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); if (threshTimer) { clearTimeout(threshTimer); threshTimer = null; } commitThreshold(); threshInput.blur(); } });")
+        js.AppendLine("})();")
+        js.AppendLine()
+        ' --- Folder helpers (new: dedicated folder column + filter) ---
+        js.AppendLine("function cardMatchesColumn(c, col) {")
+        js.AppendLine("  if (col.isFlaggedColumn) {")
+        js.AppendLine("    if (!(c.isFlagged || c.isCompleted)) return false;")
+        js.AppendLine("    if (col.id === FLAGGED_COLUMN_ID) return true;")
+        js.AppendLine("    if (c.flagBucket) return c.flagBucket === col.id;")
+        js.AppendLine("    return false;")
+        js.AppendLine("  }")
+        js.AppendLine("  if (c.allCategories && c.allCategories.length > 0) return c.allCategories.some(function(ac){ return ac.name === col.id; });")
+        js.AppendLine("  return c.category === col.id;")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("function getAllFolderNames() {")
+        js.AppendLine("  var allNames = boardFolders.map(function(f){ return f.name; });")
+        js.AppendLine("  cards.forEach(function(c){ if(c.boardFolder && allNames.indexOf(c.boardFolder)<0) allNames.push(c.boardFolder); });")
+        js.AppendLine("  return allNames;")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("function applyFolderFilter() {")
+        js.AppendLine("  document.querySelectorAll('.card').forEach(function(cardEl) {")
+        js.AppendLine("    var card = cards.find(function(c) { return c.entryId === cardEl.dataset.entryId; });")
+        js.AppendLine("    if (!card) return;")
+        js.AppendLine("    if (selectedFolder) {")
+        js.AppendLine("      if (card.boardFolder === selectedFolder) cardEl.classList.remove('folder-hidden');")
+        js.AppendLine("      else cardEl.classList.add('folder-hidden');")
+        js.AppendLine("    } else if (hideFoldered && card.boardFolder) {")
+        js.AppendLine("      cardEl.classList.add('folder-hidden');")
+        js.AppendLine("    } else {")
+        js.AppendLine("      cardEl.classList.remove('folder-hidden');")
+        js.AppendLine("    }")
+        js.AppendLine("  });")
+        js.AppendLine("  document.querySelectorAll('.folder-tile:not(.show-all):not(.show-foldered-toggle)').forEach(function(tile) {")
+        js.AppendLine("    if (tile.dataset.folderName === selectedFolder) tile.classList.add('selected');")
+        js.AppendLine("    else tile.classList.remove('selected');")
+        js.AppendLine("  });")
+        js.AppendLine("  var showAllBtn = document.getElementById('folderShowAll');")
+        js.AppendLine("  if (showAllBtn) showAllBtn.style.display = selectedFolder ? '' : 'none';")
+        js.AppendLine("  var toggleBtn = document.getElementById('folderToggleHide');")
+        js.AppendLine("  if (toggleBtn) {")
+        js.AppendLine("    if (selectedFolder) { toggleBtn.style.display = 'none'; }")
+        js.AppendLine("    else {")
+        js.AppendLine("      toggleBtn.style.display = '';")
+        js.AppendLine("      var toggleName = toggleBtn.querySelector('.folder-name');")
+        js.AppendLine("      if (toggleName) toggleName.textContent = hideFoldered ? 'Show foldered cards' : 'Hide foldered cards';")
+        js.AppendLine("      var toggleIcon = toggleBtn.querySelector('.folder-icon');")
+        js.AppendLine("      if (toggleIcon) toggleIcon.textContent = hideFoldered ? '\uD83D\uDC41' : '\uD83D\uDEAB';")
+        js.AppendLine("    }")
+        js.AppendLine("  }")
+        js.AppendLine("  updateCounts();")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("function createFolderTile(folderName) {")
+        js.AppendLine("  var tile = document.createElement('div');")
+        js.AppendLine("  tile.className = 'folder-tile' + (selectedFolder === folderName ? ' selected' : '');")
+        js.AppendLine("  tile.dataset.folderName = folderName;")
+        js.AppendLine("  var icon = document.createElement('span'); icon.className = 'folder-icon'; icon.textContent = '\uD83D\uDCC1';")
+        js.AppendLine("  var name = document.createElement('span'); name.className = 'folder-name'; name.textContent = folderName;")
+        js.AppendLine("  var count = document.createElement('span'); count.className = 'folder-count';")
+        js.AppendLine("  count.textContent = cards.filter(function(c){ return c.boardFolder === folderName; }).length;")
+        js.AppendLine("  tile.appendChild(icon); tile.appendChild(name); tile.appendChild(count);")
+        js.AppendLine("  tile.addEventListener('click', function(){")
+        js.AppendLine("    if (selectedFolder === folderName) { selectedFolder = null; showToast('Showing all cards'); }")
+        js.AppendLine("    else { selectedFolder = folderName; showToast('\uD83D\uDCC1 Filtering: ' + folderName); }")
+        js.AppendLine("    applyFolderFilter();")
+        js.AppendLine("  });")
+        js.AppendLine("  tile.addEventListener('dragover', function(e){ e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect='move'; tile.classList.add('drag-over'); });")
+        js.AppendLine("  tile.addEventListener('dragleave', function(e){ if(!tile.contains(e.relatedTarget)) tile.classList.remove('drag-over'); });")
+        js.AppendLine("  tile.addEventListener('drop', function(e){")
+        js.AppendLine("    e.preventDefault(); e.stopPropagation(); tile.classList.remove('drag-over');")
+        js.AppendLine("    var entryId = e.dataTransfer.getData('text/plain'); if(!entryId) return;")
+        js.AppendLine("    var card = cards.find(function(c){ return c.entryId===entryId; });")
+        js.AppendLine("    if(card && card.boardFolder===folderName){ showToast('Already in '+folderName); return; }")
+        js.AppendLine("    window.chrome.webview.postMessage(JSON.stringify({action:'moveToFolder',entryId:entryId,folderName:folderName}));")
+        js.AppendLine("    showToast('\uD83D\uDCC1 Moved to '+folderName);")
+        js.AppendLine("  });")
+        js.AppendLine("  return tile;")
+        js.AppendLine("}")
+        js.AppendLine()
+        ' --- Reload button ---
+        js.AppendLine("document.getElementById('reloadBtn').addEventListener('click', function() { window.chrome.webview.postMessage(JSON.stringify({ action: 'reload' })); });")
+        js.AppendLine()
+        ' --- Ctrl key tracking ---
         js.AppendLine("document.addEventListener('keydown', function(e) { if (e.key === 'Control' && !ctrlHeld) { ctrlHeld = true; updateDragModeVisuals(); } });")
         js.AppendLine("document.addEventListener('keyup', function(e) { if (e.key === 'Control') { ctrlHeld = false; updateDragModeVisuals(); } });")
         js.AppendLine("window.addEventListener('blur', function() { ctrlHeld = false; updateDragModeVisuals(); });")
@@ -2736,24 +3183,24 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  }")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Column sort functions ---
-        js.AppendLine("// --- Column sorting ---")
+        js.AppendLine("function applyFieldVisibility() {")
+        js.AppendLine("  document.querySelectorAll('.card-sender').forEach(function(el) { el.style.display = fieldSettings.sender ? '' : 'none'; });")
+        js.AppendLine("  document.querySelectorAll('.card-meta .card-date').forEach(function(el) { el.style.display = fieldSettings.date ? '' : 'none'; });")
+        js.AppendLine("  document.querySelectorAll('.card-meta .card-msg-count').forEach(function(el) { el.style.display = fieldSettings.messageCount ? '' : 'none'; });")
+        js.AppendLine("  document.querySelectorAll('.card-summary').forEach(function(el) { el.style.display = fieldSettings.summary ? '' : 'none'; });")
+        js.AppendLine("}")
+        js.AppendLine()
+        ' --- Column sorting ---
         js.AppendLine("var SORT_OPTIONS = [")
-        js.AppendLine("  { key: 'date-desc', label: 'Date (newest first)' },")
-        js.AppendLine("  { key: 'date-asc', label: 'Date (oldest first)' },")
-        js.AppendLine("  { key: 'subject-asc', label: 'Subject (A\u2013Z)' },")
-        js.AppendLine("  { key: 'subject-desc', label: 'Subject (Z\u2013A)' },")
-        js.AppendLine("  { key: 'sender-asc', label: 'Sender (A\u2013Z)' },")
-        js.AppendLine("  { key: 'sender-desc', label: 'Sender (Z\u2013A)' },")
+        js.AppendLine("  { key: 'date-desc', label: 'Date (newest first)' }, { key: 'date-asc', label: 'Date (oldest first)' },")
+        js.AppendLine("  { key: 'subject-asc', label: 'Subject (A\u2013Z)' }, { key: 'subject-desc', label: 'Subject (Z\u2013A)' },")
+        js.AppendLine("  { key: 'sender-asc', label: 'Sender (A\u2013Z)' }, { key: 'sender-desc', label: 'Sender (Z\u2013A)' },")
         js.AppendLine("  { key: 'unread', label: 'Unread first' }")
         js.AppendLine("];")
-        js.AppendLine()
         js.AppendLine("function sortColumnCards(colId, sortKey) {")
         js.AppendLine("  columnSortState[colId] = sortKey;")
-        js.AppendLine("  var colEl = document.querySelector('.column[data-column=""' + CSS.escape(colId) + '""]');")
-        js.AppendLine("  if (!colEl) return;")
-        js.AppendLine("  var list = colEl.querySelector('.card-list');")
-        js.AppendLine("  if (!list) return;")
+        js.AppendLine("  var colEl = document.querySelector('.column[data-column=""' + CSS.escape(colId) + '""]'); if (!colEl) return;")
+        js.AppendLine("  var list = colEl.querySelector('.card-list'); if (!list) return;")
         js.AppendLine("  var cardEls = Array.from(list.querySelectorAll('.card'));")
         js.AppendLine("  cardEls.sort(function(a, b) {")
         js.AppendLine("    var ca = cards.find(function(c) { return c.entryId === a.dataset.entryId; });")
@@ -2771,101 +3218,98 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    }")
         js.AppendLine("  });")
         js.AppendLine("  cardEls.forEach(function(el) { list.appendChild(el); });")
-        js.AppendLine("  // Update sort checkmarks in dropdown")
         js.AppendLine("  var dd = colEl.querySelector('.sort-dropdown');")
-        js.AppendLine("  if (dd) { dd.querySelectorAll('.sort-check').forEach(function(ck) { ck.textContent = ck.parentElement.dataset.sortKey === sortKey ? '\u2713' : ''; }); }")
+        js.AppendLine("  if (dd) dd.querySelectorAll('.sort-check').forEach(function(ck) { ck.textContent = ck.parentElement.dataset.sortKey === sortKey ? '\u2713' : ''; });")
         js.AppendLine("  showToast('Sorted by ' + SORT_OPTIONS.find(function(o) { return o.key === sortKey; }).label);")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Render Board ---
+        ' --- Render Board (folder column + category columns) ---
         js.AppendLine("function renderBoard() {")
         js.AppendLine("  var board = document.getElementById('board');")
         js.AppendLine("  board.innerHTML = '';")
+        js.AppendLine()
+        ' Folder column (only if folders exist)
+        js.AppendLine("  var allFolderNames = getAllFolderNames();")
+        js.AppendLine("  if (allFolderNames.length > 0) {")
+        js.AppendLine("    var folderCol = document.createElement('div');")
+        js.AppendLine("    folderCol.className = 'column folder-column';")
+        js.AppendLine("    folderCol.dataset.column = '__folders__';")
+        js.AppendLine("    var fHeader = document.createElement('div'); fHeader.className = 'column-header'; fHeader.draggable = false; fHeader.style.cursor = 'default';")
+        js.AppendLine("    var fDot = document.createElement('span'); fDot.className = 'dot'; fDot.style.background = '#3b82f6';")
+        js.AppendLine("    var fTitle = document.createElement('span'); fTitle.textContent = '\uD83D\uDCC1 Folders';")
+        js.AppendLine("    var fCount = document.createElement('span'); fCount.className = 'count'; fCount.textContent = allFolderNames.length;")
+        js.AppendLine("    fHeader.appendChild(fDot); fHeader.appendChild(fTitle); fHeader.appendChild(fCount);")
+        js.AppendLine("    folderCol.appendChild(fHeader);")
+        js.AppendLine("    var fList = document.createElement('div'); fList.className = 'card-list'; fList.dataset.column = '__folders__';")
+        ' Show All button (only visible when a folder is selected)
+        js.AppendLine("    var showAllBtn = document.createElement('div');")
+        js.AppendLine("    showAllBtn.id = 'folderShowAll';")
+        js.AppendLine("    showAllBtn.className = 'folder-tile show-all';")
+        js.AppendLine("    showAllBtn.style.display = selectedFolder ? '' : 'none';")
+        js.AppendLine("    showAllBtn.innerHTML = '<span class=""folder-icon"">\u2716</span><span class=""folder-name"">Show All</span>';")
+        js.AppendLine("    showAllBtn.addEventListener('click', function(){ selectedFolder = null; applyFolderFilter(); showToast('Showing all cards'); });")
+        js.AppendLine("    fList.appendChild(showAllBtn);")
+        ' Toggle hide/show foldered cards button
+        js.AppendLine("    var toggleHideBtn = document.createElement('div');")
+        js.AppendLine("    toggleHideBtn.id = 'folderToggleHide';")
+        js.AppendLine("    toggleHideBtn.className = 'folder-tile show-foldered-toggle';")
+        js.AppendLine("    toggleHideBtn.style.display = selectedFolder ? 'none' : '';")
+        js.AppendLine("    toggleHideBtn.innerHTML = '<span class=""folder-icon"">' + (hideFoldered ? '\uD83D\uDC41' : '\uD83D\uDEAB') + '</span><span class=""folder-name"">' + (hideFoldered ? 'Show foldered cards' : 'Hide foldered cards') + '</span>';")
+        js.AppendLine("    toggleHideBtn.addEventListener('click', function(){ hideFoldered = !hideFoldered; applyFolderFilter(); showToast(hideFoldered ? 'Hiding foldered cards' : 'Showing all cards'); });")
+        js.AppendLine("    fList.appendChild(toggleHideBtn);")
+        js.AppendLine("    allFolderNames.forEach(function(fn){ fList.appendChild(createFolderTile(fn)); });")
+        js.AppendLine("    folderCol.appendChild(fList);")
+        js.AppendLine("    board.appendChild(folderCol);")
+        js.AppendLine("  }")
+        js.AppendLine()
+        ' Category columns — ALL cards shown (folder filter hides via CSS class)
         js.AppendLine("  COLUMNS.forEach(function(col) {")
         js.AppendLine("    var colEl = document.createElement('div');")
         js.AppendLine("    colEl.className = 'column';")
         js.AppendLine("    colEl.dataset.column = col.id;")
-        js.AppendLine("    var colCards = cards.filter(function(c) {")
-        js.AppendLine("      if (col.isFlaggedColumn) {")
-        js.AppendLine("        if (!(c.isFlagged || c.isCompleted)) return false;")
-        js.AppendLine("        if (col.id === FLAGGED_COLUMN_ID) return true;")
-        js.AppendLine("        if (c.flagBucket) return c.flagBucket === col.id;")
-        js.AppendLine("        return false;")
-        js.AppendLine("      }")
-        js.AppendLine("      if (c.allCategories && c.allCategories.length > 0) {")
-        js.AppendLine("        return c.allCategories.some(function(ac) { return ac.name === col.id; });")
-        js.AppendLine("      }")
-        js.AppendLine("      return c.category === col.id;")
-        js.AppendLine("    });")
-        js.AppendLine("    var headerDiv = document.createElement('div');")
-        js.AppendLine("    headerDiv.className = 'column-header';")
-        js.AppendLine("    var dot = document.createElement('span');")
-        js.AppendLine("    dot.className = 'dot';")
-        js.AppendLine("    dot.style.background = col.color;")
-        js.AppendLine("    var titleSpan = document.createElement('span');")
-        js.AppendLine("    titleSpan.textContent = col.title;")
-        js.AppendLine("    var countSpan = document.createElement('span');")
-        js.AppendLine("    countSpan.className = 'count';")
-        js.AppendLine("    countSpan.textContent = colCards.length;")
-        js.AppendLine("    headerDiv.appendChild(dot);")
-        js.AppendLine("    headerDiv.appendChild(titleSpan);")
-        js.AppendLine("    headerDiv.appendChild(countSpan);")
+        js.AppendLine("    var colCards = cards.filter(function(c) { return cardMatchesColumn(c, col); });")
+        js.AppendLine("    var headerDiv = document.createElement('div'); headerDiv.className = 'column-header';")
+        js.AppendLine("    var dot = document.createElement('span'); dot.className = 'dot'; dot.style.background = col.color;")
+        js.AppendLine("    var titleSpan = document.createElement('span'); titleSpan.textContent = col.title;")
+        js.AppendLine("    var countSpan = document.createElement('span'); countSpan.className = 'count'; countSpan.textContent = colCards.length;")
+        js.AppendLine("    headerDiv.appendChild(dot); headerDiv.appendChild(titleSpan); headerDiv.appendChild(countSpan);")
         js.AppendLine()
-        ' --- Sort button in column header ---
-        js.AppendLine("    var sortBtnWrapper = document.createElement('div');")
-        js.AppendLine("    sortBtnWrapper.style.position = 'relative'; sortBtnWrapper.style.display = 'inline-flex';")
-        js.AppendLine("    var sortBtn = document.createElement('button');")
-        js.AppendLine("    sortBtn.className = 'sort-btn';")
-        js.AppendLine("    sortBtn.title = 'Sort cards';")
+        ' Sort button
+        js.AppendLine("    var sortBtnWrapper = document.createElement('div'); sortBtnWrapper.style.position = 'relative'; sortBtnWrapper.style.display = 'inline-flex';")
+        js.AppendLine("    var sortBtn = document.createElement('button'); sortBtn.className = 'sort-btn'; sortBtn.title = 'Sort cards';")
         js.AppendLine("    sortBtn.innerHTML = '<svg width=""14"" height=""14"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M7 15l5 5 5-5""/><path d=""M7 9l5-5 5 5""/></svg>';")
-        js.AppendLine("    var sortDD = document.createElement('div');")
-        js.AppendLine("    sortDD.className = 'sort-dropdown';")
+        js.AppendLine("    var sortDD = document.createElement('div'); sortDD.className = 'sort-dropdown';")
         js.AppendLine("    var currentSort = columnSortState[col.id] || '';")
         js.AppendLine("    SORT_OPTIONS.forEach(function(opt) {")
-        js.AppendLine("      var item = document.createElement('div');")
-        js.AppendLine("      item.className = 'sort-option';")
-        js.AppendLine("      item.dataset.sortKey = opt.key;")
+        js.AppendLine("      var item = document.createElement('div'); item.className = 'sort-option'; item.dataset.sortKey = opt.key;")
         js.AppendLine("      var check = document.createElement('span'); check.className = 'sort-check'; check.textContent = (opt.key === currentSort) ? '\u2713' : '';")
         js.AppendLine("      var labelSpan = document.createElement('span'); labelSpan.textContent = opt.label;")
         js.AppendLine("      item.appendChild(check); item.appendChild(labelSpan);")
-        js.AppendLine("      item.addEventListener('click', function(e) {")
-        js.AppendLine("        e.stopPropagation();")
-        js.AppendLine("        sortColumnCards(col.id, opt.key);")
-        js.AppendLine("        sortDD.classList.remove('open');")
-        js.AppendLine("      });")
+        js.AppendLine("      item.addEventListener('click', function(e) { e.stopPropagation(); sortColumnCards(col.id, opt.key); sortDD.classList.remove('open'); });")
         js.AppendLine("      sortDD.appendChild(item);")
         js.AppendLine("    });")
-        js.AppendLine("    sortBtn.addEventListener('click', function(e) {")
-        js.AppendLine("      e.stopPropagation();")
-        js.AppendLine("      // Close all other dropdowns first")
-        js.AppendLine("      document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { if (dd !== sortDD) dd.classList.remove('open'); });")
-        js.AppendLine("      sortDD.classList.toggle('open');")
-        js.AppendLine("    });")
-        js.AppendLine("    sortBtnWrapper.appendChild(sortBtn);")
-        js.AppendLine("    sortBtnWrapper.appendChild(sortDD);")
-        js.AppendLine("    headerDiv.appendChild(sortBtnWrapper);")
+        js.AppendLine("    sortBtn.addEventListener('click', function(e) { e.stopPropagation(); document.querySelectorAll('.sort-dropdown.open').forEach(function(dd) { if (dd !== sortDD) dd.classList.remove('open'); }); sortDD.classList.toggle('open'); });")
+        js.AppendLine("    sortBtnWrapper.appendChild(sortBtn); sortBtnWrapper.appendChild(sortDD); headerDiv.appendChild(sortBtnWrapper);")
         js.AppendLine()
         js.AppendLine("    colEl.appendChild(headerDiv);")
-        js.AppendLine("    var list = document.createElement('div');")
-        js.AppendLine("    list.className = 'card-list';")
-        js.AppendLine("    list.dataset.column = col.id;")
+        js.AppendLine("    var list = document.createElement('div'); list.className = 'card-list'; list.dataset.column = col.id;")
         js.AppendLine("    colEl.appendChild(list);")
         js.AppendLine("    colCards.forEach(function(card) { list.appendChild(createCardEl(card, col)); });")
         js.AppendLine("    setupDropZone(list);")
         js.AppendLine("    board.appendChild(colEl);")
-        js.AppendLine()
-        js.AppendLine("    // Re-apply column sort if one was previously set")
-        js.AppendLine("    if (columnSortState[col.id]) { sortColumnCards(col.id, columnSortState[col.id]); }")
+        js.AppendLine("    if (columnSortState[col.id]) sortColumnCards(col.id, columnSortState[col.id]);")
         js.AppendLine("  });")
         js.AppendLine("  applyFieldVisibility();")
         js.AppendLine("  applySearchFilter();")
+        js.AppendLine("  applyFolderFilter();")
         js.AppendLine("  setupColumnDrag();")
+        js.AppendLine("  renderFolderManageList();")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Column drag (unchanged) ---
+        ' --- Column drag (skip folder column) ---
         js.AppendLine("var colDragSrc=null;")
         js.AppendLine("function setupColumnDrag(){")
-        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl){")
+        js.AppendLine("  document.querySelectorAll('.column:not(.folder-column)').forEach(function(colEl){")
         js.AppendLine("    var header=colEl.querySelector('.column-header');")
         js.AppendLine("    header.draggable=true;")
         js.AppendLine("    header.addEventListener('dragstart',function(e){ if(e.target.closest('.card') || e.target.closest('.sort-btn') || e.target.closest('.sort-dropdown')){e.preventDefault();return;} colDragSrc=colEl; colEl.classList.add('col-dragging'); e.dataTransfer.effectAllowed='move'; e.dataTransfer.setData('text/x-column',colEl.dataset.column); });")
@@ -2874,13 +3318,13 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    colEl.addEventListener('dragleave',function(e){ if(!colEl.contains(e.relatedTarget))colEl.classList.remove('col-drag-over'); });")
         js.AppendLine("    colEl.addEventListener('drop',function(e){")
         js.AppendLine("      if(!colDragSrc||colDragSrc===colEl)return; e.preventDefault();")
-        js.AppendLine("      var board=document.getElementById('board'); var allCols=[...board.querySelectorAll('.column')];")
+        js.AppendLine("      var board=document.getElementById('board'); var allCols=[...board.querySelectorAll('.column:not(.folder-column)')];")
         js.AppendLine("      var fromIdx=allCols.indexOf(colDragSrc); var toIdx=allCols.indexOf(colEl);")
         js.AppendLine("      if(fromIdx<0||toIdx<0)return;")
         js.AppendLine("      if(fromIdx<toIdx){board.insertBefore(colDragSrc,colEl.nextSibling);}else{board.insertBefore(colDragSrc,colEl);}")
         js.AppendLine("      document.querySelectorAll('.column').forEach(function(c){c.classList.remove('col-dragging','col-drag-over');});")
         js.AppendLine("      colDragSrc=null;")
-        js.AppendLine("      var newOrder=[]; board.querySelectorAll('.column').forEach(function(c){newOrder.push(c.dataset.column);});")
+        js.AppendLine("      var newOrder=[]; board.querySelectorAll('.column:not(.folder-column)').forEach(function(c){newOrder.push(c.dataset.column);});")
         js.AppendLine("      COLUMNS.sort(function(a,b){return newOrder.indexOf(a.id)-newOrder.indexOf(b.id);});")
         js.AppendLine("      window.chrome.webview.postMessage(JSON.stringify({action:'setColumnOrder',columns:newOrder}));")
         js.AppendLine("      showToast('Column order updated');")
@@ -2888,61 +3332,54 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  });")
         js.AppendLine("}")
         js.AppendLine()
-        ' --- Create card element (with flag support) ---
+        ' --- Create card element ---
         js.AppendLine("function createCardEl(card, col) {")
         js.AppendLine("  var el = document.createElement('div');")
         js.AppendLine("  var cls = 'card';")
         js.AppendLine("  if (card.isConversation) cls += ' conversation';")
         js.AppendLine("  if (card.isFlagged) cls += ' flagged';")
         js.AppendLine("  el.className = cls;")
-        js.AppendLine("  el.dataset.entryId = card.entryId;")
-        js.AppendLine("  el.dataset.id = card.id;")
-        js.AppendLine("  el.draggable = true;")
+        js.AppendLine("  el.dataset.entryId = card.entryId; el.dataset.id = card.id; el.draggable = true;")
         js.AppendLine()
-        js.AppendLine("  var subjectDiv = document.createElement('div');")
-        js.AppendLine("  subjectDiv.className = 'card-subject';")
+        js.AppendLine("  var subjectDiv = document.createElement('div'); subjectDiv.className = 'card-subject';")
         js.AppendLine("  if (!card.isRead) { var dot = document.createElement('span'); dot.className = 'unread-dot'; subjectDiv.appendChild(dot); }")
         js.AppendLine("  if (card.isFlagged) { var fb = document.createElement('span'); fb.className = 'flag-badge'; fb.textContent = '\u2691 '; subjectDiv.appendChild(fb); }")
         js.AppendLine("  if (card.isConversation) { var ci = document.createElement('span'); ci.className = 'conv-icon'; ci.textContent = '\uD83D\uDCEC '; subjectDiv.appendChild(ci); }")
         js.AppendLine("  subjectDiv.appendChild(document.createTextNode(card.subject));")
         js.AppendLine("  el.appendChild(subjectDiv);")
         js.AppendLine()
+        ' Multi-category badges
         js.AppendLine("  if (card.allCategories && card.allCategories.length > 1) {")
         js.AppendLine("    var catsDiv = document.createElement('div'); catsDiv.className = 'card-categories';")
-        js.AppendLine("    card.allCategories.forEach(function(ac) {")
-        js.AppendLine("      var badge = document.createElement('span'); badge.className = 'card-cat-badge'; badge.textContent = ac.name; badge.style.background = ac.color;")
-        js.AppendLine("      if (ac.name !== col.id) badge.style.opacity = '0.55';")
-        js.AppendLine("      catsDiv.appendChild(badge);")
-        js.AppendLine("    });")
+        js.AppendLine("    card.allCategories.forEach(function(ac) { var badge = document.createElement('span'); badge.className = 'card-cat-badge'; badge.textContent = ac.name; badge.style.background = ac.color; if (ac.name !== col.id) badge.style.opacity = '0.55'; catsDiv.appendChild(badge); });")
         js.AppendLine("    el.appendChild(catsDiv);")
         js.AppendLine("  }")
         js.AppendLine()
-        js.AppendLine("  var senderDiv = document.createElement('div'); senderDiv.className = 'card-sender';")
-        js.AppendLine("  senderDiv.textContent = card.senderName || card.senderEmail;")
-        js.AppendLine("  el.appendChild(senderDiv);")
+        ' Folder badge
+        js.AppendLine("  if (card.boardFolder) {")
+        js.AppendLine("    var folderBadge = document.createElement('div'); folderBadge.className = 'card-folder-badge';")
+        js.AppendLine("    folderBadge.textContent = '\uD83D\uDCC1 ' + card.boardFolder;")
+        js.AppendLine("    el.appendChild(folderBadge);")
+        js.AppendLine("  }")
+        js.AppendLine()
+        js.AppendLine("  var senderDiv = document.createElement('div'); senderDiv.className = 'card-sender'; senderDiv.textContent = card.senderName || card.senderEmail; el.appendChild(senderDiv);")
         js.AppendLine()
         js.AppendLine("  var metaDiv = document.createElement('div'); metaDiv.className = 'card-meta';")
         js.AppendLine("  var dateSpan = document.createElement('span'); dateSpan.className = 'card-date'; dateSpan.textContent = card.date; metaDiv.appendChild(dateSpan);")
         js.AppendLine("  var msgSpan = document.createElement('span'); msgSpan.className = 'card-msg-count';")
-        js.AppendLine("  if (card.isGrouped && card.messages > 1) { msgSpan.textContent = card.messages + ' mail' + (card.messages !== 1 ? 's' : ''); }")
+        js.AppendLine("  if (card.isGrouped && card.messages > 1) msgSpan.textContent = card.messages + ' mail' + (card.messages !== 1 ? 's' : '');")
         js.AppendLine("  metaDiv.appendChild(msgSpan);")
-        ' Flag metadata (request + due date)
         js.AppendLine("  if (card.isFlagged || card.isCompleted) {")
-        js.AppendLine("    var flagSpan = document.createElement('span');")
-        js.AppendLine("    flagSpan.className = 'flag-meta' + (card.isCompleted ? ' completed' : '');")
-        js.AppendLine("    var flagText = card.flagRequest || (card.isFlagged ? 'Flagged' : 'Done');")
-        js.AppendLine("    if (card.flagDueDate) flagText += ' \u2022 ' + card.flagDueDate;")
-        js.AppendLine("    flagSpan.textContent = flagText;")
-        js.AppendLine("    metaDiv.appendChild(flagSpan);")
+        js.AppendLine("    var flagSpan = document.createElement('span'); flagSpan.className = 'flag-meta' + (card.isCompleted ? ' completed' : '');")
+        js.AppendLine("    var flagText = card.flagRequest || (card.isFlagged ? 'Flagged' : 'Done'); if (card.flagDueDate) flagText += ' \u2022 ' + card.flagDueDate;")
+        js.AppendLine("    flagSpan.textContent = flagText; metaDiv.appendChild(flagSpan);")
         js.AppendLine("  }")
         js.AppendLine("  el.appendChild(metaDiv);")
         js.AppendLine()
-        js.AppendLine("  var summaryDiv = document.createElement('div');")
-        js.AppendLine("  summaryDiv.className = card.summary ? 'card-summary' : 'card-summary loading';")
-        js.AppendLine("  summaryDiv.dataset.entryId = card.entryId;")
-        js.AppendLine("  summaryDiv.textContent = card.summary || 'Generating summary\u2026';")
-        js.AppendLine("  el.appendChild(summaryDiv);")
+        js.AppendLine("  var summaryDiv = document.createElement('div'); summaryDiv.className = card.summary ? 'card-summary' : 'card-summary loading';")
+        js.AppendLine("  summaryDiv.dataset.entryId = card.entryId; summaryDiv.textContent = card.summary || 'Generating summary\u2026'; el.appendChild(summaryDiv);")
         js.AppendLine()
+        ' Footer buttons
         js.AppendLine("  var footerDiv = document.createElement('div'); footerDiv.className = 'card-footer';")
         js.AppendLine("  var openBtn = document.createElement('button'); openBtn.className = 'card-btn'; openBtn.dataset.action = 'open'; openBtn.dataset.entryId = card.entryId; openBtn.title = 'Open in Outlook';")
         js.AppendLine("  openBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z""/><polyline points=""22,6 12,13 2,6""/></svg><span class=""tip"">Open in Outlook</span>';")
@@ -2951,15 +3388,26 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  unmarkBtn.title = 'Remove from ' + col.title;")
         js.AppendLine("  unmarkBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><line x1=""18"" y1=""6"" x2=""6"" y2=""18""/><line x1=""6"" y1=""6"" x2=""18"" y2=""18""/></svg><span class=""tip"">Remove from ' + escHtml(col.title) + '</span>';")
         js.AppendLine("  footerDiv.appendChild(unmarkBtn);")
+        ' Remove-from-folder button (only when card has a folder)
+        js.AppendLine("  if (card.boardFolder) {")
+        js.AppendLine("    var removeFolderBtn = document.createElement('button'); removeFolderBtn.className = 'card-btn folder-remove-btn';")
+        js.AppendLine("    removeFolderBtn.dataset.action = 'removeFromFolder'; removeFolderBtn.dataset.entryId = card.entryId;")
+        js.AppendLine("    removeFolderBtn.title = 'Remove from ' + card.boardFolder;")
+        js.AppendLine("    removeFolderBtn.innerHTML = '<svg class=""icon-svg"" viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M3 7v13a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7""/><path d=""M8 7V5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2""/><line x1=""1"" y1=""7"" x2=""23"" y2=""7""/></svg><span class=""tip"">Remove from folder</span>';")
+        js.AppendLine("    removeFolderBtn.addEventListener('click', function(e){ e.stopPropagation(); window.chrome.webview.postMessage(JSON.stringify({action:'removeFromFolder',entryId:card.entryId})); showToast('Removed from '+card.boardFolder); });")
+        js.AppendLine("    footerDiv.insertBefore(removeFolderBtn, footerDiv.firstChild);")
+        js.AppendLine("  }")
         js.AppendLine("  el.appendChild(footerDiv);")
         js.AppendLine()
+        ' Drag events
         js.AppendLine("  el.addEventListener('dragstart', function(e) { isDragging = true; el.classList.add('dragging'); e.dataTransfer.effectAllowed = 'copyMove'; e.dataTransfer.setData('text/plain', card.entryId); updateDragModeVisuals(); });")
         js.AppendLine("  el.addEventListener('dragend', function() { isDragging = false; el.classList.remove('dragging'); clearAllIndicators(); document.getElementById('dragModeLabel').classList.remove('visible'); });")
         js.AppendLine()
+        ' Button click handler
         js.AppendLine("  el.querySelectorAll('.card-btn').forEach(function(btn) {")
         js.AppendLine("    btn.addEventListener('click', function(e) {")
         js.AppendLine("      e.stopPropagation(); var act = btn.dataset.action; var eid = btn.dataset.entryId;")
-        js.AppendLine("      if (act === 'open') { window.chrome.webview.postMessage(JSON.stringify({ action: 'open', entryId: eid })); }")
+        js.AppendLine("      if (act === 'open') window.chrome.webview.postMessage(JSON.stringify({ action: 'open', entryId: eid }));")
         js.AppendLine("      else if (act === 'unmark') { var colId = btn.dataset.column || ''; window.chrome.webview.postMessage(JSON.stringify({ action: 'unmark', entryId: eid, category: colId })); }")
         js.AppendLine("    });")
         js.AppendLine("  });")
@@ -2968,7 +3416,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine()
         js.AppendLine("function escHtml(str) { var d = document.createElement('div'); d.textContent = str; return d.innerHTML; }")
         js.AppendLine()
-        ' --- Drag & Drop (unchanged logic) ---
+        ' --- Drag & Drop ---
         js.AppendLine("function setupDropZone(list) {")
         js.AppendLine("  list.addEventListener('dragover', function(e) { e.preventDefault(); ctrlHeld = e.ctrlKey; e.dataTransfer.dropEffect = ctrlHeld ? 'copy' : 'move'; var col = list.closest('.column'); col.classList.add('drag-over'); if (ctrlHeld) col.classList.add('drag-over-add'); else col.classList.remove('drag-over-add'); showDropIndicator(list, getDragAfterElement(list, e.clientY)); });")
         js.AppendLine("  list.addEventListener('dragleave', function(e) { if (!list.contains(e.relatedTarget)) { var col = list.closest('.column'); col.classList.remove('drag-over'); col.classList.remove('drag-over-add'); clearIndicators(list); } });")
@@ -2978,7 +3426,8 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    var entryId = e.dataTransfer.getData('text/plain');")
         js.AppendLine("    var cardEl = document.querySelector('.card[data-entry-id=""' + CSS.escape(entryId) + '""]');")
         js.AppendLine("    if (!cardEl) return;")
-        js.AppendLine("    var oldColumnId = cardEl.closest('.card-list').dataset.column;")
+        js.AppendLine("    var oldList = cardEl.closest('.card-list');")
+        js.AppendLine("    var oldColumnId = oldList ? oldList.dataset.column : '';")
         js.AppendLine("    var newColumnId = list.dataset.column;")
         js.AppendLine("    clearAllIndicators();")
         js.AppendLine("    if (oldColumnId === newColumnId && !isAddMode) { var after = getDragAfterElement(list, e.clientY); if (after) list.insertBefore(cardEl, after); else list.appendChild(cardEl); saveState(); return; }")
@@ -3005,18 +3454,59 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("function clearIndicators(list) { list.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); }); }")
         js.AppendLine("function clearAllIndicators() { document.querySelectorAll('.drop-indicator').forEach(function(el) { el.remove(); }); document.querySelectorAll('.column.drag-over').forEach(function(el) { el.classList.remove('drag-over'); }); document.querySelectorAll('.column.drag-over-add').forEach(function(el) { el.classList.remove('drag-over-add'); }); }")
         js.AppendLine()
-        js.AppendLine("function updateCounts() { document.querySelectorAll('.column').forEach(function(colEl) { var list = colEl.querySelector('.card-list'); if (!list) return; var count = list.querySelectorAll('.card:not(.hidden)').length; var countEl = colEl.querySelector('.count'); if (countEl) countEl.textContent = count; }); }")
+        js.AppendLine("function updateCounts() { document.querySelectorAll('.column:not(.folder-column)').forEach(function(colEl) { var list = colEl.querySelector('.card-list'); if (!list) return; var count = list.querySelectorAll('.card:not(.hidden):not(.folder-hidden)').length; var countEl = colEl.querySelector('.count'); if (countEl) countEl.textContent = count; }); }")
         js.AppendLine()
         js.AppendLine("function showToast(message) { var container = document.getElementById('toastContainer'); var toast = document.createElement('div'); toast.className = 'toast'; toast.textContent = message; container.appendChild(toast); setTimeout(function() { toast.classList.add('fade-out'); setTimeout(function() { toast.remove(); }, 300); }, 2500); }")
         js.AppendLine()
+        ' --- Custom confirm/prompt dialogs (no browser chrome text) ---
+        js.AppendLine("function showConfirm(message, onYes) {")
+        js.AppendLine("  var overlay = document.createElement('div');")
+        js.AppendLine("  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:var(--overlay-bg);z-index:2000;display:flex;align-items:center;justify-content:center';")
+        js.AppendLine("  var box = document.createElement('div');")
+        js.AppendLine("  box.style.cssText = 'background:var(--settings-bg);border:1px solid var(--settings-border);border-radius:10px;padding:20px 24px;min-width:320px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.2);font-size:13px;color:var(--text)';")
+        js.AppendLine("  var msg = document.createElement('div'); msg.style.cssText = 'margin-bottom:16px;line-height:1.5'; msg.textContent = message;")
+        js.AppendLine("  var btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';")
+        js.AppendLine("  var cancelBtn = document.createElement('button'); cancelBtn.textContent = 'Cancel';")
+        js.AppendLine("  cancelBtn.style.cssText = 'padding:6px 16px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;cursor:pointer';")
+        js.AppendLine("  var yesBtn = document.createElement('button'); yesBtn.textContent = 'Delete';")
+        js.AppendLine("  yesBtn.style.cssText = 'padding:6px 16px;border:none;border-radius:6px;background:#ef4444;color:#fff;font-size:13px;cursor:pointer;font-weight:600';")
+        js.AppendLine("  cancelBtn.addEventListener('click', function(){ overlay.remove(); });")
+        js.AppendLine("  yesBtn.addEventListener('click', function(){ overlay.remove(); onYes(); });")
+        js.AppendLine("  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });")
+        js.AppendLine("  btnRow.appendChild(cancelBtn); btnRow.appendChild(yesBtn);")
+        js.AppendLine("  box.appendChild(msg); box.appendChild(btnRow);")
+        js.AppendLine("  overlay.appendChild(box); document.body.appendChild(overlay); yesBtn.focus();")
+        js.AppendLine("}")
+        js.AppendLine()
+        js.AppendLine("function showPrompt(message, defaultVal, onOk) {")
+        js.AppendLine("  var overlay = document.createElement('div');")
+        js.AppendLine("  overlay.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:var(--overlay-bg);z-index:2000;display:flex;align-items:center;justify-content:center';")
+        js.AppendLine("  var box = document.createElement('div');")
+        js.AppendLine("  box.style.cssText = 'background:var(--settings-bg);border:1px solid var(--settings-border);border-radius:10px;padding:20px 24px;min-width:320px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.2);font-size:13px;color:var(--text)';")
+        js.AppendLine("  var msg = document.createElement('div'); msg.style.cssText = 'margin-bottom:10px;line-height:1.5'; msg.textContent = message;")
+        js.AppendLine("  var input = document.createElement('input'); input.type = 'text'; input.value = defaultVal || '';")
+        js.AppendLine("  input.style.cssText = 'width:100%;padding:6px 10px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;outline:none;margin-bottom:16px';")
+        js.AppendLine("  var btnRow = document.createElement('div'); btnRow.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';")
+        js.AppendLine("  var cancelBtn = document.createElement('button'); cancelBtn.textContent = 'Cancel';")
+        js.AppendLine("  cancelBtn.style.cssText = 'padding:6px 16px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);font-size:13px;cursor:pointer';")
+        js.AppendLine("  var okBtn = document.createElement('button'); okBtn.textContent = 'OK';")
+        js.AppendLine("  okBtn.style.cssText = 'padding:6px 16px;border:none;border-radius:6px;background:#3b82f6;color:#fff;font-size:13px;cursor:pointer;font-weight:600';")
+        js.AppendLine("  cancelBtn.addEventListener('click', function(){ overlay.remove(); });")
+        js.AppendLine("  okBtn.addEventListener('click', function(){ overlay.remove(); onOk(input.value); });")
+        js.AppendLine("  input.addEventListener('keydown', function(e){ if(e.key==='Enter'){e.preventDefault(); overlay.remove(); onOk(input.value);} if(e.key==='Escape') overlay.remove(); });")
+        js.AppendLine("  overlay.addEventListener('click', function(e){ if(e.target===overlay) overlay.remove(); });")
+        js.AppendLine("  btnRow.appendChild(cancelBtn); btnRow.appendChild(okBtn);")
+        js.AppendLine("  box.appendChild(msg); box.appendChild(input); box.appendChild(btnRow);")
+        js.AppendLine("  overlay.appendChild(box); document.body.appendChild(overlay); input.focus(); input.select();")
+        js.AppendLine("}")
         ' --- Search & Filter ---
         js.AppendLine("document.getElementById('searchInput').addEventListener('input', applySearchFilter);")
-        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', function() { applySearchFilter(); var val = document.getElementById('columnFilter').value; window.chrome.webview.postMessage(JSON.stringify({ action: 'setColumnFilter', filter: val })); });")
+        js.AppendLine("document.getElementById('columnFilter').addEventListener('change', function() { applySearchFilter(); window.chrome.webview.postMessage(JSON.stringify({ action: 'setColumnFilter', filter: document.getElementById('columnFilter').value })); });")
         js.AppendLine()
         js.AppendLine("function applySearchFilter() {")
         js.AppendLine("  var query = document.getElementById('searchInput').value.toLowerCase().trim();")
         js.AppendLine("  var colFilter = document.getElementById('columnFilter').value;")
-        js.AppendLine("  document.querySelectorAll('.column').forEach(function(colEl) { var colId = colEl.dataset.column; colEl.style.display = (colFilter === 'all' || colFilter === colId) ? '' : 'none'; });")
+        js.AppendLine("  document.querySelectorAll('.column:not(.folder-column)').forEach(function(colEl) { var colId = colEl.dataset.column; colEl.style.display = (colFilter === 'all' || colFilter === colId) ? '' : 'none'; });")
         js.AppendLine("  document.querySelectorAll('.card').forEach(function(cardEl) {")
         js.AppendLine("    var card = cards.find(function(c) { return c.entryId === cardEl.dataset.entryId; }); if (!card) return;")
         js.AppendLine("    if (!query) { cardEl.classList.remove('hidden'); return; }")
@@ -3043,7 +3533,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("      if (card) { card.category = msg.category; card.categoryColor = msg.categoryColor; card.allCategories = msg.allCategories || [];")
         js.AppendLine("        card.isFlagged = msg.isFlagged || false; card.isCompleted = msg.isCompleted || false;")
         js.AppendLine("        card.flagRequest = msg.flagRequest || ''; card.flagDueDate = msg.flagDueDate || '';")
-        js.AppendLine("        card.flagBucket = msg.flagBucket || ''; }")
+        js.AppendLine("        card.flagBucket = msg.flagBucket || ''; card.boardFolder = msg.boardFolder || ''; }")
         js.AppendLine("      renderBoard();")
         js.AppendLine("    }")
         js.AppendLine("  });")
