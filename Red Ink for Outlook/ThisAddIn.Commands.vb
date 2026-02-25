@@ -1085,12 +1085,14 @@ Partial Public Class ThisAddIn
             Dim convertedHtml As String = Markdown.ToHtml(LLMResult, markdownPipeline)
 
             If mailItem.BodyFormat = OlBodyFormat.olFormatHTML Then
-                ' Ensure consistent font and style for HTML emails
-                Dim defaultStyle As String = "<div style='font-family:Arial, sans-serif; font-size:11pt;'>" ' Adjust as needed
-                Dim formattedResult As String = defaultStyle & convertedHtml & "</div><br/><br/>"
+                ' Insert via Word editor to preserve the existing font/style and paragraph spacing
+                Dim editorSel As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
 
-                ' Append the formatted result to the HTML body
-                mailItem.HTMLBody = formattedResult & mailItem.HTMLBody
+                ' Move cursor to the very beginning of the document
+                editorSel.HomeKey(Microsoft.Office.Interop.Word.WdUnits.wdStory)
+
+                ' Insert the raw LLM result (Markdown), not the pre-converted HTML
+                SLib.InsertTextWithMarkdown(editorSel, LLMResult & vbCrLf & vbCrLf, True)
             Else
                 ' Convert HTML to plain text for non-HTML formats (optional)
                 Dim doc As New HtmlAgilityPack.HtmlDocument()

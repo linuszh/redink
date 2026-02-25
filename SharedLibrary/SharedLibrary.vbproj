@@ -343,6 +343,7 @@
     <Compile Include="Code\Core\Config\SharedMethods.License.Core.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Private.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Pro.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.License.RegistryBackup.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Testing.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.UpdateIni.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.vb" />
