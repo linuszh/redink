@@ -116,18 +116,24 @@ Partial Public Class ThisAddIn
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
-            .ModelDescription = "Process Word/PowerPoint Document (built-in)",
+            .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx) or PowerPoint (.pptx) attachments by applying a prompt/instruction. " &
-                "Use this for translation, correction, proofreading, anonymization, or any text transformation. " &
+                AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments by applying a prompt/instruction. " &
+                "Use this for translation, correction, proofreading, anonymization, data updates, formula changes, or any text/data transformation. " &
                 "For Word documents, returns both a clean version and a compare document showing changes. " &
-                "For PowerPoint files, returns the processed version (no compare document).",
+                "For PowerPoint and Excel files, returns the processed version (no compare document). " &
+                "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
-                """description"":""Applies a text processing instruction to Word (.docx) or PowerPoint (.pptx) attachments. Supports translation, correction, anonymization, and freestyle text operations. For Word documents, produces clean output and a compare document with tracked changes. For PowerPoint, produces the processed file only.""," &
+                """description"":""Applies a processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
+                "Supports translation, correction, anonymization, data updates, formula modifications, and freestyle operations. " &
+                "For Word documents, produces clean output and a compare document with tracked changes. " &
+                "For PowerPoint and Excel, produces the processed file only. " &
+                "For Excel, can process all cell types including text, numbers, formulas, and booleans.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """instruction"":{""type"":""string"",""description"":""The instruction to apply to the document (e.g., 'Translate to German', 'Correct spelling and grammar', 'Anonymize all personal names')""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the Word (.docx) or PowerPoint (.pptx) attachments to process. If empty or omitted, processes all .docx and .pptx attachments.""}" &
+                """instruction"":{""type"":""string"",""description"":""The instruction to apply to the document (e.g., 'Translate to German', 'Anonymize all personal names', 'Update all 2024 dates to 2025', 'Change SUM formulas to AVERAGE')""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
+                """sheet_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional: for Excel files only, restrict processing to these sheet names. If omitted, all sheets are processed.""}" &
                 "},""required"":[""instruction""]}}"
         })
 
@@ -1840,6 +1846,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim sheetNames = GetArgStringArray(toolCall.Arguments, "sheet_names")
 
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
@@ -1853,14 +1860,15 @@ Partial Public Class ThisAddIn
                 Next
             Else
                 toProcess = _apCurrentAttachments?.Where(
-                    Function(a) (a.Extension = ".docx" OrElse a.Extension = ".doc" OrElse a.Extension = ".pptx") AndAlso
+                    Function(a) (a.Extension = ".docx" OrElse a.Extension = ".doc" OrElse
+                                 a.Extension = ".pptx" OrElse a.Extension = ".xlsx") AndAlso
                                 Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing
                 ).ToList()
             End If
 
             If toProcess Is Nothing OrElse toProcess.Count = 0 Then
                 response.Success = False
-                response.Response = "No processable Word or PowerPoint attachments found."
+                response.Response = "No processable Word, PowerPoint, or Excel attachments found."
                 Return response
             End If
 
@@ -1876,13 +1884,14 @@ Partial Public Class ThisAddIn
                 context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction}")
 
                 Dim inputPath = att.TempFilePath
-                Dim isPptx As Boolean = att.Extension.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
-                Dim outputExt As String = If(isPptx, ".pptx", ".docx")
+                Dim ext = att.Extension.ToLowerInvariant()
+                Dim isPptx As Boolean = ext.Equals(".pptx", StringComparison.OrdinalIgnoreCase)
+                Dim isXlsx As Boolean = ext.Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+                Dim outputExt As String = If(isPptx, ".pptx", If(isXlsx, ".xlsx", ".docx"))
                 Dim outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_processed" & outputExt
                 Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
 
-                ' Prevent filename collision when re-processing: if the output already exists,
-                ' append a counter to avoid overwriting a previous result
+                ' Prevent filename collision when re-processing
                 Dim counter = 1
                 While File.Exists(outputPath)
                     outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_processed_{counter}" & outputExt
@@ -1890,7 +1899,9 @@ Partial Public Class ThisAddIn
                     counter += 1
                 End While
 
-                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct)
+                ' Pass sheet filter only for Excel files
+                Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
+                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -1902,8 +1913,8 @@ Partial Public Class ThisAddIn
 
                     registrationTarget.OutputFiles.Add(outputPath)
 
-                    ' Compare document only for Word files (Word's CompareDocuments doesn't support PPTX)
-                    If Not isPptx Then
+                    ' Compare document only for Word files (not PPTX or XLSX)
+                    If Not isPptx AndAlso Not isXlsx Then
                         Dim comparePath = Path.Combine(_apCurrentTempDir,
                             Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_compare.docx")
                         ' Prevent compare filename collision too
@@ -1940,6 +1951,7 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
 
     Private Function CreateWordCompareDocumentForAutoPilot(originalPath As String, processedPath As String, comparePath As String) As Boolean
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing

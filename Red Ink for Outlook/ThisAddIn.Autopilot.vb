@@ -89,6 +89,20 @@ Partial Public Class ThisAddIn
 
     Private Const AP_MaxToolIterations As Integer = 30
 
+    ''' <summary>
+    ''' Product IDs whose Pro license holders are permitted to use AutoPilot.
+    ''' Add or remove IDs here to control which Pro products grant access.
+    ''' A Private license always grants access regardless of product ID.
+    ''' </summary>
+    Private Shared ReadOnly AP_PermittedProProductIds As String() = {
+        "1702",
+        "1727",
+        "1827",
+        "2040",
+        "2150",
+        "1693"
+    }
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -167,6 +181,16 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Starts AutoPilot using the configuration dialog and saved settings.</summary>
     Public Sub StartAutoPilot()
+        ' Distinguish license failure from user whitelist failure for a clear message
+        If Not IsAutoPilotLicenseValid() Then
+            Dim licenseStatus = GetLicenseStatusShort()
+            ShowCustomMessageBox(
+                $"{AN6} AutoPilot requires a Pro or Private license." & vbCrLf &
+                $"Current license: {licenseStatus}" & vbCrLf & vbCrLf &
+                $"Visit {AN4} to obtain a license.",
+                AN)
+            Return
+        End If
         If Not IsAutoPilotPermitted() Then
             ShowCustomMessageBox(
                 $"{AN6} AutoPilot is not available for your user account ({Environment.UserName}). Contact your administrator to request access.",
@@ -546,32 +570,98 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  AUTOPILOT USER PERMISSION CHECK
+    '  AUTOPILOT LICENSE & PERMISSION GATE
     ' ═══════════════════════════════════════════════════════════════════════════
 
+
     ''' <summary>
-    ''' Checks whether the current Windows user is permitted to run AutoPilot.
-    ''' If INI_AutoPilot is empty or whitespace, any user is permitted.
-    ''' Otherwise, INI_AutoPilot must contain a comma-separated list of usernames,
-    ''' and the current %USERNAME% must appear in that list (case-insensitive).
+    ''' Checks whether the current license permits AutoPilot.
+    ''' Allowed if:
+    '''   (a) Private license in any active state (PrivateActive or PrivateReconfirmNeeded), OR
+    '''   (b) Pro license active AND the stored Product ID is in AP_PermittedProProductIds.
+    ''' Denied for: None, Legacy, PrivateExpired, ProActive with non-matching product, etc.
+    ''' </summary>
+    Public Shared Function IsAutoPilotLicenseValid() As Boolean
+        Select Case CurrentLicenseState
+            Case LicenseState.PrivateActive, LicenseState.PrivateReconfirmNeeded
+                ' Private license always permits AutoPilot (non-commercial use)
+                Return True
+
+            Case LicenseState.ProActive, LicenseState.TestingProActive
+                ' Pro license: only if the product ID is in the permitted list
+                Dim productId As String = StoredProductId
+                If String.IsNullOrWhiteSpace(productId) Then Return False
+                For Each permitted In AP_PermittedProProductIds
+                    If productId.Equals(permitted, StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Next
+                Return False
+
+            Case Else
+                ' None, PrivateExpired, Legacy, ProOfflineGrace, or any other state → not permitted
+                Return False
+        End Select
+    End Function
+
+    ''' <summary>
+    ''' Checks whether the current user is permitted to run AutoPilot.
+    ''' Requires BOTH:
+    '''   1. A valid license (checked via IsAutoPilotLicenseValid) — mandatory.
+    '''   2. User whitelist (INI_AutoPilot) — if empty or "*", all licensed users are allowed;
+    '''      otherwise %USERNAME% must appear in the comma-separated list.
     ''' </summary>
     ''' <returns>True if the current user is allowed; False otherwise.</returns>
     Public Shared Function IsAutoPilotPermitted() As Boolean
-        Dim allowedUsers As String = INI_AutoPilot
-        If String.IsNullOrWhiteSpace(allowedUsers) Then Return True
+        ' ── Diagnostics ──
+        Debug.WriteLine("[AutoPilot] ═══ IsAutoPilotPermitted diagnostics ═══")
+        Debug.WriteLine($"[AutoPilot] CurrentLicenseState = {CurrentLicenseState} ({CInt(CurrentLicenseState)})")
+        Debug.WriteLine($"[AutoPilot] StoredProductId = '{If(StoredProductId, "(Nothing)")}'")
+        Debug.WriteLine($"[AutoPilot] AP_PermittedProProductIds = {String.Join(", ", AP_PermittedProProductIds)}")
+        Debug.WriteLine($"[AutoPilot] IsAutoPilotLicenseValid() = {IsAutoPilotLicenseValid()}")
+        Debug.WriteLine($"[AutoPilot] _context.INI_AutoPilot = '{If(_context.INI_AutoPilot, "(Nothing)")}'")
+        Debug.WriteLine($"[AutoPilot] _context.INI_AutoPilot length = {If(_context.INI_AutoPilot IsNot Nothing, _context.INI_AutoPilot.Length.ToString(), "N/A")}")
+        Debug.WriteLine($"[AutoPilot] Environment USERNAME = '{Environment.GetEnvironmentVariable("USERNAME")}'")
+        Debug.WriteLine($"[AutoPilot] Environment.UserName = '{Environment.UserName}'")
+        Debug.WriteLine("[AutoPilot] ═══════════════════════════════════════════")
+
+        ' Gate 1: License check (mandatory, cannot be bypassed)
+        If Not IsAutoPilotLicenseValid() Then
+            Debug.WriteLine("[AutoPilot] DENIED: IsAutoPilotLicenseValid() returned False")
+            Return False
+        End If
+
+        ' Gate 2: User whitelist (mandatory — empty = nobody allowed)
+        Dim allowedUsers As String = _context.INI_AutoPilot
+        If String.IsNullOrWhiteSpace(allowedUsers) Then
+            Debug.WriteLine("[AutoPilot] DENIED: INI_AutoPilot is empty/whitespace → no users permitted")
+            Return False
+        End If
+        If allowedUsers.Trim() = "*" Then
+            Debug.WriteLine("[AutoPilot] ALLOWED: INI_AutoPilot = '*' → all users permitted")
+            Return True
+        End If
 
         Dim currentUser As String = Environment.GetEnvironmentVariable("USERNAME")
-        If String.IsNullOrWhiteSpace(currentUser) Then Return False
+        If String.IsNullOrWhiteSpace(currentUser) Then
+            Debug.WriteLine("[AutoPilot] DENIED: USERNAME environment variable is empty")
+            Return False
+        End If
 
+        Debug.WriteLine($"[AutoPilot] Splitting INI_AutoPilot by comma: '{allowedUsers}'")
         Dim users = allowedUsers.Split(","c)
         For Each entry In users
             Dim trimmed = entry.Trim()
+            Debug.WriteLine($"[AutoPilot]   comparing '{trimmed}' with '{currentUser}' → {trimmed.Equals(currentUser, StringComparison.OrdinalIgnoreCase)}")
             If trimmed.Length > 0 AndAlso trimmed.Equals(currentUser, StringComparison.OrdinalIgnoreCase) Then
+                Debug.WriteLine("[AutoPilot] ALLOWED: username match found")
                 Return True
             End If
         Next
 
+        Debug.WriteLine("[AutoPilot] DENIED: no username match in whitelist")
         Return False
     End Function
 
@@ -667,14 +757,37 @@ Partial Public Class ThisAddIn
             If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached)", "warn") : Return : End If
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
+            ' ── Reply-To mismatch: potential spoofing or reflection attack ──
+            ' If the mail has a Reply-To that differs from the sender, the From address
+            ' may be forged. Force approval regardless of whitelist status so the operator
+            ' can verify the legitimacy before any reply is sent.
+            Dim hasReplyToMismatch As Boolean = False
+            Try
+                Dim replyToAddress = Await SwitchToUi(Function() As String
+                                                          Try
+                                                              If mi.ReplyRecipients IsNot Nothing AndAlso mi.ReplyRecipients.Count > 0 Then
+                                                                  Return mi.ReplyRecipients(1).Address
+                                                              End If
+                                                          Catch
+                                                          End Try
+                                                          Return ""
+                                                      End Function)
+                If Not String.IsNullOrWhiteSpace(replyToAddress) AndAlso
+                   Not replyToAddress.Equals(mailInfo.SenderEmail, StringComparison.OrdinalIgnoreCase) Then
+                    hasReplyToMismatch = True
+                    ApDashboardLog($"⚠ SECURITY: Reply-To mismatch! From={mailInfo.SenderEmail}, Reply-To={replyToAddress}. Forcing approval.", "warn")
+                End If
+            Catch
+            End Try
+
             Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
-            Dim requiresApproval As Boolean = _apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation
+            ' SECURITY: Force approval if Reply-To differs from sender (potential spoofing/reflection)
+            Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation) OrElse hasReplyToMismatch
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
             ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
-
             ' Check for #model: command
             Dim modelOverrideConfig As ModelConfig = Nothing
             Dim modelOverrideName As String = Nothing
@@ -1017,7 +1130,11 @@ Partial Public Class ThisAddIn
                 If info.SenderEmail.EndsWith(pattern, StringComparison.OrdinalIgnoreCase) Then Return True
             Case AutoPilotFilterRuleType.Sender
                 If WildcardMatch(info.SenderEmail, rule.Pattern) Then Return True
-                If WildcardMatch(info.SenderName, rule.Pattern) Then Return True
+                ' SECURITY: Do NOT match on SenderName for sender-type rules.
+                ' An attacker can set their display name to "john@trusted.com"
+                ' which would cause a false positive match against a sender filter.
+                ' Display names are unauthenticated and trivially spoofable.
+                ' If WildcardMatch(info.SenderName, rule.Pattern) Then Return True  ← REMOVED
             Case AutoPilotFilterRuleType.Folder
                 If info.FolderPath.IndexOf(rule.Pattern, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
         End Select
@@ -1034,6 +1151,9 @@ Partial Public Class ThisAddIn
     ''' <summary>Determines whether the sender is in the whitelist.</summary>
     Private Function IsSenderWhitelisted(senderEmail As String) As Boolean
         If _apConfig.WhitelistedSenders Is Nothing OrElse _apConfig.WhitelistedSenders.Count = 0 Then Return False
+        ' SECURITY: Only match on the SMTP email address, never on display name.
+        ' Display names can be trivially spoofed to look like email addresses.
+        If String.IsNullOrWhiteSpace(senderEmail) Then Return False
         For Each pattern In _apConfig.WhitelistedSenders
             If WildcardMatch(senderEmail, pattern) Then Return True
         Next
@@ -1204,7 +1324,41 @@ Partial Public Class ThisAddIn
             reply = originalMail.Reply()
             reply.CC = ""
             reply.BCC = ""
-            reply.To = If(originalMail.SenderEmailAddress, originalMail.SenderName)
+
+            ' SECURITY: Explicitly set reply.To to the envelope sender address.
+            ' This prevents Reply-To header manipulation where an attacker sets
+            ' Reply-To: victim@other.com to redirect AutoPilot responses.
+            ' We also clear ReplyRecipients to ensure Outlook doesn't silently
+            ' re-add a Reply-To address when the mail is sent.
+            Dim senderAddr As String = If(originalMail.SenderEmailAddress, "")
+            If String.IsNullOrWhiteSpace(senderAddr) Then
+                senderAddr = If(originalMail.SenderName, "")
+            End If
+
+            ' Detect and log Reply-To mismatch for operator awareness
+            Try
+                Dim replyToAddr As String = ""
+                If originalMail.ReplyRecipients IsNot Nothing AndAlso originalMail.ReplyRecipients.Count > 0 Then
+                    replyToAddr = originalMail.ReplyRecipients(1).Address
+                End If
+                If Not String.IsNullOrWhiteSpace(replyToAddr) AndAlso
+                   Not replyToAddr.Equals(senderAddr, StringComparison.OrdinalIgnoreCase) Then
+                    ApDashboardLog($"⚠ SECURITY: Reply-To mismatch detected! From={senderAddr}, Reply-To={replyToAddr}. Replying to From address only.", "warn")
+                End If
+            Catch
+                ' ReplyRecipients may not be available on all mail types
+            End Try
+
+            reply.To = senderAddr
+
+            ' Clear any Reply-To recipients that Outlook's .Reply() may have populated
+            Try
+                While reply.ReplyRecipients.Count > 0
+                    reply.ReplyRecipients.Remove(1)
+                End While
+            Catch
+            End Try
+
             reply.BodyFormat = OlBodyFormat.olFormatHTML
 
             Dim originalThread As String = If(reply.HTMLBody, "")
