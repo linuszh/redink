@@ -1752,10 +1752,35 @@ Partial Public Class ThisAddIn
 
         If cells.Count = 0 Then Return True
 
+        ' ── Build structural summary of the entire sheet ──
+        ' This gives the LLM a bird's-eye view: column headings, data types,
+        ' row count, and sample rows — so it understands what each column means
+        ' even when processing cells deep into the sheet.
+        Dim structureSummary As String = APBuildXlsxStructureSummary(cells, sheetName)
+
+        ' ── Build column header map from row 1 cells (for per-batch header injection) ──
+        Dim columnHeaders As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+        For Each c In cells
+            Dim rowNum As String = ""
+            Dim colLetter As String = ""
+            For Each ch In c.CellRef
+                If Char.IsLetter(ch) Then
+                    colLetter &= ch
+                Else
+                    rowNum &= ch
+                End If
+            Next
+            If rowNum = "1" AndAlso c.CellType = "text" AndAlso Not String.IsNullOrWhiteSpace(c.DisplayText) Then
+                columnHeaders(colLetter) = c.DisplayText
+            End If
+        Next
+
         Dim systemPrompt As String =
             "You are a professional spreadsheet processor. Apply the following instruction to the cells " &
             "shown in the [CELLS] section." & vbCrLf & vbCrLf &
             "INSTRUCTION: " & instruction & vbCrLf & vbCrLf &
+            If(Not String.IsNullOrWhiteSpace(structureSummary),
+               structureSummary & vbCrLf, "") &
             "RULES:" & vbCrLf &
             "1. You will see cells in the format [CellRef] content (e.g. [A1] Hello)." & vbCrLf &
             "2. Return ONLY the cells you want to CHANGE, in the same [CellRef] format." & vbCrLf &
@@ -1765,7 +1790,9 @@ Partial Public Class ThisAddIn
             "6. For numbers, write the number (e.g. [C3] 42.5)." & vbCrLf &
             "7. To clear a cell, write [CellRef] (empty)." & vbCrLf &
             "8. Return ONLY [CellRef] lines, no explanations or commentary." & vbCrLf &
-            "9. If no cells need changing, return exactly: NO_CHANGES"
+            "9. If no cells need changing, return exactly: NO_CHANGES" & vbCrLf &
+            "10. When the instruction targets a specific column by name, ONLY change cells in that column. " &
+            "Use the SPREADSHEET STRUCTURE section above to identify which column letter corresponds to which heading."
 
         Dim batchIndex As Integer = 0
         Dim totalBatches As Integer = CInt(Math.Ceiling(cells.Count / CDbl(AP_ParagraphsPerBatch)))
@@ -1795,6 +1822,35 @@ Partial Public Class ThisAddIn
 
             ' Build prompt
             Dim promptBuilder As New StringBuilder()
+
+            ' ── Always include header row at the top for structural context ──
+            If columnHeaders.Count > 0 Then
+                Dim headerCells = cells.Where(Function(c)
+                                                  Dim rn = ""
+                                                  For Each ch In c.CellRef
+                                                      If Not Char.IsLetter(ch) Then rn &= ch
+                                                  Next
+                                                  Return rn = "1"
+                                              End Function).ToList()
+
+                ' Only add if header row is NOT already in this batch
+                Dim batchContainsRow1 = False
+                For j = batchStart To batchEnd
+                    Dim rn = ""
+                    For Each ch In cells(j).CellRef
+                        If Not Char.IsLetter(ch) Then rn &= ch
+                    Next
+                    If rn = "1" Then batchContainsRow1 = True : Exit For
+                Next
+
+                If Not batchContainsRow1 AndAlso headerCells.Count > 0 Then
+                    promptBuilder.AppendLine("[COLUMN HEADERS - row 1, for reference only, do not modify]")
+                    For Each hc In headerCells
+                        promptBuilder.AppendLine($"[{hc.CellRef}] {If(hc.NewValue, hc.DisplayText)}")
+                    Next
+                    promptBuilder.AppendLine()
+                End If
+            End If
 
             ' Context before (previous batch cells for continuity)
             Dim contextStart = Math.Max(0, batchStart - AP_ContextBefore)
@@ -1882,6 +1938,93 @@ Partial Public Class ThisAddIn
             End If
         Next
     End Sub
+
+
+    ''' <summary>
+    ''' Builds a concise structural summary of an Excel worksheet for LLM context.
+    ''' Includes column headers, row count, sample rows, and data type profile.
+    ''' This summary is prepended to the instruction so the batch-processing LLM
+    ''' understands the full spreadsheet structure before seeing individual cells.
+    ''' </summary>
+    Private Function APBuildXlsxStructureSummary(
+            cells As List(Of APXlsxCellInfo),
+            sheetName As String) As String
+
+        If cells.Count = 0 Then Return ""
+
+        ' ── Parse cell refs into (column, row) tuples ──
+        Dim parsed As New List(Of (Cell As APXlsxCellInfo, Col As String, Row As Integer))()
+        For Each c In cells
+            Dim col As String = ""
+            Dim rowStr As String = ""
+            For Each ch In c.CellRef
+                If Char.IsLetter(ch) Then col &= ch Else rowStr &= ch
+            Next
+            Dim rowNum As Integer
+            If Integer.TryParse(rowStr, rowNum) Then
+                parsed.Add((c, col.ToUpperInvariant(), rowNum))
+            End If
+        Next
+
+        If parsed.Count = 0 Then Return ""
+
+        ' ── Identify header row (row 1 text cells) ──
+        Dim headers = parsed.Where(Function(p) p.Row = 1 AndAlso p.Cell.CellType = "text") _
+                            .OrderBy(Function(p) p.Col) _
+                            .ToList()
+
+        ' ── Compute basic stats ──
+        Dim maxRow = parsed.Max(Function(p) p.Row)
+        Dim allColumns = parsed.Select(Function(p) p.Col).Distinct().OrderBy(Function(c) c).ToList()
+        Dim dataRowCount = If(headers.Count > 0, maxRow - 1, maxRow)
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"[SPREADSHEET STRUCTURE — Sheet: ""{sheetName}""]")
+        sb.AppendLine($"Columns: {allColumns.Count} ({String.Join(", ", allColumns)})")
+        sb.AppendLine($"Data rows: {dataRowCount} (excluding header)")
+        sb.AppendLine()
+
+        ' ── Column headers with data type profile ──
+        If headers.Count > 0 Then
+            sb.AppendLine("Column headings (row 1):")
+            For Each h In headers
+                ' Determine predominant data type in this column (skip row 1)
+                Dim colCells = parsed.Where(Function(p) p.Col = h.Col AndAlso p.Row > 1).ToList()
+                Dim typeProfile As String = ""
+                If colCells.Count > 0 Then
+                    Dim typeCounts = colCells.GroupBy(Function(p) p.Cell.CellType) _
+                                            .OrderByDescending(Function(g) g.Count()) _
+                                            .Select(Function(g) g.Key) _
+                                            .ToList()
+                    typeProfile = $" [{String.Join("/", typeCounts)}, {colCells.Count} values]"
+                End If
+                sb.AppendLine($"  Column {h.Col} = ""{h.Cell.DisplayText}""{typeProfile}")
+            Next
+            sb.AppendLine()
+        End If
+
+        ' ── Sample rows (first 3 data rows) for pattern recognition ──
+        Dim sampleRows = parsed.Where(Function(p) p.Row > 1) _
+                               .GroupBy(Function(p) p.Row) _
+                               .OrderBy(Function(g) g.Key) _
+                               .Take(3) _
+                               .ToList()
+
+        If sampleRows.Count > 0 Then
+            sb.AppendLine("Sample data (first rows):")
+            For Each rowGroup In sampleRows
+                Dim rowCells = rowGroup.OrderBy(Function(p) p.Col) _
+                                      .Select(Function(p) $"[{p.Cell.CellRef}] {p.Cell.DisplayText}") _
+                                      .ToList()
+                sb.AppendLine($"  Row {rowGroup.Key}: {String.Join("  ", rowCells)}")
+            Next
+            sb.AppendLine()
+        End If
+
+        sb.AppendLine("[/SPREADSHEET STRUCTURE]")
+        Return sb.ToString()
+    End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  XLSX WRITE-BACK

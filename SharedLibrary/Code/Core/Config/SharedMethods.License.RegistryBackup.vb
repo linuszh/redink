@@ -118,6 +118,8 @@ Namespace SharedLibrary
                 SaveProLicenseToSettings(productId, licenseKey, userId,
                                          If(productName, ""), apiConfirmed)
 
+                _restoredFromRegistryBackup = True
+
                 LogLicenseEvent("REGISTRY_RESTORE",
                                 $"Pro license restored from registry backup (Product: {If(productName, "unknown")}).",
                                 alwaysLog:=True)
