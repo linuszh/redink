@@ -137,6 +137,49 @@ Partial Public Class ThisAddIn
     ''' <summary>Captured at AutoPilot startup — the model config to re-apply before every LLM call.</summary>
     Private _apBaseModelConfig As ModelConfig = Nothing
 
+    ''' <summary>Minimum estimated queue wait (seconds) before a queue notification is sent.</summary>
+    Private Const AP_QueueNotifyThresholdSeconds As Integer = 60
+
+    ''' <summary>Extensions that indicate heavy document processing (doc processor, comment processor).</summary>
+    Private Shared ReadOnly AP_HeavyDocExtensions As String() = {".docx", ".pptx", ".xlsx", ".xls", ".doc"}
+
+    ''' <summary>Threshold (bytes) above which a PDF is considered heavy (likely OCR).</summary>
+    Private Const AP_HeavyPdfThreshold As Long = 2 * 1024 * 1024
+
+    ''' <summary>
+    ''' Internal time seeds per mail category (seconds). Used solely to decide whether
+    ''' the 60-second notification threshold is crossed — never exposed to the sender.
+    ''' </summary>
+    Private Const AP_SeedSeconds_TextOnly As Double = 15.0
+    Private Const AP_SeedSeconds_LightAttachments As Double = 30.0
+    Private Const AP_SeedSeconds_HeavyDoc As Double = 300.0
+    Private Const AP_SeedSeconds_HeavyPdf As Double = 600.0
+
+    ''' <summary>Tracks when each queued mail was first seen in the queue (EntryId → UTC enqueue time).</summary>
+    Private ReadOnly _apQueueEnqueueTimes As New ConcurrentDictionary(Of String, DateTime)()
+
+    ''' <summary>Entry IDs that have already received a queue holding notification.</summary>
+    Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ''' <summary>Rolling average processing time per mail category. Key = category tag, Value = (avg, count).</summary>
+    Private ReadOnly _apCategoryTimings As New ConcurrentDictionary(Of String, (AvgSeconds As Double, SampleCount As Integer))(StringComparer.OrdinalIgnoreCase)
+
+    ''' <summary>Stopwatch tracking the current mail's processing time.</summary>
+    Private _apCurrentProcessingStopwatch As Stopwatch = Nothing
+
+    ''' <summary>Category tag of the mail currently being processed (for timing updates).</summary>
+    Private _apCurrentProcessingCategory As String = Nothing
+
+    ''' <summary>
+    ''' Periodic timer that checks for queued mails needing holding notifications.
+    ''' Runs independently of the processing pump so notifications fire even during
+    ''' long-running tool executions (e.g. multi-hour document processing).
+    ''' </summary>
+    Private _apNotificationTimer As System.Threading.Timer = Nothing
+
+    ''' <summary>Guard to prevent overlapping notification checks.</summary>
+    Private _apNotificationCheckRunning As Integer = 0
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -151,6 +194,8 @@ Partial Public Class ThisAddIn
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
             End If
         Catch : End Try
+        Try : _apNotificationTimer?.Dispose() : Catch : End Try
+        _apNotificationTimer = Nothing
         Try : _apCts?.Cancel() : Catch : End Try
         Try : _apCts?.Dispose() : Catch : End Try
         _apCts = Nothing
@@ -163,6 +208,11 @@ Partial Public Class ThisAddIn
         _apBaseModelConfig = Nothing
         _apSenderCooldowns.Clear()
         _apProcessedConversations.Clear()
+        _apQueueNotifiedEntryIds.Clear()
+        _apQueueEnqueueTimes.Clear()
+        _apCategoryTimings.Clear()
+        _apCurrentProcessingStopwatch = Nothing
+        _apCurrentProcessingCategory = Nothing
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -287,6 +337,16 @@ Partial Public Class ThisAddIn
 
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
         Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
+
+        ' Start a periodic timer for queue holding notifications.
+        ' This runs independently of the processing pump so notifications
+        ' can fire even while a long tool execution blocks the pump.
+        _apNotificationTimer = New System.Threading.Timer(
+            AddressOf NotificationTimerCallback,
+            Nothing,
+            dueTime:=TimeSpan.FromSeconds(15),
+            period:=TimeSpan.FromSeconds(15))
+
     End Sub
 
     ''' <summary>Handles a dashboard stop request.</summary>
@@ -469,6 +529,7 @@ Partial Public Class ThisAddIn
             If selectedEntryIds IsNot Nothing AndAlso selectedEntryIds.Count > 0 Then
                 For Each entryId In selectedEntryIds
                     _apMailQueue.Enqueue(entryId)
+                    _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
                 Next
                 ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} missed mail(s) for processing.", "info")
             Else
@@ -544,8 +605,33 @@ Partial Public Class ThisAddIn
         If Not _apActive Then Return
         For Each id In EntryIDCollection.Split(","c)
             Dim trimmed = id.Trim()
-            If trimmed.Length > 0 Then _apMailQueue.Enqueue(trimmed)
+            If trimmed.Length > 0 Then
+                _apMailQueue.Enqueue(trimmed)
+                _apQueueEnqueueTimes.TryAdd(trimmed, DateTime.UtcNow)
+            End If
         Next
+    End Sub
+
+    ''' <summary>
+    ''' Timer callback that periodically checks for queued mails needing holding
+    ''' notifications. Uses Interlocked to prevent overlapping executions.
+    ''' </summary>
+    Private Async Sub NotificationTimerCallback(state As Object)
+        ' Guard: skip if AutoPilot is not active or already checking
+        If Not _apActive Then Return
+        If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
+
+        Try
+            Dim ct = _apCts?.Token
+            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
+            Await SendQueuePositionNotificationsAsync(ct.Value)
+        Catch ex As OperationCanceledException
+            ' Expected during shutdown
+        Catch ex As System.Exception
+            ApDashboardLog($"Notification timer error: {ex.Message}", "warn")
+        Finally
+            Interlocked.Exchange(_apNotificationCheckRunning, 0)
+        End Try
     End Sub
 
     ''' <summary>Processes queued messages until cancellation is requested.</summary>
@@ -554,11 +640,43 @@ Partial Public Class ThisAddIn
             While Not ct.IsCancellationRequested
                 Dim entryId As String = Nothing
                 If _apMailQueue.TryDequeue(entryId) Then
+                    ' Clean up enqueue time tracking for this mail
+                    Dim dummy As DateTime
+                    _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+
                     Dim pending = _apMailQueue.Count
                     If pending > 0 Then
                         ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
                     End If
-                    Await ProcessIncomingMailAsync(entryId, ct)
+
+                    ' Classify and time the current mail
+                    Try
+                        _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
+                                                                            Try
+                                                                                Dim ns = Application.GetNamespace("MAPI")
+                                                                                Dim obj = ns.GetItemFromID(entryId)
+                                                                                If TypeOf obj Is MailItem Then
+                                                                                    Dim mi = DirectCast(obj, MailItem)
+                                                                                    Try : Return ClassifyMailCategory(mi)
+                                                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                                                End If
+                                                                            Catch : End Try
+                                                                            Return AP_Cat_TextOnly
+                                                                        End Function)
+                    Catch
+                        _apCurrentProcessingCategory = AP_Cat_TextOnly
+                    End Try
+
+                    _apCurrentProcessingStopwatch = Stopwatch.StartNew()
+                    Try
+                        Await ProcessIncomingMailAsync(entryId, ct)
+                    Finally
+                        _apCurrentProcessingStopwatch.Stop()
+                        UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                        ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
+                        _apCurrentProcessingStopwatch = Nothing
+                        _apCurrentProcessingCategory = Nothing
+                    End Try
                 Else
                     Await Task.Delay(1000, ct)
                 End If
@@ -666,6 +784,278 @@ Partial Public Class ThisAddIn
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  QUEUE POSITION NOTIFICATION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Mail weight categories used for internal time estimation.</summary>
+    Private Const AP_Cat_TextOnly As String = "text"
+    Private Const AP_Cat_Light As String = "light"
+    Private Const AP_Cat_HeavyDoc As String = "heavydoc"
+    Private Const AP_Cat_HeavyPdf As String = "heavypdf"
+
+    ''' <summary>
+    ''' Classifies a mail into a weight category based on its attachments.
+    ''' Called on the UI thread (needs COM access).
+    ''' </summary>
+    Private Function ClassifyMailCategory(mi As MailItem) As String
+        Try
+            If mi.Attachments.Count = 0 Then Return AP_Cat_TextOnly
+
+            Dim hasHeavyDoc As Boolean = False
+            Dim hasHeavyPdf As Boolean = False
+            Dim hasAnyProcessable As Boolean = False
+
+            For i As Integer = 1 To mi.Attachments.Count
+                Dim att = mi.Attachments(i)
+                Try
+                    If att.Type = OlAttachmentType.olEmbeddeditem Then Continue For
+                    Dim fileName = att.FileName
+                    If String.IsNullOrWhiteSpace(fileName) Then Continue For
+                    Dim ext = Path.GetExtension(fileName).ToLowerInvariant()
+                    Dim size As Long = att.Size
+
+                    For Each heavyExt In AP_HeavyDocExtensions
+                        If ext = heavyExt Then hasHeavyDoc = True : hasAnyProcessable = True : Exit For
+                    Next
+                    If ext = ".pdf" Then
+                        hasAnyProcessable = True
+                        If size >= AP_HeavyPdfThreshold Then hasHeavyPdf = True
+                    End If
+                    If Not hasAnyProcessable Then
+                        Dim lightExts = {".txt", ".csv", ".html", ".xml", ".json", ".md"}
+                        For Each le In lightExts
+                            If ext = le Then hasAnyProcessable = True : Exit For
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If hasHeavyPdf Then Return AP_Cat_HeavyPdf
+            If hasHeavyDoc Then Return AP_Cat_HeavyDoc
+            If hasAnyProcessable Then Return AP_Cat_Light
+        Catch
+        End Try
+        Return AP_Cat_TextOnly
+    End Function
+
+    ''' <summary>Returns the estimated seconds for a category, using learned data or seed defaults.</summary>
+    Private Function GetCategoryEstimate(category As String) As Double
+        Dim timing As (AvgSeconds As Double, SampleCount As Integer) = Nothing
+        If _apCategoryTimings.TryGetValue(category, timing) AndAlso timing.SampleCount > 0 Then
+            Return timing.AvgSeconds
+        End If
+        Select Case category
+            Case AP_Cat_HeavyPdf : Return AP_SeedSeconds_HeavyPdf
+            Case AP_Cat_HeavyDoc : Return AP_SeedSeconds_HeavyDoc
+            Case AP_Cat_Light : Return AP_SeedSeconds_LightAttachments
+            Case Else : Return AP_SeedSeconds_TextOnly
+        End Select
+    End Function
+
+    ''' <summary>Updates the rolling average for a category after processing completes.</summary>
+    Private Sub UpdateCategoryTiming(category As String, elapsedSeconds As Double)
+        _apCategoryTimings.AddOrUpdate(
+            category,
+            addValueFactory:=Function(k) (elapsedSeconds, 1),
+            updateValueFactory:=Function(k, existing)
+                                    Dim newCount = existing.SampleCount + 1
+                                    If newCount <= 2 Then
+                                        Return (((existing.AvgSeconds * existing.SampleCount) + elapsedSeconds) / newCount, newCount)
+                                    Else
+                                        Const alpha As Double = 0.3
+                                        Return (alpha * elapsedSeconds + (1.0 - alpha) * existing.AvgSeconds, newCount)
+                                    End If
+                                End Function)
+    End Sub
+
+    ''' <summary>
+    ''' Runs the full AutoPilot pre-filter pipeline against a mail item to determine
+    ''' whether it will actually be processed. This is the same set of checks performed
+    ''' at the top of ProcessIncomingMailAsync, extracted here so that queue notifications
+    ''' are only sent for mails that will genuinely be processed.
+    ''' Must be called via SwitchToUi for COM access.
+    ''' </summary>
+    ''' <returns>True if the mail would pass all filters and be processed.</returns>
+    Private Function WouldMailBeProcessed(mi As MailItem, Optional entryId As String = Nothing) As Boolean
+        Try
+            ' Mailbox filter
+            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Dim recipientAddress As String = ""
+                Try
+                    Dim acct = mi.SendUsingAccount
+                    If acct IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(acct.SmtpAddress) Then
+                        recipientAddress = acct.SmtpAddress
+                    Else
+                        For Each recip As Recipient In mi.Recipients
+                            If recip.Type = CInt(OlMailRecipientType.olTo) Then
+                                Dim addr = recip.Address
+                                If Not String.IsNullOrWhiteSpace(addr) Then recipientAddress = addr : Exit For
+                            End If
+                        Next
+                    End If
+                Catch
+                End Try
+                If Not _apConfig.MonitoredMailbox.Equals(recipientAddress, StringComparison.OrdinalIgnoreCase) Then Return False
+            End If
+
+            Dim mailInfo = ExtractMailInfo(mi)
+            If mailInfo Is Nothing Then Return False
+
+            ' Loop prevention
+            If mailInfo.HasAutoReplyHeader Then Return False
+
+            ' Auto-reply/OOF detection
+            If IsAutoReplyOrOof(mailInfo) Then Return False
+
+            ' Domain/sender filter rules (trust boundary)
+            If Not MatchesFilterRules(mailInfo) Then Return False
+            If MatchesNegativeFilters(mailInfo) Then Return False
+
+            ' Subject trigger word — allow bypass for existing conversations
+            Dim isExistingConversation As Boolean = False
+            Try : isExistingConversation = IsPartOfAutoPilotConversation(mi) : Catch : End Try
+
+            If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
+                If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    If Not isExistingConversation Then Return False
+                End If
+            End If
+
+            ' Cooldown — bypass if we already sent a holding notice for this specific mail
+            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
+                Dim alreadyNotified = (entryId IsNot Nothing AndAlso _apQueueNotifiedEntryIds.ContainsKey(entryId))
+                If Not alreadyNotified Then Return False
+            End If
+
+            ' Session limit
+            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then Return False
+
+            ' Thread depth
+            If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then Return False
+
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Checks all currently queued mails and sends a holding notification to any
+    ''' that have been waiting in the queue for at least AP_QueueNotifyThresholdSeconds
+    ''' of real wall-clock time. The message includes the queue position and a
+    ''' qualitative description of expected wait based on attachment classification.
+    ''' Only mails that pass the full filter pipeline receive a notification.
+    ''' Called from the processing pump on every iteration (not just at dequeue time).
+    ''' </summary>
+    Private Async Function SendQueuePositionNotificationsAsync(ct As CancellationToken) As Task
+        Dim queueSnapshot = _apMailQueue.ToArray()
+        If queueSnapshot.Length = 0 Then Return
+
+        ' Classify every queued mail and build position/weight info
+        Dim queueEntries As New List(Of (EntryId As String, Position As Integer, Category As String))()
+        For i As Integer = 0 To queueSnapshot.Length - 1
+            Dim queuedId = queueSnapshot(i)
+            Dim qCat As String = AP_Cat_TextOnly
+            Try
+                qCat = Await SwitchToUi(Function() As String
+                                            Try
+                                                Dim ns = Application.GetNamespace("MAPI")
+                                                Dim obj = ns.GetItemFromID(queuedId)
+                                                If TypeOf obj Is MailItem Then
+                                                    Dim mi = DirectCast(obj, MailItem)
+                                                    Try : Return ClassifyMailCategory(mi)
+                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                End If
+                                            Catch : End Try
+                                            Return AP_Cat_TextOnly
+                                        End Function)
+            Catch : End Try
+            queueEntries.Add((queuedId, i + 1, qCat))
+        Next
+
+        ' Include the currently-processing mail's category for "ahead" description
+        Dim currentIsHeavy As Boolean = (_apCurrentProcessingCategory = AP_Cat_HeavyDoc OrElse _apCurrentProcessingCategory = AP_Cat_HeavyPdf)
+
+        Dim now = DateTime.UtcNow
+
+        For Each entry In queueEntries
+            ' Only notify mails that have been waiting >= threshold seconds
+            Dim enqueueTime As DateTime = Nothing
+            If Not _apQueueEnqueueTimes.TryGetValue(entry.EntryId, enqueueTime) Then Continue For
+            Dim waitedSeconds = (now - enqueueTime).TotalSeconds
+            If waitedSeconds < AP_QueueNotifyThresholdSeconds Then Continue For
+
+            ' Don't notify the same mail twice
+            If Not _apQueueNotifiedEntryIds.TryAdd(entry.EntryId, True) Then Continue For
+
+            Try
+                Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
+                                                          Try
+                                                              Dim ns = Application.GetNamespace("MAPI")
+                                                              Dim obj = ns.GetItemFromID(entry.EntryId)
+                                                              If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                          Catch : End Try
+                                                          Return Nothing
+                                                      End Function)
+                If mi Is Nothing Then Continue For
+
+                Try
+                    ' Full filter pipeline check
+                    Dim wouldProcess = Await SwitchToUi(Function() WouldMailBeProcessed(mi, entry.EntryId))
+
+                    If Not wouldProcess Then
+                        ApDashboardLog($"Queue notification skipped (would not be processed): {entry.EntryId.Substring(0, Math.Min(20, entry.EntryId.Length))}...", "step")
+                        Continue For
+                    End If
+
+                    Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                    Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
+
+                    ' Count heavy jobs ahead of this mail (including current processing)
+                    Dim heavyAhead As Integer = If(currentIsHeavy, 1, 0)
+                    For Each other In queueEntries
+                        If other.Position >= entry.Position Then Exit For
+                        If other.Category = AP_Cat_HeavyDoc OrElse other.Category = AP_Cat_HeavyPdf Then heavyAhead += 1
+                    Next
+
+                    ' Build position text
+                    Dim positionText = If(entry.Position = 1,
+                        "Your request is next in line.",
+                        $"Your request is at position {entry.Position} in the queue.")
+
+                    ' Build qualitative wait description based on what's ahead
+                    Dim waitDescription As String = ""
+                    If heavyAhead > 0 Then
+                        If heavyAhead = 1 Then
+                            waitDescription = " There is a document processing request ahead of yours which may take a while to complete."
+                        Else
+                            waitDescription = $" There are {heavyAhead} document processing requests ahead of yours which may each take a while to complete."
+                        End If
+                    ElseIf entry.Position > 3 Then
+                        waitDescription = " There are several requests ahead of yours."
+                    End If
+
+                    Dim stallWarning As String =
+                        " Please also note that occasional delays may occur if the system requires operator attention."
+
+                    Dim holdingMessage As String =
+                        $"Thank you for your message. I'm currently processing other requests. " &
+                        $"{positionText}{waitDescription}{stallWarning} " &
+                        $"I will get back to you as soon as possible. — {AN6}"
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingMessage, Nothing, tagAsAutoReply:=True))
+                    ApDashboardLog($"📨 Queue notification sent to {senderLabel} (position {entry.Position}, waited {waitedSeconds:F0}s, {heavyAhead} heavy ahead)", "info")
+                Finally
+                    Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                End Try
+            Catch ex As System.Exception
+                ApDashboardLog($"Queue notification error: {ex.Message}", "warn")
+            End Try
+        Next
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  CORE PROCESSING
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -753,7 +1143,19 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            If IsSenderOnCooldown(mailInfo.SenderEmail) Then : ApDashboardLog("SKIP (cooldown): " & mailInfo.SenderEmail, "step") : Return : End If
+            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
+                ' If we already sent a holding notice for this mail, we committed to processing it.
+                ' The cooldown may have been recorded by a previous mail from the same sender that
+                ' finished while this mail was waiting in the queue. Skipping it now would be
+                ' misleading since the sender already received "your request is in the queue".
+                If Not _apQueueNotifiedEntryIds.ContainsKey(entryId) Then
+                    ApDashboardLog("SKIP (cooldown): " & mailInfo.SenderEmail, "step")
+                    Return
+                Else
+                    ApDashboardLog("COOLDOWN BYPASS (holding notice already sent): " & mailInfo.SenderEmail, "step")
+                End If
+            End If
+
             If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached)", "warn") : Return : End If
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
@@ -1480,6 +1882,8 @@ Partial Public Class ThisAddIn
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
     ''' already adds [HH:mm:ss.fff]. Instead we prepend the date-only portion
     ''' so the dashboard shows [HH:mm:ss.fff] [dd-MMM] message.
+    ''' When the Chat Agent is active, also routes to the tooling LogWindow
+    ''' so internal tool detail appears in the web agent dashboard.
     ''' </summary>
     Private Sub ApDashboardLog(message As String, level As String)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
@@ -1496,6 +1900,14 @@ Partial Public Class ThisAddIn
             End If
         Catch
         End Try
+
+        ' Route to the Chat Agent's tooling LogWindow (no date tag needed)
+        If _chatAgentActive AndAlso _activeToolingContext IsNot Nothing Then
+            Try
+                _activeToolingContext.Log(message, level)
+            Catch
+            End Try
+        End If
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>

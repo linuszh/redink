@@ -417,11 +417,18 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_PdfToWord,
             .ModelDescription = "Convert PDF to Word (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's PDF import. " &
-                "The resulting .docx can then be used with compare_word_documents or other Word tools.",
+                AP_Tool_PdfToWord & ": Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF import. " &
+                "The resulting .docx can then be used with compare_word_documents or other Word tools. " &
+                "This is the PREFERRED method for PDF-to-Word conversion — use it FIRST. It works well for most PDFs " &
+                "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
+                "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
+                "fall back to extract_pdf_text (which supports OCR) to obtain the text, and use create_word_document " &
+                "to produce a .docx from that text.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
-                """description"":""Converts a PDF attachment to a Word document (.docx) format. Use this when you need a .docx version of a PDF for comparison or editing.""," &
+                """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
+                "Use this as the PRIMARY method for PDF-to-Word conversion. Works well for text-based PDFs with layout preservation. " &
+                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
                 """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}" &
@@ -456,35 +463,97 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateExcel,
             .ModelDescription = "Create Excel Spreadsheet (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_CreateExcel & ": Creates a new Excel spreadsheet (.xlsx) with values, formulas, and basic formatting. " &
-                "Use this when the user asks you to create, generate, or produce a spreadsheet, table, budget, calculation, " &
-                "tracker, or any tabular data as an Excel file. ALWAYS use this tool for spreadsheet/table requests — " &
-                "do NOT put tabular data into a PowerPoint or Word document instead. " &
-                "Provide cell data as a JSON array of cell objects. " &
-                "Each cell object has: 'cell' (A1-style address), and one of 'formula' (Excel formula starting with =) " &
-                "or 'value' (string or number). Optional: 'bold' (boolean), 'italic' (boolean), 'number_format' (Excel format string e.g. '#,##0.00', '0%', 'dd/mm/yyyy'). " &
-                "Formulas must use English function names and comma as separator (e.g. =SUM(A1,A2), =IF(A1>0,""Yes"",""No"")). " &
-                "You can also specify optional 'column_widths' as an object mapping column letters to widths (e.g. {""A"":25,""B"":15}), " &
-                "and 'sheet_name' for the worksheet tab name. " &
-                "Tip: build cells row by row — e.g. headers in row 1 (A1, B1, C1...), then data rows (A2, B2, C2..., A3, B3, C3..., etc.).",
+                AP_Tool_CreateExcel & ": Creates a professionally formatted Excel spreadsheet (.xlsx/.xlsm). " &
+                "Use for any spreadsheet, table, budget, tracker, dashboard, or tabular data request. " &
+                "ALWAYS call this tool immediately — do NOT describe what you plan to create; just create it. " &
+                "MANDATORY: include column_widths for every column, freeze_pane='A2', auto_filter on headers, " &
+                "bold headers with bg_color/font_color/borders, alternating row colors, wrap_text on long text, " &
+                "number_format on numeric/date columns, and data_validations (dropdowns) for any column with finite valid values.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreateExcel & """," &
-                """description"":""Creates a new Excel spreadsheet (.xlsx) with cell values, formulas, and basic formatting. " &
-                "Provide cell data as a JSON array. Each cell object has 'cell' (A1 address) and either 'formula' or 'value', " &
-                "plus optional 'bold', 'italic', 'number_format'. Use English formula syntax with comma separators.""," &
+                """description"":""Creates a new Excel spreadsheet (.xlsx or .xlsm) with MANDATORY professional formatting. " &
+                "EVERY spreadsheet MUST include: column_widths sized for content, freeze_pane='A2', auto_filter on headers, " &
+                "header row with bold + bg_color '#4472C4' + font_color '#FFFFFF' + border 'all-thin' + h_align 'center', " &
+                "data cells with border 'all-thin' + alternating bg_color '#D9E2F3', wrap_text on long text columns, " &
+                "number_format on all numeric/date/percentage columns, and data_validations with type 'list' on any column " &
+                "with a finite set of valid values (Status, Priority, Yes/No, categories, etc.). " &
+                "Also supports formulas, multiple sheets, conditional formatting, charts, VBA macros, and more. " &
+                "STYLING RULES (apply to EVERY spreadsheet unless user explicitly asks for plain output): " &
+                "1. HEADER ROW: bg_color '#4472C4', font_color '#FFFFFF', bold, font_size 12, h_align 'center', border 'all-thin'. " &
+                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows. " &
+                "3. COLUMN WIDTHS: MUST set for every column. Short labels 12-15, names/descriptions 25-35, numbers/dates 12-18. " &
+                "4. ROW HEIGHTS: header row 28. " &
+                "5. NUMBER FORMATS: '#,##0.00' for currency, '0%' for percent, 'dd/mm/yyyy' for dates, '#,##0' for integers. " &
+                "6. ALIGNMENT: left for text, center for short labels/status, right for numbers. " &
+                "7. WRAP TEXT: true for descriptions, notes, addresses, any long content. " &
+                "8. FREEZE PANE: ALWAYS 'A2'. " &
+                "9. AUTO FILTER: ALWAYS on header range (e.g. 'A1:F1'). " &
+                "10. DROPDOWNS: ALWAYS add data_validation type 'list' for columns with finite values (Status, Priority, Yes/No, Rating, Category). " &
+                "11. CONDITIONAL FORMATTING: red bg for negative/overdue/failed, green for completed/positive, yellow for pending. " &
+                "12. TOTALS ROW: SUM/AVERAGE formulas with bold + border 'bottom-medium'. " &
+                "13. TITLE ROW: For dashboards, merge + font_size 16 + bold + distinct bg_color. " &
+                "Use English formula syntax with comma separators.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """cells"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
-                """cell"":{""type"":""string"",""description"":""Cell address in A1 notation (e.g. A1, B2, C10)""}," &
-                """value"":{""description"":""Cell value (string or number). Use this for static content.""}," &
-                """formula"":{""type"":""string"",""description"":""Excel formula starting with = (e.g. =SUM(A1:A10)). Use English function names and comma as separator.""}," &
-                """bold"":{""type"":""boolean"",""description"":""Make the cell text bold (default: false)""}," &
-                """italic"":{""type"":""boolean"",""description"":""Make the cell text italic (default: false)""}," &
-                """number_format"":{""type"":""string"",""description"":""Excel number format string (e.g. '#,##0.00', '0%', 'dd/mm/yyyy', '@' for text)""}" &
-                "}},""description"":""Array of cell objects defining the spreadsheet content""}," &
-                """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Spreadsheet')""}," &
-                """sheet_name"":{""type"":""string"",""description"":""Worksheet tab name (default: 'Sheet1')""}," &
-                """column_widths"":{""type"":""object"",""description"":""Optional column widths as {column_letter: width} (e.g. {""A"":25,""B"":15})""}" &
-                "},""required"":[""cells""]}}"
+                """cell"":{""type"":""string"",""description"":""Cell address in A1 notation""}," &
+                """value"":{""description"":""Cell value (string or number)""}," &
+                """formula"":{""type"":""string"",""description"":""Excel formula starting with =""}," &
+                """bold"":{""type"":""boolean""}," &
+                """italic"":{""type"":""boolean""}," &
+                """underline"":{""type"":""boolean""}," &
+                """strikethrough"":{""type"":""boolean""}," &
+                """font_name"":{""type"":""string""}," &
+                """font_size"":{""type"":""number""}," &
+                """font_color"":{""type"":""string"",""description"":""Hex RGB e.g. #FF0000. Use #FFFFFF for headers""}," &
+                """bg_color"":{""type"":""string"",""description"":""Hex RGB. Use #4472C4 for headers, #D9E2F3 for alternating rows""}," &
+                """number_format"":{""type"":""string"",""description"":""REQUIRED for numbers/dates. #,##0.00 currency, 0% percent, dd/mm/yyyy dates, #,##0 integers""}," &
+                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""REQUIRED: left=text, center=headers/labels, right=numbers""}," &
+                """v_align"":{""type"":""string"",""enum"":[""top"",""center"",""bottom""]}," &
+                """wrap_text"":{""type"":""boolean"",""description"":""REQUIRED true for long text cells""}," &
+                """border"":{""type"":""string"",""description"":""REQUIRED: 'all-thin' for all cells. Also: medium, thick, all-medium, bottom-thin, bottom-medium""}," &
+                """border_color"":{""type"":""string"",""description"":""Border color hex RGB""}" &
+                "}},""description"":""Cells for default/first sheet""}," &
+                """sheets"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """name"":{""type"":""string""},""cells"":{""type"":""array"",""items"":{""type"":""object""}}" &
+                "}},""description"":""Multiple sheets. Each: name + cells array.""}," &
+                """file_name"":{""type"":""string"",""description"":""Filename without extension""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Tab name for single-sheet mode""}," &
+                """column_widths"":{""type"":""object"",""description"":""REQUIRED: {col_letter: width} for EVERY column. 12-15 short, 25-35 descriptions, 12-18 numbers""}," &
+                """row_heights"":{""type"":""object"",""description"":""Row heights. Set header row to 28""}," &
+                """merge_ranges"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Ranges to merge""}," &
+                """freeze_pane"":{""type"":""string"",""description"":""REQUIRED: Always 'A2'""}," &
+                """auto_filter"":{""type"":""string"",""description"":""REQUIRED: Header range e.g. 'A1:F1'""}," &
+                """data_validations"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """range"":{""type"":""string""},""type"":{""type"":""string""},""formula1"":{""type"":""string""}," &
+                """formula2"":{""type"":""string""},""operator"":{""type"":""string""}," &
+                """show_dropdown"":{""type"":""boolean""},""input_title"":{""type"":""string""}," &
+                """input_message"":{""type"":""string""},""error_title"":{""type"":""string""}," &
+                """error_message"":{""type"":""string""}" &
+                "}},""description"":""REQUIRED for finite-value columns: type 'list', formula1='Val1,Val2,Val3'""}," &
+                """conditional_formats"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """range"":{""type"":""string""},""type"":{""type"":""string""},""operator"":{""type"":""string""}," &
+                """formula1"":{""type"":""string""},""formula2"":{""type"":""string""}," &
+                """format_font_color"":{""type"":""string""},""format_bg_color"":{""type"":""string""}," &
+                """format_bold"":{""type"":""boolean""}" &
+                "}},""description"":""Conditional formatting rules""}," &
+                """charts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]}," &
+                """data_range"":{""type"":""string""},""title"":{""type"":""string""}," &
+                """position"":{""type"":""string""},""width"":{""type"":""number""},""height"":{""type"":""number""}," &
+                """sheet_name"":{""type"":""string""}" &
+                "}},""description"":""Charts to create""}," &
+                """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """name"":{""type"":""string""},""range"":{""type"":""string""}" &
+                "}},""description"":""Named ranges""}," &
+                """vba_modules"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """name"":{""type"":""string""},""code"":{""type"":""string""},""type"":{""type"":""string""}" &
+                "}},""description"":""VBA modules (saves as .xlsm)""}," &
+                """print_setup"":{""type"":""object"",""properties"":{" &
+                """orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""]}," &
+                """fit_to_pages_wide"":{""type"":""integer""},""fit_to_pages_tall"":{""type"":""integer""}," &
+                """header_text"":{""type"":""string""},""footer_text"":{""type"":""string""}" &
+                "},""description"":""Print setup options""}" &
+                "},""required"":[]}}"
         })
 
         ' ── create_powerpoint ──
@@ -1296,69 +1365,110 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            ' Parse cells array
-            Dim cellsArray As JArray = Nothing
-            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("cells") Then
-                Dim cellsObj = toolCall.Arguments("cells")
-                If TypeOf cellsObj Is JArray Then
-                    cellsArray = DirectCast(cellsObj, JArray)
+            ' ── Resolve sheet definitions ──
+            ' Support both: top-level "cells" (single sheet) and "sheets" array (multi-sheet)
+            Dim sheetDefs As New List(Of (SheetName As String, Cells As JArray))()
+            Dim hasVba As Boolean = False
+
+            ' Check for VBA modules — determines .xlsm vs .xlsx
+            Dim vbaModules As JArray = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("vba_modules") Then
+                Dim vbaObj = toolCall.Arguments("vba_modules")
+                If TypeOf vbaObj Is JArray AndAlso DirectCast(vbaObj, JArray).Count > 0 Then
+                    vbaModules = DirectCast(vbaObj, JArray)
+                    hasVba = True
                 End If
             End If
 
-            If cellsArray Is Nothing OrElse cellsArray.Count = 0 Then
-                response.Success = False
-                response.Response = "Missing required parameter: cells (must be a non-empty array of cell objects)"
-                Return response
-            End If
-
-            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
-            If String.IsNullOrWhiteSpace(fileName) Then fileName = "Spreadsheet"
-
-            ' Sanitize filename
-            For Each c In Path.GetInvalidFileNameChars()
-                fileName = fileName.Replace(c, "_"c)
-            Next
-            If Not fileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) Then
-                fileName &= ".xlsx"
-            End If
-
-            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
-
-            ' Prevent filename collision
-            Dim counter = 1
-            While File.Exists(outputPath)
-                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
-                fileName = baseName & $"_{counter}.xlsx"
-                outputPath = Path.Combine(_apCurrentTempDir, fileName)
-                counter += 1
-            End While
-
-            Dim sheetName = GetArgString(toolCall.Arguments, "sheet_name")
-            If String.IsNullOrWhiteSpace(sheetName) Then sheetName = "Sheet1"
-
-            ' Parse column_widths
-            Dim columnWidths As Dictionary(Of String, Double) = Nothing
-            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("column_widths") Then
-                Dim cwObj = toolCall.Arguments("column_widths")
-                If TypeOf cwObj Is JObject Then
-                    columnWidths = New Dictionary(Of String, Double)(StringComparer.OrdinalIgnoreCase)
-                    For Each prop In DirectCast(cwObj, JObject).Properties()
-                        Dim w As Double
-                        If Double.TryParse(prop.Value.ToString(), Globalization.NumberStyles.Any,
-                                          Globalization.CultureInfo.InvariantCulture, w) Then
-                            columnWidths(prop.Name.ToUpperInvariant()) = w
+            ' Multi-sheet mode
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("sheets") Then
+                Dim sheetsObj = toolCall.Arguments("sheets")
+                If TypeOf sheetsObj Is JArray Then
+                    For Each sheetObj As JObject In DirectCast(sheetsObj, JArray)
+                        Dim sName = sheetObj.Value(Of String)("name")
+                        If String.IsNullOrWhiteSpace(sName) Then sName = $"Sheet{sheetDefs.Count + 1}"
+                        Dim sCells As JArray = Nothing
+                        Dim sCellsToken = sheetObj("cells")
+                        If TypeOf sCellsToken Is JArray Then sCells = DirectCast(sCellsToken, JArray)
+                        If sCells IsNot Nothing AndAlso sCells.Count > 0 Then
+                            sheetDefs.Add((sName, sCells))
                         End If
                     Next
                 End If
             End If
 
-            context.Log($"Creating Excel spreadsheet: {fileName} ({cellsArray.Count} cells)")
-            ApDashboardLog($"📊 Creating Excel spreadsheet: {fileName}", "step")
+            ' Single-sheet mode (backward compatible)
+            If sheetDefs.Count = 0 Then
+                Dim cellsArray As JArray = Nothing
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("cells") Then
+                    Dim cellsObj = toolCall.Arguments("cells")
+                    If TypeOf cellsObj Is JArray Then cellsArray = DirectCast(cellsObj, JArray)
+                End If
+
+                If cellsArray Is Nothing OrElse cellsArray.Count = 0 Then
+                    response.Success = False
+                    response.Response = "Missing required parameter: cells or sheets (must contain at least one non-empty cell array)"
+                    Return response
+                End If
+
+                Dim sheetName = GetArgString(toolCall.Arguments, "sheet_name")
+                If String.IsNullOrWhiteSpace(sheetName) Then sheetName = "Sheet1"
+                sheetDefs.Add((sheetName, cellsArray))
+            End If
+
+            ' ── Determine file name and extension ──
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            If String.IsNullOrWhiteSpace(fileName) Then fileName = "Spreadsheet"
+            For Each c In Path.GetInvalidFileNameChars()
+                fileName = fileName.Replace(c, "_"c)
+            Next
+
+            Dim fileExt As String = If(hasVba, ".xlsm", ".xlsx")
+            If Not fileName.EndsWith(fileExt, StringComparison.OrdinalIgnoreCase) Then
+                ' Strip wrong extension if present
+                If fileName.EndsWith(".xlsx", StringComparison.OrdinalIgnoreCase) OrElse
+                   fileName.EndsWith(".xlsm", StringComparison.OrdinalIgnoreCase) Then
+                    fileName = Path.GetFileNameWithoutExtension(fileName)
+                End If
+                fileName &= fileExt
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(fileName)
+                fileName = baseName & $"_{counter}{fileExt}"
+                outputPath = Path.Combine(_apCurrentTempDir, fileName)
+                counter += 1
+            End While
+
+            ' ── Parse shared parameters ──
+            Dim columnWidths As Dictionary(Of String, Double) = ParseColumnWidths(toolCall.Arguments)
+            Dim rowHeights As Dictionary(Of Integer, Double) = ParseRowHeights(toolCall.Arguments)
+            Dim mergeRanges = GetArgStringArray(toolCall.Arguments, "merge_ranges")
+            Dim freezePane = GetArgString(toolCall.Arguments, "freeze_pane")
+            Dim autoFilter = GetArgString(toolCall.Arguments, "auto_filter")
+            Dim dataValidations = ParseJsonArray(toolCall.Arguments, "data_validations")
+            Dim conditionalFormats = ParseJsonArray(toolCall.Arguments, "conditional_formats")
+            Dim charts = ParseJsonArray(toolCall.Arguments, "charts")
+            Dim namedRanges = ParseJsonArray(toolCall.Arguments, "named_ranges")
+            Dim printSetup As JObject = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("print_setup") Then
+                Dim psObj = toolCall.Arguments("print_setup")
+                If TypeOf psObj Is JObject Then printSetup = DirectCast(psObj, JObject)
+            End If
+
+            Dim totalCells = sheetDefs.Sum(Function(sd) sd.Cells.Count)
+            context.Log($"Creating Excel spreadsheet: {fileName} ({sheetDefs.Count} sheet(s), {totalCells} cells)")
+            ApDashboardLog($"📊 Creating Excel: {fileName} ({sheetDefs.Count} sheet(s))", "step")
+
+            ' xlOpenXMLWorkbook = 51, xlOpenXMLWorkbookMacroEnabled = 52
+            Const xlOpenXMLWorkbook As Integer = 51
+            Const xlOpenXMLWorkbookMacroEnabled As Integer = 52
 
             Dim success = Await SwitchToUi(Function()
                                                Dim excelApp As Microsoft.Office.Interop.Excel.Application = Nothing
                                                Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
-                                               Dim ws As Microsoft.Office.Interop.Excel.Worksheet = Nothing
                                                Try
                                                    excelApp = New Microsoft.Office.Interop.Excel.Application()
                                                    excelApp.Visible = False
@@ -1366,81 +1476,103 @@ Partial Public Class ThisAddIn
                                                    excelApp.ScreenUpdating = False
 
                                                    wb = excelApp.Workbooks.Add()
-                                                   ws = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
-                                                   ws.Name = sheetName
 
-                                                   ' Apply cell data
-                                                   For Each cellObj As JObject In cellsArray
-                                                       Dim addr = cellObj.Value(Of String)("cell")
-                                                       If String.IsNullOrWhiteSpace(addr) Then Continue For
+                                                   ' ── Create worksheets ──
+                                                   ' Excel starts with 1 sheet by default; add more as needed
+                                                   While wb.Sheets.Count < sheetDefs.Count
+                                                       wb.Sheets.Add(After:=wb.Sheets(wb.Sheets.Count))
+                                                   End While
 
-                                                       Dim cell As Microsoft.Office.Interop.Excel.Range = Nothing
-                                                       Try
-                                                           cell = ws.Range(addr)
-                                                       Catch
-                                                           Continue For
-                                                       End Try
+                                                   ' Remove extra default sheets
+                                                   While wb.Sheets.Count > sheetDefs.Count
+                                                       CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet).Delete()
+                                                   End While
 
-                                                       ' Number format (apply before value/formula so formatting takes effect)
-                                                       Dim numFmt = cellObj.Value(Of String)("number_format")
-                                                       If Not String.IsNullOrWhiteSpace(numFmt) Then
-                                                           Try : cell.NumberFormat = numFmt : Catch : End Try
+                                                   For sheetIdx = 0 To sheetDefs.Count - 1
+                                                       Dim ws = CType(wb.Sheets(sheetIdx + 1), Microsoft.Office.Interop.Excel.Worksheet)
+                                                       Dim sheetDef = sheetDefs(sheetIdx)
+                                                       ws.Name = sheetDef.SheetName
+
+                                                       ' ── Apply cells ──
+                                                       ApplyExcelCells(ws, sheetDef.Cells)
+
+                                                       ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
+                                                       If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
+                                                           ApplyColumnWidths(ws, columnWidths)
                                                        End If
 
-                                                       ' Formula or value
-                                                       Dim formula = cellObj.Value(Of String)("formula")
-                                                       If Not String.IsNullOrWhiteSpace(formula) Then
+                                                       ' ── Row heights ──
+                                                       If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
+                                                           ApplyRowHeights(ws, rowHeights)
+                                                       End If
+
+                                                       ' ── Merge ranges ──
+                                                       If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
+                                                           For Each mr In mergeRanges
+                                                               Try : ws.Range(mr).Merge() : Catch : End Try
+                                                           Next
+                                                       End If
+
+                                                       ' ── Freeze pane ──
+                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
                                                            Try
-                                                               cell.Formula2 = formula
+                                                               ws.Activate()
+                                                               ws.Range(freezePane).Select()
+                                                               excelApp.ActiveWindow.FreezePanes = True
                                                            Catch
-                                                               Try
-                                                                   cell.Formula = formula
-                                                               Catch ex2 As Exception
-                                                                   Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
-                                                               End Try
                                                            End Try
-                                                       Else
-                                                           Dim valToken = cellObj("value")
-                                                           If valToken IsNot Nothing Then
-                                                               Dim valStr = valToken.ToString()
-                                                               Dim numVal As Double
-                                                               If Double.TryParse(valStr, Globalization.NumberStyles.Any,
-                                                                                  Globalization.CultureInfo.InvariantCulture, numVal) Then
-                                                                   cell.Value2 = numVal
-                                                               Else
-                                                                   cell.Value2 = valStr
-                                                               End If
-                                                           End If
                                                        End If
 
-                                                       ' Bold
-                                                       Dim boldToken = cellObj("bold")
-                                                       If boldToken IsNot Nothing AndAlso boldToken.Type = JTokenType.Boolean AndAlso
-                                                          CBool(boldToken) Then
-                                                           Try : cell.Font.Bold = True : Catch : End Try
+                                                       ' ── Auto-filter ──
+                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
+                                                           Try : ws.Range(autoFilter).AutoFilter() : Catch : End Try
                                                        End If
 
-                                                       ' Italic
-                                                       Dim italicToken = cellObj("italic")
-                                                       If italicToken IsNot Nothing AndAlso italicToken.Type = JTokenType.Boolean AndAlso
-                                                          CBool(italicToken) Then
-                                                           Try : cell.Font.Italic = True : Catch : End Try
+                                                       ' ── Data validations ──
+                                                       If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
+                                                           ApplyDataValidations(ws, dataValidations)
+                                                       End If
+
+                                                       ' ── Conditional formatting ──
+                                                       If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
+                                                           ApplyConditionalFormats(ws, conditionalFormats)
+                                                       End If
+
+                                                       ' ── Print setup ──
+                                                       If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
+                                                           ApplyPrintSetup(ws, printSetup)
                                                        End If
                                                    Next
 
-                                                   ' Apply column widths
-                                                   If columnWidths IsNot Nothing Then
-                                                       For Each kv In columnWidths
+                                                   ' ── Charts (can target any sheet) ──
+                                                   If charts IsNot Nothing Then
+                                                       ApplyCharts(wb, charts, sheetDefs)
+                                                   End If
+
+                                                   ' ── Named ranges ──
+                                                   If namedRanges IsNot Nothing Then
+                                                       For Each nrObj As JObject In namedRanges
                                                            Try
-                                                               Dim colRange = ws.Columns(kv.Key & ":" & kv.Key)
-                                                               colRange.ColumnWidth = kv.Value
+                                                               Dim nrName = nrObj.Value(Of String)("name")
+                                                               Dim nrRange = nrObj.Value(Of String)("range")
+                                                               If Not String.IsNullOrWhiteSpace(nrName) AndAlso Not String.IsNullOrWhiteSpace(nrRange) Then
+                                                                   wb.Names.Add(Name:=nrName, RefersTo:="=" & nrRange)
+                                                               End If
                                                            Catch
                                                            End Try
                                                        Next
                                                    End If
 
-                                                   wb.SaveAs(outputPath, Microsoft.Office.Interop.Excel.XlFileFormat.xlOpenXMLWorkbook)
+                                                   ' ── VBA modules ──
+                                                   If hasVba AndAlso vbaModules IsNot Nothing Then
+                                                       ApplyVbaModules(wb, vbaModules)
+                                                   End If
+
+                                                   ' ── Save ──
+                                                   Dim fmt = If(hasVba, xlOpenXMLWorkbookMacroEnabled, xlOpenXMLWorkbook)
+                                                   wb.SaveAs(outputPath, fmt)
                                                    Return True
+
                                                Catch ex As Exception
                                                    Debug.WriteLine($"CreateExcel error: {ex.Message}")
                                                    Return False
@@ -1454,9 +1586,18 @@ Partial Public Class ThisAddIn
                     _apCurrentAttachments(0).OutputFiles.Add(outputPath)
                 End If
 
+                Dim featureList As New List(Of String)()
+                If sheetDefs.Count > 1 Then featureList.Add($"{sheetDefs.Count} sheets")
+                featureList.Add($"{totalCells} cells")
+                If mergeRanges.Count > 0 Then featureList.Add($"{mergeRanges.Count} merged range(s)")
+                If dataValidations IsNot Nothing AndAlso dataValidations.Count > 0 Then featureList.Add($"{dataValidations.Count} validation(s)")
+                If conditionalFormats IsNot Nothing AndAlso conditionalFormats.Count > 0 Then featureList.Add($"{conditionalFormats.Count} conditional format(s)")
+                If charts IsNot Nothing AndAlso charts.Count > 0 Then featureList.Add($"{charts.Count} chart(s)")
+                If hasVba Then featureList.Add("VBA macros")
+
                 response.Success = True
-                response.Response = $"Excel spreadsheet created: {fileName} ({cellsArray.Count} cells, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
-                ApDashboardLog($"✓ Excel spreadsheet created: {fileName}", "info")
+                response.Response = $"Excel spreadsheet created: {fileName} ({String.Join(", ", featureList)}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ Excel created: {fileName}", "info")
             Else
                 response.Success = False
                 response.Response = "Failed to create Excel spreadsheet."
@@ -1474,6 +1615,660 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  EXCEL CREATION HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Parses a hex color string like "#FF0000" or "FF0000" to an OLE color integer.
+    ''' Returns Nothing if parsing fails.
+    ''' </summary>
+    Private Shared Function ParseHexColor(hexStr As String) As Integer?
+        If String.IsNullOrWhiteSpace(hexStr) Then Return Nothing
+        hexStr = hexStr.TrimStart("#"c)
+        If hexStr.Length <> 6 Then Return Nothing
+        Try
+            Dim r = System.Convert.ToInt32(hexStr.Substring(0, 2), 16)
+            Dim g = System.Convert.ToInt32(hexStr.Substring(2, 2), 16)
+            Dim b = System.Convert.ToInt32(hexStr.Substring(4, 2), 16)
+            ' Excel uses BGR (OLE color) format
+            Return System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.FromArgb(r, g, b))
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Parses column_widths from tool arguments.
+    ''' </summary>
+    Private Shared Function ParseColumnWidths(args As Dictionary(Of String, Object)) As Dictionary(Of String, Double)
+        If args Is Nothing OrElse Not args.ContainsKey("column_widths") Then Return Nothing
+        Dim cwObj = args("column_widths")
+        If Not TypeOf cwObj Is JObject Then Return Nothing
+        Dim result As New Dictionary(Of String, Double)(StringComparer.OrdinalIgnoreCase)
+        For Each prop In DirectCast(cwObj, JObject).Properties()
+            Dim w As Double
+            If Double.TryParse(prop.Value.ToString(), Globalization.NumberStyles.Any,
+                              Globalization.CultureInfo.InvariantCulture, w) Then
+                result(prop.Name.ToUpperInvariant()) = w
+            End If
+        Next
+        Return If(result.Count > 0, result, Nothing)
+    End Function
+
+    ''' <summary>
+    ''' Parses row_heights from tool arguments.
+    ''' </summary>
+    Private Shared Function ParseRowHeights(args As Dictionary(Of String, Object)) As Dictionary(Of Integer, Double)
+        If args Is Nothing OrElse Not args.ContainsKey("row_heights") Then Return Nothing
+        Dim rhObj = args("row_heights")
+        If Not TypeOf rhObj Is JObject Then Return Nothing
+        Dim result As New Dictionary(Of Integer, Double)()
+        For Each prop In DirectCast(rhObj, JObject).Properties()
+            Dim rowNum As Integer
+            Dim h As Double
+            If Integer.TryParse(prop.Name, rowNum) AndAlso
+               Double.TryParse(prop.Value.ToString(), Globalization.NumberStyles.Any,
+                              Globalization.CultureInfo.InvariantCulture, h) Then
+                result(rowNum) = h
+            End If
+        Next
+        Return If(result.Count > 0, result, Nothing)
+    End Function
+
+    ''' <summary>
+    ''' Parses a JSON array from tool arguments by key name.
+    ''' </summary>
+    Private Shared Function ParseJsonArray(args As Dictionary(Of String, Object), key As String) As List(Of JObject)
+        If args Is Nothing OrElse Not args.ContainsKey(key) Then Return Nothing
+        Dim obj = args(key)
+        If Not TypeOf obj Is JArray Then Return Nothing
+        Dim arr = DirectCast(obj, JArray)
+        If arr.Count = 0 Then Return Nothing
+        Return arr.OfType(Of JObject)().ToList()
+    End Function
+
+    ''' <summary>
+    ''' Applies cell data, values, formulas, and rich formatting to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyExcelCells(ws As Microsoft.Office.Interop.Excel.Worksheet, cellsArray As JArray)
+        For Each cellObj As JObject In cellsArray
+            Dim addr = cellObj.Value(Of String)("cell")
+            If String.IsNullOrWhiteSpace(addr) Then Continue For
+
+            Dim cell As Microsoft.Office.Interop.Excel.Range = Nothing
+            Try
+                cell = ws.Range(addr)
+            Catch
+                Continue For
+            End Try
+
+            ' ── Number format (apply before value so formatting takes effect) ──
+            Dim numFmt = cellObj.Value(Of String)("number_format")
+            If Not String.IsNullOrWhiteSpace(numFmt) Then
+                Try : cell.NumberFormat = numFmt : Catch : End Try
+            End If
+
+            ' ── Formula or value ──
+            Dim formula = cellObj.Value(Of String)("formula")
+            If Not String.IsNullOrWhiteSpace(formula) Then
+                Try
+                    cell.Formula2 = formula
+                Catch
+                    Try : cell.Formula = formula
+                    Catch ex2 As Exception
+                        Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                    End Try
+                End Try
+            Else
+                Dim valToken = cellObj("value")
+                If valToken IsNot Nothing Then
+                    Dim valStr = valToken.ToString()
+                    Dim numVal As Double
+                    If Double.TryParse(valStr, Globalization.NumberStyles.Any,
+                                      Globalization.CultureInfo.InvariantCulture, numVal) Then
+                        cell.Value2 = numVal
+                    Else
+                        cell.Value2 = valStr
+                    End If
+                End If
+            End If
+
+            ' ── Font styles ──
+            If GetJBool(cellObj, "bold") Then Try : cell.Font.Bold = True : Catch : End Try
+            If GetJBool(cellObj, "italic") Then Try : cell.Font.Italic = True : Catch : End Try
+            If GetJBool(cellObj, "underline") Then Try : cell.Font.Underline = Microsoft.Office.Interop.Excel.XlUnderlineStyle.xlUnderlineStyleSingle : Catch : End Try
+            If GetJBool(cellObj, "strikethrough") Then Try : cell.Font.Strikethrough = True : Catch : End Try
+
+            Dim fontName = cellObj.Value(Of String)("font_name")
+            If Not String.IsNullOrWhiteSpace(fontName) Then Try : cell.Font.Name = fontName : Catch : End Try
+
+            Dim fontSizeToken = cellObj("font_size")
+            If fontSizeToken IsNot Nothing Then
+                Dim fs As Double
+                If Double.TryParse(fontSizeToken.ToString(), Globalization.NumberStyles.Any,
+                                  Globalization.CultureInfo.InvariantCulture, fs) AndAlso fs > 0 Then
+                    Try : cell.Font.Size = fs : Catch : End Try
+                End If
+            End If
+
+            ' ── Font color ──
+            Dim fontColor = ParseHexColor(cellObj.Value(Of String)("font_color"))
+            If fontColor.HasValue Then Try : cell.Font.Color = fontColor.Value : Catch : End Try
+
+            ' ── Background color ──
+            Dim bgColor = ParseHexColor(cellObj.Value(Of String)("bg_color"))
+            If bgColor.HasValue Then
+                Try
+                    cell.Interior.Color = bgColor.Value
+                    cell.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
+                Catch
+                End Try
+            End If
+
+            ' ── Alignment ──
+            Dim hAlign = cellObj.Value(Of String)("h_align")
+            If Not String.IsNullOrWhiteSpace(hAlign) Then
+                Try
+                    Select Case hAlign.ToLowerInvariant()
+                        Case "left" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignLeft
+                        Case "center" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignCenter
+                        Case "right" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignRight
+                    End Select
+                Catch
+                End Try
+            End If
+
+            Dim vAlign = cellObj.Value(Of String)("v_align")
+            If Not String.IsNullOrWhiteSpace(vAlign) Then
+                Try
+                    Select Case vAlign.ToLowerInvariant()
+                        Case "top" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignTop
+                        Case "center" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignCenter
+                        Case "bottom" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignBottom
+                    End Select
+                Catch
+                End Try
+            End If
+
+            If GetJBool(cellObj, "wrap_text") Then Try : cell.WrapText = True : Catch : End Try
+
+            ' ── Borders ──
+            Dim borderStyle = cellObj.Value(Of String)("border")
+            If Not String.IsNullOrWhiteSpace(borderStyle) Then
+                Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
+                ApplyBorderStyle(cell, borderStyle, borderColor)
+            End If
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Helper to read a boolean from a JObject token.
+    ''' </summary>
+    Private Shared Function GetJBool(obj As JObject, key As String) As Boolean
+        Dim token = obj(key)
+        If token Is Nothing Then Return False
+        If token.Type = JTokenType.Boolean Then Return CBool(token)
+        Dim s = token.ToString()
+        Dim result As Boolean
+        If Boolean.TryParse(s, result) Then Return result
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Applies border styles to a cell range.
+    ''' </summary>
+    Private Shared Sub ApplyBorderStyle(cell As Microsoft.Office.Interop.Excel.Range,
+                                         borderStyle As String, borderColor As Integer?)
+        ' Map style names to Excel line style and weight
+        Dim lineStyle As Microsoft.Office.Interop.Excel.XlLineStyle = Microsoft.Office.Interop.Excel.XlLineStyle.xlContinuous
+        Dim weight As Microsoft.Office.Interop.Excel.XlBorderWeight = Microsoft.Office.Interop.Excel.XlBorderWeight.xlThin
+
+        Dim style = borderStyle.ToLowerInvariant()
+
+        If style.Contains("medium") Then
+            weight = Microsoft.Office.Interop.Excel.XlBorderWeight.xlMedium
+        ElseIf style.Contains("thick") Then
+            weight = Microsoft.Office.Interop.Excel.XlBorderWeight.xlThick
+        End If
+
+        Try
+            If style.StartsWith("all") OrElse style = "thin" OrElse style = "medium" OrElse style = "thick" Then
+                ' All four sides
+                Dim edges() As Microsoft.Office.Interop.Excel.XlBordersIndex = {
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeLeft,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeTop,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeBottom,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeRight
+                }
+                For Each edge In edges
+                    cell.Borders(edge).LineStyle = lineStyle
+                    cell.Borders(edge).Weight = weight
+                    If borderColor.HasValue Then cell.Borders(edge).Color = borderColor.Value
+                Next
+            ElseIf style.StartsWith("bottom") Then
+                cell.Borders(Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeBottom).LineStyle = lineStyle
+                cell.Borders(Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeBottom).Weight = weight
+                If borderColor.HasValue Then cell.Borders(Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeBottom).Color = borderColor.Value
+            ElseIf style.StartsWith("outline") Then
+                Dim edges() As Microsoft.Office.Interop.Excel.XlBordersIndex = {
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeLeft,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeTop,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeBottom,
+                    Microsoft.Office.Interop.Excel.XlBordersIndex.xlEdgeRight
+                }
+                For Each edge In edges
+                    cell.Borders(edge).LineStyle = lineStyle
+                    cell.Borders(edge).Weight = weight
+                    If borderColor.HasValue Then cell.Borders(edge).Color = borderColor.Value
+                Next
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Applies column widths to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyColumnWidths(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                          widths As Dictionary(Of String, Double))
+        For Each kv In widths
+            Try
+                Dim colRange = ws.Columns(kv.Key & ":" & kv.Key)
+                colRange.ColumnWidth = kv.Value
+            Catch
+            End Try
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Applies row heights to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyRowHeights(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                        heights As Dictionary(Of Integer, Double))
+        For Each kv In heights
+            Try
+                ws.Rows(kv.Key).RowHeight = kv.Value
+            Catch
+            End Try
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Applies data validation rules to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyDataValidations(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                              validations As List(Of JObject))
+        For Each dvObj In validations
+            Try
+                Dim rangeName = dvObj.Value(Of String)("range")
+                If String.IsNullOrWhiteSpace(rangeName) Then Continue For
+
+                Dim dvRange = ws.Range(rangeName)
+                dvRange.Validation.Delete() ' Clear existing validation
+
+                Dim dvType = If(dvObj.Value(Of String)("type"), "list").ToLowerInvariant()
+                Dim formula1 = dvObj.Value(Of String)("formula1")
+                Dim formula2 = dvObj.Value(Of String)("formula2")
+                Dim operatorStr = If(dvObj.Value(Of String)("operator"), "between").ToLowerInvariant()
+
+                ' Map type to Excel constant
+                Dim xlType As Integer
+                Select Case dvType
+                    Case "list" : xlType = 3 ' xlValidateList
+                    Case "whole_number" : xlType = 1 ' xlValidateWholeNumber
+                    Case "decimal" : xlType = 2 ' xlValidateDecimal
+                    Case "date" : xlType = 4 ' xlValidateDate
+                    Case "text_length" : xlType = 6 ' xlValidateTextLength
+                    Case "custom" : xlType = 7 ' xlValidateCustom
+                    Case Else : xlType = 3
+                End Select
+
+                ' Map operator to Excel constant
+                Dim xlOp As Integer = 1 ' xlBetween
+                Select Case operatorStr
+                    Case "between" : xlOp = 1
+                    Case "not_between" : xlOp = 2
+                    Case "equal" : xlOp = 3
+                    Case "not_equal" : xlOp = 4
+                    Case "greater_than" : xlOp = 5
+                    Case "less_than" : xlOp = 6
+                    Case "greater_than_or_equal" : xlOp = 7
+                    Case "less_than_or_equal" : xlOp = 8
+                End Select
+
+                If dvType = "list" Then
+                    ' For list validation, formula1 is the comma-separated list.
+                    ' LLMs sometimes wrap individual items in quotes (e.g., "Yes","No","Maybe")
+                    ' which causes the first dropdown item to start with " and the last to end with ".
+                    ' Strip any such quoting to get clean values for Excel.
+                    Dim cleanedFormula1 = formula1
+                    If Not String.IsNullOrWhiteSpace(cleanedFormula1) Then
+                        ' Remove quotes wrapping individual items: "Yes","No" → Yes,No
+                        Dim parts = cleanedFormula1.Split(","c)
+                        For i = 0 To parts.Length - 1
+                            parts(i) = parts(i).Trim().Trim(""""c).Trim("'"c)
+                        Next
+                        cleanedFormula1 = String.Join(",", parts)
+                    End If
+                    dvRange.Validation.Add(Type:=xlType, AlertStyle:=1,
+                                           Formula1:=cleanedFormula1)
+                ElseIf Not String.IsNullOrWhiteSpace(formula2) Then
+                    dvRange.Validation.Add(Type:=xlType, AlertStyle:=1,
+                                           Operator:=xlOp,
+                                           Formula1:=formula1, Formula2:=formula2)
+                Else
+                    dvRange.Validation.Add(Type:=xlType, AlertStyle:=1,
+                                           Operator:=xlOp,
+                                           Formula1:=formula1)
+                End If
+
+                ' Show dropdown for list type
+                Dim showDropdown = dvObj("show_dropdown")
+                If showDropdown IsNot Nothing AndAlso showDropdown.Type = JTokenType.Boolean Then
+                    dvRange.Validation.InCellDropdown = CBool(showDropdown)
+                End If
+
+                ' Input message
+                Dim inputTitle = dvObj.Value(Of String)("input_title")
+                Dim inputMsg = dvObj.Value(Of String)("input_message")
+                If Not String.IsNullOrWhiteSpace(inputTitle) OrElse Not String.IsNullOrWhiteSpace(inputMsg) Then
+                    dvRange.Validation.ShowInput = True
+                    If Not String.IsNullOrWhiteSpace(inputTitle) Then dvRange.Validation.InputTitle = inputTitle
+                    If Not String.IsNullOrWhiteSpace(inputMsg) Then dvRange.Validation.InputMessage = inputMsg
+                End If
+
+                ' Error message
+                Dim errorTitle = dvObj.Value(Of String)("error_title")
+                Dim errorMsg = dvObj.Value(Of String)("error_message")
+                If Not String.IsNullOrWhiteSpace(errorTitle) OrElse Not String.IsNullOrWhiteSpace(errorMsg) Then
+                    dvRange.Validation.ShowError = True
+                    If Not String.IsNullOrWhiteSpace(errorTitle) Then dvRange.Validation.ErrorTitle = errorTitle
+                    If Not String.IsNullOrWhiteSpace(errorMsg) Then dvRange.Validation.ErrorMessage = errorMsg
+                End If
+
+            Catch ex As Exception
+                Debug.WriteLine($"Data validation error: {ex.Message}")
+            End Try
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Applies conditional formatting rules to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyConditionalFormats(ws As Microsoft.Office.Interop.Excel.Worksheet,
+                                                formats As List(Of JObject))
+        For Each cfObj In formats
+            Try
+                Dim rangeName = cfObj.Value(Of String)("range")
+                If String.IsNullOrWhiteSpace(rangeName) Then Continue For
+
+                Dim cfRange = ws.Range(rangeName)
+                Dim cfType = If(cfObj.Value(Of String)("type"), "cell_value").ToLowerInvariant()
+                Dim operatorStr = If(cfObj.Value(Of String)("operator"), "greater_than").ToLowerInvariant()
+                Dim formula1 = cfObj.Value(Of String)("formula1")
+                Dim formula2 = cfObj.Value(Of String)("formula2")
+
+                ' Map operator
+                Dim xlOp As Integer = 5 ' xlGreater
+                Select Case operatorStr
+                    Case "between" : xlOp = 1
+                    Case "not_between" : xlOp = 2
+                    Case "equal" : xlOp = 3
+                    Case "not_equal" : xlOp = 4
+                    Case "greater_than" : xlOp = 5
+                    Case "less_than" : xlOp = 6
+                    Case "greater_than_or_equal" : xlOp = 7
+                    Case "less_than_or_equal" : xlOp = 8
+                End Select
+
+                Dim fc As Microsoft.Office.Interop.Excel.FormatCondition = Nothing
+
+                Select Case cfType
+                    Case "cell_value"
+                        If Not String.IsNullOrWhiteSpace(formula2) Then
+                            fc = CType(cfRange.FormatConditions.Add(
+                                Type:=Microsoft.Office.Interop.Excel.XlFormatConditionType.xlCellValue,
+                                Operator:=xlOp, Formula1:=formula1, Formula2:=formula2),
+                                Microsoft.Office.Interop.Excel.FormatCondition)
+                        Else
+                            fc = CType(cfRange.FormatConditions.Add(
+                                Type:=Microsoft.Office.Interop.Excel.XlFormatConditionType.xlCellValue,
+                                Operator:=xlOp, Formula1:=formula1),
+                                Microsoft.Office.Interop.Excel.FormatCondition)
+                        End If
+
+                    Case "text_contains"
+                        fc = CType(cfRange.FormatConditions.Add(
+                            Type:=Microsoft.Office.Interop.Excel.XlFormatConditionType.xlTextString,
+                            TextOperator:=Microsoft.Office.Interop.Excel.XlContainsOperator.xlContains,
+                            String:=formula1),
+                            Microsoft.Office.Interop.Excel.FormatCondition)
+
+                    Case "duplicate"
+                        fc = CType(cfRange.FormatConditions.AddUniqueValues(),
+                            Microsoft.Office.Interop.Excel.UniqueValues)
+                        CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).DupeUnique = Microsoft.Office.Interop.Excel.XlDupeUnique.xlDuplicate
+                        ' UniqueValues doesn't have the same format interface; apply formatting directly
+                        Dim fmtBgColor = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
+                        If fmtBgColor.HasValue Then
+                            Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Interior.Color = fmtBgColor.Value : Catch : End Try
+                        End If
+                        Dim fmtFontColor = ParseHexColor(cfObj.Value(Of String)("format_font_color"))
+                        If fmtFontColor.HasValue Then
+                            Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Font.Color = fmtFontColor.Value : Catch : End Try
+                        End If
+                        Continue For ' Skip standard formatting below
+
+                    Case "unique"
+                        fc = CType(cfRange.FormatConditions.AddUniqueValues(),
+                            Microsoft.Office.Interop.Excel.UniqueValues)
+                        CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).DupeUnique = Microsoft.Office.Interop.Excel.XlDupeUnique.xlUnique
+                        Dim fmtBgColorU = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
+                        If fmtBgColorU.HasValue Then
+                            Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Interior.Color = fmtBgColorU.Value : Catch : End Try
+                        End If
+                        Continue For
+
+                    Case "color_scale"
+                        cfRange.FormatConditions.AddColorScale(ColorScaleType:=3) ' 3-color scale
+                        Continue For
+
+                    Case "data_bar"
+                        cfRange.FormatConditions.AddDatabar()
+                        Continue For
+
+                    Case "icon_set"
+                        cfRange.FormatConditions.AddIconSetCondition()
+                        Continue For
+
+                    Case "top_10"
+                        fc = CType(cfRange.FormatConditions.AddTop10(),
+                            Microsoft.Office.Interop.Excel.Top10)
+                        Dim rank As Integer = 10
+                        If Not String.IsNullOrWhiteSpace(formula1) Then
+                            Integer.TryParse(formula1, rank)
+                        End If
+                        CType(fc, Microsoft.Office.Interop.Excel.Top10).Rank = rank
+                        Dim fmtBgColorT = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
+                        If fmtBgColorT.HasValue Then
+                            Try : CType(fc, Microsoft.Office.Interop.Excel.Top10).Interior.Color = fmtBgColorT.Value : Catch : End Try
+                        End If
+                        Continue For
+
+                    Case Else
+                        Continue For
+                End Select
+
+                ' Apply formatting to the FormatCondition
+                If fc IsNot Nothing Then
+                    Dim fmtFontColor = ParseHexColor(cfObj.Value(Of String)("format_font_color"))
+                    If fmtFontColor.HasValue Then Try : fc.Font.Color = fmtFontColor.Value : Catch : End Try
+
+                    Dim fmtBgColor = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
+                    If fmtBgColor.HasValue Then
+                        Try
+                            fc.Interior.Color = fmtBgColor.Value
+                            fc.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
+                        Catch
+                        End Try
+                    End If
+
+                    If GetJBool(cfObj, "format_bold") Then Try : fc.Font.Bold = True : Catch : End Try
+                End If
+
+            Catch ex As Exception
+                Debug.WriteLine($"Conditional format error: {ex.Message}")
+            End Try
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Creates charts and places them on worksheets.
+    ''' </summary>
+    Private Shared Sub ApplyCharts(wb As Microsoft.Office.Interop.Excel.Workbook,
+                                    charts As List(Of JObject),
+                                    sheetDefs As List(Of (SheetName As String, Cells As JArray)))
+        For Each chartObj In charts
+            Try
+                Dim chartType = If(chartObj.Value(Of String)("type"), "column").ToLowerInvariant()
+                Dim dataRange = chartObj.Value(Of String)("data_range")
+                Dim chartTitle = chartObj.Value(Of String)("title")
+                Dim position = If(chartObj.Value(Of String)("position"), "E2")
+                Dim chartSheetName = chartObj.Value(Of String)("sheet_name")
+
+                If String.IsNullOrWhiteSpace(dataRange) Then Continue For
+
+                ' Determine target worksheet
+                Dim targetWs As Microsoft.Office.Interop.Excel.Worksheet
+                If Not String.IsNullOrWhiteSpace(chartSheetName) Then
+                    Try
+                        targetWs = CType(wb.Sheets(chartSheetName), Microsoft.Office.Interop.Excel.Worksheet)
+                    Catch
+                        targetWs = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
+                    End Try
+                Else
+                    targetWs = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
+                End If
+
+                ' Parse width/height
+                Dim chartWidth As Double = 480
+                Dim chartHeight As Double = 300
+                Dim wToken = chartObj("width")
+                If wToken IsNot Nothing Then Double.TryParse(wToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartWidth)
+                Dim hToken = chartObj("height")
+                If hToken IsNot Nothing Then Double.TryParse(hToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartHeight)
+
+                ' Get position from cell
+                Dim posCell = targetWs.Range(position)
+                Dim posLeft As Double = CDbl(posCell.Left)
+                Dim posTop As Double = CDbl(posCell.Top)
+
+                ' Map chart type to Excel constant
+                Dim xlChartType As Microsoft.Office.Interop.Excel.XlChartType
+                Select Case chartType
+                    Case "column" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlColumnClustered
+                    Case "bar" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlBarClustered
+                    Case "line" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlLine
+                    Case "pie" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlPie
+                    Case "area" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlArea
+                    Case "scatter" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlXYScatter
+                    Case "doughnut" : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlDoughnut
+                    Case Else : xlChartType = Microsoft.Office.Interop.Excel.XlChartType.xlColumnClustered
+                End Select
+
+                ' Add chart as embedded ChartObject
+                Dim chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
+                Dim chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
+                Dim chart = chartObject.Chart
+
+                chart.SetSourceData(targetWs.Range(dataRange))
+                chart.ChartType = xlChartType
+
+                If Not String.IsNullOrWhiteSpace(chartTitle) Then
+                    chart.HasTitle = True
+                    chart.ChartTitle.Text = chartTitle
+                End If
+
+            Catch ex As Exception
+                Debug.WriteLine($"Chart creation error: {ex.Message}")
+            End Try
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Applies print/page setup to a worksheet.
+    ''' </summary>
+    Private Shared Sub ApplyPrintSetup(ws As Microsoft.Office.Interop.Excel.Worksheet, setup As JObject)
+        Try
+            Dim orientation = setup.Value(Of String)("orientation")
+            If Not String.IsNullOrWhiteSpace(orientation) Then
+                Select Case orientation.ToLowerInvariant()
+                    Case "landscape" : ws.PageSetup.Orientation = Microsoft.Office.Interop.Excel.XlPageOrientation.xlLandscape
+                    Case "portrait" : ws.PageSetup.Orientation = Microsoft.Office.Interop.Excel.XlPageOrientation.xlPortrait
+                End Select
+            End If
+
+            Dim fitWideToken = setup("fit_to_pages_wide")
+            If fitWideToken IsNot Nothing Then
+                ws.PageSetup.Zoom = False
+                ws.PageSetup.FitToPagesWide = CInt(fitWideToken)
+            End If
+
+            Dim fitTallToken = setup("fit_to_pages_tall")
+            If fitTallToken IsNot Nothing Then
+                ws.PageSetup.Zoom = False
+                ws.PageSetup.FitToPagesTall = CInt(fitTallToken)
+            End If
+
+            Dim headerText = setup.Value(Of String)("header_text")
+            If Not String.IsNullOrWhiteSpace(headerText) Then ws.PageSetup.CenterHeader = headerText
+
+            Dim footerText = setup.Value(Of String)("footer_text")
+            If Not String.IsNullOrWhiteSpace(footerText) Then ws.PageSetup.CenterFooter = footerText
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Injects VBA code modules into the workbook using late binding to avoid
+    ''' a hard reference to Microsoft.Vbe.Interop.
+    ''' Requires "Trust access to the VBA project object model" to be enabled in Excel Trust Center settings.
+    ''' </summary>
+    Private Shared Sub ApplyVbaModules(wb As Microsoft.Office.Interop.Excel.Workbook, modules As JArray)
+        For Each modObj As JObject In modules
+            Try
+                Dim modName = If(modObj.Value(Of String)("name"), "Module1")
+                Dim modCode = modObj.Value(Of String)("code")
+                Dim modType = If(modObj.Value(Of String)("type"), "module").ToLowerInvariant()
+
+                If String.IsNullOrWhiteSpace(modCode) Then Continue For
+
+                ' Use CallByName to fully late-bind and avoid requiring Microsoft.Vbe.Interop reference.
+                ' Even with Option Strict Off, wb.VBProject resolves via the typed Workbook interface
+                ' which pulls in the Vbe.Interop assembly at compile time.
+                Dim vbProj As Object = Microsoft.VisualBasic.Interaction.CallByName(wb, "VBProject", CallType.Get)
+                Dim vbComponents As Object = Microsoft.VisualBasic.Interaction.CallByName(vbProj, "VBComponents", CallType.Get)
+
+                If modType = "thisworkbook" Then
+                    ' Insert code into the ThisWorkbook module
+                    Dim tbComponent As Object = vbComponents("ThisWorkbook")
+                    Dim codeMod As Object = Microsoft.VisualBasic.Interaction.CallByName(tbComponent, "CodeModule", CallType.Get)
+                    Microsoft.VisualBasic.Interaction.CallByName(codeMod, "AddFromString", CallType.Method, modCode)
+                Else
+                    ' vbext_ct_StdModule = 1, vbext_ct_ClassModule = 2
+                    Dim componentType As Integer = If(modType = "class", 2, 1)
+                    Dim newMod As Object = Microsoft.VisualBasic.Interaction.CallByName(vbComponents, "Add", CallType.Method, componentType)
+                    Microsoft.VisualBasic.Interaction.CallByName(newMod, "Name", CallType.Let, modName)
+                    Dim codeMod As Object = Microsoft.VisualBasic.Interaction.CallByName(newMod, "CodeModule", CallType.Get)
+                    Microsoft.VisualBasic.Interaction.CallByName(codeMod, "AddFromString", CallType.Method, modCode)
+                End If
+            Catch ex As Exception
+                Debug.WriteLine($"VBA module insertion error: {ex.Message}")
+            End Try
+        Next
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: create_word_document
@@ -3054,32 +3849,45 @@ Partial Public Class ThisAddIn
             ' Ensure font resolver is configured before any XFont usage
             EnsureApPdfSharpFontResolver()
 
-            ' Copy source, then open for modification
-            File.Copy(att.TempFilePath, outputPath, True)
-            Using doc = PdfSharp.Pdf.IO.PdfReader.Open(outputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
-                Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
-                Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
-                    PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
+            ' Write to a temp file first, then move to final path to avoid lock conflicts
+            Dim tempOutputPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
 
-                For Each page In doc.Pages
-                    Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
-                        Dim state = gfx.Save()
+            Try
+                ' Copy source to temp output
+                File.Copy(att.TempFilePath, tempOutputPath, True)
+                Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempOutputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                    Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
+                    Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
+                        PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
 
-                        ' Move origin to center of page
-                        gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
-                        gfx.RotateTransform(-45)
+                    For Each page In doc.Pages
+                        Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                            Dim state = gfx.Save()
 
-                        ' Measure and draw the watermark text centered
-                        Dim size = gfx.MeasureString(watermarkText, wmFont)
-                        gfx.DrawString(watermarkText, wmFont, wmBrush,
-                                       New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
-                                       PdfSharp.Drawing.XStringFormats.Center)
+                            ' Move origin to center of page
+                            gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
+                            gfx.RotateTransform(-45)
 
-                        gfx.Restore(state)
-                    End Using
-                Next
-                doc.Save(outputPath)
-            End Using
+                            ' Measure and draw the watermark text centered
+                            Dim size = gfx.MeasureString(watermarkText, wmFont)
+                            gfx.DrawString(watermarkText, wmFont, wmBrush,
+                                           New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
+                                           PdfSharp.Drawing.XStringFormats.Center)
+
+                            gfx.Restore(state)
+                        End Using
+                    Next
+                    doc.Save(tempOutputPath)
+                End Using
+
+                ' All handles released — safe to move
+                If File.Exists(outputPath) Then File.Delete(outputPath)
+                File.Move(tempOutputPath, outputPath)
+            Finally
+                ' Clean up temp file on any failure
+                Try : If File.Exists(tempOutputPath) Then File.Delete(tempOutputPath)
+                Catch : End Try
+            End Try
 
             att.OutputFiles.Add(outputPath)
             response.Success = True
@@ -3217,64 +4025,113 @@ Partial Public Class ThisAddIn
             context.Log($"Converting PDF to Word: {fileName}")
             ApDashboardLog($"📄 Converting PDF to Word: {fileName}", "step")
 
-            Dim success = Await SwitchToUi(Function()
-                                               Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
-                                               Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
-                                               Dim weCreated As Boolean = False
-                                               Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel =
-                                                   Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
-                                               Try
-                                                   Try
-                                                       wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
-                                                   Catch
-                                                       wordApp = New Microsoft.Office.Interop.Word.Application()
-                                                       wordApp.Visible = False
-                                                       weCreated = True
-                                                   End Try
-                                                   ' Save and suppress alerts to prevent third-party PDF converter dialogs
-                                                   prevAlerts = wordApp.DisplayAlerts
-                                                   wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
-                                                   wordApp.ScreenUpdating = False
-                                                   wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
-                                                   ' Word can open PDFs and convert them to editable .docx
-                                                   doc = wordApp.Documents.Open(
-                                                       FileName:=att.TempFilePath,
-                                                       [ReadOnly]:=False,
-                                                       Visible:=False,
-                                                       AddToRecentFiles:=False,
-                                                       ConfirmConversions:=False,
-                                                       OpenAndRepair:=False)
-                                                   doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
-                                                   Return True
-                                               Catch ex As Exception
-                                                   Debug.WriteLine($"PdfToWord error: {ex.Message}")
-                                                   Return False
-                                               Finally
-                                                   Try : If doc IsNot Nothing Then doc.Close(False)
-                                                   Catch : End Try
-                                                   Try
-                                                       If wordApp IsNot Nothing Then
-                                                           wordApp.DisplayAlerts = prevAlerts
-                                                           wordApp.ScreenUpdating = True
-                                                           wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityByUI
-                                                       End If
-                                                   Catch : End Try
-                                                   If weCreated AndAlso wordApp IsNot Nothing Then
-                                                       Try : wordApp.Quit(False) : Catch : End Try
-                                                   End If
-                                               End Try
-                                           End Function)
+            ' Use a timeout to prevent indefinite UI thread blocking
+            Dim uiTask = SwitchToUi(Function()
+                                        Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
+                                        Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+                                        Dim weCreated As Boolean = False
+                                        Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel =
+                                            Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+                                        Dim prevAutoSec As Microsoft.Office.Core.MsoAutomationSecurity =
+                                            Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityByUI
+                                        Dim prevFileConverters As Object = Nothing
+                                        Try
+                                            Try
+                                                wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
+                                            Catch
+                                                wordApp = New Microsoft.Office.Interop.Word.Application()
+                                                wordApp.Visible = False
+                                                weCreated = True
+                                            End Try
+
+                                            ' Capture current state BEFORE modifying
+                                            prevAlerts = wordApp.DisplayAlerts
+                                            prevAutoSec = wordApp.AutomationSecurity
+
+                                            ' Suppress all alerts and macro execution
+                                            wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+                                            wordApp.ScreenUpdating = False
+                                            wordApp.AutomationSecurity = Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityForceDisable
+
+                                            ' Disable third-party file format converters to prevent modal dialogs
+                                            ' from Adobe Acrobat, Foxit, Nuance, etc.
+                                            Try
+                                                prevFileConverters = wordApp.Options.ConfirmConversions
+                                                wordApp.Options.ConfirmConversions = False
+                                            Catch
+                                            End Try
+
+                                            ' Word can open PDFs and convert them to editable .docx
+                                            ' Using Format:=wdOpenFormatAuto (0) lets Word use its BUILT-IN
+                                            ' PDF reflow engine rather than deferring to a third-party converter.
+                                            doc = wordApp.Documents.Open(
+                                                FileName:=att.TempFilePath,
+                                                [ReadOnly]:=False,
+                                                Visible:=False,
+                                                AddToRecentFiles:=False,
+                                                ConfirmConversions:=False,
+                                                OpenAndRepair:=False,
+                                                Format:=0) ' wdOpenFormatAuto = 0
+
+                                            doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                                            Return True
+                                        Catch ex As Exception
+                                            Debug.WriteLine($"PdfToWord error: {ex.Message}")
+                                            Return False
+                                        Finally
+                                            Try : If doc IsNot Nothing Then doc.Close(False)
+                                            Catch : End Try
+                                            Try
+                                                If wordApp IsNot Nothing Then
+                                                    wordApp.DisplayAlerts = prevAlerts
+                                                    wordApp.ScreenUpdating = True
+                                                    wordApp.AutomationSecurity = prevAutoSec
+                                                    Try
+                                                        If prevFileConverters IsNot Nothing Then
+                                                            wordApp.Options.ConfirmConversions = CBool(prevFileConverters)
+                                                        End If
+                                                    Catch
+                                                    End Try
+                                                End If
+                                            Catch : End Try
+                                            If weCreated AndAlso wordApp IsNot Nothing Then
+                                                Try : wordApp.Quit(False) : Catch : End Try
+                                            End If
+                                        End Try
+                                    End Function)
+
+            ' Apply a 120-second timeout to prevent indefinite UI thread blocking
+            Dim timeoutTask = Task.Delay(TimeSpan.FromSeconds(120), ct)
+            Dim completedTask = Await Task.WhenAny(uiTask, timeoutTask)
+
+            Dim success As Boolean = False
+            If completedTask Is uiTask Then
+                success = Await uiTask
+            Else
+                ' Timeout or cancellation
+                response.Success = False
+                response.Response = $"PDF to Word conversion timed out for '{fileName}'. The PDF may be too large, corrupted, or a third-party converter dialog may be blocking. Check if any dialog is open in Word."
+                ApDashboardLog($"⚠ PdfToWord timed out: {fileName}", "warn")
+                Return response
+            End If
 
             If success AndAlso File.Exists(outputPath) Then
                 att.OutputFiles.Add(outputPath)
                 response.Success = True
-                response.Response = $"Converted '{fileName}' to Word: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). This file can now be used with compare_word_documents."
+                response.Response = $"Converted '{fileName}' to Word: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
+                    "This file can now be used with compare_word_documents. " &
+                    "Note: Word does NOT perform OCR — if the PDF is a scanned image, the resulting .docx will contain images without extracted text."
                 ApDashboardLog($"✓ Converted to Word: {outputName}", "info")
             Else
                 response.Success = False
-                response.Response = $"Failed to convert '{fileName}' to Word. The PDF may be image-only or corrupted."
+                response.Response = $"Failed to convert '{fileName}' to Word. The PDF may be image-only, corrupted, or a third-party PDF converter add-in may have interfered. " &
+                    "Ensure no PDF add-ins (Adobe Acrobat, Foxit, etc.) are registered as Word file converters."
             End If
 
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
         Catch ex As Exception
             response.Success = False
             response.ErrorMessage = ex.Message
@@ -3283,7 +4140,6 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
-
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: search_in_attachments

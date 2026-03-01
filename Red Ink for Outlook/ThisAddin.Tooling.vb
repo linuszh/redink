@@ -92,6 +92,12 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public MaxToolIterations As Integer = 10
 
+    ''' <summary>
+    ''' Holds the active ToolExecutionContext during an ExecuteToolingLoop run.
+    ''' Used by ApDashboardLog to route messages to the Chat Agent's LogWindow.
+    ''' </summary>
+    Private _activeToolingContext As ToolExecutionContext = Nothing
+
 #Region "WebView2 Web Content Retrieval"
 
     ''' <summary>
@@ -647,14 +653,26 @@ Partial Public Class ThisAddIn
 
         ''' <summary>
         ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
+        ''' Tool instructions and tool responses are logged as length stubs only (full content is already
+        ''' recorded via <see cref="LogModelConfigOnce"/> and <see cref="LogRawResponse"/>).
         ''' </summary>
         Public Shared Sub LogPreMainLlmCallSnapshot()
             If Not _isEnabled Then Return
             WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
             WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
             WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: {SafeStr(INI_APICall_ToolInstructions_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {SafeStr(INI_APICall_ToolResponses_2)}")
+
+            Dim toolInstr = SafeStr(INI_APICall_ToolInstructions_2)
+            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: ({toolInstr.Length} chars)")
+
+            Dim toolResp = SafeStr(INI_APICall_ToolResponses_2)
+            If toolResp.Length <= 500 Then
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {toolResp}")
+            Else
+                Dim excerpt = toolResp.Substring(0, 500) & "..."
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: ({toolResp.Length} chars) {excerpt}")
+            End If
+
             WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
         End Sub
 
@@ -685,6 +703,28 @@ Partial Public Class ThisAddIn
             WriteLine("RESP", $"Raw response ({source}) begins:")
             WriteRaw("RESP", vbCrLf & vbCrLf & SafeStr(rawResponse) & vbCrLf & vbCrLf)
             WriteLine("RESP", $"Raw response ({source}) ends.")
+        End Sub
+
+        ''' <summary>
+        ''' Logs a brief stub of a raw response (length + short excerpt) without the full content.
+        ''' Used for main LLM responses to keep the log file focused on tool calls.
+        ''' </summary>
+        ''' <param name="source">Source label (e.g. "Main LLM()").</param>
+        ''' <param name="rawResponse">Raw response text.</param>
+        ''' <param name="excerptLength">Maximum number of characters to include in the excerpt.</param>
+        Public Shared Sub LogRawResponseStub(source As String, rawResponse As String, Optional excerptLength As Integer = 200)
+            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
+
+            Dim safe As String = SafeStr(rawResponse)
+            Dim charCount As Integer = safe.Length
+            Dim excerpt As String = If(charCount <= excerptLength,
+                safe,
+                safe.Substring(0, excerptLength) & "...")
+
+            WriteLine("RESP", $"Raw response ({source}): {charCount} chars")
+            If charCount > 0 Then
+                WriteLine("RESP", $"Excerpt: {excerpt}")
+            End If
         End Sub
 
         ''' <summary>
@@ -1043,6 +1083,9 @@ Partial Public Class ThisAddIn
             End If
         End If
 
+        ' Make context available to ApDashboardLog for Chat Agent routing
+        _activeToolingContext = context
+
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
             context.Log($"Selected tools: {String.Join(", ", selectedTools.Select(Function(t) t.ToolName))}")
@@ -1194,7 +1237,7 @@ Partial Public Class ThisAddIn
                     End Using
                 End Using
 
-                ToolingFileLogger.LogRawResponse("Main LLM()", currentResponse)
+                ToolingFileLogger.LogRawResponseStub("Main LLM()", currentResponse)
 
                 If String.IsNullOrWhiteSpace(currentResponse) Then
                     context.LogWarn("Empty response from LLM", details:="LLM() returned null/empty/whitespace.")
@@ -1331,7 +1374,7 @@ Partial Public Class ThisAddIn
                             If Not String.IsNullOrWhiteSpace(finalResponse) Then
                                 currentResponse = finalResponse
                                 context.Log($"Final response received ({currentResponse.Length} chars)")
-                                ToolingFileLogger.LogRawResponse("Main LLM() - Forced Final", currentResponse)
+                                ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
                             Else
                                 context.LogWarn("Empty response from forced final LLM call")
                             End If
@@ -1394,6 +1437,9 @@ Partial Public Class ThisAddIn
                     context.Log($"Log saved to: {ToolingFileLogger.LogFilePath}")
                 End If
             End If
+
+            ' Clear the context reference so ApDashboardLog stops routing
+            _activeToolingContext = Nothing
         End Try
     End Function
 #End Region
@@ -1860,10 +1906,27 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
 
-        ' ── AutoPilot internal tool routing ──
-        If _apActive AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
+        ' ── AutoPilot / Chat Agent internal tool routing ──
+        If (_apActive OrElse _chatAgentActive) AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
             Dim apResult = Await TryExecuteAutoPilotTool(toolCall, context, cancellationToken)
-            If apResult IsNot Nothing Then Return apResult
+            If apResult IsNot Nothing Then
+                ' Record for "Sources used:" footer
+                If _apCurrentToolCallLog IsNot Nothing Then
+                    Dim elapsed = DateTime.Now - apResult.Timestamp
+                    Dim excerpt = BuildResultExcerpt(apResult.Response, 80)
+                    RecordAutoPilotToolCall(
+                        toolCall.ToolName,
+                        If(toolConfig?.ModelDescription, toolCall.ToolName),
+                        BuildCondensedParamSummary(toolCall.Arguments),
+                        isInternalTool:=True,
+                        wasSuccessful:=apResult.Success,
+                        resultExcerpt:=excerpt,
+                        elapsed:=elapsed,
+                        urls:=Nothing)
+                End If
+
+                Return apResult
+            End If
         End If
 
         Dim response As New ToolResponse() With {
@@ -1896,12 +1959,12 @@ Partial Public Class ThisAddIn
                 context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
             End If
 
-            ' ── AutoPilot: record external tool call for dashboard + sources footer ──
-            If _apActive AndAlso _apCurrentToolCallLog IsNot Nothing Then
+            ' ── AutoPilot / Chat Agent: record tool call for dashboard + sources footer ──
+            If (_apActive OrElse _chatAgentActive) AndAlso _apCurrentToolCallLog IsNot Nothing Then
                 Dim elapsed = DateTime.Now - response.Timestamp
                 Dim excerpt = BuildResultExcerpt(response.Response, 80)
 
-                ' Log to AutoPilot dashboard (Feature 3)
+                ' Log to dashboard (ApDashboardLog routes to AutoPilot OR Chat Agent automatically)
                 ApDashboardLog($"🔧 External tool: {toolCall.ToolName}{paramSummary}", "info")
                 If response.Success Then
                     ApDashboardLog($"   ✓ {excerpt}", "info")
@@ -1909,7 +1972,7 @@ Partial Public Class ThisAddIn
                     ApDashboardLog($"   ✗ {If(response.ErrorMessage, excerpt)}", "error")
                 End If
 
-                ' Record for "Sources used:" footer (Feature 2)                
+                ' Record for "Sources used:" footer
                 Dim toolUrls As List(Of String) = Nothing
                 If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("urls") Then
                     Try
