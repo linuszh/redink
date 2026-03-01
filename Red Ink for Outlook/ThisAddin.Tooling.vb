@@ -1945,10 +1945,10 @@ Partial Public Class ThisAddIn
 
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalWebTool(toolCall, context, cancellationToken)
-                ToolingFileLogger.LogRawResponse($"Internal tool ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
             Else
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
-                ToolingFileLogger.LogRawResponse($"Tool LLM() ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
 
             ' Log completion with excerpt
@@ -2214,6 +2214,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
     ''' the tool API call payload, and invoking <c>LLM</c> in JSON response mode.
+    ''' For SSE/MCP endpoints (prefixed with "sse:"), bypasses LLM() and calls the MCP server directly.
     ''' </summary>
     ''' <param name="toolCall">Tool call extracted from the LLM response.</param>
     ''' <param name="toolConfig">Tool configuration to apply for this call.</param>
@@ -2246,7 +2247,35 @@ Partial Public Class ThisAddIn
 
             For Each kvp In toolCall.Arguments
                 Dim placeholder = "{" & kvp.Key & "}"
-                Dim value = If(kvp.Value?.ToString(), "")
+                Dim value As String
+                If kvp.Value Is Nothing Then
+                    value = ""
+                ElseIf TypeOf kvp.Value Is Boolean Then
+                    ' JSON requires lowercase true/false
+                    value = If(CBool(kvp.Value), "true", "false")
+                ElseIf TypeOf kvp.Value Is JToken Then
+                    Dim jt = DirectCast(kvp.Value, JToken)
+                    If jt.Type = JTokenType.String Then
+                        ' Escape the string value for safe JSON embedding in the template
+                        value = JsonConvert.ToString(jt.Value(Of String)())
+                        ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                        value = value.Substring(1, value.Length - 2)
+                    Else
+                        ' Preserve JSON token as-is (handles nested objects/arrays)
+                        value = jt.ToString(Formatting.None)
+                    End If
+                ElseIf TypeOf kvp.Value Is Double OrElse TypeOf kvp.Value Is Single OrElse TypeOf kvp.Value Is Decimal Then
+                    ' Ensure invariant culture (dot decimal separator)
+                    value = System.Convert.ToDouble(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                ElseIf TypeOf kvp.Value Is Long OrElse TypeOf kvp.Value Is Integer OrElse TypeOf kvp.Value Is Short Then
+                    value = System.Convert.ToInt64(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                Else
+                    ' Escape the string for safe JSON embedding (handles ", \, newlines, etc.)
+                    Dim raw = kvp.Value.ToString()
+                    Dim escaped = JsonConvert.ToString(raw)
+                    ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                    value = escaped.Substring(1, escaped.Length - 2)
+                End If
                 apiCall = apiCall.Replace(placeholder, value)
             Next
 
@@ -2280,6 +2309,7 @@ Partial Public Class ThisAddIn
                     apiCall = apiCall.Replace(m.Value, defaultValue)
                 Next
 
+                ' Re-check: if anything remains unreplaced after applying defaults, that's a real error.
                 Dim remainingMatches = unreplacedPattern.Matches(apiCall)
                 If remainingMatches.Count > 0 Then
                     Dim remainingNames = remainingMatches.
@@ -2299,6 +2329,45 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' ── SSE transport: full round-trip bypassing LLM() ───────────
+            If Not String.IsNullOrWhiteSpace(toolConfig.Endpoint) AndAlso
+               toolConfig.Endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+
+                Dim sseBase = toolConfig.Endpoint.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
+                Dim resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
+
+                context.Log($"SSE transport: executing tool {toolCall.ToolName} via {sseBase}")
+                ToolingFileLogger.LogStep($"SSE round-trip for {toolCall.ToolName} at {sseBase}")
+                ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
+
+                Try
+                    Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                        sseBase, apiCall,
+                        If(toolConfig.HeaderA, ""), resolvedHeaderB,
+                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+
+                    ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
+
+                    If Not String.IsNullOrWhiteSpace(rawResult) Then
+                        response.Response = rawResult
+                        response.Success = True
+                    Else
+                        response.Success = False
+                        response.ErrorMessage = "Empty response from SSE tool service"
+                        ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
+                    End If
+
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
+                    ToolingFileLogger.LogError("SSE tool call failed.",
+                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
+                End Try
+
+                Return response
+            End If
+
+            ' ── Standard transport: route through LLM() ──────────────────
             Dim backupConfig = GetCurrentConfig(_context)
 
             Try
@@ -2326,7 +2395,7 @@ Partial Public Class ThisAddIn
                 ' Pass cancellation token to LLM call
                 Dim result = Await LLM("", "", "", "", 0, True, True, "", "", cancellationToken, EnsureUI:=False)
 
-                ToolingFileLogger.LogRawResponse($"Tool LLM() result ({toolCall.ToolName})", result)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
 
                 _context.INI_Response_2 = originalResponse
 

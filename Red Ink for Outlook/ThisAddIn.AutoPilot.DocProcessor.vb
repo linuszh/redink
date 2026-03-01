@@ -1,21 +1,47 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.DocProcessor.vb
-' Purpose: Ported OpenXML document processing engine from the Word add-in's
-'          ThisAddIn.TranslateDocuments.vb. Operates directly on DOCX XML to modify
-'          text nodes while preserving formatting.
+' Purpose:
+'   AutoPilot document-processing engine for Office attachments. Applies an
+'   instruction via LLM to OpenXML package content while preserving structural
+'   fidelity and formatting boundaries.
+'
+' Scope:
+'  - DOCX processing (WordprocessingML)
+'  - PPTX processing (DrawingML in slides and notes slides)
+'  - XLSX processing (SpreadsheetML cells, formulas, and shared strings)
 '
 ' Architecture:
-'  - Extracts paragraphs and text runs from OpenXML and batches them with context
-'    windows for LLM processing.
-'  - Uses a run boundary marker (|) for multi-run paragraphs to preserve formatting
-'    boundaries when reapplying translated text.
-'  - Applies processed text back into document.xml and other sub-parts (headers,
-'    footers, comments, footnotes, endnotes).
-'  - Does not use Word interop for core processing (compare document generation is
-'    handled elsewhere).
+'  - OpenXML-first pipeline (no Word/PowerPoint/Excel interop for core mutation).
+'  - Unzips package parts, extracts processable text units, batches content for LLM,
+'    parses structured responses, writes updates back to XML parts, then repacks.
+'  - DOCX paragraph/run model:
+'      * Preserves run boundaries via `|` marker where applicable.
+'      * Preserves footnote/endnote/field boundary anchors via `‖` marker.
+'      * Reapplies text proportionally when exact marker alignment is unavailable.
+'  - Sub-part coverage:
+'      * DOCX: `document.xml`, headers, footers, comments, footnotes, endnotes.
+'      * PPTX: `slide*.xml` and `notesSlide*.xml`.
+'      * XLSX: worksheet parts, shared strings table, workbook relationships,
+'        and content-type registration when creating shared strings on demand.
+'  - Batch strategy:
+'      * Context-before/context-after windows.
+'      * Paragraph/cell chunking with character cap and cancellation support.
+'      * Structured response parsing (`[n] ...` for paragraph batches,
+'        `[A1] ...` for spreadsheet cells).
+'
+' Safety & Integrity:
+'  - Operates on copied output file, preserving input file unchanged.
+'  - Maintains XML whitespace and declaration-sensitive saves for OOXML compatibility.
+'  - Avoids namespace corruption by creating/importing elements in proper namespace context.
+'  - Clears temporary extraction directories in `Finally` paths.
+'
+' Notes:
+'  - Compare document generation for Word files is handled by tooling logic in
+'    `ThisAddIn.AutoPIlot.Tools.vb` (`CreateWordCompareDocumentForAutoPilot`).
 ' =============================================================================
 
 Option Explicit On
@@ -34,7 +60,7 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  CONSTANTS (matching Word add-in)
+    '  CONSTANTS 
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
@@ -87,7 +113,7 @@ Partial Public Class ThisAddIn
         Public Property TextRuns As List(Of APTextRunInfo)
         Public Property FullText As String
 
-        ''' <summary>Text with | markers between runs (for multi-run paragraphs).</summary>
+        ''' Builds text with | markers between formatting runs for boundary-preserving reapplication.
         Public Property MarkerText As String
 
         Public Property TranslatedText As String
@@ -344,7 +370,7 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Builds text with | markers between formatting runs (matching Word add-in's BuildMarkerAnnotatedText).
+    ''' Builds text with | markers between formatting runs for boundary-preserving reapplication.
     ''' Only inserts markers between non-empty runs where formatting actually changes.
     ''' Also preserves ‖ (note-reference) markers at footnote/endnote boundaries.
     ''' </summary>
@@ -2176,9 +2202,15 @@ Partial Public Class ThisAddIn
         Dim imported = sstDoc.ImportNode(fragDoc.DocumentElement.FirstChild, True)
         Return DirectCast(imported, System.Xml.XmlElement)
     End Function
+
+
     ''' <summary>
-    ''' Resolves sheet names to their XML file paths inside the extracted .xlsx directory.
+    ''' Resolves workbook sheet names to worksheet XML file paths inside the extracted package.
     ''' </summary>
+    ''' <returns>
+    ''' Dictionary mapping sheet display name to physical worksheet part path.
+    ''' Returns an empty dictionary if workbook metadata or relationships are missing.
+    ''' </returns>
     Private Function APResolveXlsxSheets(tempDir As String) As Dictionary(Of String, String)
         Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 

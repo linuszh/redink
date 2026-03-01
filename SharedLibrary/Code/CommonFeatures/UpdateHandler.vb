@@ -931,12 +931,29 @@ Namespace SharedLibrary
                     WriteUpdateLog($"[PeriodicCheck] local-deployed vsto='{vstoFile}'")
 
                     If File.Exists(vstoFile) Then
-                        ShowUpdatingSplash("Updating …")
+                        ' Compare local .vsto manifest version against currently installed version
+                        Dim remoteVersion = GetVersionFromLocalManifest(vstoFile)
+                        Dim currentVersion As Version = Nothing
                         Try
-                            RunVstoInstaller(vstoFile)
-                        Finally
-                            CloseUpdatingSplash()
+                            If ApplicationDeployment.IsNetworkDeployed Then
+                                currentVersion = ApplicationDeployment.CurrentDeployment.CurrentVersion
+                            End If
+                        Catch
                         End Try
+
+                        If remoteVersion IsNot Nothing AndAlso currentVersion IsNot Nothing AndAlso remoteVersion <= currentVersion Then
+                            WriteUpdateLog($"[PeriodicCheck] local vsto version={remoteVersion} is not newer than current={currentVersion}, skipping install")
+                        Else
+                            Dim remoteStr As String = If(remoteVersion IsNot Nothing, remoteVersion.ToString(), "unknown")
+                            Dim currentStr As String = If(currentVersion IsNot Nothing, currentVersion.ToString(), "unknown")
+                            WriteUpdateLog($"[PeriodicCheck] local vsto version={remoteStr} current={currentStr} → running installer")
+                            ShowUpdatingSplash("Updating …")
+                            Try
+                                RunVstoInstaller(vstoFile)
+                            Finally
+                                CloseUpdatingSplash()
+                            End Try
+                        End If
                     Else
                         UIInvokeMessage(
                         $"The configuration asks me to check for local updates of {SharedMethods.AN}, but I have not found '{vstoFile}'. Please inform your administrator.",
@@ -1274,6 +1291,63 @@ Namespace SharedLibrary
                 WriteUpdateLog($"{logPrefix} bring-to-front exception", ex)
                 Return False
             End Try
+        End Function
+
+        ''' <summary>
+        ''' Parses the assemblyIdentity version from a local .vsto manifest file on disk.
+        ''' </summary>
+        ''' <param name="vstoFilePath">Full path to the local .vsto file.</param>
+        ''' <returns>The parsed version, or Nothing if it could not be determined.</returns>
+        Private Shared Function GetVersionFromLocalManifest(vstoFilePath As String) As Version
+            Try
+                Dim doc As New System.Xml.XmlDocument()
+                doc.Load(vstoFilePath)
+
+                Dim node As System.Xml.XmlNode = Nothing
+
+                ' Strategy 1: asmv1 namespace
+                Dim nsMgr As New System.Xml.XmlNamespaceManager(doc.NameTable)
+                nsMgr.AddNamespace("asmv1", "urn:schemas-microsoft-com:asm.v1")
+                node = doc.SelectSingleNode("/asmv1:assembly/asmv1:assemblyIdentity", nsMgr)
+
+                ' Strategy 2: default namespace alias
+                If node Is Nothing Then
+                    nsMgr.AddNamespace("d", "urn:schemas-microsoft-com:asm.v1")
+                    node = doc.SelectSingleNode("/d:assembly/d:assemblyIdentity", nsMgr)
+                End If
+
+                ' Strategy 3: asmv2 namespace
+                If node Is Nothing Then
+                    nsMgr.AddNamespace("asmv2", "urn:schemas-microsoft-com:asm.v2")
+                    node = doc.SelectSingleNode("/asmv2:assembly/asmv2:assemblyIdentity", nsMgr)
+                End If
+
+                ' Strategy 4: namespace-agnostic
+                If node Is Nothing Then
+                    For Each child As System.Xml.XmlNode In doc.DocumentElement.ChildNodes
+                        If child.LocalName = "assemblyIdentity" Then
+                            node = child
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                If node IsNot Nothing Then
+                    Dim verAttr = node.Attributes("version")
+                    If verAttr IsNot Nothing Then
+                        Dim v As Version = Nothing
+                        If Version.TryParse(verAttr.Value, v) Then
+                            WriteUpdateLog($"[GetVersionFromLocalManifest] parsed version='{v}' from '{vstoFilePath}'")
+                            Return v
+                        End If
+                    End If
+                End If
+
+                WriteUpdateLog($"[GetVersionFromLocalManifest] could not find version in '{vstoFilePath}'")
+            Catch ex As Exception
+                WriteUpdateLog("[GetVersionFromLocalManifest] failed to parse manifest", ex)
+            End Try
+            Return Nothing
         End Function
 
         ''' <summary>

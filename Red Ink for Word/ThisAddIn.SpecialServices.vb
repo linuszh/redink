@@ -295,7 +295,44 @@ Partial Public Class ThisAddIn
 
             End If
 
-            Dim llmresult As String = Await LLM(OtherPrompt, SelectedText, "", "", 0, True)
+            ' ── Call LLM (or SSE transport for MCP servers) ──────────────
+            Dim llmresult As String
+
+            If INI_Endpoint_2.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+                ' SSE transport: full round-trip bypassing LLM()
+                Dim sseBase = INI_Endpoint_2.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
+                Dim resolvedHeaderB = INI_HeaderB_2.Replace("{apikey}", _context.DecodedAPI_2)
+
+                ' Build the final request body from the APICall with user text substituted
+                Dim sseRequestBody As String = INI_APICall_2
+                sseRequestBody = sseRequestBody.Replace("{promptuser}", SLib.CleanString(SelectedText))
+
+                Try
+                    llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                        sseBase, sseRequestBody,
+                        INI_HeaderA_2, resolvedHeaderB,
+                        CInt(Math.Min(INI_Timeout_2, Integer.MaxValue)))
+                Catch ex As Exception
+                    ShowCustomMessageBox($"SSE tool call failed: {ex.Message}")
+                    Return
+                End Try
+
+                ' Apply the Response key extraction if configured and not "JSON"
+                If Not String.IsNullOrWhiteSpace(llmresult) AndAlso
+                   Not String.IsNullOrWhiteSpace(INI_Response_2) AndAlso
+                   Not INI_Response_2.Equals("JSON", StringComparison.OrdinalIgnoreCase) Then
+                    Try
+                        Dim extracted = SharedLibrary.SharedLibrary.JsonTemplateFormatter.FormatJsonWithTemplate(llmresult, INI_Response_2)
+                        If Not String.IsNullOrWhiteSpace(extracted) Then
+                            llmresult = extracted
+                        End If
+                    Catch
+                        ' If extraction fails, keep the raw JSON
+                    End Try
+                End If
+            Else
+                llmresult = Await LLM(OtherPrompt, SelectedText, "", "", 0, True)
+            End If
 
             SP_MergePrompt_Cached = SP_MergePrompt
 

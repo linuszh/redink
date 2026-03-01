@@ -1030,6 +1030,7 @@ Partial Public Class ThisAddIn
                 ' JSON / TEMPLATES (selection required)
                 AddItem("generateresponsetemplate", "Generate a JSON response template from selected JSON + description.")
                 AddItem("generateresponsekey", "Generate a JSON response key from selected JSON + description.")
+                AddItem("mcp", "Import tools from an MCP server and generate INI sections.")
 
                 ' CLIPBOARD / INSERTION
                 AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
@@ -1445,6 +1446,11 @@ Partial Public Class ThisAddIn
             ' Open the centralized usage Log File
             If String.Equals(OtherPrompt.Trim(), "logstat", StringComparison.OrdinalIgnoreCase) Then
                 SharedLogger.AnalyzeLogs(_context)
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "mcp", StringComparison.OrdinalIgnoreCase) Then
+                ImportMCPServer()
                 Return
             End If
 

@@ -1,25 +1,47 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.AutoPilot.PdfCommentProcessor.vb
-' Purpose: Adds PDF annotation comments (highlight + popup) to a PDF file by
-'          having the LLM identify relevant text portions and provide comments.
-'          Uses PdfPig for text extraction with positions and PdfSharp for
-'          annotation injection — no Word interop dependency.
+' File: ThisAddIn.AutoPilot.PDFCommentProcessor.vb
+' Purpose:
+'   Adds review comments to PDF attachments by creating native PDF annotations
+'   (highlight + popup), driven by LLM-generated quote/comment pairs.
 '
 ' Architecture:
-'  - Extracts all text and per-character positions from the PDF using PdfPig.
-'  - Sends text to the LLM with the SP_Add_Bubbles prompt (same protocol as
-'    the DOCX CommentProcessor: text1@@comment1§§§text2@@comment2§§§...).
-'  - Parses the LLM response (reuses APParseBubblesResponse from CommentProcessor).
-'  - Locates each quoted text in the character-position map and computes the
-'    highlight bounding rectangles per page.
-'  - Inserts /Highlight + /Popup annotation pairs via PdfSharp low-level
-'    PDF dictionary manipulation.
-'  - Unmatched comments are placed as /Text (sticky note) annotations at the
-'    top-right of the first page, stacked vertically so each is individually
-'    selectable.
+'  - Extraction:
+'      * Reads PDF text and per-character coordinates using PdfPig.
+'      * Builds a searchable text stream plus positional map for precise anchoring.
+'  - LLM protocol:
+'      * Uses the same bubble protocol as AutoPilot comment processing
+'        (`text@@comment§§§...`) and reuses `APParseBubblesResponse`.
+'      * Supports single-pass and batched mode for large PDFs with context windows.
+'  - Matching:
+'      * Resolves quoted text spans with multi-tier matching:
+'        exact, case-insensitive, normalized whitespace, letters-only normalization,
+'        and fuzzy prefix fallback.
+'      * Converts matched spans into per-line highlight rectangles by page.
+'  - Injection:
+'      * Writes annotations with PdfSharp low-level dictionaries:
+'          - `/Highlight` + `/Popup` for matched quotes
+'          - `/Text` sticky notes for unmatched comments
+'      * Adds stable metadata (`/T`, `/NM`, creation/modification timestamps, color).
+'  - Output behavior:
+'      * Works on a copied output PDF, preserves input unchanged.
+'      * Saves modified annotations directly into the destination file.
+'
+' Dependencies:
+'  - PdfPig (`UglyToad.PdfPig`) for text/position extraction.
+'  - PdfSharp for annotation object creation and PDF write-back.
+'  - AutoPilot comment pipeline helpers from:
+'      * `ThisAddIn.AutoPilot.CommentProcessor.vb`
+'        (`APGetCommentsFromLLM`, `APParseBubblesResponse`, prompt constants).
+'
+' Notes:
+'  - Unmatched comments are placed as stacked sticky notes on page 1 (top-right),
+'    with overlap avoidance and fallback column wrapping.
+'  - Optional custom author names are supported; non-default author mode prefixes
+'    comment text with the Red Ink marker.
 ' =============================================================================
 
 Option Explicit On

@@ -2,43 +2,57 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.AutoPilot.vb
-' Purpose: Inky AutoPilot — AI mail watcher that monitors incoming e-mails,
-'          filters them by domain/sender/subject rules, processes them via the
-'          LLM tooling loop, and replies to the sender with AI-generated responses.
+' File: ThisAddIn.Autopilot.vb
+' Purpose:
+'   Inky AutoPilot — AI-assisted mail watcher for Outlook that monitors incoming
+'   e-mails, applies sender/domain/subject policy filters, processes requests via
+'   LLM (with optional tool-calling), and sends or stages replies.
 '
 ' Architecture:
-'  - Event-based mail watching via Outlook's Application.NewMailEx event.
-'  - Dual-mode operation: AutoPilot (auto-send for whitelisted senders) and
-'    CoPilot (approval required, with holding response for non-whitelisted).
-'  - Filter engine: domain wildcards, sender wildcards, subject trigger words,
-'    folder filtering, negative filters, auto-reply/OOF detection, loop prevention.
-'  - Anti-loop safeguards: custom MAPI property, per-sender cooldown, max replies
-'    per session, thread depth limit, auto-reply header detection.
-'  - Stateless: each incoming mail is processed independently using the e-mail
-'    thread body for context.
-'  - Integrates with existing ExecuteToolingLoop for tool calls (document processing,
-'    PDF tools, web retrieval, and all existing specialservices tools).
-'  - Dashboard via extended LogWindow for live monitoring.
-'  - Replies are placed in Sent Items\Inky Replies subfolder.
+'  - Event-driven intake via Outlook `Application.NewMailEx`.
+'  - Dual mode:
+'      * AutoPilot: auto-send when policy permits.
+'      * CoPilot: approval workflow for non-whitelisted senders.
+'  - Trust boundary:
+'      * Positive/negative filter rules (domain/sender/folder) are always enforced.
+'      * Reply-To mismatch is logged as warning (processing continues).
+'  - Loop prevention:
+'      * Custom MAPI marker (`X-RedInk-AutoReply`) on sent replies.
+'      * Subject/header auto-reply detection (OOF/DSN patterns).
+'      * Per-sender cooldown, per-session reply limits, thread-depth limit.
+'  - Conversation awareness:
+'      * Detects prior AutoPilot participation via conversation traversal and
+'        session fallback map (`ConversationID`) to support follow-up replies.
+'  - Catch-up processing:
+'      * On start, scans recent mailbox history since last processed UTC timestamp,
+'        applies full filter pipeline, and offers operator selection dialog.
+'  - Queue + timing:
+'      * Central mail queue with processing pump.
+'      * Attachment-based category classification (text/light/heavy-doc/heavy-pdf).
+'      * Rolling timing estimates and queue position notifications for delayed jobs.
+'  - Tooling integration:
+'      * Uses existing `ExecuteToolingLoop` and AutoPilot internal tools.
+'      * Supports per-mail `#model:` override with tooling-capability checks.
+'  - Reply handling:
+'      * Sends HTML replies with optional generated attachments.
+'      * Optional approval dialog and "Sources used" footer.
+'      * Moves AutoPilot replies to Sent Items\Inky Replies.
 '
 ' Security Model for Attachments:
-'  - Each incoming e-mail gets a unique temp directory (GUID-based) under %TEMP%.
-'  - Attachments are saved into this isolated directory before processing.
-'  - Output files (processed docs, merged PDFs, compare docs) are also written
-'    into the same per-mail temp directory.
-'  - CollectResultAttachments only picks up files registered in OutputFiles AND
-'    validates they reside within the per-mail temp directory (path prefix check).
-'  - After the reply is sent (or if processing fails/is rejected), the entire
-'    temp directory is deleted recursively in the Finally block.
-'  - This ensures no sensitive attachment data persists on disk after processing.
+'  - Per-mail isolated temp directory under `%TEMP%` (GUID-based).
+'  - Attachments and tool outputs are constrained to that directory.
+'  - Result collection validates path-prefix containment before attaching outputs.
+'  - Text caches are cleared after processing.
+'  - Temp directory is deleted recursively in `Finally` (best effort).
 '
-' Model Override Command (#model:):
-'  - The sender can include "#model: <ModelName>" in the first few lines of the
-'    latest e-mail body (not in quoted replies) to request a specific model.
-'  - Only the latest/top-most portion of the body is scanned (before reply separators).
-'  - The command line is stripped from the body before passing to the LLM.
-'  - The model is applied only for this single e-mail, then restored.
+' Licensing & Access:
+'  - AutoPilot requires valid license state (`Private` or permitted `Pro` product).
+'  - Additional user whitelist gate via `INI_AutoPilot` (`*` = all licensed users).
+'
+' Threading Model:
+'  - Outlook COM access is marshaled to UI thread (`SwitchToUi`).
+'  - LLM and queue operations run asynchronously with cancellation support.
+'  - Dashboard updates are thread-safe through `LogWindow` invocation guards.
 ' =============================================================================
 
 Option Explicit On
@@ -180,6 +194,10 @@ Partial Public Class ThisAddIn
     ''' <summary>Guard to prevent overlapping notification checks.</summary>
     Private _apNotificationCheckRunning As Integer = 0
 
+    ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
+    Private _apHelpMeManualCache As String = Nothing
+    Private _apHelpMeManualCacheLoaded As Boolean = False
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -213,6 +231,8 @@ Partial Public Class ThisAddIn
         _apCategoryTimings.Clear()
         _apCurrentProcessingStopwatch = Nothing
         _apCurrentProcessingCategory = Nothing
+        _apHelpMeManualCache = Nothing
+        _apHelpMeManualCacheLoaded = False
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -728,8 +748,9 @@ Partial Public Class ThisAddIn
     ''' Checks whether the current user is permitted to run AutoPilot.
     ''' Requires BOTH:
     '''   1. A valid license (checked via IsAutoPilotLicenseValid) — mandatory.
-    '''   2. User whitelist (INI_AutoPilot) — if empty or "*", all licensed users are allowed;
+    '''   2. User whitelist (INI_AutoPilot) — "*" allows all licensed users;
     '''      otherwise %USERNAME% must appear in the comma-separated list.
+    '''      Empty/whitespace means no users are permitted.
     ''' </summary>
     ''' <returns>True if the current user is allowed; False otherwise.</returns>
     Public Shared Function IsAutoPilotPermitted() As Boolean
@@ -946,7 +967,7 @@ Partial Public Class ThisAddIn
     ''' of real wall-clock time. The message includes the queue position and a
     ''' qualitative description of expected wait based on attachment classification.
     ''' Only mails that pass the full filter pipeline receive a notification.
-    ''' Called from the processing pump on every iteration (not just at dequeue time).
+    ''' Called by the periodic notification timer.
     ''' </summary>
     Private Async Function SendQueuePositionNotificationsAsync(ct As CancellationToken) As Task
         Dim queueSnapshot = _apMailQueue.ToArray()
@@ -1160,10 +1181,10 @@ Partial Public Class ThisAddIn
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
             ' ── Reply-To mismatch: potential spoofing or reflection attack ──
-            ' If the mail has a Reply-To that differs from the sender, the From address
-            ' may be forged. Force approval regardless of whitelist status so the operator
-            ' can verify the legitimacy before any reply is sent.
-            Dim hasReplyToMismatch As Boolean = False
+            ' If the mail has a Reply-To that differs from the sender, log a warning
+            ' but do NOT force approval — that would block the entire processing queue.
+            ' The sender/domain filter rules are the trust boundary; Reply-To mismatches
+            ' are common with legitimate mailing lists, shared mailboxes, and CRM systems.
             Try
                 Dim replyToAddress = Await SwitchToUi(Function() As String
                                                           Try
@@ -1176,20 +1197,19 @@ Partial Public Class ThisAddIn
                                                       End Function)
                 If Not String.IsNullOrWhiteSpace(replyToAddress) AndAlso
                    Not replyToAddress.Equals(mailInfo.SenderEmail, StringComparison.OrdinalIgnoreCase) Then
-                    hasReplyToMismatch = True
-                    ApDashboardLog($"⚠ SECURITY: Reply-To mismatch! From={mailInfo.SenderEmail}, Reply-To={replyToAddress}. Forcing approval.", "warn")
+                    ApDashboardLog($"⚠ Reply-To mismatch: From={mailInfo.SenderEmail}, Reply-To={replyToAddress} (processing continues)", "warn")
                 End If
             Catch
             End Try
 
             Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
-            ' SECURITY: Force approval if Reply-To differs from sender (potential spoofing/reflection)
-            Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation) OrElse hasReplyToMismatch
+            Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
             ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
+
             ' Check for #model: command
             Dim modelOverrideConfig As ModelConfig = Nothing
             Dim modelOverrideName As String = Nothing
@@ -1305,11 +1325,12 @@ Partial Public Class ThisAddIn
 
                 If String.IsNullOrWhiteSpace(response) Then
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
-                    Dim errorMessage = $"I'm sorry, but {AN6} was unable to generate a response to your request. Please try again or rephrase your message."
+                    Dim errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                        mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
                     Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True))
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail)
-                    ApDashboardLog("Sent error response to: " & mailInfo.SenderEmail, "warn")
+                    ApDashboardLog("Sent helpful error response to: " & mailInfo.SenderEmail, "warn")
                     Return
                 End If
 
@@ -1532,11 +1553,10 @@ Partial Public Class ThisAddIn
                 If info.SenderEmail.EndsWith(pattern, StringComparison.OrdinalIgnoreCase) Then Return True
             Case AutoPilotFilterRuleType.Sender
                 If WildcardMatch(info.SenderEmail, rule.Pattern) Then Return True
-                ' SECURITY: Do NOT match on SenderName for sender-type rules.
-                ' An attacker can set their display name to "john@trusted.com"
-                ' which would cause a false positive match against a sender filter.
-                ' Display names are unauthenticated and trivially spoofable.
-                ' If WildcardMatch(info.SenderName, rule.Pattern) Then Return True  ← REMOVED
+            ' SECURITY: Do NOT match on SenderName for sender-type rules.
+            ' An attacker can set their display name to "john@trusted.com"
+            ' which would cause a false positive match against a sender filter.
+            ' Display names are unauthenticated and trivially spoofable.
             Case AutoPilotFilterRuleType.Folder
                 If info.FolderPath.IndexOf(rule.Pattern, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
         End Select
@@ -1695,7 +1715,8 @@ Partial Public Class ThisAddIn
             For i As Integer = 0 To attachments.Count - 1
                 Dim att = attachments(i)
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
-                Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT - cannot process]", "")
+                Dim statusStr = If(att.IsOverSizeLimit,
+                    $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
                 Dim dateStr As String = ""
                 If att.LastModifiedTime.HasValue Then
                     dateStr &= $", modified: {att.LastModifiedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
@@ -2258,6 +2279,371 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  HELPFUL FAILURE RESPONSE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Generates a meaningful failure response when AutoPilot cannot fulfill a request.
+    ''' Includes: (1) attachment size limit info if relevant, (2) a brief Red Ink add-in
+    ''' suggestion based on the HelpMeInky manual, and (3) optionally an Internet-based
+    ''' alternative tool suggestion via the InternetResearch model.
+    ''' Falls back to a static message if all LLM calls fail.
+    ''' </summary>
+    Private Async Function GenerateHelpfulFailureResponseAsync(
+            mailInfo As AutoPilotMailInfo,
+            attachments As List(Of AutoPilotAttachmentInfo),
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        Dim sb As New StringBuilder()
+
+        ' ── Static preamble ──
+        sb.AppendLine($"I'm sorry, but I was unable to fulfill your request.")
+        sb.AppendLine()
+
+        ' ── Attachment size limit detail ──
+        Dim hasOversized = attachments IsNot Nothing AndAlso attachments.Any(Function(a) a.IsOverSizeLimit)
+        If hasOversized Then
+            Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+            Dim oversizedNames = attachments.Where(Function(a) a.IsOverSizeLimit).
+                Select(Function(a) $"{a.OriginalFileName} ({a.SizeBytes / 1024.0 / 1024.0:F1} MB)").ToList()
+            sb.AppendLine($"**Attachment size limit:** The maximum permitted attachment size is {limitMB:F0} MB. " &
+                          $"The following attachment(s) exceeded this limit and could not be processed:")
+            For Each name In oversizedNames
+                sb.AppendLine($"  - {name}")
+            Next
+            sb.AppendLine($"Please send smaller files or split large documents into parts.")
+            sb.AppendLine()
+        End If
+
+        ' ── Red Ink add-in suggestion (via HelpMeInky manual) ──
+        Dim redInkSuggestion As String = Nothing
+        Try
+            redInkSuggestion = Await GetRedInkSuggestionAsync(mailInfo, failureReason, ct)
+        Catch ex As System.Exception
+            ApDashboardLog($"Fallback Red Ink suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(redInkSuggestion) Then
+            sb.AppendLine(redInkSuggestion.Trim())
+            sb.AppendLine()
+        End If
+
+        ' ── Internet alternative suggestion (optional, via InternetResearch model) ──
+        Dim internetSuggestion As String = Nothing
+        Try
+            internetSuggestion = Await GetInternetAlternativeSuggestionAsync(mailInfo, failureReason, ct)
+        Catch ex As System.Exception
+            ApDashboardLog($"Fallback internet suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(internetSuggestion) Then
+            sb.AppendLine(internetSuggestion.Trim())
+            sb.AppendLine()
+            ' Append disclaimer directly — this path sends text to the sender without LLM rewriting
+            sb.AppendLine("_Please note: Third-party services and tools may only be used if permitted by your organization's policies. " &
+                          "Before using any external service or tool, ensure it meets your corporate security, confidentiality, and data protection requirements._")
+            sb.AppendLine()
+        End If
+
+        ' ── Closing ──
+        If String.IsNullOrWhiteSpace(redInkSuggestion) AndAlso String.IsNullOrWhiteSpace(internetSuggestion) Then
+            sb.AppendLine("Please try again, rephrase your request, or contact the operator for assistance.")
+        End If
+
+        sb.Append($"— {AN6}")
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Calls the LLM with the HelpMeInky manual to suggest how the user could
+    ''' accomplish the task using the Red Ink add-ins. Returns a brief suggestion
+    ''' or Nothing if no manual is available or the call fails.
+    ''' Uses the dedicated HelpMe model (if configured in the alternate model INI)
+    ''' exactly as HelpMeInky does, falling back to the base AutoPilot model only
+    ''' if no HelpMe model is available.
+    ''' </summary>
+    Private Async Function GetRedInkSuggestionAsync(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        ' Load the HelpMeInky manual (cached per session)
+        If Not _apHelpMeManualCacheLoaded Then
+            _apHelpMeManualCacheLoaded = True
+            Try
+                Dim manualPath = INI_HelpMeInkyPath
+                If Not String.IsNullOrWhiteSpace(manualPath) Then
+                    manualPath = ExpandEnvironmentVariables(manualPath)
+                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
+                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+                End If
+            Catch ex As System.Exception
+                ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
+            End Try
+        End If
+
+        If String.IsNullOrWhiteSpace(_apHelpMeManualCache) Then Return Nothing
+
+        ' Use the SP_HelpMe system prompt (same as HelpMeInky) with an AutoPilot-specific addendum
+        Dim systemPrompt As String = _context.SP_HelpMe &
+            $" (This is an automated query from {AN6} AutoPilot, not an interactive chat. " &
+            $"A user sent an e-mail request that could not be fulfilled automatically. " &
+            $"Based on the manual, suggest in 4-10 SHORT sentences what {AN} feature could help, " &
+            $"how to use it, and tell the user to open 'Help me, {AN8}' inside the add-in for more guidance. " &
+            $"If no {AN} feature applies, reply with exactly one word: NONE)"
+
+        ' Build user prompt in the same structure as HelpMeInky.SendAsync
+        Dim userPrompt As New StringBuilder()
+        userPrompt.AppendLine("User question:")
+        userPrompt.AppendLine($"I tried to use {AN6} AutoPilot to: {mailInfo.Subject}")
+        userPrompt.AppendLine($"Details: {If(mailInfo.Body.Length > 500, mailInfo.Body.Substring(0, 500), mailInfo.Body)}")
+        userPrompt.AppendLine($"But it failed because: {failureReason}")
+        If mailInfo.AttachmentNames IsNot Nothing AndAlso mailInfo.AttachmentNames.Count > 0 Then
+            userPrompt.AppendLine($"The e-mail had these attachments: {String.Join(", ", mailInfo.AttachmentNames)}")
+        End If
+        userPrompt.AppendLine($"What {AN} feature could help the user accomplish this task directly?")
+        userPrompt.AppendLine()
+        userPrompt.AppendLine("Manual:")
+        userPrompt.AppendLine(_apHelpMeManualCache)
+
+        ' Try to use the dedicated HelpMe model (same as HelpMeInky.CallHelpMeLlmAsync)
+        Dim backupConfig = GetCurrentConfig(_context)
+        Dim useHelpMeModel As Boolean = False
+        Dim useSecondApi As Boolean = False
+        Dim timeout As Long = 0
+
+        Try
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                useHelpMeModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "HelpMe")
+            End If
+        Catch
+        End Try
+
+        If useHelpMeModel Then
+            useSecondApi = True
+            timeout = If(_context.INI_Timeout_2 > 0, _context.INI_Timeout_2, _context.INI_Timeout)
+            ApDashboardLog("Red Ink suggestion using dedicated HelpMe model", "step")
+        Else
+            ' Fallback: use the base AutoPilot model
+            ApplyModelConfig(_context, _apBaseModelConfig)
+            useSecondApi = _apUseSecondApi
+            timeout = _context.INI_Timeout
+            ApDashboardLog("Red Ink suggestion using base AutoPilot model (no HelpMe model configured)", "step")
+        End If
+
+        Try
+            Dim result = Await LLM(systemPrompt, userPrompt.ToString(),
+                                   UseSecondAPI:=useSecondApi, HideSplash:=True,
+                                   EnsureUI:=False, Timeout:=timeout,
+                                   cancellationToken:=ct)
+            result = If(result, "").Trim()
+            If result.Equals("NONE", StringComparison.OrdinalIgnoreCase) OrElse result.Length < 5 Then
+                ApDashboardLog($"Red Ink suggestion returned NONE or too short ({result.Length} chars)", "step")
+                Return Nothing
+            End If
+            ApDashboardLog($"Red Ink suggestion generated ({result.Length} chars)", "step")
+            Return result
+        Catch ex As System.Exception
+            ApDashboardLog($"Red Ink suggestion LLM call failed: {ex.GetType().Name}: {ex.Message}", "warn")
+            Return Nothing
+        Finally
+            RestoreDefaults(_context, backupConfig)
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Loads manual text from an HTTP(S) URL or a local file path.
+    ''' Mirrors the loading logic of HelpMeInky.GetManualTextFreshAsync, supporting
+    ''' plain text, PDF (with magic-byte detection for remote content), DOCX, and RTF.
+    ''' </summary>
+    Private Async Function LoadManualTextAsync(pathOrUrl As String, ct As CancellationToken) As Task(Of String)
+        If String.IsNullOrWhiteSpace(pathOrUrl) Then Return Nothing
+
+        Dim s = pathOrUrl.Trim()
+
+        ' ── Remote URL ──
+        If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+           s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+            Try
+                ' Ensure modern TLS
+                Try
+                    System.Net.ServicePointManager.SecurityProtocol =
+                        System.Net.SecurityProtocolType.Tls12 Or CType(&HC00, System.Net.SecurityProtocolType)
+                Catch : End Try
+
+                Dim handler As New System.Net.Http.HttpClientHandler()
+                handler.AllowAutoRedirect = True
+                handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+
+                Using client As New System.Net.Http.HttpClient(handler)
+                    client.Timeout = TimeSpan.FromSeconds(30)
+                    Try
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "RedInk/1.0 (+https://redink.ai)")
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/pdf, text/*, */*")
+                    Catch : End Try
+
+                    Using resp = Await client.GetAsync(s, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(False)
+                        If Not resp.IsSuccessStatusCode Then
+                            ApDashboardLog($"Manual URL returned HTTP {CInt(resp.StatusCode)}: {s}", "warn")
+                            Return Nothing
+                        End If
+
+                        Dim data = Await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(False)
+
+                        ' Detect content type
+                        Dim mediaType = ""
+                        Try
+                            If resp.Content?.Headers?.ContentType?.MediaType IsNot Nothing Then
+                                mediaType = resp.Content.Headers.ContentType.MediaType.ToLowerInvariant()
+                            End If
+                        Catch : End Try
+
+                        ' PDF detection: content-type, URL, or magic bytes
+                        Dim isPdf = False
+                        If mediaType.Contains("pdf") Then isPdf = True
+                        If Not isPdf AndAlso s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then isPdf = True
+                        If Not isPdf AndAlso data IsNot Nothing AndAlso data.Length >= 4 Then
+                            Dim scanMax = Math.Min(data.Length - 4, 1024)
+                            For i = 0 To scanMax
+                                If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso
+                                   data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
+                                    isPdf = True : Exit For
+                                End If
+                            Next
+                        End If
+
+                        If isPdf Then
+                            Dim tmpPath = IO.Path.Combine(IO.Path.GetTempPath(), "ap_manual_" & Guid.NewGuid().ToString("N") & ".pdf")
+                            Try
+                                IO.File.WriteAllBytes(tmpPath, data)
+                                Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, _context).ConfigureAwait(False)
+                            Finally
+                                Try : IO.File.Delete(tmpPath) : Catch : End Try
+                            End Try
+                        End If
+
+                        ' Decode as text
+                        Dim enc As Encoding = Encoding.UTF8
+                        Try
+                            Dim charset = resp.Content?.Headers?.ContentType?.CharSet
+                            If Not String.IsNullOrEmpty(charset) Then enc = Encoding.GetEncoding(charset)
+                        Catch : End Try
+
+                        Dim text = enc.GetString(data)
+
+                        ' Strip HTML if detected
+                        If (mediaType.Contains("html") OrElse text.TrimStart().StartsWith("<", StringComparison.Ordinal)) AndAlso
+                           text.IndexOf("<html", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            Try
+                                Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+                                htmlDoc.LoadHtml(text)
+                                Return htmlDoc.DocumentNode.InnerText
+                            Catch
+                                Return text
+                            End Try
+                        End If
+
+                        Return text
+                    End Using
+                End Using
+            Catch ex As System.Exception
+                ApDashboardLog($"Manual URL load error: {ex.Message}", "warn")
+                Return Nothing
+            End Try
+        End If
+
+        ' ── Local file ──
+        Try
+            If Not IO.File.Exists(s) Then
+                ApDashboardLog($"Manual file not found: {s}", "warn")
+                Return Nothing
+            End If
+
+            Select Case IO.Path.GetExtension(s).ToLowerInvariant()
+                Case ".txt", ".md", ".log"
+                    Return IO.File.ReadAllText(s, Encoding.UTF8)
+                Case ".pdf"
+                    Return Await SharedMethods.ReadPdfAsText(s, True, False, False, _context).ConfigureAwait(False)
+                Case ".docx"
+                    Dim text As String = Nothing
+                    Dim label As String = Nothing
+                    If TryExtractOfficeText(s, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then
+                        Return text
+                    End If
+                    Return Nothing
+                Case ".rtf"
+                    Return SharedMethods.ReadRtfAsText(s)
+                Case Else
+                    ' Best effort: read as plain text
+                    Return IO.File.ReadAllText(s, Encoding.UTF8)
+            End Select
+        Catch ex As System.Exception
+            ApDashboardLog($"Manual file load error: {ex.Message}", "warn")
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Optionally uses the InternetResearch model (if configured) to suggest
+    ''' an alternative online tool the user could use. Returns a brief suggestion
+    ''' or Nothing if no InternetResearch model is available.
+    ''' Does NOT include the third-party disclaimer — callers are responsible
+    ''' for appending it in the appropriate form (verbatim LLM instruction for
+    ''' tool responses, direct text for static failure messages).
+    ''' </summary>
+    Private Async Function GetInternetAlternativeSuggestionAsync(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        ' Check if an InternetResearch model is configured
+        If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return Nothing
+
+        Dim backupConfig = GetCurrentConfig(_context)
+        Dim hasInternetModel As Boolean = False
+
+        Try
+            hasInternetModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "InternetResearch")
+        Catch
+            ' GetSpecialTaskModel may have modified originalConfig even on failure — restore
+            Try : RestoreDefaults(_context, backupConfig) : Catch : End Try
+            Return Nothing
+        End Try
+
+        If Not hasInternetModel Then
+            ' GetSpecialTaskModel overwrites the static originalConfig/originalConfigLoaded
+            ' even when it returns False — always restore to avoid corrupting subsequent calls
+            Try : RestoreDefaults(_context, backupConfig) : Catch : End Try
+            Return Nothing
+        End If
+
+        Try
+            Dim systemPrompt =
+                $"You are a concise assistant. In 2-4 SHORT sentences, suggest other practical ways " &
+                $"(other than {AN}) that could help the user accomplish the task described below without the help of another person. Focus on the most popular/common approaches. " &
+                $"Be specific (name the tool/service/website, if applicable) but brief. If unsure, respond with exactly: NONE"
+
+            Dim userPrompt =
+                $"Task: {mailInfo.Subject}" & vbCrLf &
+                $"Details: {If(mailInfo.Body.Length > 300, mailInfo.Body.Substring(0, 300), mailInfo.Body)}" & vbCrLf &
+                $"Why it failed: {failureReason}"
+
+            Dim result = Await LLM(systemPrompt, userPrompt,
+                                   UseSecondAPI:=True, HideSplash:=True,
+                                   EnsureUI:=False, cancellationToken:=ct)
+            result = If(result, "").Trim()
+            If result.Equals("NONE", StringComparison.OrdinalIgnoreCase) OrElse result.Length < 5 Then Return Nothing
+            ApDashboardLog($"Internet alternative suggestion generated ({result.Length} chars)", "step")
+            Return "**Alternative:** " & result
+        Catch ex As System.Exception
+            ApDashboardLog($"InternetResearch suggestion error: {ex.Message}", "warn")
+            Return Nothing
+        Finally
+            RestoreDefaults(_context, backupConfig)
+        End Try
+    End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASSES

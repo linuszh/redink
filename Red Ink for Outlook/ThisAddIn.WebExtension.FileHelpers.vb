@@ -87,8 +87,17 @@ Partial Public Class ThisAddIn
     Private Function ExtractWordText(ByVal path As System.String) As System.String
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+        Dim weOwnApp As System.Boolean = False
         Try
-            app = New Microsoft.Office.Interop.Word.Application()
+            ' Try to reuse an existing Word instance
+            Try
+                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"),
+                            Microsoft.Office.Interop.Word.Application)
+            Catch ex As System.Runtime.InteropServices.COMException
+                app = New Microsoft.Office.Interop.Word.Application()
+                weOwnApp = True
+            End Try
+
             app.Visible = False
             doc = app.Documents.Open(FileName:=path, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
 
@@ -103,7 +112,7 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Throw
         Finally
-            SafeCloseWord(doc, app)
+            SafeCloseWord(doc, app, weOwnApp)
         End Try
     End Function
 
@@ -114,7 +123,8 @@ Partial Public Class ThisAddIn
     ''' <param name="app">Word application instance.</param>
     Private Sub SafeCloseWord(
     ByVal doc As Microsoft.Office.Interop.Word.Document,
-    ByVal app As Microsoft.Office.Interop.Word.Application
+    ByVal app As Microsoft.Office.Interop.Word.Application,
+    ByVal weOwnApp As System.Boolean
 )
         Try
             If doc IsNot Nothing Then
@@ -123,7 +133,10 @@ Partial Public Class ThisAddIn
             End If
         Finally
             If app IsNot Nothing Then
-                Try : app.Quit(SaveChanges:=False) : Catch : End Try
+                ' Only quit if we created this instance
+                If weOwnApp Then
+                    Try : app.Quit(SaveChanges:=False) : Catch : End Try
+                End If
                 Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(app) : Catch : End Try
             End If
         End Try
@@ -140,9 +153,18 @@ Partial Public Class ThisAddIn
         Dim app As Microsoft.Office.Interop.Excel.Application = Nothing
         Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
         Dim sb As New System.Text.StringBuilder(4096)
+        Dim weOwnApp As System.Boolean = False
 
         Try
-            app = New Microsoft.Office.Interop.Excel.Application()
+            ' Try to reuse an existing Excel instance
+            Try
+                app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Excel.Application"),
+                            Microsoft.Office.Interop.Excel.Application)
+            Catch ex As System.Runtime.InteropServices.COMException
+                app = New Microsoft.Office.Interop.Excel.Application()
+                weOwnApp = True
+            End Try
+
             app.Visible = False
             wb = app.Workbooks.Open(Filename:=path, ReadOnly:=True, AddToMru:=False)
 
@@ -255,7 +277,7 @@ Partial Public Class ThisAddIn
         Catch ex As System.Exception
             Throw
         Finally
-            SafeCloseExcel(wb, app)
+            SafeCloseExcel(wb, app, weOwnApp)
         End Try
     End Function
 
@@ -285,7 +307,8 @@ Partial Public Class ThisAddIn
     ''' <param name="app">Excel application instance.</param>
     Private Sub SafeCloseExcel(
     ByVal wb As Microsoft.Office.Interop.Excel.Workbook,
-    ByVal app As Microsoft.Office.Interop.Excel.Application
+    ByVal app As Microsoft.Office.Interop.Excel.Application,
+    ByVal weOwnApp As System.Boolean
 )
         Try
             If wb IsNot Nothing Then
@@ -294,7 +317,10 @@ Partial Public Class ThisAddIn
             End If
         Finally
             If app IsNot Nothing Then
-                Try : app.Quit() : Catch : End Try
+                ' Only quit if we created this instance
+                If weOwnApp Then
+                    Try : app.Quit() : Catch : End Try
+                End If
                 Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(app) : Catch : End Try
             End If
         End Try
@@ -313,10 +339,18 @@ Partial Public Class ThisAddIn
         Dim app As System.Object = Nothing
         Dim pres As System.Object = Nothing
         Dim sb As New System.Text.StringBuilder(2048)
+        Dim weOwnApp As System.Boolean = False
 
         Try
             ' Late binding: no PIAs required
-            app = Microsoft.VisualBasic.Interaction.CreateObject("PowerPoint.Application")
+            ' Try to get an existing instance first
+            Try
+                app = System.Runtime.InteropServices.Marshal.GetActiveObject("PowerPoint.Application")
+            Catch ex As System.Runtime.InteropServices.COMException
+                ' No running instance – create a new one; we own it
+                app = Microsoft.VisualBasic.Interaction.CreateObject("PowerPoint.Application")
+                weOwnApp = True
+            End Try
 
             ' Presentations.Open(FileName, ReadOnly, Untitled, WithWindow)
             ' Late bound: True/False as -1/0; here 1=True, 0=False
@@ -411,7 +445,10 @@ Partial Public Class ThisAddIn
             End Try
             Try
                 If app IsNot Nothing Then
-                    Try : app.Quit() : Catch : End Try
+                    ' Only quit if we created the instance ourselves
+                    If weOwnApp Then
+                        Try : app.Quit() : Catch : End Try
+                    End If
                     Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(app) : Catch : End Try
                 End If
             Catch

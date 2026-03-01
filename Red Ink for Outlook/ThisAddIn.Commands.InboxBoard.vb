@@ -1,64 +1,64 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.Commands.InboxBoard.vb
-' Purpose: Visual Kanban-style board for categorized Inbox emails. Displays
-'          flagged (categorized) mails as draggable tiles grouped by category.
-'          Supports drag-and-drop to change categories, unmarking, opening mails
-'          in Outlook, and async AI summary generation.
+' Purpose:
+'   Interactive Inbox board (Kanban-style) for Outlook mails. Displays categorized
+'   and optionally flagged messages as draggable cards, supports category/flag
+'   updates via drag-and-drop, board-folder organization, and asynchronous AI
+'   summaries.
 '
 ' Architecture:
-'  - Mail collection: Scans default Inbox for mails with at least one category.
-'    Optionally also includes flagged mails (follow-up flags). If >50 found,
-'    asks user how many to load via dropdown.
-'  - Flag support: Mails flagged for follow-up (olFlagMarked) can be included
-'    via a settings toggle. They appear in a synthetic "⚑ Flagged" column
-'    (unless they also have categories, in which case they appear in their
-'    category columns with a flag badge). The FlagRequest text (e.g. "Follow up")
-'    and optional due date are shown on the card. Completed flags (olFlagComplete)
-'    are hidden by default via a "Hide completed flags" toggle.
-'  - Conversation grouping: Mails sharing the same ConversationTopic are merged
-'    into a single card showing the latest mail, with an accurate message count.
-'    Toggle via a checkbox in the settings panel; persisted in My.Settings.
-'  - Category columns: Dynamically built from Outlook's category list. Always-
-'    present columns stored in My.Settings.InboxBoardColumns (semicolon-delimited).
-'  - Board UI: Full HTML/CSS/JS board rendered in WebView2 inside a WinForms Form.
-'    Supports dark/light theme, search, column filter, card field toggles, and
-'    drag-and-drop reordering.
-'  - JS↔VB.NET bridge: WebView2 postMessage for move/moveAdd/unmark/open/reload
-'    actions. VB.NET responds by modifying MailItem categories via COM and pushing
-'    updated data back to the board.
-'  - Drag modes: Normal drag replaces all categories with the target column's
-'    category. Ctrl+drag adds the target category while keeping existing ones
-'    (like copy vs. move in file managers). Visual feedback: green drop indicator
-'    and "+" badge when Ctrl is held.
-'  - AI Summaries: Generated asynchronously in batches after the board is displayed.
-'    Uses the existing LLM() helper with a summarization system prompt.
-'    Summaries are cached in My.Settings (JSON dict, capped at 500 entries).
-'    Summary language is selectable via a dropdown, persisted in My.Settings.
-'  - Threading: All Outlook COM access on the UI thread; LLM calls are async.
-'  - Persistence: Theme, window position/size/maximized state, card field toggles,
-'    last load count, column filter, pinned columns, summary cache, summary
-'    language, conversation grouping toggle, include-flagged toggle, and
-'    hide-done-flags toggle are all persisted via My.Settings (not localStorage).
+'  - Data collection:
+'      * Scans default Inbox and builds board entries from MailItem metadata.
+'      * Includes categorized mails; optionally includes flagged mails.
+'      * Prompts for load cap when qualifying mail volume exceeds configurable threshold.
+'  - Conversation mode:
+'      * Optional grouping by ConversationTopic into a representative card with
+'        aggregated message count and merged metadata.
+'  - Column model:
+'      * Category columns from Outlook category master list + pinned columns from settings.
+'      * Optional flagged columns:
+'          - single synthetic flagged column, or
+'          - date-bucketed flag columns (Overdue/Today/Tomorrow/This Week/.../Done).
+'  - Folder model:
+'      * User-defined board folders (separate from Outlook folders) persisted in settings.
+'      * Card assignment persisted per mail via UserProperty: `RedInkBoardFolder`.
+'  - UI host:
+'      * WinForms dialog with WebView2 rendering full HTML/CSS/JS board.
+'      * Supports search, column filter, column reorder, field toggles, theme toggle,
+'        sort per column, and card drag/drop gestures.
+'  - JS ↔ VB bridge:
+'      * WebView2 postMessage actions for move, moveAdd, unmark, open, reload,
+'        settings persistence, folder operations, and card refresh.
+'  - AI summaries:
+'      * Background batch summarization using existing `LLM()` helper and
+'        `SP_InboxBoard` prompt.
+'      * EntryID-based summary cache persisted in `My.Settings` (bounded size).
+'
+' COM / Threading:
+'  - Outlook COM operations run on UI thread (with `ComRetry` access pattern).
+'  - LLM summary generation is asynchronous with cancellation on reload/close.
+'
+' Persistence (`My.Settings`):
+'  - Window geometry/state, theme, card field toggles, column filter/order,
+'    pinned category/flag columns, load threshold + last load count,
+'    include-flagged/hide-done/grouping toggles, summary language,
+'    summary cache, board folder list, expanded folder state.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
-Imports System.Runtime.InteropServices
-Imports System.Text
 Imports System.Threading
-Imports System.Threading.Tasks
 Imports System.Windows.Forms
-Imports System.Windows.Forms.VisualStyles.VisualStyleElement.TextBox
-Imports System.Windows.Forms.VisualStyles.VisualStyleElement.ToolTip
 Imports Microsoft.Office.Interop.Outlook
 Imports Microsoft.Web.WebView2.Core
 Imports Microsoft.Web.WebView2.WinForms
-Imports Newtonsoft
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports SharedLibrary.SharedLibrary
@@ -257,6 +257,12 @@ Partial Public Class ThisAddIn
 
 #Region "InboxBoard Folder Operations"
 
+    ''' <summary>
+    ''' Reads the board-folder assignment from a mail item's user property.
+    ''' </summary>
+    ''' <returns>
+    ''' Folder name if assigned; otherwise empty string.
+    ''' </returns>
     Private Function GetMailBoardFolder(mi As MailItem) As String
         Try
             Dim prop As Outlook.UserProperty = Nothing
@@ -276,6 +282,13 @@ Partial Public Class ThisAddIn
         Return ""
     End Function
 
+    ''' <summary>
+    ''' Sets or clears the board-folder assignment user property on a mail item.
+    ''' </summary>
+    ''' <param name="entryId">Target MailItem EntryID.</param>
+    ''' <param name="folderName">
+    ''' Folder name to assign; empty value clears assignment.
+    ''' </param>
     Private Sub SetMailBoardFolder(entryId As String, folderName As String)
         Try
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -2550,6 +2563,9 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    ''' <summary>
+    ''' Returns the full CSS stylesheet used by the Inbox Board HTML host.
+    ''' </summary>
     Private Function GetBoardCss() As String
         Return "
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }

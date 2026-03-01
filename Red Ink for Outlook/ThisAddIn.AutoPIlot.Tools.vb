@@ -1,50 +1,85 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.vb
-' Purpose: Defines and executes AutoPilot-specific internal tools for document
-'          processing, attachment handling, and binary analysis. These tools are
-'          registered alongside existing external tools and the built-in web
-'          retrieval tool.
-'
-' Tools Provided:
-'  - process_word_document: Applies any prompt (translate, correct, freestyle) to
-'    DOCX attachments using the ported OpenXML paragraph-batch processing.
-'  - comment_word_document: Adds Word comment bubbles to DOCX attachments using a
-'    review instruction and optional author name.
-'  - extract_pdf_text: Extracts text content from PDF attachments, optionally
-'    running OCR when needed and available.
-'  - merge_pdfs: Merges multiple PDF attachments into a single PDF.
-'  - read_attachment: Reads the text content of any supported attachment
-'    (DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX).
-'    Now supports batch mode (attachment_names[]) and signals when richer
-'    Word reading is available.
-'  - list_attachments: Lists all attachments with metadata.
-'  - describe_binary_attachment: Sends a supported binary attachment (image, audio,
-'    video) to the AI for description or transcription.
-'  - compare_word_documents: Compares two Word document attachments using Word's
-'    built-in comparison and produces a tracked-changes document.
-'  - read_word_document_details: Deep-reads a .docx with inline tracked changes,
-'    comments, headers/footers, footnotes/endnotes using OpenXML.
-'  - create_pdf_from_text: Creates a PDF from text/markdown content.
-'  - extract_excel_data: Reads a specific sheet/range from Excel with more control.
-'  - split_pdf: Splits a PDF into a page range.
-'  - add_pdf_watermark: Adds a text watermark to PDF pages.
-'  - word_to_pdf: Converts a .docx/.doc attachment to PDF via Word interop.
-'  - search_in_attachments: Searches for text patterns across all attachments.
-'  - summarize_thread: Extracts and structures the email conversation thread.
+' Purpose:
+'   Defines, registers, and executes AutoPilot internal tools used by Outlook
+'   AutoPilot/Chat-Agent runs for attachment processing, document generation,
+'   PDF/Office conversion, binary analysis, and structured fallback handling.
 '
 ' Architecture:
-'  - Tools are registered as ModelConfig entries with ToolOnly=True, consistent
-'    with the existing tool loading pattern from specialservices INI files.
-'  - Tool execution is routed through the existing ExecuteToolCall method which
-'    checks for internal tools before calling external endpoints.
-'  - Binary analysis is enabled only when the API configuration supports file
-'    objects, and is restricted to specific extensions.
-'  - Attachment caching: extracted text is stored in AutoPilotAttachmentInfo.CachedText
-'    for reuse across tool calls. Caches MUST be cleared after each reply via
-'    ClearAttachmentCaches() for security.
+'  - Registration:
+'      * Exposes built-in tools as `ModelConfig` entries (`Tool=True`, `ToolOnly=True`)
+'        so they participate in the same tool-calling pipeline as external tools.
+'      * Tool metadata (`ToolDefinition`, `ToolInstructionsPrompt`) is generated inline
+'        and consumed by `ExecuteToolCall` / `ExecuteToolingLoop`.
+'  - Dispatch:
+'      * `TryExecuteAutoPilotTool` routes a parsed tool call to strongly scoped
+'        executors (`Execute*Tool` methods) and returns `ToolResponse` payloads.
+'  - Session scope:
+'      * Uses AutoPilot session state from `ThisAddIn.Autopilot.vb`:
+'          - `_apCurrentAttachments`
+'          - `_apCurrentTempDir`
+'          - `_apCurrentMailInfo`
+'      * Supports tool chaining via output registration (`OutputFiles`) and lookup via
+'        `FindAttachment` (original attachments + prior tool outputs).
+'  - Office/PDF processing:
+'      * Word/PPT/Excel processing and generation via Interop/OpenXML helpers.
+'      * PDF extraction/merge/split/watermark/comment flows via PdfPig/PdfSharp and
+'        shared OCR-aware extraction helpers.
+'  - Text extraction:
+'      * Reads Office/text/PDF attachments with cache reuse
+'        (`CachedText`, `CachedDocxHint`) to reduce repeated I/O and parsing.
+'  - Logging and UX:
+'      * Emits execution traces to tooling context and AutoPilot dashboard
+'        (`context.Log`, `ApDashboardLog`) with concise success/failure summaries.
+'
+' Security & Safety:
+'  - Path containment:
+'      * Tool outputs are created in the per-mail temp directory and re-used only via
+'        resolved attachment/output references.
+'  - Size and format gates:
+'      * Oversized attachments are excluded from processing.
+'      * Binary analysis is restricted to explicit allow-listed extensions.
+'  - Conversion safeguards:
+'      * PDF→Word includes timeout/interop guardrails to avoid indefinite blocking.
+'      * PDF font resolver is initialized centrally for deterministic PdfSharp behavior.
+'  - Capability fallback:
+'      * `report_inability` generates actionable alternatives (Red Ink + optional
+'        InternetResearch path) instead of silent/tool-less failures.
+'
+' Built-in Tools (current):
+'  - process_word_document
+'  - comment_word_document
+'  - comment_pdf_document
+'  - compare_word_documents
+'  - read_word_document_details
+'  - read_attachment
+'  - list_attachments
+'  - search_in_attachments
+'  - summarize_thread
+'  - describe_binary_attachment
+'  - extract_pdf_text
+'  - merge_pdfs
+'  - split_pdf
+'  - add_pdf_watermark
+'  - create_pdf_from_text
+'  - word_to_pdf
+'  - pdf_to_word
+'  - extract_excel_data
+'  - create_word_document
+'  - create_excel_spreadsheet
+'  - create_powerpoint
+'  - create_code_file
+'  - report_inability
+'
+' Notes:
+'  - This file is a partial `ThisAddIn` implementation and depends on:
+'      * AutoPilot state/config from `ThisAddIn.Autopilot.vb`
+'      * Tooling contracts from `ThisAddIn.Tooling.vb`
+'      * SharedLibrary helpers (`SharedMethods`, OCR/PDF/Office extractors)
 ' =============================================================================
 
 
@@ -105,11 +140,19 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
     Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
+    Private Const AP_Tool_ReportInability As String = "report_inability"
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ''' <summary>
+    ''' Builds and returns the full set of AutoPilot internal tool definitions.
+    ''' </summary>
+    ''' <returns>
+    ''' A list of <see cref="ModelConfig"/> items representing built-in tools
+    ''' registered for the current AutoPilot run.
+    ''' </returns>
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
@@ -166,7 +209,7 @@ Partial Public Class ThisAddIn
                 "},""required"":[]}}"
         })
 
-        ' ── read_attachment (enhanced: batch + docx hints) ──
+        ' ── read_attachment ──
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReadAttachment,
             .ModelDescription = "Read Attachment Content (built-in)",
@@ -245,7 +288,7 @@ Partial Public Class ThisAddIn
                 "},""required"":[""instruction""]}}"
         })
 
-        ' ── compare_word_documents ── (updated ToolInstructionsPrompt)
+        ' ── compare_word_documents ── 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CompareWordDocs,
             .ModelDescription = "Compare two Word documents (built-in)",
@@ -639,14 +682,47 @@ Partial Public Class ThisAddIn
                 "},""required"":[""instruction""]}}"
         })
 
+        ' ── report_inability ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReportInability,
+            .ToolPriority = 9999,
+            .ModelDescription = "Report Inability to Fulfill Request (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_ReportInability & ": Call this tool when you determine that you CANNOT fulfill the user's request " &
+                "with the available tools and capabilities. Provide a brief reason. " &
+                "The tool returns helpful suggestions for the user. You MUST naturally incorporate " &
+                "the returned content into your reply — do NOT add labels, headers, or prefixes around it. " &
+                "You MUST call this tool instead of simply telling the user you cannot help. " &
+                "Also call this tool when attachments exceed the size limit and cannot be processed.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_ReportInability & """," &
+                """description"":""Call this when you cannot fulfill the user's request. Provide the reason. " &
+                "The tool returns helpful suggestions for the user. Naturally incorporate the returned text " &
+                "into your reply without adding labels or headers around it. " &
+                "Always call this instead of simply saying you cannot help.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """reason"":{""type"":""string"",""description"":""Brief reason why the request cannot be fulfilled (e.g. 'attachment exceeds size limit', 'no tool available for image generation', 'task requires manual interaction')""}" &
+                "},""required"":[""reason""]}}"
+        })
 
         Return tools
+
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL DISPATCH
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ''' <summary>
+    ''' Resolves and executes one AutoPilot internal tool call.
+    ''' </summary>
+    ''' <param name="toolCall">The parsed tool invocation payload.</param>
+    ''' <param name="context">Execution context used for logging and correlation.</param>
+    ''' <param name="cancellationToken">Optional cancellation token for async operations.</param>
+    ''' <returns>
+    ''' A <see cref="ToolResponse"/> when the tool is recognized; otherwise <c>Nothing</c>
+    ''' so the caller can continue with external tool handling.
+    ''' </returns>
     Friend Async Function TryExecuteAutoPilotTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
@@ -697,19 +773,31 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateCodeFile
                 Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ReportInability
+                Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
                 Return Nothing
         End Select
     End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  HELPER: Get argument values
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    ''' <summary>
+    ''' Reads a string argument from a tool-argument dictionary.
+    ''' </summary>
+    ''' <param name="args">Argument dictionary from the tool call.</param>
+    ''' <param name="key">Argument key to read.</param>
+    ''' <returns>The string value if present; otherwise <c>Nothing</c>.</returns>
     Private Shared Function GetArgString(args As Dictionary(Of String, Object), key As String) As String
         If args Is Nothing OrElse Not args.ContainsKey(key) Then Return Nothing
         Return args(key)?.ToString()
     End Function
 
+    ''' <summary>
+    ''' Reads a Boolean argument with fallback default.
+    ''' </summary>
     Private Shared Function GetArgBool(args As Dictionary(Of String, Object), key As String, defaultVal As Boolean) As Boolean
         Dim s = GetArgString(args, key)
         If String.IsNullOrWhiteSpace(s) Then Return defaultVal
@@ -718,6 +806,9 @@ Partial Public Class ThisAddIn
         Return defaultVal
     End Function
 
+    ''' <summary>
+    ''' Reads an Integer argument with fallback default.
+    ''' </summary>
     Private Shared Function GetArgInt(args As Dictionary(Of String, Object), key As String, defaultVal As Integer) As Integer
         Dim s = GetArgString(args, key)
         If String.IsNullOrWhiteSpace(s) Then Return defaultVal
@@ -726,6 +817,9 @@ Partial Public Class ThisAddIn
         Return defaultVal
     End Function
 
+    ''' <summary>
+    ''' Reads a JSON array argument as a list of strings.
+    ''' </summary>
     Private Shared Function GetArgStringArray(args As Dictionary(Of String, Object), key As String) As List(Of String)
         Dim result As New List(Of String)()
         If args Is Nothing OrElse Not args.ContainsKey(key) Then Return result
@@ -739,23 +833,23 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Finds an attachment by name (case-insensitive).
-    ''' Also searches output files produced by earlier tool calls in the same session,
-    ''' so that tools can chain (e.g., process_word_document → compare_word_documents).
+    ''' Finds an attachment by filename (case-insensitive) from either:
+    ''' (1) original mail attachments, or
+    ''' (2) output files produced by prior tool calls in the same run.
     ''' </summary>
+    ''' <remarks>
+    ''' If an output file is matched, this method returns a transient
+    ''' <see cref="AutoPilotAttachmentInfo"/> marked with <c>IsToolOutput=True</c>.
+    ''' </remarks>
     Private Function FindAttachment(fileName As String) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(fileName) OrElse _apCurrentAttachments Is Nothing Then Return Nothing
 
         Dim trimmedName = fileName.Trim()
 
-        ' 1. Check original attachments by their original filename
         Dim found = _apCurrentAttachments.FirstOrDefault(
             Function(a) a.OriginalFileName.Equals(trimmedName, StringComparison.OrdinalIgnoreCase))
         If found IsNot Nothing Then Return found
 
-        ' 2. Check output files produced by earlier tool calls in this session.
-        '    This enables tool chaining: e.g. process_word_document creates
-        '    "Letter New_processed.docx" which compare_word_documents can then reference.
         For Each att In _apCurrentAttachments
             If att.OutputFiles Is Nothing Then Continue For
             For Each outputPath In att.OutputFiles
@@ -763,9 +857,6 @@ Partial Public Class ThisAddIn
                 Dim outputName = Path.GetFileName(outputPath)
                 If outputName.Equals(trimmedName, StringComparison.OrdinalIgnoreCase) AndAlso
                    File.Exists(outputPath) Then
-                    ' Create a transient AutoPilotAttachmentInfo for the output file.
-                    ' Mark it as a tool output so that destructive tools can guard against
-                    ' recursive re-processing of their own output files.
                     Return New AutoPilotAttachmentInfo() With {
                         .OriginalFileName = outputName,
                         .Extension = Path.GetExtension(outputPath).ToLowerInvariant(),
@@ -784,8 +875,8 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Returns all filenames available to the LLM: original attachments + output files.
-    ''' Used for error messages and list_attachments to show the full picture.
+    ''' Returns all filenames currently available for tool resolution:
+    ''' original attachments plus existing tool output files.
     ''' </summary>
     Private Function GetAllAvailableFileNames() As List(Of String)
         Dim names As New List(Of String)()
@@ -1186,9 +1277,16 @@ Partial Public Class ThisAddIn
             Dim success = Await SwitchToUi(Function()
                                                Dim app As Object = Nothing
                                                Dim pres As Object = Nothing
+                                               Dim weOwnApp As Boolean = False
                                                Try
                                                    ' Late binding: no PIAs required (same as ExtractPowerPointText)
-                                                   app = Microsoft.VisualBasic.Interaction.CreateObject("PowerPoint.Application")
+                                                   ' Try to get an existing instance first
+                                                   Try
+                                                       app = System.Runtime.InteropServices.Marshal.GetActiveObject("PowerPoint.Application")
+                                                   Catch ex As System.Runtime.InteropServices.COMException
+                                                       app = Microsoft.VisualBasic.Interaction.CreateObject("PowerPoint.Application")
+                                                       weOwnApp = True
+                                                   End Try
 
                                                    pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
 
@@ -1318,7 +1416,10 @@ Partial Public Class ThisAddIn
                                                    End Try
                                                    Try
                                                        If app IsNot Nothing Then
-                                                           Try : app.Quit() : Catch : End Try
+                                                           ' Only quit if we created the instance ourselves
+                                                           If weOwnApp Then
+                                                               Try : app.Quit() : Catch : End Try
+                                                           End If
                                                            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(app)
                                                            Catch : End Try
                                                        End If
@@ -1469,8 +1570,17 @@ Partial Public Class ThisAddIn
             Dim success = Await SwitchToUi(Function()
                                                Dim excelApp As Microsoft.Office.Interop.Excel.Application = Nothing
                                                Dim wb As Microsoft.Office.Interop.Excel.Workbook = Nothing
+                                               Dim weOwnApp As Boolean = False
                                                Try
-                                                   excelApp = New Microsoft.Office.Interop.Excel.Application()
+                                                   ' Try to reuse an existing Excel instance
+                                                   Try
+                                                       excelApp = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Excel.Application"),
+                                                                        Microsoft.Office.Interop.Excel.Application)
+                                                   Catch ex As System.Runtime.InteropServices.COMException
+                                                       excelApp = New Microsoft.Office.Interop.Excel.Application()
+                                                       weOwnApp = True
+                                                   End Try
+
                                                    excelApp.Visible = False
                                                    excelApp.DisplayAlerts = False
                                                    excelApp.ScreenUpdating = False
@@ -1577,7 +1687,7 @@ Partial Public Class ThisAddIn
                                                    Debug.WriteLine($"CreateExcel error: {ex.Message}")
                                                    Return False
                                                Finally
-                                                   SafeCloseExcel(wb, excelApp)
+                                                   SafeCloseExcel(wb, excelApp, weOwnApp)
                                                End Try
                                            End Function)
 
@@ -2748,6 +2858,13 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    ''' <summary>
+    ''' Creates a Word tracked-changes comparison document from an original and revised file.
+    ''' </summary>
+    ''' <param name="originalPath">Path to the baseline/original Word file.</param>
+    ''' <param name="processedPath">Path to the revised/processed Word file.</param>
+    ''' <param name="comparePath">Destination path for the generated comparison document.</param>
+    ''' <returns><c>True</c> if comparison output is created successfully; otherwise <c>False</c>.</returns>
     Private Function CreateWordCompareDocumentForAutoPilot(originalPath As String, processedPath As String, comparePath As String) As Boolean
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
         Dim originalDoc As Microsoft.Office.Interop.Word.Document = Nothing
@@ -3017,7 +3134,7 @@ Partial Public Class ThisAddIn
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
-    '  TOOL EXECUTION: read_attachment (enhanced: batch + docx hints + caching)
+    '  TOOL EXECUTION: read_attachment 
     ' ═══════════════════════════════════════════════════════════════════════════
 
     Private Async Function ExecuteReadAttachmentTool(
@@ -4411,6 +4528,9 @@ Partial Public Class ThisAddIn
 
         Private Shared ReadOnly _fontCache As New Dictionary(Of String, Byte())(StringComparer.OrdinalIgnoreCase)
 
+        ''' <summary>
+        ''' Resolves a requested font family/style combination to a concrete font face key.
+        ''' </summary>
         Public Function ResolveTypeface(familyName As String, bold As Boolean, italic As Boolean) As PdfSharp.Fonts.FontResolverInfo _
                 Implements PdfSharp.Fonts.IFontResolver.ResolveTypeface
 
@@ -4515,6 +4635,9 @@ Partial Public Class ThisAddIn
             Return New PdfSharp.Fonts.FontResolverInfo(key)
         End Function
 
+        ''' <summary>
+        ''' Loads raw font bytes for a resolved face name from Windows font locations.
+        ''' </summary>
         Public Function GetFont(faceName As String) As Byte() _
                 Implements PdfSharp.Fonts.IFontResolver.GetFont
 
@@ -4544,6 +4667,96 @@ Partial Public Class ThisAddIn
     End Class
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: report_inability
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Handles the report_inability tool call. Generates helpful suggestions by:
+    ''' (1) noting attachment size limits if relevant, (2) consulting the HelpMeInky
+    ''' manual for Red Ink add-in features, and (3) optionally querying the
+    ''' InternetResearch model for alternative online tools.
+    ''' The suggestions are returned in the tool response for LLM incorporation,
+    ''' with explicit instruction that suggestions may be rephrased but not omitted.
+    ''' </summary>
+    Private Async Function ExecuteReportInabilityTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = AP_Tool_ReportInability,
+            .OriginalCallJson = toolCall.RawJson
+        }
+
+        Dim reason = GetArgString(toolCall.Arguments, "reason")
+        If String.IsNullOrWhiteSpace(reason) Then reason = "unspecified"
+        ApDashboardLog($"📋 Inability reported: {reason}", "warn")
+
+        Dim sb As New StringBuilder()
+
+        ' ── Attachment size limit detail ──
+        If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Any(Function(a) a.IsOverSizeLimit) Then
+            Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+            Dim oversizedNames = _apCurrentAttachments.Where(Function(a) a.IsOverSizeLimit).
+                Select(Function(a) $"{a.OriginalFileName} ({a.SizeBytes / 1024.0 / 1024.0:F1} MB)").ToList()
+            sb.AppendLine($"The maximum permitted attachment size is {limitMB:F0} MB. " &
+                          $"The following file(s) exceeded this limit: {String.Join(", ", oversizedNames)}. " &
+                          $"Advise the sender to send smaller files or split large documents.")
+            sb.AppendLine()
+        End If
+
+        ' ── Red Ink add-in suggestion (via HelpMeInky manual) ──
+        Try
+            Dim redInkSuggestion = Await GetRedInkSuggestionAsync(
+                _apCurrentMailInfo, reason, ct)
+            If Not String.IsNullOrWhiteSpace(redInkSuggestion) Then
+                sb.AppendLine(redInkSuggestion.Trim())
+                sb.AppendLine()
+            End If
+        Catch ex As System.Exception
+            ApDashboardLog($"Red Ink suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        ' ── Internet alternative suggestion ──
+        Dim hasInternetSuggestion As Boolean = False
+        Try
+            Dim internetSuggestion = Await GetInternetAlternativeSuggestionAsync(
+                _apCurrentMailInfo, reason, ct)
+            If Not String.IsNullOrWhiteSpace(internetSuggestion) Then
+                sb.AppendLine(internetSuggestion.Trim())
+                sb.AppendLine()
+                hasInternetSuggestion = True
+            End If
+        Catch ex As System.Exception
+            ApDashboardLog($"Internet suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        If sb.Length = 0 Then
+            sb.AppendLine("No specific suggestions available. Advise the sender to try again, rephrase their request, or contact the operator for assistance.")
+        End If
+
+        ' ── Instruction to the LLM on how to use this tool output ──
+        sb.AppendLine()
+        sb.AppendLine("INSTRUCTIONS FOR YOUR RESPONSE:")
+        sb.AppendLine("Include ALL of the above suggestions in your reply to the sender. " &
+                      "You may rephrase the suggestions to fit naturally into your response, " &
+                      "but do NOT omit any of them.")
+        If hasInternetSuggestion Then
+            sb.AppendLine("MANDATORY: Your reply MUST end with the following disclaimer paragraph, " &
+                          "copied VERBATIM (do not rephrase, shorten or omit it):")
+            sb.AppendLine("Please note: Third-party services and tools may only be used if permitted by your organization's policies. " &
+                          "Before using any external service or tool, ensure it meets your corporate security, confidentiality, and data protection requirements.")
+        End If
+
+        response.Success = True
+        response.Response = sb.ToString().TrimEnd()
+        ApDashboardLog($"✓ Inability suggestions generated ({response.Response.Length} chars)", "step")
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL IDENTIFICATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4570,7 +4783,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_CreateExcel,
                  AP_Tool_CreatePowerPoint,
                  AP_Tool_CreateCodeFile,
-                 AP_Tool_CommentPdf
+                 AP_Tool_CommentPdf,
+                 AP_Tool_ReportInability
                 Return True
             Case Else
                 Return False

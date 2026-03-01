@@ -3688,6 +3688,28 @@ Partial Public Class ThisAddIn
 
         Dim userPrompt As String = $"The PDF has {pageCount} pages. Here is the text content page by page:" & vbCrLf & vbCrLf & pageContentSb.ToString()
 
+        ' ── Try to use a dedicated SplitPDF model (if configured in alternate models INI) ──
+        Dim backupConfig As ModelConfig = Nothing
+        Dim useSplitPdfModel As Boolean = False
+        Dim useSecondApi As Boolean = False
+        Dim timeout As Long = 0
+
+        Try
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                useSplitPdfModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "SplitPDF")
+            End If
+        Catch
+        End Try
+
+        If useSplitPdfModel Then
+            backupConfig = GetCurrentConfig(_context)
+            useSecondApi = True
+            timeout = If(_context.INI_Timeout_2 > 0, _context.INI_Timeout_2, _context.INI_Timeout)
+        Else
+            useSecondApi = False
+            timeout = _context.INI_Timeout
+        End If
+
         Dim llmResponse As String = String.Empty
         Try
             llmResponse = Await SharedMethods.LLM(
@@ -3696,18 +3718,17 @@ Partial Public Class ThisAddIn
                 userPrompt,
                 "",
                 "",
-                0,
-                False,
+                timeout,
+                useSecondApi,
                 False)
         Catch ex As Exception
             ShowCustomMessageBox($"Failed to analyze PDF structure: {ex.Message}", AN)
             Return
+        Finally
+            If useSplitPdfModel AndAlso backupConfig IsNot Nothing Then
+                RestoreDefaults(_context, backupConfig)
+            End If
         End Try
-
-        If String.IsNullOrWhiteSpace(llmResponse) Then
-            ShowCustomMessageBox("The AI did not return a response. Unable to determine how to split the PDF.", AN)
-            Return
-        End If
 
         ' ─────────────────────────────────────────────────────────────────
         ' STEP 3: Parse LLM response into split segments

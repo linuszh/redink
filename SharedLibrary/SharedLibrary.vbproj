@@ -357,6 +357,7 @@
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.AlternateModels.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.GoogleOAuthHelper.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MainLLM.vb" />
+    <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.Signing.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.Diff.vb" />
     <Compile Include="Code\Core\LLM\ImageDecoder.vb" />
