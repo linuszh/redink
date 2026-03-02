@@ -1039,7 +1039,23 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_SwitchParty_Document As String
+        Get
+            Return _context.SP_SwitchParty_Document
+        End Get
+        Set(value As String)
+            _context.SP_SwitchParty_Document = value
+        End Set
+    End Property
 
+    Public Shared Property SP_Anonymize_Document As String
+        Get
+            Return _context.SP_Anonymize_Document
+        End Get
+        Set(value As String)
+            _context.SP_Anonymize_Document = value
+        End Set
+    End Property
     Public Shared Property SP_Extract As String
         Get
             Return _context.SP_Extract
@@ -1085,6 +1101,14 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_RemoveClutter As String
+        Get
+            Return _context.SP_RemoveClutter
+        End Get
+        Set(value As String)
+            _context.SP_RemoveClutter = value
+        End Set
+    End Property
 
     Public Shared Property SP_CheckforII As String
         Get
@@ -1233,6 +1257,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Markers As String
+        Get
+            Return _context.SP_Add_Markers
+        End Get
+        Set(value As String)
+            _context.SP_Add_Markers = value
+        End Set
+    End Property
+
     Public Shared Property SP_Add_Slides As String
         Get
             Return _context.SP_Add_Slides
@@ -1323,6 +1356,51 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_DiscussThis_SumUp = value
+        End Set
+    End Property
+
+    Public Shared Property SP_MailMover As String
+        Get
+            Return _context.SP_MailMover
+        End Get
+        Set(value As String)
+            _context.SP_MailMover = value
+        End Set
+    End Property
+
+    Public Shared Property SP_InboxBoard As String
+        Get
+            Return _context.SP_InboxBoard
+        End Get
+        Set(value As String)
+            _context.SP_InboxBoard = value
+        End Set
+    End Property
+
+    Public Shared Property SP_SplitPDF As String
+        Get
+            Return _context.SP_SplitPDF
+        End Get
+        Set(value As String)
+            _context.SP_SplitPDF = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AutoPilot As String
+        Get
+            Return _context.SP_AutoPilot
+        End Get
+        Set(value As String)
+            _context.SP_AutoPilot = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AutoPilot_NoTools As String
+        Get
+            Return _context.SP_AutoPilot_NoTools
+        End Get
+        Set(value As String)
+            _context.SP_AutoPilot_NoTools = value
         End Set
     End Property
 
@@ -1786,6 +1864,26 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_MailMoverPath As String
+        Get
+            Return _context.INI_MailMoverPath
+        End Get
+        Set(value As String)
+            _context.INI_MailMoverPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_MailMoverPathLocal As String
+        Get
+            Return _context.INI_MailMoverPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_MailMoverPathLocal = value
+        End Set
+    End Property
+
+
+
     Public Shared Property INI_SpeechModelPath As String
         Get
             Return _context.INI_SpeechModelPath
@@ -1903,6 +2001,25 @@ Partial Public Class ThisAddIn
             _context.INI_WebAgentPathLocal = value
         End Set
     End Property
+
+    Public Shared Property INI_SnapshotLibPath As String
+        Get
+            Return _context.INI_SnapshotLibPath
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_SnapshotLibPathLocal As String
+        Get
+            Return _context.INI_SnapshotLibPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_SnapshotLibPathLocal = value
+        End Set
+    End Property
+
 
     Public Shared Property INI_DocCheckPath As String
         Get
@@ -2136,6 +2253,16 @@ Partial Public Class ThisAddIn
             _context.INI_NoHelperDownload = value
         End Set
     End Property
+
+    Public Shared Property INI_AutoPilot As String
+        Get
+            Return _context.INI_AutoPilot
+        End Get
+        Set(value As String)
+            _context.INI_AutoPilot = value
+        End Set
+    End Property
+
 
     ' Tooling / tool-call settings 
 

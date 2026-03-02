@@ -48,6 +48,12 @@ Namespace SharedLibrary
         Private Const ShowCheckingSplash As Boolean = False
 
         ''' <summary>
+        ''' Number of cumulative periodic update failures (across days/sessions) before showing
+        ''' the manual download fallback to the user.
+        ''' </summary>
+        Private Const ManualFallbackThreshold As Integer = 3
+
+        ''' <summary>
         ''' Maximum number of update-check failures to silently tolerate per day before prompting.
         ''' </summary>
         Private Const MaxDailyUpdateRetries As Integer = 5
@@ -248,32 +254,41 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
-        ''' Shows a Yes/No prompt on the UI thread (when required) and returns the underlying dialog result.
+        ''' Shows a Yes/No prompt on the UI thread (always marshaled) and returns the underlying dialog result.
         ''' </summary>
         ''' <param name="prompt">Prompt body text.</param>
         ''' <param name="caption">Dialog caption.</param>
         Private Shared Function UIInvokePrompt(prompt As String, caption As String) As Integer
-            NativeMethods.SetForegroundWindow(HostHandle)
-            If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
                 Dim result As Integer = 0
-                MainControl.Invoke(Sub() result = SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption))
+                MainControl.Invoke(
+                    Sub()
+                        NativeMethods.SetForegroundWindow(HostHandle)
+                        result = SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption)
+                    End Sub)
                 Return result
             Else
-                Return SharedMethods.ShowCustomYesNoBox(prompt, "Yes", "No", caption)
+                ' Fallback: no UI control available — log and return "declined"
+                WriteUpdateLog($"[UIInvokePrompt] MainControl unavailable, auto-declining: {prompt}")
+                Return 0
             End If
         End Function
 
         ''' <summary>
-        ''' Shows a message box on the UI thread (when required).
+        ''' Shows a message box on the UI thread (always marshaled).
         ''' </summary>
         ''' <param name="msg">Message body.</param>
         ''' <param name="caption">Dialog caption.</param>
         Private Shared Sub UIInvokeMessage(msg As String, caption As String)
-            NativeMethods.SetForegroundWindow(HostHandle)
-            If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
-                MainControl.Invoke(Sub() SharedMethods.ShowCustomMessageBox(msg, caption))
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                MainControl.Invoke(
+                    Sub()
+                        NativeMethods.SetForegroundWindow(HostHandle)
+                        SharedMethods.ShowCustomMessageBox(msg, caption)
+                    End Sub)
             Else
-                SharedMethods.ShowCustomMessageBox(msg, caption)
+                ' Fallback: no UI control available — log only
+                WriteUpdateLog($"[UIInvokeMessage] MainControl unavailable, message suppressed: {msg}")
             End If
         End Sub
 
@@ -325,15 +340,86 @@ Namespace SharedLibrary
 
                     Dim updateAvailable As Boolean = False
                     Dim hasUpdateInfo As Boolean = False
-                    Try
-                        updateAvailable = deployment.CheckForUpdate()
-                        hasUpdateInfo = True
-                    Catch ex As Exception
-                        WriteUpdateLog("[CheckAndInstallUpdates] CheckForUpdate failed", ex)
-                        UIInvokeMessage(
-                            "The update check could not complete (network or permission issue). Try again later or use a manual reinstall if problems persist.",
-                            $"{SharedMethods.AN} Updater")
-                    End Try
+                    Dim lastEx As Exception = Nothing
+                    Const MaxRetries As Integer = 3
+
+                    For attempt As Integer = 1 To MaxRetries
+                        Try
+                            updateAvailable = deployment.CheckForUpdate()
+                            hasUpdateInfo = True
+                            lastEx = Nothing
+                            Exit For
+                        Catch ex As Exception
+                            lastEx = ex
+                            WriteUpdateLog($"[CheckAndInstallUpdates] CheckForUpdate attempt {attempt}/{MaxRetries} failed", ex)
+                            If attempt < MaxRetries Then
+                                Thread.Sleep(1000 * CInt(Math.Pow(2, attempt - 1))) ' 1s, 2s backoff
+                            End If
+                        End Try
+                    Next
+
+                    If lastEx IsNot Nothing AndAlso Not hasUpdateInfo Then
+                        ' CheckForUpdate failed — try lightweight manifest version check as fallback
+                        WriteUpdateLog("[CheckAndInstallUpdates] CheckForUpdate failed after all retries, trying manifest fallback", lastEx)
+
+                        Dim remoteVersion = GetRemoteVersionFromManifest(deployment.UpdateLocation.AbsoluteUri)
+                        If remoteVersion IsNot Nothing AndAlso remoteVersion > deployment.CurrentVersion Then
+                            ' Update IS available but ClickOnce validation failed (trust/prereq)
+                            WriteUpdateLog($"[CheckAndInstallUpdates] manifest shows update: current='{deployment.CurrentVersion}' remote='{remoteVersion}'")
+
+                            Dim dialogResult As Integer = SharedMethods.ShowCustomYesNoBox(
+                                $"A new version is available (current: {deployment.CurrentVersion}, new: {remoteVersion}). Install now?" &
+                                Environment.NewLine & Environment.NewLine &
+                                "(Note: the standard update check encountered an issue, so an interactive install will be used.)",
+                                "Yes", "No", $"{SharedMethods.AN} Updater")
+
+                            If dialogResult = 1 Then
+                                Dim vstoUrl = deployment.UpdateLocation.AbsoluteUri.Replace(".application", ".vsto")
+                                WriteUpdateLog($"[CheckAndInstallUpdates] user accepted → interactive install '{vstoUrl}'")
+                                ShowUpdatingSplash("Updating …")
+                                Try
+                                    RunVstoInstaller(vstoUrl)
+                                Finally
+                                    CloseUpdatingSplash()
+                                End Try
+                            Else
+                                WriteUpdateLog("[CheckAndInstallUpdates] user declined update (manifest fallback)")
+                            End If
+                        ElseIf remoteVersion IsNot Nothing Then
+                            ' No update needed
+                            WriteUpdateLog($"[CheckAndInstallUpdates] manifest shows no update: current='{deployment.CurrentVersion}' remote='{remoteVersion}'")
+                            UIInvokeMessage($"No updates are currently available (current: {deployment.CurrentVersion}, remote: {remoteVersion}).", $"{SharedMethods.AN} Updater")
+                        Else
+                            ' Could not fetch manifest either — offer manual download fallback
+                            WriteUpdateLog("[CheckAndInstallUpdates] manifest fetch also failed, offering manual download")
+                            Dim detail = If(lastEx.InnerException IsNot Nothing, lastEx.InnerException.Message, lastEx.Message)
+                            Dim downloadUrl = $"{SharedMethods.AppsUrl}{SharedMethods.UpdateSubUrl}"
+
+                            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                                MainControl.Invoke(
+                                    Sub()
+                                        NativeMethods.SetForegroundWindow(HostHandle)
+                                        SharedMethods.ShowCustomMessageBox(
+                                            $"The update check could not complete after {MaxRetries} attempts." &
+                                            Environment.NewLine & $"Detail: {detail}" &
+                                            Environment.NewLine & Environment.NewLine &
+                                            $"You can download and install the latest version manually.",
+                                            $"{SharedMethods.AN} Updater",
+                                            extraButtonText:="Open downloads page",
+                                            extraButtonAction:=Sub()
+                                                                   Try
+                                                                       Process.Start(New ProcessStartInfo(downloadUrl) With {.UseShellExecute = True})
+                                                                   Catch exBrowser As Exception
+                                                                       WriteUpdateLog("[CheckAndInstallUpdates] failed to open browser", exBrowser)
+                                                                   End Try
+                                                               End Sub,
+                                            CloseAfterExtra:=True)
+                                    End Sub)
+                            Else
+                                WriteUpdateLog("[CheckAndInstallUpdates] MainControl unavailable, manual fallback suppressed")
+                            End If
+                        End If
+                    End If
 
                     If hasUpdateInfo AndAlso updateAvailable Then
                         Dim vstoUrl = deployment.UpdateLocation.AbsoluteUri.Replace(".application", ".vsto")
@@ -578,7 +664,7 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Shows a two-button Yes/No style dialog with custom button labels, marshaling to the UI thread when required.
+        ''' Shows a two-button Yes/No style dialog with custom button labels, always marshaled to the UI thread.
         ''' </summary>
         ''' <param name="bodyText">Dialog body text.</param>
         ''' <param name="button1Text">Text for the first button.</param>
@@ -586,21 +672,42 @@ Namespace SharedLibrary
         ''' <param name="caption">Dialog caption.</param>
         ''' <returns>Dialog result as returned by `SharedMethods.ShowCustomYesNoBox`.</returns>
         Private Shared Function UIInvokeYesNo(bodyText As String, button1Text As String, button2Text As String, caption As String) As Integer
-            Try
-                If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated AndAlso MainControl.InvokeRequired Then
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                Try
                     Return CInt(MainControl.Invoke(New Func(Of Integer)(
-                        Function() SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption))))
-                Else
-                    Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
-                End If
-            Catch
-                Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
-            End Try
+                        Function()
+                            NativeMethods.SetForegroundWindow(HostHandle)
+                            Return SharedMethods.ShowCustomYesNoBox(bodyText, button1Text, button2Text, caption)
+                        End Function)))
+                Catch ex As Exception
+                    WriteUpdateLog("[UIInvokeYesNo] Invoke failed", ex)
+                    Return 0
+                End Try
+            Else
+                ' Fallback: no UI control available — log and return "declined"
+                WriteUpdateLog($"[UIInvokeYesNo] MainControl unavailable, auto-declining: {bodyText}")
+                Return 0
+            End If
         End Function
 
         ''' <summary>
-        ''' Performs an automatic/periodic update check, honoring the check interval and daily retry state.
-        ''' May run an async ClickOnce check (network deployed) or run a local `.vsto` installer check (local path).
+        ''' Initial delay in milliseconds before performing the first network update check,
+        ''' giving the OS network stack time to fully initialize (VPN, proxy, Wi-Fi).
+        ''' </summary>
+        Private Const StartupDelayMs As Integer = 8000
+
+        ''' <summary>
+        ''' Maximum number of inline retries for the synchronous ClickOnce check fallback
+        ''' within <see cref="PeriodicCheckForUpdates"/>.
+        ''' </summary>
+        Private Const MaxPeriodicRetries As Integer = 3
+
+        ''' <summary>
+        ''' Performs an automatic/periodic update check on a background thread, honoring the check
+        ''' interval and daily retry state. Uses a synchronous ClickOnce check with retry and
+        ''' exponential backoff for network-deployed add-ins, or runs a local `.vsto` installer
+        ''' check for local-path deployments. All UI interactions are marshaled back to the UI
+        ''' thread via <see cref="MainControl"/>.
         ''' </summary>
         ''' <param name="checkIntervalInDays">
         ''' Interval in days between checks; 0 disables checks; -1 enables infinite retry mode for failure handling in this class.
@@ -614,10 +721,25 @@ Namespace SharedLibrary
             LocalPath As String,
             Optional context As ISharedContext = Nothing)
 
-            Dim splashManagedByOnCheck As Boolean = False
+            If checkIntervalInDays = 0 Then Return
+
+            ' Offload all blocking work (startup delay, network checks, retries, installer) to a
+            ' background thread so the Office UI thread is never blocked. All dialog/splash calls
+            ' already marshal back via MainControl.Invoke.
+            System.Threading.Tasks.Task.Run(
+                Sub() PeriodicCheckForUpdatesCore(checkIntervalInDays, appname, LocalPath, context))
+        End Sub
+
+        ''' <summary>
+        ''' Core implementation of the periodic update check. Runs entirely on a background thread.
+        ''' </summary>
+        Private Shared Sub PeriodicCheckForUpdatesCore(
+            checkIntervalInDays As Integer,
+            appname As String,
+            LocalPath As String,
+            context As ISharedContext)
 
             Try
-                If checkIntervalInDays = 0 Then Return
                 _appname = appname
                 _localPath = LocalPath
                 _checkIntervalInDays = checkIntervalInDays
@@ -647,17 +769,161 @@ Namespace SharedLibrary
                     Dim dep = ApplicationDeployment.CurrentDeployment
                     WriteUpdateLog($"[PeriodicCheck] network-deployed url='{dep.UpdateLocation}' zone='{GetUrlZoneName(dep.UpdateLocation.AbsoluteUri)}'")
 
-                    If ShowCheckingSplash Then
-                        ShowUpdatingSplash("Checking updates …")
-                        splashManagedByOnCheck = True
+                    ' --- Startup delay: give VPN/proxy/Wi-Fi time to initialize ---
+                    WriteUpdateLog($"[PeriodicCheck] waiting {StartupDelayMs}ms for network readiness")
+                    Thread.Sleep(StartupDelayMs)
+
+                    ' --- Synchronous check with retry + exponential backoff ---
+                    Dim updateAvailable As Boolean = False
+                    Dim checkSucceeded As Boolean = False
+                    Dim lastEx As Exception = Nothing
+
+                    For attempt As Integer = 1 To MaxPeriodicRetries
+                        Try
+                            updateAvailable = dep.CheckForUpdate()
+                            checkSucceeded = True
+                            lastEx = Nothing
+                            Exit For
+                        Catch ex As Exception
+                            lastEx = ex
+                            WriteUpdateLog($"[PeriodicCheck] CheckForUpdate attempt {attempt}/{MaxPeriodicRetries} failed", ex)
+                            If attempt < MaxPeriodicRetries Then
+                                Dim delayMs = 1000 * CInt(Math.Pow(2, attempt - 1)) ' 1s, 2s
+                                Thread.Sleep(delayMs)
+                            End If
+                        End Try
+                    Next
+
+                    If Not checkSucceeded Then
+                        ' All retries exhausted — try lightweight manifest version check as fallback
+                        WriteUpdateLog("[PeriodicCheck] all retries exhausted, trying manifest version check", lastEx)
+
+                        Dim remoteVersion = GetRemoteVersionFromManifest(dep.UpdateLocation.AbsoluteUri)
+                        If remoteVersion IsNot Nothing AndAlso remoteVersion > dep.CurrentVersion Then
+                            ' Update IS available, but CheckForUpdate failed (trust/prereq issue)
+                            ' Use interactive VSTOInstaller which shows trust prompt (same as clicking .vsto)
+                            WriteUpdateLog($"[PeriodicCheck] manifest shows update: current='{dep.CurrentVersion}' remote='{remoteVersion}' → interactive install")
+
+                            Dim prompt = $"A new version is available (current: {dep.CurrentVersion}, new: {remoteVersion}). Do you want to install it now?"
+                            Dim choice = UIInvokePrompt(prompt, $"{SharedMethods.AN} Updater")
+
+                            If choice = 1 Then
+                                Dim vstoUrl = dep.UpdateLocation.AbsoluteUri.Replace(".application", ".vsto")
+                                WriteUpdateLog($"[PeriodicCheck] user accepted → interactive install '{vstoUrl}'")
+                                ShowUpdatingSplash("Updating …")
+                                Try
+                                    RunVstoInstaller(vstoUrl)
+                                Finally
+                                    CloseUpdatingSplash()
+                                End Try
+                                SaveTimestamp(nowDate)
+                            Else
+                                WriteUpdateLog("[PeriodicCheck] user declined update (manifest fallback)")
+                                If _checkIntervalInDays > 0 Then SaveTimestamp(nowDate)
+                            End If
+
+                            ' Reset retry state since we successfully determined update status
+                            Dim d As Date = Date.Today : Dim c As Integer = 0 : Dim s As Boolean = False
+                            SetRetryStateToSettings(d, c, s)
+                            SetUpdateFailureCount(0)
+
+                        ElseIf remoteVersion IsNot Nothing Then
+                            ' Remote version same or older — no update needed
+                            WriteUpdateLog($"[PeriodicCheck] manifest shows no update needed: current='{dep.CurrentVersion}' remote='{remoteVersion}'")
+                            If _checkIntervalInDays > 0 Then SaveTimestamp(nowDate)
+                            Dim d As Date = Date.Today : Dim c As Integer = 0 : Dim s As Boolean = False
+                            SetRetryStateToSettings(d, c, s)
+                            SetUpdateFailureCount(0)
+                        Else
+                            ' Could not even fetch the manifest — real network issue or persistent failure
+                            If lastEx IsNot Nothing AndAlso IsTrustNotGranted(lastEx) AndAlso CanShowInteractiveUi() Then
+                                Dim appUrl = dep.UpdateLocation.AbsoluteUri
+                                Dim vstoUrl = appUrl.Replace(".application", ".vsto")
+                                WriteUpdateLog($"[PeriodicCheck] TrustNotGranted → trying interactive VSTOInstaller on '{vstoUrl}'")
+
+                                ShowUpdatingSplash("Updating …")
+                                Try
+                                    RunVstoInstaller(vstoUrl)
+                                Finally
+                                    CloseUpdatingSplash()
+                                End Try
+
+                                SaveTimestamp(nowDate)
+                                Dim d As Date = Date.Today : Dim c As Integer = 0 : Dim s As Boolean = False
+                                SetRetryStateToSettings(d, c, s)
+                                SetUpdateFailureCount(0)
+                            Else
+                                ' Increment cumulative failure counter (persists across days/sessions)
+                                Dim failCount = GetUpdateFailureCount() + 1
+                                SetUpdateFailureCount(failCount)
+                                WriteUpdateLog($"[PeriodicCheck] cumulative update failure count={failCount}/{ManualFallbackThreshold}")
+
+                                If failCount >= ManualFallbackThreshold AndAlso CanShowInteractiveUi() Then
+                                    ' All automated paths exhausted after repeated sessions — show manual download
+                                    WriteUpdateLog("[PeriodicCheck] cumulative threshold reached, offering manual download")
+                                    ShowManualUpdateFallback()
+                                    If _checkIntervalInDays > 0 Then SaveTimestamp(nowDate)
+                                    ' Reset so the user is not spammed every single time going forward
+                                    SetUpdateFailureCount(0)
+                                Else
+                                    ' Below threshold — use existing daily retry/prompt logic
+                                    Dim pause As Boolean = RecordCheckFailureAndMaybePrompt(
+                                        If(lastEx?.InnerException IsNot Nothing, lastEx.InnerException.Message,
+                                           If(lastEx IsNot Nothing, lastEx.Message, "Unknown")))
+                                    If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(nowDate)
+                                End If
+                            End If
+                        End If
                     Else
-                        splashManagedByOnCheck = False
+                        ' --- Check succeeded ---
+                        If updateAvailable Then
+                            Dim localV = dep.CurrentVersion.ToString()
+                            Dim remoteV = dep.CheckForDetailedUpdate().AvailableVersion.ToString()
+                            WriteUpdateLog($"[PeriodicCheck] update available current='{localV}' new='{remoteV}' url='{dep.UpdateLocation}'")
+
+                            Dim prompt = $"A new version is available (current: {localV}, new: {remoteV}). Do you want to install it now?"
+                            Dim choice = UIInvokePrompt(prompt, $"{SharedMethods.AN} Updater")
+
+                            If choice = 1 Then
+                                Dim appUrl = dep.UpdateLocation.AbsoluteUri
+                                Dim vstoUrl = appUrl.Replace(".application", ".vsto")
+                                WriteUpdateLog($"[PeriodicCheck] user accepted → installing '{vstoUrl}'")
+
+                                ShowUpdatingSplash("Updating …")
+                                Try
+                                    RunVstoInstaller(vstoUrl)
+                                Finally
+                                    CloseUpdatingSplash()
+                                End Try
+
+                                SaveTimestamp(nowDate)
+                            Else
+                                WriteUpdateLog("[PeriodicCheck] user declined update")
+                                If _checkIntervalInDays = -1 Then
+                                    SaveTimestamp(nowDate)
+                                ElseIf _checkIntervalInDays > 0 Then
+                                    Dim postPrompt = $"Do you want to pause update checks for {_checkIntervalInDays} days?"
+                                    Dim postChoice = UIInvokePrompt(postPrompt, $"{SharedMethods.AN} Updater")
+                                    If postChoice = 1 Then
+                                        SaveTimestamp(nowDate)
+                                    End If
+                                End If
+                            End If
+                        Else
+                            WriteUpdateLog("[PeriodicCheck] no update available")
+                            If _checkIntervalInDays > 0 Then
+                                SaveTimestamp(nowDate)
+                            End If
+                        End If
+
+                        ' Reset daily retry state on any successful check
+                        Dim day As Date = Date.Today : Dim cnt As Integer = 0 : Dim shown As Boolean = False
+                        SetRetryStateToSettings(day, cnt, shown)
+                        SetUpdateFailureCount(0)
                     End If
 
-                    RemoveHandler dep.CheckForUpdateCompleted, AddressOf OnCheck
-                    AddHandler dep.CheckForUpdateCompleted, AddressOf OnCheck
-                    dep.CheckForUpdateAsync()
                 Else
+                    ' --- Local path deployment ---
                     Dim vstoFile = Path.Combine(
                     Environment.ExpandEnvironmentVariables(_localPath),
                     $"{_appname.ToLowerInvariant()}\{SharedMethods.AN3} for {_appname}.vsto")
@@ -665,12 +931,29 @@ Namespace SharedLibrary
                     WriteUpdateLog($"[PeriodicCheck] local-deployed vsto='{vstoFile}'")
 
                     If File.Exists(vstoFile) Then
-                        ShowUpdatingSplash("Updating …")
+                        ' Compare local .vsto manifest version against currently installed version
+                        Dim remoteVersion = GetVersionFromLocalManifest(vstoFile)
+                        Dim currentVersion As Version = Nothing
                         Try
-                            RunVstoInstaller(vstoFile)
-                        Finally
-                            CloseUpdatingSplash()
+                            If ApplicationDeployment.IsNetworkDeployed Then
+                                currentVersion = ApplicationDeployment.CurrentDeployment.CurrentVersion
+                            End If
+                        Catch
                         End Try
+
+                        If remoteVersion IsNot Nothing AndAlso currentVersion IsNot Nothing AndAlso remoteVersion <= currentVersion Then
+                            WriteUpdateLog($"[PeriodicCheck] local vsto version={remoteVersion} is not newer than current={currentVersion}, skipping install")
+                        Else
+                            Dim remoteStr As String = If(remoteVersion IsNot Nothing, remoteVersion.ToString(), "unknown")
+                            Dim currentStr As String = If(currentVersion IsNot Nothing, currentVersion.ToString(), "unknown")
+                            WriteUpdateLog($"[PeriodicCheck] local vsto version={remoteStr} current={currentStr} → running installer")
+                            ShowUpdatingSplash("Updating …")
+                            Try
+                                RunVstoInstaller(vstoFile)
+                            Finally
+                                CloseUpdatingSplash()
+                            End Try
+                        End If
                     Else
                         UIInvokeMessage(
                         $"The configuration asks me to check for local updates of {SharedMethods.AN}, but I have not found '{vstoFile}'. Please inform your administrator.",
@@ -682,9 +965,11 @@ Namespace SharedLibrary
                     ' Also reset daily retries on success
                     Dim day As Date = Date.Today : Dim cnt As Integer = 0 : Dim shown As Boolean = False
                     SetRetryStateToSettings(day, cnt, shown)
+                    SetUpdateFailureCount(0)
                 End If
 
-                ' === INI Configuration Updates (async path) ===
+                ' === INI Configuration Updates ===
+                ' Only run after a confirmed successful network/local check
                 If _context IsNot Nothing Then
                     Try
                         If MainControl IsNot Nothing AndAlso MainControl.InvokeRequired Then
@@ -693,24 +978,40 @@ Namespace SharedLibrary
                             SharedMethods.CheckForIniUpdates(_context)
                         End If
                     Catch iniEx As Exception
-                        WriteUpdateLog("[OnCheck] INI update check failed", iniEx)
+                        WriteUpdateLog("[PeriodicCheck] INI update check failed", iniEx)
                     End Try
                 End If
 
             Catch dex As DeploymentException
                 WriteUpdateLog("[PeriodicCheck] DeploymentException", dex)
-                Dim pause As Boolean = RecordCheckFailureAndMaybePrompt("DeploymentException")
-                If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                Dim failCount = GetUpdateFailureCount() + 1
+                SetUpdateFailureCount(failCount)
+                WriteUpdateLog($"[PeriodicCheck] cumulative update failure count={failCount}/{ManualFallbackThreshold}")
+                If failCount >= ManualFallbackThreshold AndAlso CanShowInteractiveUi() Then
+                    ShowManualUpdateFallback()
+                    SetUpdateFailureCount(0)
+                    If _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                Else
+                    Dim pause As Boolean = RecordCheckFailureAndMaybePrompt("DeploymentException")
+                    If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                End If
 
             Catch ex As Exception
                 WriteUpdateLog("[PeriodicCheck] Unexpected Exception", ex)
-                Dim pause As Boolean = RecordCheckFailureAndMaybePrompt(ex.Message)
-                If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                Dim failCount = GetUpdateFailureCount() + 1
+                SetUpdateFailureCount(failCount)
+                WriteUpdateLog($"[PeriodicCheck] cumulative update failure count={failCount}/{ManualFallbackThreshold}")
+                If failCount >= ManualFallbackThreshold AndAlso CanShowInteractiveUi() Then
+                    ShowManualUpdateFallback()
+                    SetUpdateFailureCount(0)
+                    If _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                Else
+                    Dim pause As Boolean = RecordCheckFailureAndMaybePrompt(ex.Message)
+                    If pause AndAlso _checkIntervalInDays > 0 Then SaveTimestamp(Date.Now)
+                End If
 
             Finally
-                If Not splashManagedByOnCheck Then
-                    CloseUpdatingSplash()
-                End If
+                CloseUpdatingSplash()
             End Try
         End Sub
 
@@ -745,6 +1046,7 @@ Namespace SharedLibrary
                         ' Reset retries on success path (we attempted install)
                         Dim d As Date = Date.Today : Dim c As Integer = 0 : Dim s As Boolean = False
                         SetRetryStateToSettings(d, c, s)
+                        SetUpdateFailureCount(0)
                         Return
                     End If
 
@@ -796,6 +1098,7 @@ Namespace SharedLibrary
                 ' On any successful network check outcome, reset the daily retry state
                 Dim day As Date = Date.Today : Dim cnt As Integer = 0 : Dim shown As Boolean = False
                 SetRetryStateToSettings(day, cnt, shown)
+                SetUpdateFailureCount(0)
 
                 ' === INI Configuration Updates (async network path) ===
                 If _context IsNot Nothing Then
@@ -990,6 +1293,177 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        ''' <summary>
+        ''' Parses the assemblyIdentity version from a local .vsto manifest file on disk.
+        ''' </summary>
+        ''' <param name="vstoFilePath">Full path to the local .vsto file.</param>
+        ''' <returns>The parsed version, or Nothing if it could not be determined.</returns>
+        Private Shared Function GetVersionFromLocalManifest(vstoFilePath As String) As Version
+            Try
+                Dim doc As New System.Xml.XmlDocument()
+                doc.Load(vstoFilePath)
+
+                Dim node As System.Xml.XmlNode = Nothing
+
+                ' Strategy 1: asmv1 namespace
+                Dim nsMgr As New System.Xml.XmlNamespaceManager(doc.NameTable)
+                nsMgr.AddNamespace("asmv1", "urn:schemas-microsoft-com:asm.v1")
+                node = doc.SelectSingleNode("/asmv1:assembly/asmv1:assemblyIdentity", nsMgr)
+
+                ' Strategy 2: default namespace alias
+                If node Is Nothing Then
+                    nsMgr.AddNamespace("d", "urn:schemas-microsoft-com:asm.v1")
+                    node = doc.SelectSingleNode("/d:assembly/d:assemblyIdentity", nsMgr)
+                End If
+
+                ' Strategy 3: asmv2 namespace
+                If node Is Nothing Then
+                    nsMgr.AddNamespace("asmv2", "urn:schemas-microsoft-com:asm.v2")
+                    node = doc.SelectSingleNode("/asmv2:assembly/asmv2:assemblyIdentity", nsMgr)
+                End If
+
+                ' Strategy 4: namespace-agnostic
+                If node Is Nothing Then
+                    For Each child As System.Xml.XmlNode In doc.DocumentElement.ChildNodes
+                        If child.LocalName = "assemblyIdentity" Then
+                            node = child
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                If node IsNot Nothing Then
+                    Dim verAttr = node.Attributes("version")
+                    If verAttr IsNot Nothing Then
+                        Dim v As Version = Nothing
+                        If Version.TryParse(verAttr.Value, v) Then
+                            WriteUpdateLog($"[GetVersionFromLocalManifest] parsed version='{v}' from '{vstoFilePath}'")
+                            Return v
+                        End If
+                    End If
+                End If
+
+                WriteUpdateLog($"[GetVersionFromLocalManifest] could not find version in '{vstoFilePath}'")
+            Catch ex As Exception
+                WriteUpdateLog("[GetVersionFromLocalManifest] failed to parse manifest", ex)
+            End Try
+            Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Downloads the remote ClickOnce .vsto manifest and extracts the version string,
+        ''' bypassing the full ClickOnce trust/prerequisite validation that CheckForUpdate() performs.
+        ''' If the input URL ends with .application, it is converted to .vsto since only .vsto
+        ''' manifests are deployed on the server.
+        ''' </summary>
+        ''' <param name="applicationUrl">URL to the .application or .vsto manifest file.</param>
+        ''' <returns>The remote version string, or Nothing if it could not be determined.</returns>
+        Private Shared Function GetRemoteVersionFromManifest(applicationUrl As String) As Version
+            ' Only .vsto manifests exist on the server — convert .application URLs
+            Dim vstoUrl As String = applicationUrl
+            If vstoUrl.EndsWith(".application", StringComparison.OrdinalIgnoreCase) Then
+                vstoUrl = vstoUrl.Substring(0, vstoUrl.Length - ".application".Length) & ".vsto"
+            End If
+            Return TryGetVersionFromManifestUrl(vstoUrl)
+        End Function
+
+        ''' <summary>
+        ''' Attempts to download and parse a single manifest URL (either .application or .vsto)
+        ''' to extract the version from the assemblyIdentity element.
+        ''' </summary>
+        ''' <param name="manifestUrl">URL to the manifest file.</param>
+        ''' <returns>The parsed version, or Nothing if it could not be determined.</returns>
+        Private Shared Function TryGetVersionFromManifestUrl(manifestUrl As String) As Version
+            Try
+                ' .NET Framework defaults to TLS 1.0/1.1 which most modern servers reject.
+                ' Ensure TLS 1.2 (and 1.3 if available) is enabled for this request.
+                System.Net.ServicePointManager.SecurityProtocol =
+                    System.Net.ServicePointManager.SecurityProtocol Or
+                    System.Net.SecurityProtocolType.Tls12 Or
+                    CType(12288, System.Net.SecurityProtocolType) ' Tls13 = 12288 (not defined in older .NET FW)
+
+                Using client As New System.Net.Http.HttpClient()
+                    client.Timeout = TimeSpan.FromSeconds(15)
+
+                    ' Use GetAsync to inspect status code and content type before parsing
+                    Dim response = client.GetAsync(manifestUrl).Result
+                    Dim statusCode = CInt(response.StatusCode)
+                    Dim contentType = response.Content?.Headers?.ContentType?.MediaType
+                    Dim xml = response.Content.ReadAsStringAsync().Result
+
+                    WriteUpdateLog($"[GetRemoteVersion] fetched {xml.Length} chars from '{manifestUrl}' " &
+                                   $"status={statusCode} contentType='{contentType}' " &
+                                   $"preview='{If(xml.Length > 200, xml.Substring(0, 200), xml).Replace(vbCrLf, " ").Replace(vbLf, " ")}'")
+
+                    ' Guard: if server returned error or HTML, don't try to parse as XML
+                    If statusCode < 200 OrElse statusCode >= 300 Then
+                        WriteUpdateLog($"[GetRemoteVersion] non-success HTTP status {statusCode}, skipping")
+                        Return Nothing
+                    End If
+
+                    If contentType IsNot Nothing AndAlso contentType.Contains("html") Then
+                        WriteUpdateLog("[GetRemoteVersion] server returned HTML instead of XML manifest, skipping")
+                        Return Nothing
+                    End If
+
+                    If Not xml.TrimStart().StartsWith("<", StringComparison.Ordinal) Then
+                        WriteUpdateLog("[GetRemoteVersion] response does not start with '<', not valid XML, skipping")
+                        Return Nothing
+                    End If
+
+                    Dim doc As New System.Xml.XmlDocument()
+                    doc.LoadXml(xml)
+
+                    Dim node As System.Xml.XmlNode = Nothing
+
+                    ' Strategy 1: Try with asmv1 namespace prefix
+                    Dim nsMgr As New System.Xml.XmlNamespaceManager(doc.NameTable)
+                    nsMgr.AddNamespace("asmv1", "urn:schemas-microsoft-com:asm.v1")
+                    node = doc.SelectSingleNode("/asmv1:assembly/asmv1:assemblyIdentity", nsMgr)
+
+                    ' Strategy 2: Try with default namespace alias
+                    If node Is Nothing Then
+                        nsMgr.AddNamespace("d", "urn:schemas-microsoft-com:asm.v1")
+                        node = doc.SelectSingleNode("/d:assembly/d:assemblyIdentity", nsMgr)
+                    End If
+
+                    ' Strategy 3: Try asmv2 namespace
+                    If node Is Nothing Then
+                        nsMgr.AddNamespace("asmv2", "urn:schemas-microsoft-com:asm.v2")
+                        node = doc.SelectSingleNode("/asmv2:assembly/asmv2:assemblyIdentity", nsMgr)
+                    End If
+
+                    ' Strategy 4: Namespace-agnostic — first assemblyIdentity child of root
+                    If node Is Nothing Then
+                        For Each child As System.Xml.XmlNode In doc.DocumentElement.ChildNodes
+                            If child.LocalName = "assemblyIdentity" Then
+                                node = child
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If node IsNot Nothing Then
+                        Dim verStr = node.Attributes("version")?.Value
+                        If verStr IsNot Nothing Then
+                            Dim v As Version = Nothing
+                            If Version.TryParse(verStr, v) Then
+                                WriteUpdateLog($"[GetRemoteVersion] parsed version='{v}' from '{manifestUrl}'")
+                                Return v
+                            End If
+                        End If
+                    End If
+
+                    WriteUpdateLog($"[GetRemoteVersion] could not find version in manifest from '{manifestUrl}' " &
+                                   $"rootElement='{doc.DocumentElement?.Name}' rootNS='{doc.DocumentElement?.NamespaceURI}' " &
+                                   $"childCount={doc.DocumentElement?.ChildNodes.Count}")
+                End Using
+            Catch ex As Exception
+                WriteUpdateLog("[GetRemoteVersion] failed to fetch/parse manifest", ex)
+            End Try
+            Return Nothing
+        End Function
+
 
         ''' <summary>
         ''' Runs `VSTOInstaller.exe` to install a `.vsto` from a local path or URL. Attempts a silent install first,
@@ -1046,7 +1520,7 @@ Namespace SharedLibrary
                 ' Success: close splash, inform user
                 CloseUpdatingSplash()
                 UIInvokeMessage(
-                       "Update completed. It will be active the next time you restart your application.",
+                       "Update completed. It will be active the next time you restart your application (until you do so, your add-in may not work correctly anymore).",
                       $"{SharedMethods.AN} Updater")
                 Return
             End If
@@ -1104,7 +1578,7 @@ Namespace SharedLibrary
 
                     If p.ExitCode = 0 Then
                         UIInvokeMessage(
-                            "Update completed. It will be active the next time you restart your application.",
+                            "Update completed. It will be active the next time you restart your application (until you do so, your add-in may not work correctly anymore).",
                             $"{SharedMethods.AN} Updater")
                     Else
                         UIInvokeMessage(
@@ -1136,6 +1610,166 @@ Namespace SharedLibrary
             End Select
             My.Settings.Save()
             WriteUpdateLog($"[SaveTimestamp] {_appname} -> {timeStamp:yyyy-MM-dd HH:mm:ss}")
+        End Sub
+
+
+        ''' <summary>
+        ''' Shows a message informing the user that all automatic update methods have failed,
+        ''' with an extra button that opens the manual download page in the default browser.
+        ''' Includes the current version and environment (Preview/Develop/GA) in the message.
+        ''' </summary>
+        Private Shared Sub ShowManualUpdateFallback()
+            Dim downloadUrl = $"{SharedMethods.AppsUrl}{SharedMethods.UpdateSubUrl}"
+
+            ' Build version info string including environment qualifier
+            Dim versionInfo As String = ""
+            Dim versionQualifier As String = SharedMethods.VersionQualifier?.Trim()
+            Try
+                If ApplicationDeployment.IsNetworkDeployed Then
+                    versionInfo = ApplicationDeployment.CurrentDeployment.CurrentVersion.ToString()
+                End If
+            Catch
+            End Try
+            If String.IsNullOrEmpty(versionInfo) Then
+                versionInfo = "unknown"
+            End If
+
+            ' Append environment qualifier (e.g., "Preview", "Develop", or nothing for GA)
+            Dim qualifier As String = SharedMethods.VersionQualifier?.Trim()
+            If Not String.IsNullOrEmpty(qualifier) Then
+                versionInfo &= $" (= {qualifier})"
+            Else
+                versionInfo &= " (= GA)"
+            End If
+
+            If String.IsNullOrEmpty(SharedMethods.VersionQualifier) Then
+                versionQualifier = "GA"
+            End If
+
+            WriteUpdateLog($"[ManualUpdateFallback] showing manual download prompt url='{downloadUrl}' version='{versionInfo}'")
+
+            If MainControl IsNot Nothing AndAlso MainControl.IsHandleCreated Then
+                MainControl.Invoke(
+                    Sub()
+                        NativeMethods.SetForegroundWindow(HostHandle)
+                        SharedMethods.ShowCustomMessageBox(
+                            $"The automatic update could not be completed despite multiple attempts. " &
+                            $"You should try to manually update your add-in to make sure you have the latest version." &
+                            Environment.NewLine & Environment.NewLine &
+                            $"Click the button below or visit (you are using the {versionQualifier} version): {downloadUrl}",
+                            $"{SharedMethods.AN} Updater",
+                            extraButtonText:="Open downloads page",
+                            extraButtonAction:=Sub()
+                                                   Try
+                                                       Process.Start(New ProcessStartInfo(downloadUrl) With {.UseShellExecute = True})
+                                                   Catch ex As Exception
+                                                       WriteUpdateLog("[ManualUpdateFallback] failed to open browser", ex)
+                                                   End Try
+                                               End Sub,
+                            CloseAfterExtra:=True)
+                    End Sub)
+            Else
+                WriteUpdateLog("[ManualUpdateFallback] MainControl unavailable, fallback suppressed")
+            End If
+        End Sub
+
+
+        ''' <summary>
+        ''' Gets the cumulative update failure count for the current app from `My.Settings`.
+        ''' </summary>
+        Private Shared Function GetUpdateFailureCount() As Integer
+            Select Case Left(_appname, 4)
+                Case "Word" : Return My.Settings.UpdateFailureCountWord
+                Case "Exce" : Return My.Settings.UpdateFailureCountExcel
+                Case "Outl" : Return My.Settings.UpdateFailureCountOutlook
+                Case Else : Return 0
+            End Select
+        End Function
+
+        ''' <summary>
+        ''' Sets the cumulative update failure count for the current app in `My.Settings`.
+        ''' </summary>
+        Private Shared Sub SetUpdateFailureCount(count As Integer)
+            Select Case Left(_appname, 4)
+                Case "Word" : My.Settings.UpdateFailureCountWord = count
+                Case "Exce" : My.Settings.UpdateFailureCountExcel = count
+                Case "Outl" : My.Settings.UpdateFailureCountOutlook = count
+            End Select
+            Try : My.Settings.Save() : Catch : End Try
+        End Sub
+
+        Public Shared Sub TestManualFallback()
+            ' Ensure _appname is set so GetUpdateFailureCount/SetUpdateFailureCount don't fail
+            If String.IsNullOrEmpty(_appname) Then _appname = "Word"
+            ShowManualUpdateFallback()
+        End Sub
+
+        ''' <summary>
+        ''' Runs the manifest version check test on a background thread (safe to call from a UI button click).
+        ''' </summary>
+        Public Shared Sub TestManifestVersionCheckAsync()
+            If String.IsNullOrEmpty(_appname) Then _appname = "Word"
+            System.Threading.Tasks.Task.Run(Sub() TestManifestVersionCheck())
+        End Sub
+
+        ''' <summary>
+        ''' DEBUG: Tests GetRemoteVersionFromManifest against the live manifest URLs for all three environments.
+        ''' Call from Immediate Window: SharedLibrary.SharedLibrary.UpdateHandler.TestManifestVersionCheck()
+        ''' </summary>
+        Public Shared Sub TestManifestVersionCheck()
+            If String.IsNullOrEmpty(_appname) Then _appname = "Word"
+
+            ' Test against all three environment manifest URLs (.application → .vsto fallback)
+            Dim urls As New Dictionary(Of String, String) From {
+                {"GA", "https://redink.ai/apps/ga/word/Red%20Ink%20for%20Word.application"},
+                {"Preview", "https://redink.ai/apps/preview/word/Red%20Ink%20for%20Word.application"},
+                {"Develop", "https://redink.ai/apps/develop/word/Red%20Ink%20for%20Word.application"}
+            }
+
+            Dim results As New StringBuilder()
+            results.AppendLine("=== GetRemoteVersionFromManifest Test Results ===")
+            results.AppendLine("  (each test tries .application first, then .vsto fallback)")
+            results.AppendLine()
+
+            For Each kvp In urls
+                Dim env = kvp.Key
+                Dim url = kvp.Value
+                Try
+                    Dim version = GetRemoteVersionFromManifest(url)
+                    If version IsNot Nothing Then
+                        results.AppendLine($"  {env}: {version}  ✓")
+                    Else
+                        results.AppendLine($"  {env}: Nothing returned  ✗")
+                    End If
+                Catch ex As Exception
+                    results.AppendLine($"  {env}: EXCEPTION — {ex.Message}  ✗")
+                End Try
+            Next
+
+            ' Also test with the actual deployed URL if network-deployed
+            Try
+                If ApplicationDeployment.IsNetworkDeployed Then
+                    Dim dep = ApplicationDeployment.CurrentDeployment
+                    Dim liveUrl = dep.UpdateLocation.AbsoluteUri
+                    Dim liveVersion = GetRemoteVersionFromManifest(liveUrl)
+                    results.AppendLine()
+                    results.AppendLine($"  Live deployment URL: {liveUrl}")
+                    results.AppendLine($"  Local version:  {dep.CurrentVersion}")
+                    results.AppendLine($"  Remote version: {If(liveVersion?.ToString(), "Nothing")}")
+                    If liveVersion IsNot Nothing Then
+                        results.AppendLine($"  Update available: {liveVersion > dep.CurrentVersion}")
+                    End If
+                Else
+                    results.AppendLine()
+                    results.AppendLine("  (Not network-deployed — skipped live deployment test)")
+                End If
+            Catch ex As Exception
+                results.AppendLine($"  Live test error: {ex.Message}")
+            End Try
+
+            Dim output = results.ToString()
+            WriteUpdateLog(output)
+            UIInvokeMessage(output, $"{SharedMethods.AN} Updater — Manifest Test")
         End Sub
 
     End Class

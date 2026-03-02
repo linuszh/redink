@@ -417,13 +417,38 @@ Partial Public Class ThisAddIn
     '========================= WebView 2 Alternative Implementation ============================
 
     ''' <summary>
+    ''' Document extensions that should be downloaded and processed instead of rendered via WebView2.
+    ''' </summary>
+    Private Shared ReadOnly DocumentExtensions As String() = {".pdf", ".docx", ".pptx", ".txt", ".rtf"}
+    ' NOTE: .doc (legacy binary format) is excluded - requires Word Interop which can execute macros
+
+    ''' <summary>
+    ''' Maximum file size for document downloads (50 MB).
+    ''' </summary>
+    Private Const MaxDocumentDownloadBytes As Long = 50 * 1024 * 1024
+
+    ''' <summary>
     ''' Retrieves website content using WebView2 (Edge-based, built into Windows).
     ''' Handles JavaScript rendering without external browser downloads.
+    ''' For document URLs (PDF, Word, PowerPoint, TXT), downloads and extracts text using safe parsers.
     ''' </summary>
     ''' <param name="baseUrl">The URL to fetch.</param>
     ''' <param name="maxChars">Maximum characters to return. 0 or negative = no limit.</param>
-    Private Function RetrieveWebsiteContent_WebView2(baseUrl As String, Optional maxChars As Integer = 0) As Task(Of String)
+    ''' <param name="expandCollapsed">When True, attempts to expand collapsed/hidden content before extraction.</param>
+    Private Function RetrieveWebsiteContent_WebView2(baseUrl As String, Optional maxChars As Integer = 0, Optional expandCollapsed As Boolean = True) As Task(Of String)        
+        
         Dim tcs As New TaskCompletionSource(Of String)()
+
+        ' Check if URL points to a document that should be downloaded instead of rendered
+        Dim documentContent As String = Nothing
+        If TryExtractDocumentContent(baseUrl, documentContent) Then
+            ' Apply character limit if requested
+            If maxChars > 0 AndAlso documentContent.Length > maxChars Then
+                documentContent = TrimToSentenceBoundary(documentContent, maxChars)
+            End If
+            tcs.SetResult(documentContent)
+            Return tcs.Task
+        End If
 
         ' Create a new STA thread for WebView2 (it requires its own message loop)
         Dim thread As New System.Threading.Thread(
@@ -431,7 +456,7 @@ Partial Public Class ThisAddIn
                 Dim result As String = ""
                 Dim form As Form = Nothing
                 Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
-                Dim userDataFolder As String
+                Dim userDataFolder As String = ""
 
                 Try
                     Debug.WriteLine($"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())})")
@@ -531,14 +556,127 @@ Partial Public Class ThisAddIn
                                         timer.Dispose()
 
                                         Try
-                                            ' Scroll to trigger lazy loading
+                                            ' Define the expansion script
+                                            Dim expandAndScrollScript As String =
+                                    "(async function () {
+                                      const start = Date.now();
+                                      const MAX_MS = 20000;
+                                      const MAX_ROUNDS = 5; 
+                                      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+                                      const clicked = new WeakSet();
+
+                                      // 1. INJECT STYLE TO FORCE VISIBILITY (Fail-safe)
+                                      // This exposes content inside accordions/regions even if JS expansion fails
+                                      const style = document.createElement('style');
+                                      style.innerHTML = `
+                                        cws-accordion-section .content,
+                                        cws-accordion-section [role=""region""], 
+                                        details > *:not(summary),
+                                        [aria-hidden=""true""] { 
+                                            display: block !important; 
+                                            height: auto !important; 
+                                            visibility: visible !important; 
+                                            opacity: 1 !important; 
+                                            max-height: none !important;
+                                        }
+                                      `;
+                                      document.head.appendChild(style);
+
+                                      function timeUp() { return (Date.now() - start) > MAX_MS; }
+
+                                      // Shadow DOM aware selector helper
+                                      function getCandidates(selector) {
+                                         const nodes = [];
+                                         // Grab light DOM first
+                                         document.querySelectorAll(selector).forEach(el => nodes.push(el));
+                                         
+                                         // Recursive traversal for shadow roots
+                                         function traverse(node) {
+                                            if (node.shadowRoot) {
+                                                node.shadowRoot.querySelectorAll(selector).forEach(el => nodes.push(el));
+                                                Array.from(node.shadowRoot.children).forEach(traverse);
+                                            }
+                                            if (node.children) Array.from(node.children).forEach(traverse);
+                                         }
+                                         traverse(document.body);
+                                         return nodes;
+                                      }
+
+                                      function clickCollapsedOnce() {
+                                        let c = 0;
+                                        
+                                        // A. Google Cloud Specific: cws-accordion-section
+                                        // Needs 'expanded' attribute on the SECTION, not the container
+                                        getCandidates('cws-accordion-section').forEach(el => {
+                                            if (el.getAttribute('expanded') !== 'true') {
+                                                el.setAttribute('expanded', 'true'); // Attribute
+                                                try { el.expanded = true; } catch(e){} // Property direct access
+                                                c++;
+                                            }
+                                        });
+
+                                        // B. Standard ARIA
+                                        getCandidates('[aria-expanded=""false""]').forEach(el => {
+                                           if (!clicked.has(el)) { 
+                                            clicked.add(el); el.click(); c++;
+                                          }
+                                        });
+
+                                        // C. Details
+                                        getCandidates('details:not([open])').forEach(el => {
+                                          if (!clicked.has(el)) {
+                                            clicked.add(el); el.open = true; c++;
+                                          }
+                                        });
+
+                                        // D. Generic Buttons with expansion keywords
+                                        const query = 'button, [role=""button""], .accordion-trigger, .expander';
+                                        getCandidates(query).forEach(el => {
+                                          if (clicked.has(el)) return;
+                                          
+                                          const t = (el.innerText || '').trim().toLowerCase();
+                                          if (!t) return;
+                                          
+                                          if (/^(expand|show|read|load|more|all)/.test(t) || t.includes('expand') || t.includes('show more')) {
+                                              clicked.add(el);
+                                              el.click();
+                                              c++;
+                                          }
+                                        });
+
+                                        return c;
+                                      }
+
+                                      // Scroll helper to trigger lazy loading
+                                      async function scrollPage() {
+                                         window.scrollBy(0, window.innerHeight / 2);
+                                         await sleep(200);
+                                      }
+
+                                      let totalClicks = 0;
+                                      for (let round = 0; round < MAX_ROUNDS; round++) {
+                                        if (timeUp()) break;
+                                        await scrollPage(); 
+                                        
+                                        const clicks = clickCollapsedOnce();
+                                        totalClicks += clicks;
+                                        
+                                        if (clicks > 0) await sleep(500); // Wait for animations
+                                      }
+
+                                      window.scrollTo(0, 0);
+                                      return 'done';
+                                    })();"
+
+                                            ' Define the scroll-down script
                                             Dim scrollScript As String = "
                                                             (async function() {
                                                                 var totalHeight = document.body.scrollHeight;
                                                                 var viewportHeight = window.innerHeight || 1000;
                                                                 var currentPosition = 0;
-    
-                                                                while (currentPosition < totalHeight) {
+                                                                var maxScroll = 15000; 
+
+                                                                while (currentPosition < totalHeight && currentPosition < maxScroll) {
                                                                     window.scrollTo(0, currentPosition);
                                                                     await new Promise(r => setTimeout(r, 200));
                                                                     currentPosition += viewportHeight;
@@ -548,53 +686,61 @@ Partial Public Class ThisAddIn
                                                                 window.scrollTo(0, 0);
                                                                 await new Promise(r => setTimeout(r, 300));
                                                                 return 'done';
-                                                            })();
-                                                            "
-                                            webView.CoreWebView2.ExecuteScriptAsync(scrollScript).ContinueWith(
-                                                                                                            Sub(scrollTask)
-                                                                                                                ' Wait after scrolling
-                                                                                                                System.Threading.Thread.Sleep(2000)
+                                                            })();"
 
-                                                                                                                form.BeginInvoke(
-                                                                                                                    Sub()
-                                                                                                                        Try
-                                                                                                                            ' Simple extraction - get full body text
-                                                                                                                            Dim extractScript As String = "
+                                            ' Define the extraction script
+                                            Dim extractScript As String = "
                                                             (function() {
-                                                                // Remove script/style/noscript to reduce noise
                                                                 var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
                                                                 toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
-    
-                                                                // Get body text
                                                                 var text = document.body ? (document.body.innerText || '') : '';
-    
-                                                                // Clean up whitespace
                                                                 text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
-    
                                                                 return text;
-                                                            })();
-                                                            "
-                                                                webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
-                                                                    Sub(t)
-                                                                        form.BeginInvoke(
-                                                                            Sub()
-                                                                                Try
-                                                                                    If t.IsCompleted AndAlso Not t.IsFaulted Then
-                                                                                        result = UnescapeJsonString(t.Result)
-                                                                                        Debug.WriteLine($"[WebView2] Extracted {result.Length} chars (full content)")
-                                                                                    End If
-                                                                                Catch ex As Exception
-                                                                                    Debug.WriteLine($"[WebView2] Extract error: {ex.Message}")
-                                                                                End Try
-                                                                                contentExtracted = True
-                                                                            End Sub)
-                                                                    End Sub)
-                                                            Catch ex As Exception
-                                                                Debug.WriteLine($"[WebView2] Script error: {ex.Message}")
-                                                                contentExtracted = True
-                                                            End Try
-                                                        End Sub)
-                                                End Sub)
+                                                            })();"
+
+                                            ' EXECUTION CHAIN
+                                            Dim initialTask As Task(Of String)
+
+                                            If expandCollapsed Then
+                                                ' Chain: Expand -> Scroll
+                                                initialTask = webView.CoreWebView2.ExecuteScriptAsync(expandAndScrollScript).ContinueWith(
+                                                    Function(t)
+                                                        Return webView.CoreWebView2.ExecuteScriptAsync(scrollScript)
+                                                    End Function, TaskScheduler.FromCurrentSynchronizationContext()).Unwrap()
+                                            Else
+                                                ' Chain: Scroll only
+                                                initialTask = webView.CoreWebView2.ExecuteScriptAsync(scrollScript)
+                                            End If
+
+                                            ' Final Chain: ... -> Extract -> Process Result
+                                            initialTask.ContinueWith(
+                                                Sub(t)
+                                                    ' Delay slightly to safely ensure rendering is settled
+                                                    Dim extractionTimer As New System.Windows.Forms.Timer() With {.Interval = 1000}
+                                                    AddHandler extractionTimer.Tick,
+                                                        Sub(extractSender, extractArgs)
+                                                            extractionTimer.Stop()
+                                                            extractionTimer.Dispose()
+
+                                                            webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
+                                                                Sub(extractTask)
+                                                                    form.BeginInvoke(
+                                                                        Sub()
+                                                                            Try
+                                                                                If extractTask.IsCompleted AndAlso Not extractTask.IsFaulted Then
+                                                                                    result = UnescapeJsonString(extractTask.Result)
+                                                                                    Debug.WriteLine($"[WebView2] Extracted {result.Length} chars")
+                                                                                End If
+                                                                            Catch ex As Exception
+                                                                                Debug.WriteLine($"[WebView2] Extract error: {ex.Message}")
+                                                                            End Try
+                                                                            contentExtracted = True
+                                                                        End Sub)
+                                                                End Sub)
+                                                        End Sub
+                                                    extractionTimer.Start()
+                                                End Sub, TaskScheduler.FromCurrentSynchronizationContext())
+
                                         Catch ex As Exception
                                             Debug.WriteLine($"[WebView2] Timer error: {ex.Message}")
                                             contentExtracted = True
@@ -639,7 +785,10 @@ Partial Public Class ThisAddIn
                 Catch ex As Exception
                     Debug.WriteLine($"[WebView2] Error: {ex.Message}")
                 Finally
-                    Try : Directory.Delete(userDataFolder, True) : Catch : End Try
+                    Try
+                        If Not String.IsNullOrEmpty(userDataFolder) Then Directory.Delete(userDataFolder, True)
+                    Catch
+                    End Try
                     Try : webView?.Dispose() : Catch : End Try
                     Try : form?.Close() : form?.Dispose() : Catch : End Try
                 End Try
@@ -647,19 +796,7 @@ Partial Public Class ThisAddIn
                 ' Apply character limit only if explicitly requested (maxChars > 0)
                 Dim finalResult As String = result.Trim()
                 If maxChars > 0 AndAlso finalResult.Length > maxChars Then
-                    ' Try to cut at a sentence boundary
-                    Dim cutPoint As Integer = maxChars
-                    Dim lastPeriod As Integer = finalResult.LastIndexOf("."c, maxChars - 1)
-                    Dim lastNewline As Integer = finalResult.LastIndexOf(vbLf, maxChars - 1)
-
-                    If lastPeriod > maxChars * 0.8 Then
-                        cutPoint = lastPeriod + 1
-                    ElseIf lastNewline > maxChars * 0.8 Then
-                        cutPoint = lastNewline
-                    End If
-
-                    finalResult = finalResult.Substring(0, cutPoint).Trim()
-                    Debug.WriteLine($"[WebView2] Trimmed to {finalResult.Length} chars (limit was {maxChars})")
+                    finalResult = TrimToSentenceBoundary(finalResult, maxChars)
                 End If
 
                 tcs.TrySetResult(finalResult)
@@ -669,6 +806,236 @@ Partial Public Class ThisAddIn
         thread.Start()
 
         Return tcs.Task
+    End Function
+
+    ''' <summary>
+    ''' Attempts to download and extract text content from a document URL (PDF, Word, PowerPoint, TXT).
+    ''' Uses safe parsers that do not execute macros or scripts.
+    ''' </summary>
+    ''' <param name="url">The URL to check and potentially download.</param>
+    ''' <param name="content">Output parameter containing extracted text if successful.</param>
+    ''' <returns>True if the URL was a document and content was extracted; otherwise False.</returns>
+    Private Function TryExtractDocumentContent(url As String, ByRef content As String) As Boolean
+        content = Nothing
+
+        Try
+            ' Validate URL
+            If Not IsSafeWebUrl(url) Then Return False
+
+            Dim uri As New Uri(url)
+            Dim path As String = uri.AbsolutePath.ToLowerInvariant()
+
+            ' Check for query string parameters that might indicate document type
+            Dim queryExt As String = ""
+            If Not String.IsNullOrEmpty(uri.Query) Then
+                For Each ext In DocumentExtensions
+                    If uri.Query.ToLowerInvariant().Contains(ext) Then
+                        queryExt = ext
+                        Exit For
+                    End If
+                Next
+            End If
+
+            ' Determine extension from path or query
+            Dim extension As String = IO.Path.GetExtension(path).ToLowerInvariant()
+            If String.IsNullOrEmpty(extension) OrElse Not DocumentExtensions.Contains(extension) Then
+                extension = queryExt
+            End If
+
+            ' If no document extension found, return False to use WebView2
+            If String.IsNullOrEmpty(extension) OrElse Not DocumentExtensions.Contains(extension) Then
+                Return False
+            End If
+
+            Debug.WriteLine($"[Document] Detected document URL: {url} (extension: {extension})")
+
+            ' Download the file to a temp location            
+            Dim tempFile As String = IO.Path.Combine(IO.Path.GetTempPath(), $"RedInk_Download_{Guid.NewGuid()}{extension}")
+
+            Using client As New HttpClient()
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                client.Timeout = TimeSpan.FromSeconds(60)
+
+                ' Use polling for synchronous-style download with size check
+                Dim responseTask = client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead)
+                While Not responseTask.IsCompleted
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                If responseTask.Status <> TaskStatus.RanToCompletion Then
+                    Debug.WriteLine($"[Document] Download failed for: {url}")
+                    Return False
+                End If
+
+                Using response = responseTask.Result
+                    ' Check HTTP status
+                    If Not response.IsSuccessStatusCode Then
+                        Debug.WriteLine($"[Document] HTTP {response.StatusCode} for: {url}")
+                        Return False
+                    End If
+
+                    ' Check content length if available
+                    If response.Content.Headers.ContentLength.HasValue Then
+                        If response.Content.Headers.ContentLength.Value > MaxDocumentDownloadBytes Then
+                            Debug.WriteLine($"[Document] File too large ({response.Content.Headers.ContentLength.Value} bytes): {url}")
+                            Return False
+                        End If
+                    End If
+
+                    ' Download with size limit enforcement
+                    Dim readTask = response.Content.ReadAsByteArrayAsync()
+                    While Not readTask.IsCompleted
+                        System.Windows.Forms.Application.DoEvents()
+                        System.Threading.Thread.Sleep(50)
+                    End While
+
+                    If readTask.Status <> TaskStatus.RanToCompletion Then
+                        Debug.WriteLine($"[Document] Failed to read content for: {url}")
+                        Return False
+                    End If
+
+                    Dim fileBytes = readTask.Result
+                    If fileBytes.Length > MaxDocumentDownloadBytes Then
+                        Debug.WriteLine($"[Document] File too large ({fileBytes.Length} bytes): {url}")
+                        Return False
+                    End If
+
+                    File.WriteAllBytes(tempFile, fileBytes)
+                    Debug.WriteLine($"[Document] Downloaded {fileBytes.Length} bytes to: {tempFile}")
+                End Using
+            End Using
+
+            Try
+                ' Extract content based on file type using SAFE parsers only
+                Select Case extension
+                    Case ".pdf"
+                        ' PdfPig is safe - pure .NET parser, no JS/macro execution
+                        Dim pdfTask = ReadPdfAsText(tempFile, True, False, False, _context)
+                        While Not pdfTask.IsCompleted
+                            System.Windows.Forms.Application.DoEvents()
+                            System.Threading.Thread.Sleep(50)
+                        End While
+                        If pdfTask.Status = TaskStatus.RanToCompletion Then
+                            content = pdfTask.Result
+                        End If
+
+                    Case ".docx"
+                        ' Open XML SDK is safe - only reads XML structure, no macro execution
+                        content = ReadDocxSafe(tempFile)
+
+                    Case ".pptx"
+                        ' Open XML SDK is safe - only reads XML, no macro execution
+                        content = GetPresentationJson(tempFile)
+
+                    Case ".txt"
+                        ' Plain text is safe
+                        content = ReadTextFile(tempFile, False)
+
+                    Case ".rtf"
+                        ' RichTextBox parsing is safe - no macro execution
+                        content = ReadRtfAsText(tempFile, False)
+
+                        ' NOTE: .doc (legacy binary) is NOT supported here due to macro risks
+                        ' It would require Word Interop which can execute embedded macros
+                End Select
+
+                Debug.WriteLine($"[Document] Extracted {If(content?.Length, 0)} chars from {extension} file")
+
+            Finally
+                ' Clean up temp file
+                Try
+                    If File.Exists(tempFile) Then File.Delete(tempFile)
+                Catch
+                    ' Ignore cleanup errors
+                End Try
+            End Try
+
+            Return Not String.IsNullOrWhiteSpace(content)
+
+        Catch ex As Exception
+            Debug.WriteLine($"[Document] Error extracting document content: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Safely extracts text from a .docx file using Open XML SDK.
+    ''' This method does NOT execute macros or embedded code - it only reads the XML structure.
+    ''' </summary>
+    ''' <param name="filePath">Path to the .docx file.</param>
+    ''' <returns>Extracted plain text content, or empty string on failure.</returns>
+    Private Function ReadDocxSafe(filePath As String) As String
+        Try
+            Using doc = DocumentFormat.OpenXml.Packaging.WordprocessingDocument.Open(filePath, False)
+                If doc.MainDocumentPart Is Nothing OrElse doc.MainDocumentPart.Document Is Nothing Then
+                    Return ""
+                End If
+
+                Dim body = doc.MainDocumentPart.Document.Body
+                If body Is Nothing Then
+                    Return ""
+                End If
+
+                ' Extract text from all paragraphs with proper line breaks
+                Dim sb As New Text.StringBuilder()
+
+                For Each para In body.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Paragraph)()
+                    Dim paraText As String = para.InnerText
+                    If Not String.IsNullOrWhiteSpace(paraText) Then
+                        sb.AppendLine(paraText.Trim())
+                    End If
+                Next
+
+                ' Also extract text from tables
+                For Each table In body.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Table)()
+                    For Each row In table.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.TableRow)()
+                        Dim cellTexts As New List(Of String)()
+                        For Each cell In row.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.TableCell)()
+                            Dim cellText = cell.InnerText.Trim()
+                            If Not String.IsNullOrWhiteSpace(cellText) Then
+                                cellTexts.Add(cellText)
+                            End If
+                        Next
+                        If cellTexts.Count > 0 Then
+                            sb.AppendLine(String.Join(vbTab, cellTexts))
+                        End If
+                    Next
+                Next
+
+                Return sb.ToString().Trim()
+            End Using
+
+        Catch ex As Exception
+            Debug.WriteLine($"[Document] Error reading .docx with Open XML: {ex.Message}")
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Trims text to a maximum length, attempting to cut at a sentence boundary.
+    ''' </summary>
+    ''' <param name="text">The text to trim.</param>
+    ''' <param name="maxChars">Maximum number of characters.</param>
+    ''' <returns>Trimmed text.</returns>
+    Private Function TrimToSentenceBoundary(text As String, maxChars As Integer) As String
+        If String.IsNullOrEmpty(text) OrElse text.Length <= maxChars Then
+            Return text
+        End If
+
+        Dim cutPoint As Integer = maxChars
+        Dim lastPeriod As Integer = text.LastIndexOf("."c, maxChars - 1)
+        Dim lastNewline As Integer = text.LastIndexOf(vbLf, maxChars - 1)
+
+        If lastPeriod > maxChars * 0.8 Then
+            cutPoint = lastPeriod + 1
+        ElseIf lastNewline > maxChars * 0.8 Then
+            cutPoint = lastNewline
+        End If
+
+        Dim result = text.Substring(0, cutPoint).Trim()
+        Debug.WriteLine($"[Document] Trimmed to {result.Length} chars (limit was {maxChars})")
+        Return result
     End Function
 
 

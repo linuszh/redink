@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 28.1.2026
+' 2.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -58,7 +58,7 @@ Partial Public Class ThisAddIn
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
 
-    Public Shared Version As String = "V.280126" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.020326" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -597,8 +597,8 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Asynchronously sends prompts to SharedMethods.LLM and optionally ensures UI thread affinity before returning the response.
     ''' </summary>
-    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional HideSplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True, Optional ToolExecution As Boolean = False) As Task(Of String)
-        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, HideSplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution)
+    Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional HideSplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True, Optional ToolExecution As Boolean = False, Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
+        Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, HideSplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution, binaryOutputDirectory)
         If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
         Return Response
     End Function

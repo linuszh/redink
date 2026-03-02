@@ -137,6 +137,9 @@ Namespace SharedLibrary
             Property INI_ExtractorPathLocal As String
             Property INI_RenameLibPath As String
             Property INI_RenameLibPathLocal As String
+            Property INI_MailMoverPath As String
+            Property INI_MailMoverPathLocal As String
+
             Property INI_RedactionInstructionsPath As String
             Property INI_RedactionInstructionsPathLocal As String
             Property INI_SpeechModelPath As String
@@ -182,10 +185,13 @@ Namespace SharedLibrary
             Property SP_Freestyle_Document As String
             Property SP_SwitchParty As String
             Property SP_Anonymize As String
+            Property SP_SwitchParty_Document As String
+            Property SP_Anonymize_Document As String
             Property SP_Extract As String
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
             Property SP_Rename As String
+            Property SP_RemoveClutter As String
             Property SP_Redact As String
             Property SP_CheckforII As String
             Property SP_ContextSearch As String
@@ -195,6 +201,7 @@ Namespace SharedLibrary
             Property SP_ParseFile As String
             Property SP_Ignore As String
             Property SP_Add_Tooling As String
+            Property SP_Add_Markers As String
             Property SP_Add_KeepFormulasIntact As String
             Property SP_Add_KeepHTMLIntact As String
             Property SP_Add_KeepInlineIntact As String
@@ -213,6 +220,12 @@ Namespace SharedLibrary
             Property SP_HelpMe As String
             Property SP_DiscussThis_SortOut As String
             Property SP_DiscussThis_SumUp As String
+            Property SP_MailMover As String
+            Property SP_InboxBoard As String
+            Property SP_SplitPDF As String
+            Property SP_AutoPilot As String
+            Property SP_AutoPilot_NoTools As String
+
             Property SP_Add_ChatWord_Commands As String
             Property SP_Add_Chat_NoCommands As String
             Property SP_ChatExcel As String
@@ -253,6 +266,9 @@ Namespace SharedLibrary
             Property INI_FindClausePathLocal As String
             Property INI_WebAgentPath As String
             Property INI_WebAgentPathLocal As String
+            Property INI_SnapshotLibPath As String
+            Property INI_SnapshotLibPathLocal As String
+
             Property INI_DocCheckPath As String
             Property INI_DocCheckPathLocal As String
             Property INI_DocStylePath As String
@@ -291,6 +307,7 @@ Namespace SharedLibrary
             ' Log silent update actions to a file for audit purposes
             Property INI_UpdateIniSilentLog As Boolean
 
+            Property INI_AutoPilot As String
 
             ' Tooling / tool-call settings 
             Property INI_ToolingLogWindow As Boolean
@@ -413,7 +430,8 @@ Namespace SharedLibrary
         Public Property INI_ExtractorPathLocal As String Implements ISharedContext.INI_ExtractorPathLocal
         Public Property INI_RenameLibPath As String Implements ISharedContext.INI_RenameLibPath
         Public Property INI_RenameLibPathLocal As String Implements ISharedContext.INI_RenameLibPathLocal
-
+        Public Property INI_MailMoverPath As String Implements ISharedContext.INI_MailMoverPath
+        Public Property INI_MailMoverPathLocal As String Implements ISharedContext.INI_MailMoverPathLocal
         Public Property INI_RedactionInstructionsPath As String Implements ISharedContext.INI_RedactionInstructionsPath
         Public Property INI_RedactionInstructionsPathLocal As String Implements ISharedContext.INI_RedactionInstructionsPathLocal
         Public Property INI_SpeechModelPath As String Implements ISharedContext.INI_SpeechModelPath
@@ -460,11 +478,14 @@ Namespace SharedLibrary
         Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
         Public Property SP_SwitchParty As String Implements ISharedContext.SP_SwitchParty
         Public Property SP_Anonymize As String Implements ISharedContext.SP_Anonymize
+        Public Property SP_SwitchParty_Document As String Implements ISharedContext.SP_SwitchParty_Document
+        Public Property SP_Anonymize_Document As String Implements ISharedContext.SP_Anonymize_Document
         Public Property SP_Extract As String Implements ISharedContext.SP_Extract
         Public Property SP_ExtractSchema As String Implements ISharedContext.SP_ExtractSchema
 
         Public Property SP_MergeDateRows As String Implements ISharedContext.SP_MergeDateRows
         Public Property SP_Rename As String Implements ISharedContext.SP_Rename
+        Public Property SP_RemoveClutter As String Implements ISharedContext.SP_RemoveClutter
         Public Property SP_Redact As String Implements ISharedContext.SP_Redact
         Public Property SP_CheckforII As String Implements ISharedContext.SP_CheckforII
         Public Property SP_ContextSearch As String Implements ISharedContext.SP_ContextSearch
@@ -474,6 +495,7 @@ Namespace SharedLibrary
         Public Property SP_Ignore As String Implements ISharedContext.SP_Ignore
         Public Property SP_WriteNeatly As String Implements ISharedContext.SP_WriteNeatly
         Public Property SP_Add_Tooling As String Implements ISharedContext.SP_Add_Tooling
+        Public Property SP_Add_Markers As String Implements ISharedContext.SP_Add_Markers
         Public Property SP_Add_KeepFormulasIntact As String Implements ISharedContext.SP_Add_KeepFormulasIntact
         Public Property SP_Add_KeepHTMLIntact As String Implements ISharedContext.SP_Add_KeepHTMLIntact
         Public Property SP_Add_KeepInlineIntact As String Implements ISharedContext.SP_Add_KeepInlineIntact
@@ -493,6 +515,11 @@ Namespace SharedLibrary
         Public Property SP_HelpMe As String Implements ISharedContext.SP_HelpMe
         Public Property SP_DiscussThis_SortOut As String Implements ISharedContext.SP_DiscussThis_SortOut
         Public Property SP_DiscussThis_SumUp As String Implements ISharedContext.SP_DiscussThis_SumUp
+        Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
+        Public Property SP_InboxBoard As String Implements ISharedContext.SP_InboxBoard
+        Public Property SP_SplitPDF As String Implements ISharedContext.SP_SplitPDF
+        Public Property SP_AutoPilot As String Implements ISharedContext.SP_AutoPilot
+        Public Property SP_AutoPilot_NoTools As String Implements ISharedContext.SP_AutoPilot_NoTools
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
         Public Property SP_Add_Chat_NoCommands As String Implements ISharedContext.SP_Add_Chat_NoCommands
         Public Property SP_ChatExcel As String Implements ISharedContext.SP_ChatExcel
@@ -534,6 +561,9 @@ Namespace SharedLibrary
         Public Property INI_FindClausePathLocal As String Implements ISharedContext.INI_FindClausePathLocal
         Public Property INI_WebAgentPath As String Implements ISharedContext.INI_WebAgentPath
         Public Property INI_WebAgentPathLocal As String Implements ISharedContext.INI_WebAgentPathLocal
+        Public Property INI_SnapshotLibPath As String Implements ISharedContext.INI_SnapshotLibPath
+        Public Property INI_SnapshotLibPathLocal As String Implements ISharedContext.INI_SnapshotLibPathLocal
+
         Public Property INI_DocCheckPath As String Implements ISharedContext.INI_DocCheckPath
         Public Property INI_DocCheckPathLocal As String Implements ISharedContext.INI_DocCheckPathLocal
         Public Property INI_DocStylePath As String Implements ISharedContext.INI_DocStylePath
@@ -564,6 +594,7 @@ Namespace SharedLibrary
         Public Property Ignore As String Implements ISharedContext.Ignore
         Public Property Location As String Implements ISharedContext.Location
 
+        Public Property INI_AutoPilot As String Implements ISharedContext.INI_AutoPilot
 
         ' Tooling / tool-call settings 
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow

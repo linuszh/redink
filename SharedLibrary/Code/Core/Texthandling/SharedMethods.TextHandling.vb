@@ -178,12 +178,23 @@ Namespace SharedLibrary
 
                 formattedText = doc.DocumentNode.OuterHtml
 
-                ' --- 2) Read font and paragraph properties from the start of the range ---
-                Dim fontName As String = origRange.Font.Name
-                Dim fontSize As Single = origRange.Font.Size
-                Dim isBold As Boolean = (origRange.Font.Bold = 1)
-                Dim isItalic As Boolean = (origRange.Font.Italic = 1)
-                Dim fontColor As Integer = origRange.Font.Color
+                ' --- 2) Read font and paragraph properties from the first character of the range ---
+                '     A collapsed range at a paragraph boundary can inherit font properties from the
+                '     *following* paragraph. Reading from the first concrete character avoids this.
+                Dim fontSourceRange As Microsoft.Office.Interop.Word.Range = range.Duplicate()
+                If fontSourceRange.Characters.Count > 0 Then
+                    fontSourceRange.SetRange(fontSourceRange.Start, fontSourceRange.Start + 1)
+                End If
+
+                Dim fontName As String = fontSourceRange.Font.Name
+                Dim fontSize As Single = fontSourceRange.Font.Size
+                Dim isBold As Boolean = (fontSourceRange.Font.Bold = 1)
+                Dim isItalic As Boolean = (fontSourceRange.Font.Italic = 1)
+                Dim fontColor As Integer = fontSourceRange.Font.Color
+
+                ' Guard against ambiguous values (9999999 = mixed formatting in selection)
+                If fontSize <= 0 OrElse fontSize > 1000 Then fontSize = 11.0F
+                If fontName Is Nothing OrElse fontName = "" Then fontName = "Calibri"
 
                 ' Convert Word BGR color to RGB hex string
                 Dim bgr As Integer = fontColor And &HFFFFFF
@@ -192,7 +203,7 @@ Namespace SharedLibrary
                 Dim b As Integer = ((bgr >> 16) And &HFF)
                 Dim hexColor As String = System.String.Format("#{0:X2}{1:X2}{2:X2}", r, g, b)
 
-                Dim para As Microsoft.Office.Interop.Word.ParagraphFormat = origRange.ParagraphFormat
+                Dim para As Microsoft.Office.Interop.Word.ParagraphFormat = fontSourceRange.ParagraphFormat
                 Dim spaceBefore As Single = para.SpaceBefore
                 Dim spaceAfter As Single = para.SpaceAfter
                 Dim lineRule As Microsoft.Office.Interop.Word.WdLineSpacing = para.LineSpacingRule
@@ -250,7 +261,7 @@ Namespace SharedLibrary
 
                 ' --- 5) Construct HTML fragment ---
                 Dim htmlHeader As String = "<html><head><meta charset=""UTF-8""></head>" &
-                                   $"<body style=""font-family:'{fontName}'""><!--StartFragment-->"
+                                   $"<body style=""font-family:'{fontName}'; font-size:{fontSize}pt;""><!--StartFragment-->"
                 Dim htmlFooter As String = "<!--EndFragment--></body></html>"
 
                 Dim cleanedHtml As String = htmlHeader & formattedText.Trim() & htmlFooter
@@ -343,12 +354,20 @@ Namespace SharedLibrary
                     range = range.Application.Selection.Range
 
                     ' --- 8) Optionally remove last newline character ---
+                    '     Only delete if the trailing character is actually a paragraph mark,
+                    '     not real content. PasteAndFormat does not always append a trailing CR.
                     If ReplaceSelection AndAlso NoTrailingCR Then
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range = range.Application.Selection.Range
                         Dim delRng As Microsoft.Office.Interop.Word.Range = insertedRange.Duplicate()
                         delRng.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         delRng.MoveStart(Microsoft.Office.Interop.Word.WdUnits.wdCharacter, -1)
-                        delRng.Delete()
+
+                        ' Only delete if the character is a paragraph mark (vbCr) or line feed
+                        Dim trailingChar As String = delRng.Text
+                        If trailingChar = vbCr OrElse trailingChar = vbLf Then
+                            delRng.Delete()
+                        End If
+
                         insertedRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         insertedRange.Select()
                     End If

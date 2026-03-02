@@ -77,7 +77,21 @@ Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports Slib = SharedLibrary.SharedLibrary.SharedMethods
 
+
+
 Partial Public Class ThisAddIn
+
+    ''' <summary>
+    ''' Represents a segment of a PDF to be extracted as a separate exhibit file.
+    ''' </summary>
+    Friend Class SplitSegment
+        ''' <summary>1-based start page number.</summary>
+        Public Property StartPage As Integer
+        ''' <summary>1-based end page number (inclusive).</summary>
+        Public Property EndPage As Integer
+        ''' <summary>Descriptive name for the exhibit.</summary>
+        Public Property Name As String
+    End Class
 
     ''' <summary>
     ''' CSS styling applied to all HTML summary windows for consistent formatting of LLM-generated content.
@@ -186,12 +200,29 @@ Partial Public Class ThisAddIn
             docToCompare = indexToDoc(chosenIdx)
         End If
 
+        ' Delegate to the shared comparison + display helper
+        CompareDocumentsAndShowResult(wordApp, activeDoc, docToCompare)
+    End Sub
+
+    ''' <summary>
+    ''' Performs document comparison between originalDoc and revisedDoc, exports the result to
+    ''' filtered HTML, and displays it in the HTML viewer with action buttons including
+    ''' "Switch Direction" to re-compare with swapped documents.
+    ''' </summary>
+    ''' <param name="wordApp">The Word application instance.</param>
+    ''' <param name="originalDoc">The document treated as the original (baseline).</param>
+    ''' <param name="revisedDoc">The document treated as the revised version.</param>
+    Private Shared Sub CompareDocumentsAndShowResult(
+        wordApp As Microsoft.Office.Interop.Word.Application,
+        originalDoc As Microsoft.Office.Interop.Word.Document,
+        revisedDoc As Microsoft.Office.Interop.Word.Document)
+
         ' Store document names for PDF naming
-        Dim originalDocName As String = Path.GetFileNameWithoutExtension(If(activeDoc.Name, "Original"))
-        Dim revisedDocName As String = Path.GetFileNameWithoutExtension(If(docToCompare.Name, "Revised"))
+        Dim originalDocName As String = Path.GetFileNameWithoutExtension(If(originalDoc.Name, "Original"))
+        Dim revisedDocName As String = Path.GetFileNameWithoutExtension(If(revisedDoc.Name, "Revised"))
         Dim originalDocPath As String = Nothing
         Try
-            originalDocPath = activeDoc.Path
+            originalDocPath = originalDoc.Path
         Catch
         End Try
 
@@ -217,8 +248,8 @@ Partial Public Class ThisAddIn
 
             ' Create comparison document
             compareDoc = wordApp.CompareDocuments(
-                OriginalDocument:=activeDoc,
-                RevisedDocument:=docToCompare,
+                OriginalDocument:=originalDoc,
+                RevisedDocument:=revisedDoc,
                 Destination:=WdCompareDestination.wdCompareDestinationNew,
                 Granularity:=WdGranularity.wdGranularityWordLevel,
                 CompareFormatting:=True,
@@ -278,6 +309,8 @@ Partial Public Class ThisAddIn
 
             ' Capture references for closures
             Dim capturedWordApp As Microsoft.Office.Interop.Word.Application = wordApp
+            Dim capturedOriginalDoc As Microsoft.Office.Interop.Word.Document = originalDoc
+            Dim capturedRevisedDoc As Microsoft.Office.Interop.Word.Document = revisedDoc
             Dim capturedOriginalDocName As String = originalDocName
             Dim capturedRevisedDocName As String = revisedDocName
             Dim capturedOriginalDocPath As String = originalDocPath
@@ -294,6 +327,12 @@ Partial Public Class ThisAddIn
 
             ' Build additional buttons array
             Dim additionalButtons As New List(Of System.Tuple(Of String, System.Action, Boolean))()
+
+            ' Switch Direction button (⇄ icon via Unicode)
+            additionalButtons.Add(New System.Tuple(Of String, System.Action, Boolean)(
+                "⇄",
+                Sub() CompareDocumentsAndShowResult(capturedWordApp, capturedRevisedDoc, capturedOriginalDoc),
+                True))
 
             ' Summarize Changes button
             If Not String.IsNullOrWhiteSpace(extractedChangesText) Then
@@ -407,7 +446,9 @@ Partial Public Class ThisAddIn
                     End Sub
 
             ' Show result with all buttons - cleanup happens when dialog closes
-            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
+            ' Title includes direction hint: Original → Revised
+            Dim directionHint As String = $" ({capturedOriginalDocName} → {capturedRevisedDocName})"
+            ShowHTMLCustomMessageBox(htmlContent, $"{AN} Word Active Compare{directionHint}", additionalButtons:=additionalButtons.ToArray(), onClose:=cleanupAction)
 
         Catch ex As System.Exception
             ' Safety close on error
@@ -1907,7 +1948,7 @@ Partial Public Class ThisAddIn
 
                     Dim llmResult As String = String.Empty
                     Try
-                        llmResult = SharedMethods.LLM(
+                        llmResult = LLM(
                             _context,
                             systemPrompt,
                             userPrompt,
@@ -2876,4 +2917,1030 @@ Partial Public Class ThisAddIn
             CompareAndInsertComparedoc(text1, text2, secondRange)
         End If
     End Sub
+
+
+    ''' <summary>
+    ''' Removes leading "RI: " prefix from Word comments (including threaded replies) in the selection or entire document.
+    ''' Optionally also removes comment timestamps via Open XML post-processing.
+    ''' Uses a progress bar and supports cancellation.
+    ''' </summary>
+    Public Sub NewRemoveRIPrefixFromComments()
+
+        Dim riPrefix As String = $"{AN5}: "
+
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+            Dim hasSelection As Boolean = (sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End)
+            Dim scopeRange As Microsoft.Office.Interop.Word.Range = If(hasSelection, sel.Range, doc.Content)
+
+            Dim candidates As New List(Of Microsoft.Office.Interop.Word.Comment)()
+
+            ' Collect candidates that start with the prefix (base comments + replies)
+            For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                Dim inScope As Boolean = False
+
+                Try
+                    Dim cStart As Integer = c.Scope.Start
+                    Dim cEnd As Integer = c.Scope.End
+                    inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                Catch
+                    Try
+                        Dim cStart As Integer = c.Reference.Start
+                        Dim cEnd As Integer = c.Reference.End
+                        inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                    Catch
+                        inScope = False
+                    End Try
+                End Try
+
+                If Not inScope Then Continue For
+
+                Try
+                    Dim text As String = If(c.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        candidates.Add(c)
+                    End If
+                Catch
+                End Try
+
+                ' Threaded replies
+                Try
+                    If c.Replies IsNot Nothing AndAlso c.Replies.Count > 0 Then
+                        For Each r As Microsoft.Office.Interop.Word.Comment In c.Replies
+                            Try
+                                Dim replyText As String = If(r.Range.Text, String.Empty)
+                                If replyText.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                                    candidates.Add(r)
+                                End If
+                            Catch
+                            End Try
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If candidates.Count = 0 Then
+                ShowCustomMessageBox($"No '{AN5}:' prefixes found in comments for the current scope.", AN)
+                Exit Sub
+            End If
+
+            ' Ask whether to also remove the date/time from the processed comments
+            Dim alsoRemoveDateTime As Boolean = False
+            Dim dateTimeAnswer As Integer = ShowCustomYesNoBox(
+                $"Found {candidates.Count} comment(s) with '{AN5}:' prefix." & vbCrLf & vbCrLf &
+                "Do you also want to remove the date/time from these comments?" & vbCrLf &
+                "(The date/time will be removed entirely.)",
+                "Yes, also remove date/time",
+                "No, only remove prefix",
+                AN & $" Remove {AN5} Prefix")
+            If dateTimeAnswer = 0 Then
+                Exit Sub ' User closed/cancelled
+            End If
+            alsoRemoveDateTime = (dateTimeAnswer = 1)
+
+            ' Collect the 1-based Interop Comment.Index for each candidate BEFORE modifying text
+            ' (Index is stable as long as we don't add/remove comments)
+            Dim commentIndicesToProcess As New List(Of Integer)()
+            If alsoRemoveDateTime Then
+                For Each cmt As Microsoft.Office.Interop.Word.Comment In candidates
+                    Try
+                        commentIndicesToProcess.Add(cmt.Index)
+                    Catch
+                    End Try
+                Next
+            End If
+
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressMax = candidates.Count
+            ProgressBarModule.GlobalProgressLabel = "Processing comments..."
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.ShowProgressBarInSeparateThread(AN & $" Remove {AN5} Prefix", "Starting...")
+
+            Dim removedCount As Integer = 0
+
+            For i As Integer = 0 To candidates.Count - 1
+                System.Windows.Forms.Application.DoEvents()
+
+                If ProgressBarModule.CancelOperation Then Exit For
+                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                    ProgressBarModule.CancelOperation = True
+                    Exit For
+                End If
+
+                ProgressBarModule.GlobalProgressValue = i + 1
+                ProgressBarModule.GlobalProgressLabel = $"Processing {i + 1} of {candidates.Count}..."
+
+                Try
+                    Dim cmt As Microsoft.Office.Interop.Word.Comment = candidates(i)
+                    Dim text As String = If(cmt.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        cmt.Range.Text = text.Substring(riPrefix.Length)
+                        removedCount += 1
+                    End If
+                Catch
+                End Try
+            Next
+
+            ProgressBarModule.CancelOperation = True
+
+            ' If user requested date/time removal, do it via Open XML post-processing
+            Dim dateTimeRemoved As Boolean = False
+            If alsoRemoveDateTime AndAlso removedCount > 0 AndAlso commentIndicesToProcess.Count > 0 Then
+                dateTimeRemoved = RemoveCommentDateTimesViaOpenXml(doc, app, commentIndicesToProcess)
+            End If
+
+            Dim scopeInfo As String = If(hasSelection, "the selected text", "the entire document")
+            If ProgressBarModule.CancelOperation AndAlso removedCount < candidates.Count Then
+                ShowCustomMessageBox($"Operation cancelled. Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}." &
+                    If(dateTimeRemoved, " Date/time was also removed.", ""), AN)
+            Else
+                ShowCustomMessageBox($"Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}." &
+                    If(dateTimeRemoved, " Date/time was also removed.", ""), AN)
+            End If
+
+        Catch ex As System.Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Error in RemoveRIPrefixFromComments: {ex.Message}", AN)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Removes comment date/time stamps by saving the document to a temp DOCX, modifying the
+    ''' w:date attributes in comments.xml (and commentsExtended/commentsExtensible.xml) via Open XML,
+    ''' then reopening the document.
+    ''' Instead of fragile index or text matching, processes ALL comments whose text (after prefix
+    ''' removal) matches any of the expected stripped texts. Falls back to processing all comments
+    ''' by the add-in's author if no matches are found.
+    ''' </summary>
+    ''' <param name="doc">The active Word document.</param>
+    ''' <param name="app">The Word application instance.</param>
+    ''' <param name="commentIndices">1-based Interop Comment.Index values (used only for count validation).</param>
+    ''' <returns>True if date/time removal succeeded; False otherwise.</returns>
+    Private Shared Function RemoveCommentDateTimesViaOpenXml(
+            doc As Microsoft.Office.Interop.Word.Document,
+            app As Microsoft.Office.Interop.Word.Application,
+            commentIndices As List(Of Integer)) As Boolean
+
+        Dim tempPath As String = Nothing
+        Dim originalPath As String = Nothing
+        Dim wasReadOnly As Boolean = False
+
+        Try
+            ' Get original path
+            Try
+                originalPath = doc.FullName
+            Catch
+                Return False
+            End Try
+
+            If String.IsNullOrEmpty(originalPath) Then Return False
+
+            ' Check if the document is in a format that supports Open XML
+            Dim ext As String = System.IO.Path.GetExtension(originalPath).ToLowerInvariant()
+            If ext <> ".docx" AndAlso ext <> ".docm" Then
+                ShowCustomMessageBox("Date/time removal requires a .docx or .docm document. Please save as .docx first.", AN)
+                Return False
+            End If
+
+            wasReadOnly = doc.ReadOnly
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 1: Before saving, collect the w:id values from the Interop
+            '         comments we want to process. We do this by saving the doc
+            '         first, reading the XML, and matching by author name.
+            '         The author for add-in comments is the current Word UserName
+            '         at time of creation, but comment text starts with the prefix.
+            ' ─────────────────────────────────────────────────────────────────
+
+            ' Collect the actual comment texts (already stripped of prefix by caller)
+            ' so we can match in Open XML by content
+            Dim strippedTexts As New HashSet(Of String)(StringComparer.Ordinal)
+            For Each idx In commentIndices
+                Try
+                    If idx >= 1 AndAlso idx <= doc.Comments.Count Then
+                        Dim cmtText As String = If(doc.Comments(idx).Range.Text, "")
+                        ' The prefix has already been removed by the caller, so this is the post-strip text
+                        strippedTexts.Add(cmtText.Trim())
+                    End If
+                Catch
+                End Try
+            Next
+
+            ' Save to temp
+            tempPath = System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                $"{AN2}_cmtdate_{Guid.NewGuid():N}.docx")
+
+            Dim prevScreenUpdating As Boolean = app.ScreenUpdating
+            Dim prevAlerts As Microsoft.Office.Interop.Word.WdAlertLevel = app.DisplayAlerts
+            Try
+                app.ScreenUpdating = False
+                app.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+                doc.SaveAs2(tempPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+                doc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Finally
+                app.DisplayAlerts = prevAlerts
+                app.ScreenUpdating = prevScreenUpdating
+            End Try
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 2: Open XML — remove w:date from matching comments
+            ' ─────────────────────────────────────────────────────────────────
+            Dim modified As Boolean = False
+            Dim modifiedWIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim modifiedParaIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            Using wordDoc As DocumentFormat.OpenXml.Packaging.WordprocessingDocument =
+                    DocumentFormat.OpenXml.Packaging.WordprocessingDocument.Open(tempPath, True)
+
+                Dim commentsPart = wordDoc.MainDocumentPart?.WordprocessingCommentsPart
+                If commentsPart IsNot Nothing AndAlso commentsPart.Comments IsNot Nothing Then
+
+                    Dim wNs As System.Xml.Linq.XNamespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                    Dim w14Ns As System.Xml.Linq.XNamespace = "http://schemas.microsoft.com/office/word/2010/wordml"
+
+                    ' Load the entire comments part as XDocument for reliable attribute manipulation
+                    Dim commentsXDoc As System.Xml.Linq.XDocument = Nothing
+                    Using readStream As System.IO.Stream = commentsPart.GetStream(System.IO.FileMode.Open, System.IO.FileAccess.Read)
+                        commentsXDoc = System.Xml.Linq.XDocument.Load(readStream)
+                    End Using
+
+                    Dim commentsChanged As Boolean = False
+
+                    For Each commentElem In commentsXDoc.Descendants(wNs + "comment").ToList()
+
+                        ' Extract plain text from w:t elements
+                        Dim commentPlainText As String = String.Join("", commentElem.Descendants(wNs + "t").Select(Function(t) t.Value))
+                        Dim trimmedText As String = commentPlainText.Trim()
+
+                        ' Match: does this comment's text match one of the stripped texts?
+                        If Not strippedTexts.Contains(trimmedText) Then Continue For
+
+                        ' Collect w:id for extended parts
+                        Dim wIdAttr = commentElem.Attribute(wNs + "id")
+                        If wIdAttr IsNot Nothing AndAlso Not String.IsNullOrEmpty(wIdAttr.Value) Then
+                            modifiedWIds.Add(wIdAttr.Value)
+                        End If
+
+                        ' Collect paraId values
+                        For Each paraElem In commentElem.Descendants(wNs + "p")
+                            Dim paraIdAttr = paraElem.Attribute(w14Ns + "paraId")
+                            If paraIdAttr IsNot Nothing AndAlso Not String.IsNullOrEmpty(paraIdAttr.Value) Then
+                                modifiedParaIds.Add(paraIdAttr.Value)
+                            End If
+                        Next
+
+                        ' Remove the w:date attribute
+                        Dim dateAttr = commentElem.Attribute(wNs + "date")
+                        If dateAttr IsNot Nothing Then
+                            dateAttr.Remove()
+                            commentsChanged = True
+                            modified = True
+                        End If
+
+                        ' Remove from set so we don't match duplicates unnecessarily
+                        strippedTexts.Remove(trimmedText)
+                    Next
+
+                    If commentsChanged Then
+                        Using writeStream As System.IO.Stream = commentsPart.GetStream(System.IO.FileMode.Create, System.IO.FileAccess.Write)
+                            commentsXDoc.Save(writeStream)
+                        End Using
+                    End If
+                End If
+
+                ' ─────────────────────────────────────────────────────────────────
+                ' STEP 3: Remove dateUtc from commentsExtended/commentsExtensible
+                ' ─────────────────────────────────────────────────────────────────
+                If modified AndAlso (modifiedParaIds.Count > 0 OrElse modifiedWIds.Count > 0) Then
+                    Try
+                        For Each extPart In wordDoc.MainDocumentPart.Parts
+                            Try
+                                Dim uri As String = If(extPart.OpenXmlPart?.Uri?.ToString(), "")
+                                If Not (uri.Contains("commentsExtensible") OrElse
+                                        uri.Contains("commentsExtended") OrElse
+                                        uri.Contains("commentsEx")) Then Continue For
+
+                                Using stream As System.IO.Stream = extPart.OpenXmlPart.GetStream(
+                                    System.IO.FileMode.Open, System.IO.FileAccess.ReadWrite)
+
+                                    Dim xdoc As System.Xml.Linq.XDocument = System.Xml.Linq.XDocument.Load(stream)
+                                    Dim anyChanged As Boolean = False
+
+                                    For Each elem In xdoc.Descendants().ToList()
+                                        Dim shouldModify As Boolean = False
+
+                                        ' Match by paraId
+                                        Dim pIdAttr = elem.Attributes().FirstOrDefault(
+                                            Function(a) a.Name.LocalName.Equals("paraId", StringComparison.OrdinalIgnoreCase))
+                                        If pIdAttr IsNot Nothing AndAlso modifiedParaIds.Contains(pIdAttr.Value) Then
+                                            shouldModify = True
+                                        End If
+
+                                        ' Match by commentId (w:id reference)
+                                        If Not shouldModify Then
+                                            Dim cIdAttr = elem.Attributes().FirstOrDefault(
+                                                Function(a) a.Name.LocalName.Equals("commentId", StringComparison.OrdinalIgnoreCase))
+                                            If cIdAttr IsNot Nothing AndAlso modifiedWIds.Contains(cIdAttr.Value) Then
+                                                shouldModify = True
+                                            End If
+                                        End If
+
+                                        If Not shouldModify Then Continue For
+
+                                        For Each attr In elem.Attributes().ToList()
+                                            If attr.Name.LocalName.Equals("dateUtc", StringComparison.OrdinalIgnoreCase) Then
+                                                attr.Remove()
+                                                anyChanged = True
+                                            End If
+                                        Next
+                                    Next
+
+                                    If anyChanged Then
+                                        stream.SetLength(0)
+                                        xdoc.Save(stream)
+                                    End If
+                                End Using
+                            Catch
+                            End Try
+                        Next
+                    Catch
+                    End Try
+                End If
+            End Using
+
+            ' ─────────────────────────────────────────────────────────────────
+            ' STEP 4: Reopen the document
+            ' ─────────────────────────────────────────────────────────────────
+            Dim prevScreenUpdating2 As Boolean = app.ScreenUpdating
+            Dim prevAlerts2 As Microsoft.Office.Interop.Word.WdAlertLevel = app.DisplayAlerts
+            Try
+                app.ScreenUpdating = False
+                app.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
+
+                Dim reopened As Microsoft.Office.Interop.Word.Document = app.Documents.Open(
+                    FileName:=tempPath,
+                    ReadOnly:=False,
+                    Visible:=True)
+
+                reopened.SaveAs2(originalPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
+            Finally
+                app.DisplayAlerts = prevAlerts2
+                app.ScreenUpdating = prevScreenUpdating2
+            End Try
+
+            Return modified
+
+        Catch ex As System.Exception
+            Try
+                If Not String.IsNullOrEmpty(originalPath) AndAlso System.IO.File.Exists(originalPath) Then
+                    app.Documents.Open(FileName:=originalPath, ReadOnly:=wasReadOnly, Visible:=True)
+                ElseIf Not String.IsNullOrEmpty(tempPath) AndAlso System.IO.File.Exists(tempPath) Then
+                    app.Documents.Open(FileName:=tempPath, ReadOnly:=False, Visible:=True)
+                End If
+            Catch
+            End Try
+            Return False
+        Finally
+            Try
+                If Not String.IsNullOrEmpty(tempPath) AndAlso System.IO.File.Exists(tempPath) Then
+                    System.IO.File.Delete(tempPath)
+                End If
+            Catch
+            End Try
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Extracts plain text from an Open XML Comment element by collecting text from all w:t descendants.
+    ''' This is more reliable than InnerText which may include unexpected whitespace from XML structure.
+    ''' </summary>
+    Private Shared Function ExtractPlainTextFromOpenXmlComment(comment As DocumentFormat.OpenXml.Wordprocessing.Comment) As String
+        If comment Is Nothing Then Return Nothing
+        Dim sb As New System.Text.StringBuilder()
+        For Each textElement In comment.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Text)()
+            sb.Append(textElement.Text)
+        Next
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Normalizes comment text for comparison by removing control characters (BEL, vertical tab,
+    ''' form feed, etc.) that Word Interop and Open XML may handle differently.
+    ''' </summary>
+    Private Shared Function NormalizeCommentText(text As String) As String
+        If text Is Nothing Then Return String.Empty
+        Dim sb As New System.Text.StringBuilder(text.Length)
+        For Each ch As Char In text
+            ' Skip control characters except standard whitespace (space, tab, CR, LF)
+            If Char.IsControl(ch) AndAlso ch <> " "c AndAlso ch <> vbTab(0) AndAlso ch <> vbCr(0) AndAlso ch <> vbLf(0) Then
+                Continue For
+            End If
+            sb.Append(ch)
+        Next
+        ' Normalize line endings
+        Return sb.ToString().Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).TrimEnd()
+    End Function
+
+    ''' <summary>
+    ''' Removes leading "RI: " prefix from Word comments (including threaded replies) in the selection or entire document.
+    ''' Uses a progress bar and supports cancellation.
+    ''' </summary>
+    Public Sub RemoveRIPrefixFromComments()
+
+        Dim riPrefix As String = $"{AN5}: "
+
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+            Dim hasSelection As Boolean = (sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End)
+            Dim scopeRange As Microsoft.Office.Interop.Word.Range = If(hasSelection, sel.Range, doc.Content)
+
+            Dim candidates As New List(Of Microsoft.Office.Interop.Word.Comment)()
+
+            ' Collect candidates that start with the prefix (base comments + replies)
+            For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
+                Dim inScope As Boolean = False
+
+                Try
+                    Dim cStart As Integer = c.Scope.Start
+                    Dim cEnd As Integer = c.Scope.End
+                    inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                Catch
+                    Try
+                        Dim cStart As Integer = c.Reference.Start
+                        Dim cEnd As Integer = c.Reference.End
+                        inScope = (cStart >= scopeRange.Start AndAlso cEnd <= scopeRange.End)
+                    Catch
+                        inScope = False
+                    End Try
+                End Try
+
+                If Not inScope Then Continue For
+
+                Try
+                    Dim text As String = If(c.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        candidates.Add(c)
+                    End If
+                Catch
+                End Try
+
+                ' Threaded replies
+                Try
+                    If c.Replies IsNot Nothing AndAlso c.Replies.Count > 0 Then
+                        For Each r As Microsoft.Office.Interop.Word.Comment In c.Replies
+                            Try
+                                Dim replyText As String = If(r.Range.Text, String.Empty)
+                                If replyText.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                                    candidates.Add(r)
+                                End If
+                            Catch
+                            End Try
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If candidates.Count = 0 Then
+                ShowCustomMessageBox($"No '{AN5}:' prefixes found in comments for the current scope.", AN)
+                Exit Sub
+            End If
+
+            ProgressBarModule.GlobalProgressValue = 0
+            ProgressBarModule.GlobalProgressMax = candidates.Count
+            ProgressBarModule.GlobalProgressLabel = "Processing comments..."
+            ProgressBarModule.CancelOperation = False
+            ProgressBarModule.ShowProgressBarInSeparateThread(AN & $" Remove {AN5} Prefix", "Starting...")
+
+            Dim removedCount As Integer = 0
+
+            For i As Integer = 0 To candidates.Count - 1
+                System.Windows.Forms.Application.DoEvents()
+
+                If ProgressBarModule.CancelOperation Then Exit For
+                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                    ProgressBarModule.CancelOperation = True
+                    Exit For
+                End If
+
+                ProgressBarModule.GlobalProgressValue = i + 1
+                ProgressBarModule.GlobalProgressLabel = $"Processing {i + 1} of {candidates.Count}..."
+
+                Try
+                    Dim cmt As Microsoft.Office.Interop.Word.Comment = candidates(i)
+                    Dim text As String = If(cmt.Range.Text, String.Empty)
+                    If text.StartsWith(riPrefix, StringComparison.Ordinal) Then
+                        cmt.Range.Text = text.Substring(riPrefix.Length)
+                        removedCount += 1
+                    End If
+                Catch
+                End Try
+            Next
+
+            ProgressBarModule.CancelOperation = True
+
+            Dim scopeInfo As String = If(hasSelection, "the selected text", "the entire document")
+            If ProgressBarModule.CancelOperation AndAlso removedCount < candidates.Count Then
+                ShowCustomMessageBox($"Operation cancelled. Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}.", AN)
+            Else
+                ShowCustomMessageBox($"Removed '{AN5}:' prefix from {removedCount} comment(s) in {scopeInfo}.", AN)
+            End If
+
+        Catch ex As System.Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Error in RemoveRIPrefixFromComments: {ex.Message}", AN)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Reads a PDF page by page, extracts text (with OCR if needed), sends the page texts
+    ''' to the LLM to determine how to split the PDF into separate exhibits/documents,
+    ''' and saves each split segment into a new subdirectory alongside the source PDF.
+    ''' Output filenames follow the pattern "Exhibit 01 - Brief Description.pdf".
+    ''' Shows a progress bar and supports cancellation.
+    ''' </summary>
+    Public Async Sub SplitPdfByExhibits()
+        Dim selectedPath As String = ""
+
+        ' Show DragDropForm for PDF file selection
+        Globals.ThisAddIn.DragDropFormLabel = "Select a PDF file to split into exhibits"
+
+        Try
+            Using frm As New DragDropForm(DragDropMode.FileOnly)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(selectedPath) Then
+            Return
+        End If
+
+        If Not IO.File.Exists(selectedPath) Then
+            ShowCustomMessageBox("The selected file does not exist.", AN)
+            Return
+        End If
+
+        Dim ext As String = IO.Path.GetExtension(selectedPath).ToLowerInvariant()
+        If ext <> ".pdf" Then
+            ShowCustomMessageBox($"File type '{ext}' is not supported. Only PDF files can be split.", AN)
+            Return
+        End If
+
+        ' Determine OCR availability and ask user
+        Dim doOcr As Boolean = False
+        If SharedMethods.IsOcrAvailable(_context) Then
+            Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                "Some pages may contain scanned content that requires OCR (optical character recognition) to extract text." & vbCrLf & vbCrLf &
+                "Do you want to enable OCR for pages where text extraction yields little or no content?",
+                "Yes, enable OCR",
+                "No, skip OCR",
+                AN & " Split PDF by Exhibits")
+            If ocrChoice = 0 Then
+                Return ' User cancelled
+            End If
+            doOcr = (ocrChoice = 1)
+        End If
+
+        ' Prompt user for output language for file descriptions
+        ' If empty, no description will be added to filenames (just 01.pdf, 02.pdf, etc.)
+        Dim useDescription As Boolean = True
+        Dim languageInput As String = ShowCustomInputBox(
+            "Enter the language for exhibit descriptions in the filenames (e.g., English, German, French)." & vbCrLf & vbCrLf &
+            "Leave empty if you do not want descriptions added to the filenames (files will be named 01.pdf, 02.pdf, etc.).",
+            AN & " Split PDF by Exhibits",
+            True,
+            INI_Language1)
+
+        If languageInput Is Nothing Then
+            Return ' User cancelled (pressed Cancel/Esc)
+        End If
+
+        languageInput = languageInput.Trim()
+
+        If String.IsNullOrEmpty(languageInput) Then
+            ' No description wanted; set OutputLanguage to English for internal LLM use
+            OutputLanguage = "English"
+            useDescription = False
+        Else
+            OutputLanguage = languageInput
+            useDescription = True
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 1: Extract text page by page
+        ' ─────────────────────────────────────────────────────────────────
+        Dim pageCount As Integer = 0
+
+        ' Get page count first
+        Try
+            Using pdfDoc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(selectedPath)
+                pageCount = pdfDoc.NumberOfPages
+            End Using
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to open PDF: {ex.Message}", AN)
+            Return
+        End Try
+
+        If pageCount = 0 Then
+            ShowCustomMessageBox("The PDF has no pages.", AN)
+            Return
+        End If
+
+        If pageCount = 1 Then
+            ShowCustomMessageBox("The PDF has only one page and cannot be split.", AN)
+            Return
+        End If
+
+        ' Show progress bar for text extraction
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = pageCount
+        ProgressBarModule.GlobalProgressLabel = "Extracting text from pages..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Split PDF by Exhibits", "Reading PDF pages...")
+
+        Dim pageTexts As New Dictionary(Of Integer, String)()
+        Dim ocrWasUsed As Boolean = False
+
+        Try
+            ' Extract text using PdfPig page by page
+            Using pdfDoc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(selectedPath)
+                For pageIdx As Integer = 1 To pdfDoc.NumberOfPages
+                    If ProgressBarModule.CancelOperation Then Exit For
+
+                    ProgressBarModule.GlobalProgressValue = pageIdx
+                    ProgressBarModule.GlobalProgressLabel = $"Extracting text from page {pageIdx} of {pdfDoc.NumberOfPages}..."
+
+                    Dim pageText As String = String.Empty
+
+                    Try
+                        Dim page = pdfDoc.GetPage(pageIdx)
+                        pageText = String.Join(" ", page.GetWords().Select(Function(w) w.Text))
+                    Catch
+                        ' Page text extraction failed
+                    End Try
+
+                    ' If text is sparse and OCR is enabled, use OCR for this page
+                    If doOcr AndAlso (String.IsNullOrWhiteSpace(pageText) OrElse pageText.Trim().Length < 50) Then
+                        Try
+                            ProgressBarModule.GlobalProgressLabel = $"OCR processing page {pageIdx} of {pdfDoc.NumberOfPages}..."
+
+                            ' Extract single page to temp PDF for OCR
+                            Dim tempPagePdf As String = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_splitocr_{Guid.NewGuid():N}.pdf")
+                            Try
+                                Await System.Threading.Tasks.Task.Run(Sub() ExtractSinglePagePdf(selectedPath, pageIdx, tempPagePdf))
+
+                                Dim ocrResult As String = Await ReadPdfAsText(tempPagePdf, False, True, False, _context)
+                                If Not String.IsNullOrWhiteSpace(ocrResult) AndAlso ocrResult.Trim().Length > pageText.Trim().Length Then
+                                    pageText = ocrResult
+                                    ocrWasUsed = True
+                                End If
+                            Finally
+                                Try
+                                    If IO.File.Exists(tempPagePdf) Then IO.File.Delete(tempPagePdf)
+                                Catch
+                                End Try
+                            End Try
+                        Catch
+                            ' OCR failed for this page; use whatever text we have
+                        End Try
+                    End If
+
+                    pageTexts(pageIdx) = If(pageText, String.Empty)
+                Next
+            End Using
+
+        Catch ex As Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Failed to extract text from PDF: {ex.Message}", AN)
+            Return
+        End Try
+
+        ' Close extraction progress
+        ProgressBarModule.CancelOperation = True
+
+        If pageTexts.Count = 0 Then
+            ShowCustomMessageBox("No text could be extracted from the PDF.", AN)
+            Return
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 2: Send page texts to LLM for split analysis
+        ' ─────────────────────────────────────────────────────────────────
+
+        ' Build the page-by-page content for the LLM
+        Dim pageContentSb As New System.Text.StringBuilder()
+
+        ' Dynamically scale per-page character budget to stay within token limits
+        ' Target: ~200K chars total (~50K tokens) to leave room for system prompt + response
+        Const MaxTotalChars As Integer = 200000
+        Dim charsPerPage As Integer = Math.Max(300, MaxTotalChars \ Math.Max(1, pageTexts.Count))
+        ' Cap at 2250 so small documents still get the full truncation treatment
+        charsPerPage = Math.Min(charsPerPage, 2250)
+        ' Reserve 250 chars for the tail portion; the rest goes to the head
+        Dim tailChars As Integer = Math.Min(250, charsPerPage \ 4)
+        Dim headChars As Integer = charsPerPage - tailChars
+
+        For Each kvp In pageTexts.OrderBy(Function(k) k.Key)
+            Dim truncatedText As String = kvp.Value
+            ' Truncate pages that exceed the per-page budget, keeping head + tail
+            If truncatedText.Length > charsPerPage Then
+                truncatedText = truncatedText.Substring(0, headChars) & " [...] " & truncatedText.Substring(truncatedText.Length - tailChars)
+            End If
+            pageContentSb.AppendLine($"--- PAGE {kvp.Key} ---")
+            pageContentSb.AppendLine(If(String.IsNullOrWhiteSpace(truncatedText), "[No text extracted from this page]", truncatedText))
+            pageContentSb.AppendLine()
+        Next
+
+        Dim systemPrompt As String = SP_SplitPDF
+
+        Dim userPrompt As String = $"The PDF has {pageCount} pages. Here is the text content page by page:" & vbCrLf & vbCrLf & pageContentSb.ToString()
+
+        ' ── Try to use a dedicated SplitPDF model (if configured in alternate models INI) ──
+        Dim backupConfig As ModelConfig = Nothing
+        Dim useSplitPdfModel As Boolean = False
+        Dim useSecondApi As Boolean = False
+        Dim timeout As Long = 0
+
+        Try
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                useSplitPdfModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "SplitPDF")
+            End If
+        Catch
+        End Try
+
+        If useSplitPdfModel Then
+            backupConfig = GetCurrentConfig(_context)
+            useSecondApi = True
+            timeout = If(_context.INI_Timeout_2 > 0, _context.INI_Timeout_2, _context.INI_Timeout)
+        Else
+            useSecondApi = False
+            timeout = _context.INI_Timeout
+        End If
+
+        Dim llmResponse As String = String.Empty
+        Try
+            llmResponse = Await SharedMethods.LLM(
+                _context,
+                InterpolateAtRuntime(systemPrompt),
+                userPrompt,
+                "",
+                "",
+                timeout,
+                useSecondApi,
+                False)
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to analyze PDF structure: {ex.Message}", AN)
+            Return
+        Finally
+            If useSplitPdfModel AndAlso backupConfig IsNot Nothing Then
+                RestoreDefaults(_context, backupConfig)
+            End If
+        End Try
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 3: Parse LLM response into split segments
+        ' ─────────────────────────────────────────────────────────────────
+        Dim segments As New List(Of SplitSegment)()
+
+        Try
+            ' Clean response: strip code fences if present
+            Dim cleanedResponse As String = llmResponse.Trim()
+            If cleanedResponse.StartsWith("```") Then
+                Dim firstNewline As Integer = cleanedResponse.IndexOf(vbLf)
+                If firstNewline >= 0 Then
+                    cleanedResponse = cleanedResponse.Substring(firstNewline + 1)
+                End If
+                If cleanedResponse.EndsWith("```") Then
+                    cleanedResponse = cleanedResponse.Substring(0, cleanedResponse.Length - 3).Trim()
+                End If
+            End If
+
+            Dim jsonArray As Newtonsoft.Json.Linq.JArray = Newtonsoft.Json.Linq.JArray.Parse(cleanedResponse)
+
+            For Each item As Newtonsoft.Json.Linq.JObject In jsonArray
+                Dim seg As New SplitSegment()
+                seg.StartPage = CInt(item("start_page"))
+                seg.EndPage = CInt(item("end_page"))
+                seg.Name = CStr(If(item("name"), "Unnamed"))
+                segments.Add(seg)
+            Next
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to parse the AI response as valid JSON: {ex.Message}" & vbCrLf & vbCrLf &
+                                 "Raw response:" & vbCrLf & llmResponse, AN)
+            Return
+        End Try
+
+        If segments.Count = 0 Then
+            ShowCustomMessageBox("The AI returned no segments. Unable to split the PDF.", AN)
+            Return
+        End If
+
+        ' Validate segments
+        For Each seg In segments
+            If seg.StartPage < 1 OrElse seg.EndPage > pageCount OrElse seg.StartPage > seg.EndPage Then
+                ShowCustomMessageBox($"Invalid page range detected: pages {seg.StartPage}-{seg.EndPage} for '{seg.Name}'. Total pages: {pageCount}.", AN)
+                Return
+            End If
+        Next
+
+        ' Sort by start page
+        segments.Sort(Function(a, b) a.StartPage.CompareTo(b.StartPage))
+
+        If segments.Count = 1 Then
+            ShowCustomMessageBox("The AI determined this PDF is a single coherent document and cannot be meaningfully split." & vbCrLf & vbCrLf &
+                                 $"Document: {segments(0).Name} (pages {segments(0).StartPage}-{segments(0).EndPage})", AN)
+            Return
+        End If
+
+        ' Show proposed split to user for confirmation
+        Dim previewSb As New System.Text.StringBuilder()
+        previewSb.AppendLine($"The AI proposes splitting this {pageCount}-page PDF into {segments.Count} parts:")
+        previewSb.AppendLine()
+        For i As Integer = 0 To segments.Count - 1
+            Dim seg = segments(i)
+            Dim pageInfo As String = If(seg.StartPage = seg.EndPage, $"page {seg.StartPage}", $"pages {seg.StartPage}-{seg.EndPage}")
+            previewSb.AppendLine($"  {(i + 1):D2}. {seg.Name} ({pageInfo})")
+        Next
+        previewSb.AppendLine()
+        previewSb.AppendLine("Do you want to proceed with this split?")
+
+        Dim confirmChoice As Integer = ShowCustomYesNoBox(
+            previewSb.ToString(),
+            "Yes, split PDF",
+            "No, cancel",
+            AN & " Split PDF by Exhibits")
+        If confirmChoice <> 1 Then
+            Return
+        End If
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 4: Split the PDF using PdfSharp
+        ' ─────────────────────────────────────────────────────────────────
+        Dim pdfDir As String = IO.Path.GetDirectoryName(selectedPath)
+        Dim pdfBaseName As String = IO.Path.GetFileNameWithoutExtension(selectedPath)
+        Dim outputDir As String = IO.Path.Combine(pdfDir, SanitizeFileName(pdfBaseName) & "_split")
+
+        ' Ensure unique output directory
+        If IO.Directory.Exists(outputDir) Then
+            Dim counter As Integer = 1
+            While IO.Directory.Exists(outputDir & $"_{counter}")
+                counter += 1
+            End While
+            outputDir = outputDir & $"_{counter}"
+        End If
+
+        Try
+            IO.Directory.CreateDirectory(outputDir)
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to create output directory: {ex.Message}", AN)
+            Return
+        End Try
+
+        ' Show progress bar for splitting
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = segments.Count
+        ProgressBarModule.GlobalProgressLabel = "Splitting PDF..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Split PDF by Exhibits", "Splitting PDF into exhibits...")
+
+        Dim successCount As Integer = 0
+        Dim failedSegments As New List(Of String)()
+
+        Try
+            ' Load the source PDF once with PdfSharp
+            Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(selectedPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+
+                For i As Integer = 0 To segments.Count - 1
+                    If ProgressBarModule.CancelOperation Then Exit For
+
+                    Dim seg = segments(i)
+                    ProgressBarModule.GlobalProgressValue = i + 1
+                    ProgressBarModule.GlobalProgressLabel = $"Creating exhibit {i + 1} of {segments.Count}: {seg.Name}..."
+
+                    Try
+                        ' Build filename based on whether descriptions are wanted
+                        Dim outputFileName As String
+                        If useDescription Then
+                            Dim sanitizedName As String = SanitizeFileName(seg.Name)
+                            outputFileName = $"{(i + 1):D2} - {sanitizedName}.pdf"
+                        Else
+                            outputFileName = $"{(i + 1):D2}.pdf"
+                        End If
+                        Dim outputPath As String = IO.Path.Combine(outputDir, outputFileName)
+
+                        ' Create a new document with just the pages for this segment
+                        Using outDoc As New PdfSharp.Pdf.PdfDocument()
+                            For pageNum As Integer = seg.StartPage To seg.EndPage
+                                ' PdfSharp uses 0-based indexing
+                                Dim srcPage As PdfSharp.Pdf.PdfPage = srcDoc.Pages(pageNum - 1)
+                                outDoc.AddPage(srcPage)
+                            Next
+
+                            outDoc.Save(outputPath)
+                        End Using
+
+                        successCount += 1
+
+                    Catch ex As Exception
+                        failedSegments.Add($"{seg.Name}: {ex.Message}")
+                    End Try
+                Next
+            End Using
+
+        Catch ex As Exception
+            ProgressBarModule.CancelOperation = True
+            ShowCustomMessageBox($"Failed to split PDF: {ex.Message}", AN)
+            Return
+        Finally
+            ProgressBarModule.CancelOperation = True
+        End Try
+
+        ' ─────────────────────────────────────────────────────────────────
+        ' STEP 5: Show summary
+        ' ─────────────────────────────────────────────────────────────────
+        Dim summary As New System.Text.StringBuilder()
+        summary.AppendLine($"Successfully created {successCount} exhibit file(s).")
+        summary.AppendLine($"Output directory: {outputDir}")
+
+        If ocrWasUsed Then
+            summary.AppendLine("OCR was used for some pages with little or no text.")
+        End If
+
+        If failedSegments.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"Failed: {failedSegments.Count} segment(s)")
+            For Each f In failedSegments
+                summary.AppendLine($"  • {f}")
+            Next
+        End If
+
+        ' Ask if user wants to open the output directory
+        Dim openChoice As Integer = ShowCustomYesNoBox(
+            summary.ToString() & vbCrLf & vbCrLf & "Do you want to open the output directory?",
+            "Yes, open directory",
+            "No",
+            AN & " Split PDF by Exhibits")
+
+        If openChoice = 1 Then
+            Try
+                System.Diagnostics.Process.Start(New System.Diagnostics.ProcessStartInfo(outputDir) With {.UseShellExecute = True})
+            Catch ex As Exception
+                ShowCustomMessageBox($"Could not open directory: {ex.Message}", AN)
+            End Try
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Extracts a single page from a PDF file and saves it as a separate PDF.
+    ''' Used for per-page OCR processing during exhibit splitting.
+    ''' </summary>
+    ''' <param name="inputPath">Source PDF file path.</param>
+    ''' <param name="pageNumber">1-based page number to extract.</param>
+    ''' <param name="outputPath">Destination PDF file path for the single page.</param>
+    Private Shared Sub ExtractSinglePagePdf(inputPath As String, pageNumber As Integer, outputPath As String)
+        Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+            Using outDoc As New PdfSharp.Pdf.PdfDocument()
+                outDoc.AddPage(srcDoc.Pages(pageNumber - 1))
+                outDoc.Save(outputPath)
+            End Using
+        End Using
+    End Sub
+
 End Class
+
+
+
+

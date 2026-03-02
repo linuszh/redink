@@ -6,37 +6,58 @@
 ; FriendlyName; SourceUrl; App1, App2; ParameterForPath; IsFullPath; DefaultPath; DefaultFileName
 ;
 ; FriendlyName = name shown to the user
-; SourceUrl = where the file is obtained (with placeholders {AppsUrl}{AppsUrlDir})
+; SourceUrl = where the file is obtained (with placeholders {AppsUrl}{AppsUrlDir}) [can remain empty]
 ; App = Word, Excel, Outlook (scope, comma separated)
 ; ParameterForPath = the parameter that needs to be set within redink.ini
 ; IsFullPath = True if the parameter holds the full path; False if only the directory
 ; DefaultPath = the default path to be used if none is use (will be expanded)
 ; DefaultFileName = the default filename of the file on the target
 ;
-; 28 December 2025
+; 13 February 2026
 
-Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %Appdata%\microsoft\word; promptlib.txt
+Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %APPDATA%\microsoft\word; promptlib.txt
 
-Prompt Library (Transcriptor); {AppsUrl}{AppsUrlDir}promptlib-transcript.txt; Word; PromptLib_Transcript; True; %Appdata%\microsoft\word; promptlib_transcript.txt
+Prompt Library (Local); ; Word, Excel, Outlook; PromptLibLocal; True; %APPDATA%\microsoft\word; promptliblocal.txt
 
-Renaming Library; {AppsUrl}{AppsUrlDir}renamelib.txt; Word, Excel; RenameLibPath; True; %Appdata%\microsoft\word; renamelib.txt
+Prompt Library (Transcriptor); {AppsUrl}{AppsUrlDir}promptlib-transcript.txt; Word; PromptLib_Transcript; True; %APPDATA%\microsoft\word; promptlib_transcript.txt
 
-Data Extractor Library; {AppsUrl}{AppsUrlDir}extractorlib.txt; Word, Excel; ExtractorPath; True; %Appdata%\microsoft\word; extractorlib.txt
+Renaming Library; {AppsUrl}{AppsUrlDir}renamelib.txt; Word, Excel; RenameLibPath; True; %APPDATA%\microsoft\word; renamelib.txt
 
-Find Clause Sample (Corp); {AppsUrl}{AppsUrlDir}redink-lib-samplecorp.txt; Word; FindClausePath; False; %Appdata%\microsoft\word; redink-lib-samplecorp.txt
+Renaming Library (Local); ; Word, Excel; RenameLibPathLocal; True; %APPDATA%\microsoft\word; renameliblocal.txt
 
-DocCheck Sample 1 (DPA); {AppsUrl}{AppsUrlDir}redink-dc-DPA.txt; Word; DocCheckPath; False; %Appdata%\microsoft\word; redink-dc-DPA.txt
+Data Extractor Library; {AppsUrl}{AppsUrlDir}extractorlib.txt; Word, Excel; ExtractorPath; True; %APPDATA%\microsoft\word; extractorlib.txt
 
-DocCheck Sample 2 (AI Act); {AppsUrl}{AppsUrlDir}redink-dc-AI_Act.txt; Word; DocCheckPath; False; %Appdata%\microsoft\word; redink-dc-AI_Act.txt
+Data Extractor Library (Local); ; Word, Excel; ExtractorPathLocal; True; %APPDATA%\microsoft\word; extractorliblocal.txt
 
-WebAgent Sample 1 (BGer); {AppsUrl}{AppsUrlDir}redink-ag-Bundesgericht_Neuheiten.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ag-Bundesgericht_Neuheiten.json
+Find Clause Sample (Corp); {AppsUrl}{AppsUrlDir}redink-lib-samplecorp.txt; Word; FindClausePath; False; %APPDATA%\microsoft\word; redink-lib-samplecorp.txt
+
+Find Clause (Local); ; Word; FindClausePathLocal; False; %APPDATA%\microsoft\word;
+
+DocCheck Sample 1 (DPA); {AppsUrl}{AppsUrlDir}redink-dc-DPA.txt; Word; DocCheckPath; False; %APPDATA%\microsoft\word; redink-dc-DPA.txt
+
+DocCheck Sample 2 (AI Act); {AppsUrl}{AppsUrlDir}redink-dc-AI_Act.txt; Word; DocCheckPath; False; %APPDATA%\microsoft\word; redink-dc-AI_Act.txt
+
+DocCheck (Local); ; Word; DocCheckPathLocal; False; %APPDATA%\microsoft\word;
+
+WebAgent Sample 1 (BGer); {AppsUrl}{AppsUrlDir}redink-ag-Bundesgericht_Neuheiten.json; Word; WebAgentPath; False; %APPDATA%\microsoft\word; redink-ag-Bundesgericht_Neuheiten.json
+
+WebAgent Sample 2 (DuckDuckGo); {AppsUrl}{AppsUrlDir}redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json; Word; WebAgentPath; False; %APPDATA%\microsoft\word; redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json
+
+WebAgent (Local); ; Word; WebAgentPathLocal; False; %APPDATA%\microsoft\word;
 
 Discuss this (Persona library); {AppsUrl}{AppsUrlDir}personalib.txt; Word; DiscussInkyPath; True; %APPDATA%\microsoft\word\; personalib.txt
 
-; This file is usually stored locally in network setups and contains additional personas; here we combine them for local setups
-Discuss this (Local Persona library); {AppsUrl}{AppsUrlDir}personaliblocal.txt; Word; DiscussInkyPathLocal; True; %APPDATA%\microsoft\word\; personaliblocal.txt
+Discuss this (Persona library) (Local); {AppsUrl}{AppsUrlDir}personaliblocal.txt; Word; DiscussInkyPathLocal; True; %APPDATA%\microsoft\word; personaliblocal.txt
 
-WebAgent Sample 2 (DuckDuckGo); {AppsUrl}{AppsUrlDir}redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json
+DocStyle Sample (Contract); {AppsUrl}{AppsUrlDir}redink-ds-General_Contract_Template.json; Word; DocStylePath; False; %APPDATA%\microsoft\word; redink-ds-General_Contract_Template.json
 
-DocStyle Sample (Contract); {AppsUrl}{AppsUrlDir}redink-ds-General_Contract_Template.json; Word; WebAgentPath; False; %Appdata%\microsoft\word; redink-ds-General_Contract_Template.json
+DocStyle (Local); ; Word; DocStylePathLocal; False; %APPDATA%\microsoft\word;
+
+Snapshot Library; {AppsUrl}{AppsUrlDir}snapshotlib.txt; Word; SnapshotLibPath; True; %APPDATA%\microsoft\word; snapshotlib.txt
+
+Snapshot Library (Local); ; Word; SnapshotLibPathLocal; True; %APPDATA%\microsoft\word; snapshotliblocal.txt
+
+Mail Mover Rules; {AppsUrl}{AppsUrlDir}mailmover.txt; Word, Outlook; MailMoverPath; True; %APPDATA%\microsoft\word; mailmover.txt
+
+Mail Mover Rules (Local); ; Word, Outlook; MailMoverPathLocal; True; %APPDATA%\microsoft\word; mailmoverlocal.txt
 

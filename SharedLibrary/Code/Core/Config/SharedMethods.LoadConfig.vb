@@ -175,7 +175,10 @@ Namespace SharedLibrary
                 context.SP_MailSumup2 = If(configDict.ContainsKey("SP_MailSumup2"), configDict("SP_MailSumup2"), Default_SP_MailSumup2)
                 context.SP_SwitchParty = If(configDict.ContainsKey("SP_SwitchParty"), configDict("SP_SwitchParty"), Default_SP_SwitchParty)
                 context.SP_Anonymize = If(configDict.ContainsKey("SP_Anonymize"), configDict("SP_Anonymize"), Default_SP_Anonymize)
+                context.SP_SwitchParty_Document = If(configDict.ContainsKey("SP_SwitchParty_Document"), configDict("SP_SwitchParty_Document"), Default_SP_SwitchParty_Document)
+                context.SP_Anonymize_Document = If(configDict.ContainsKey("SP_Anonymize_Document"), configDict("SP_Anonymize_Document"), Default_SP_Anonymize_Document)
                 context.SP_Rename = If(configDict.ContainsKey("SP_Rename"), configDict("SP_Rename"), Default_SP_Rename)
+                context.SP_RemoveClutter = If(configDict.ContainsKey("SP_RemoveClutter"), configDict("SP_RemoveClutter"), Default_SP_RemoveClutter)
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)
                 context.SP_CheckforII = If(configDict.ContainsKey("SP_CheckforII"), configDict("SP_CheckforII"), Default_SP_CheckforII)
                 context.SP_Extract = If(configDict.ContainsKey("SP_Extract"), configDict("SP_Extract"), Default_SP_Extract)
@@ -190,6 +193,7 @@ Namespace SharedLibrary
                 context.SP_Add_KeepHTMLIntact = If(configDict.ContainsKey("SP_Add_KeepHTMLIntact"), configDict("SP_Add_KeepHTMLIntact"), Default_SP_Add_KeepHTMLIntact)
                 context.SP_Add_KeepInlineIntact = If(configDict.ContainsKey("SP_Add_KeepInlineIntact"), configDict("SP_Add_KeepInlineIntact"), Default_SP_Add_KeepInlineIntact)
                 context.SP_Add_Tooling = If(configDict.ContainsKey("SP_Add_Tooling"), configDict("SP_Add_Tooling"), Default_SP_Add_Tooling)
+                context.SP_Add_Markers = If(configDict.ContainsKey("SP_Add_Markers"), configDict("SP_Add_Markers"), Default_SP_Add_Markers)
                 context.SP_Add_Bubbles = If(configDict.ContainsKey("SP_Add_Bubbles"), configDict("SP_Add_Bubbles"), Default_SP_Add_Bubbles)
                 context.SP_Add_BubblesExtract = If(configDict.ContainsKey("SP_Add_BubblesExtract"), configDict("SP_Add_BubblesExtract"), Default_SP_Add_BubblesExtract)
                 context.SP_Add_BubblesReply = If(configDict.ContainsKey("SP_Add_BubblesReply"), configDict("SP_Add_BubblesReply"), Default_SP_Add_BubblesReply)
@@ -204,6 +208,11 @@ Namespace SharedLibrary
                 context.SP_HelpMe = If(configDict.ContainsKey("SP_HelpMe"), configDict("SP_HelpMe"), Default_SP_HelpMe)
                 context.SP_DiscussThis_SortOut = If(configDict.ContainsKey("SP_DiscussThis_SortOut"), configDict("SP_DiscussThis_SortOut"), Default_SP_DiscussThis_SortOut)
                 context.SP_DiscussThis_SumUp = If(configDict.ContainsKey("SP_DiscussThis_SumUp"), configDict("SP_DiscussThis_SumUp"), Default_SP_DiscussThis_Sumup)
+                context.SP_MailMover = If(configDict.ContainsKey("SP_MailMover"), configDict("SP_MailMover"), Default_SP_MailMover)
+                context.SP_InboxBoard = If(configDict.ContainsKey("SP_InboxBoard"), configDict("SP_InboxBoard"), Default_SP_InboxBoard)
+                context.SP_SplitPDF = If(configDict.ContainsKey("SP_SplitPDF"), configDict("SP_SplitPDF"), Default_SP_SplitPDF)
+                context.SP_AutoPilot = If(configDict.ContainsKey("SP_AutoPilot"), configDict("SP_AutoPilot"), Default_SP_AutoPilot)
+                context.SP_AutoPilot_NoTools = If(configDict.ContainsKey("SP_AutoPilot_NoTools"), configDict("SP_AutoPilot_NoTools"), Default_SP_AutoPilot_NoTools)
                 context.SP_Chat = If(configDict.ContainsKey("SP_Chat"), configDict("SP_Chat"), Default_SP_Chat)
                 context.SP_Add_ChatWord_Commands = If(configDict.ContainsKey("SP_Add_ChatWord_Commands"), configDict("SP_Add_ChatWord_Commands"), Default_SP_Add_ChatWord_Commands)
                 context.SP_Add_Chat_NoCommands = If(configDict.ContainsKey("SP_Add_Chat_NoCommands"), configDict("SP_Add_Chat_NoCommands"), Default_SP_Add_Chat_NoCommands)
@@ -262,6 +271,8 @@ Namespace SharedLibrary
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
 
+                context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
+
                 ' Tooling settings
 
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
@@ -293,6 +304,8 @@ Namespace SharedLibrary
                 context.INI_ExtractorPathLocal = If(configDict.ContainsKey("ExtractorPathLocal"), configDict("ExtractorPathLocal"), "")
                 context.INI_RenameLibPath = If(configDict.ContainsKey("RenameLibPath"), configDict("RenameLibPath"), "")
                 context.INI_RenameLibPathLocal = If(configDict.ContainsKey("RenameLibPathLocal"), configDict("RenameLibPathLocal"), "")
+                context.INI_MailMoverPath = If(configDict.ContainsKey("MailMoverPath"), configDict("MailMoverPath"), "")
+                context.INI_MailMoverPathLocal = If(configDict.ContainsKey("MailMoverPathLocal"), configDict("MailMoverPathLocal"), "")
 
                 context.INI_Location = If(configDict.ContainsKey("Location"), configDict("Location"), "")
 
@@ -307,6 +320,8 @@ Namespace SharedLibrary
                 context.INI_SpecialServicePath = If(configDict.ContainsKey("SpecialServicePath"), configDict("SpecialServicePath"), "")
                 context.INI_WebAgentPath = If(configDict.ContainsKey("WebAgentPath"), configDict("WebAgentPath"), "")
                 context.INI_WebAgentPathLocal = If(configDict.ContainsKey("WebAgentPathLocal"), configDict("WebAgentPathLocal"), "")
+                context.INI_SnapshotLibPath = If(configDict.ContainsKey("SnapshotLibPath"), configDict("SnapshotLibPath"), "")
+                context.INI_SnapshotLibPathLocal = If(configDict.ContainsKey("SnapshotLibPathLocal"), configDict("SnapshotLibPathLocal"), "")
                 context.INI_FindClausePath = If(configDict.ContainsKey("FindClausePath"), configDict("FindClausePath"), "")
                 context.INI_FindClausePathLocal = If(configDict.ContainsKey("FindClausePathLocal"), configDict("FindClausePathLocal"), "")
                 context.INI_DocCheckPath = If(configDict.ContainsKey("DocCheckPath"), configDict("DocCheckPath"), "")

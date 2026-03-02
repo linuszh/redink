@@ -1,6 +1,7 @@
 ' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
+Imports System.Diagnostics
 Imports Microsoft.Office.Tools.Ribbon
 Imports Microsoft.Win32
 Imports SharedLibrary
@@ -374,6 +375,16 @@ Public Class Ribbon2
         Globals.ThisAddIn.MainMenu("ApplyMyStyle")
     End Sub
 
+    Private Sub RI_MailMover_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_MailMover.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_MailMover_Click invoked")
+        Globals.ThisAddIn.MainMenu("MailMover")
+    End Sub
+
+    Private Sub RI_InboxBoard_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_InboxBoard.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_InboxBoard_Click invoked")
+        Globals.ThisAddIn.MainMenu("InboxBoard")
+    End Sub
+
     Private Sub RI_DefineMyStyle_Click_1(sender As Object, e As RibbonControlEventArgs) Handles RI_DefineMyStyle.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_DefineMyStyle_Click_1 invoked")
         Globals.ThisAddIn.DefineMyStyle()
@@ -387,6 +398,19 @@ Public Class Ribbon2
     Private Sub RI_CompareSelected_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CompareSelected.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_CompareSelected_Click invoked")
         Globals.ThisAddIn.CompareSelectedTextRangesOutlook()
+    End Sub
+
+    Private Sub RI_AutoPilot_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_AutoPilot.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_AutoPilot_Click invoked")
+        Globals.ThisAddIn.StartAutoPilot()
+    End Sub
+
+    Private Sub RI_OpenChat_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_OpenChat.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_OpenChat_Click invoked")
+        Dim startInfo As New ProcessStartInfo(SharedMethods.AN7) With {
+            .UseShellExecute = True
+        }
+        Process.Start(startInfo)
     End Sub
 
 End Class

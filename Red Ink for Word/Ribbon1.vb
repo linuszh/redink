@@ -400,4 +400,24 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Charting_Click invoked")
         Globals.ThisAddIn.OpenExistingDrawioFileForEditing()
     End Sub
+
+    Private Sub RI_Snapshot_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Snapshot.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Snapshot_Click invoked")
+        Globals.ThisAddIn.SelectSnapshotDocument()
+    End Sub
+
+    Private Sub RI_Remove_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Remove.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Remove_Click invoked")
+        Globals.ThisAddIn.RemoveRIPrefixFromComments()
+    End Sub
+
+    Private Sub RI_WebApp_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_WebApp.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_WebApp_Click invoked")
+        Globals.ThisAddIn.ConvertDrawioToHtml()
+    End Sub
+
+    Private Sub RI_SplitPDF_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_SplitPDF.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_SplitPDF_Click invoked")
+        Globals.ThisAddIn.SplitPdfByExhibits()
+    End Sub
 End Class

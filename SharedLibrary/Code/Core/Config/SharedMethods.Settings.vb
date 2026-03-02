@@ -584,11 +584,15 @@ Namespace SharedLibrary
                                            End Sub
 
             AddHandler aboutButton.Click, Sub(sender, e)
+
                                               ShowAboutWindow(settingsForm, CapturedContext)
                                           End Sub
 
             If ApplicationDeployment.IsNetworkDeployed OrElse Not String.IsNullOrWhiteSpace(CapturedContext.INI_UpdatePath) OrElse (context.INI_UpdateIniSilentMode = 0 AndAlso context.INI_UpdateIni) Then
                 AddHandler updateButton.Click, Sub(sender, e)
+
+
+
                                                    Dim updater As New UpdateHandler()
                                                    updater.CheckAndInstallUpdates(CapturedContext.RDV, CapturedContext.INI_UpdatePath, CapturedContext)
                                                End Sub
@@ -956,6 +960,10 @@ Namespace SharedLibrary
                     Return context.INI_WebAgentPath
                 Case "WebAgentPathLocal"
                     Return context.INI_WebAgentPathLocal
+                Case "SnapshotLibPath"
+                    Return context.INI_SnapshotLibPath
+                Case "SnapshotLibPathLocal"
+                    Return context.INI_SnapshotLibPathLocal
                 Case "DocCheckPath"
                     Return context.INI_DocCheckPath
                 Case "DocCheckPathLocal"
@@ -976,7 +984,7 @@ Namespace SharedLibrary
                     Return context.INI_LogoPath
                 Case "LogoPathMedium"
                     Return context.INI_LogoPathMedium
-                Case "LotoPathLarge"
+                Case "LogoPathLarge"
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
@@ -1030,8 +1038,6 @@ Namespace SharedLibrary
                     Return context.INI_UsageRestrictions
                 Case "LogPath"
                     Return context.INI_LogPath
-                Case "LogPath"
-                    Return context.INI_LogPath
                 Case "ContextMenu"
                     Return context.INI_ContextMenu.ToString()
                 Case "NoLocalConfig"
@@ -1060,6 +1066,10 @@ Namespace SharedLibrary
                     Return context.INI_RenameLibPath
                 Case "RenameLibPathLocal"
                     Return context.INI_RenameLibPathLocal
+                Case "MailMoverPath"
+                    Return context.INI_MailMoverPath
+                Case "MailMoverPathLocal"
+                    Return context.INI_MailMoverPathLocal
                 Case "TTSEndpoint"
                     Return context.INI_TTSEndpoint
                 Case "OAuth2"
@@ -1068,6 +1078,8 @@ Namespace SharedLibrary
                     Return context.INI_OAuth2_2.ToString()
                 Case "NoHelperDownload"
                     Return context.INI_NoHelperDownload.ToString()
+                Case "AutoPilot"
+                    Return context.INI_AutoPilot
                 Case "ToolingLogWindow"
                     Return context.INI_ToolingLogWindow.ToString()
                 Case "ToolingDryRun"
@@ -1252,6 +1264,10 @@ Namespace SharedLibrary
                     context.INI_WebAgentPath = value
                 Case "WebAgentPathLocal"
                     context.INI_WebAgentPathLocal = value
+                Case "SnapshotLibPath"
+                    context.INI_SnapshotLibPath = value
+                Case "SnapshotLibPathLocal"
+                    context.INI_SnapshotLibPathLocal = value
                 Case "FindClausePath"
                     context.INI_FindClausePath = value
                 Case "FindClausePathLocal"
@@ -1352,8 +1368,14 @@ Namespace SharedLibrary
                     context.INI_RenameLibPath = value
                 Case "RenameLibPathLocal"
                     context.INI_RenameLibPathLocal = value
+                Case "MailMoverPath"
+                    context.INI_MailMoverPath = value
+                Case "MailMoverPathLocal"
+                    context.INI_MailMoverPathLocal = value
                 Case "NoHelperDownload"
                     context.INI_NoHelperDownload = Boolean.Parse(value)
+                Case "AutoPilot"
+                    context.INI_AutoPilot = value
                 Case "ToolingLogWindow"
                     context.INI_ToolingLogWindow = Boolean.Parse(value)
                 Case "ToolingDryRun"
@@ -1617,6 +1639,7 @@ Namespace SharedLibrary
                     {"ISearch_URL", context.INI_ISearch_URL},
                     {"ISearch_ResponseMask1", context.INI_ISearch_ResponseMask1},
                     {"ISearch_ResponseMask2", context.INI_ISearch_ResponseMask2},
+                    {"ISearch_ResponseURLStart", context.INI_ISearch_ResponseURLStart},
                     {"ISearch_Name", context.INI_ISearch_Name},
                     {"ISearch_Tries", context.INI_ISearch_Tries.ToString()},
                     {"ISearch_Results", context.INI_ISearch_Results.ToString()},
@@ -1650,6 +1673,8 @@ Namespace SharedLibrary
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
+                    {"MailMoverPath", context.INI_MailMoverPath},
+                    {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"SpeechModelPath", context.INI_SpeechModelPath},
                     {"LocalModelPath", context.INI_LocalModelPath},
                     {"TTSEndpoint", context.INI_TTSEndpoint},
@@ -1663,6 +1688,8 @@ Namespace SharedLibrary
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
+                    {"SnapshotLibPath", context.INI_SnapshotLibPath},
+                    {"SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal},
                     {"DocCheckPath", context.INI_DocCheckPath},
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
@@ -1709,7 +1736,10 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
                     {"SP_SwitchParty", context.SP_SwitchParty},
                     {"SP_Anonymize", context.SP_Anonymize},
+                    {"SP_SwitchParty_Document", context.SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", context.SP_Anonymize_Document},
                     {"SP_Rename", context.SP_Rename},
+                    {"SP_RemoveClutter", context.SP_RemoveClutter},
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
                     {"SP_Extract", context.SP_Extract},
@@ -1730,8 +1760,8 @@ Namespace SharedLibrary
                     {"SP_Add_Bubbles_Format", context.SP_Add_Bubbles_Format},
                     {"SP_Add_Batch", context.SP_Add_Batch},
                     {"SP_Add_Tooling", context.SP_Add_Tooling},
+                    {"SP_Add_Markers", context.SP_Add_Markers},
                     {"SP_Add_Slides", context.SP_Add_Slides},
-                    {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
@@ -1740,6 +1770,11 @@ Namespace SharedLibrary
                     {"SP_HelpMe", context.SP_HelpMe},
                     {"SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut},
                     {"SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp},
+                    {"SP_MailMover", context.SP_MailMover},
+                    {"SP_InboxBoard", context.SP_InboxBoard},
+                    {"SP_SplitPDF", context.SP_SplitPDF},
+                    {"SP_AutoPilot", context.SP_AutoPilot},
+                    {"SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools},
                     {"SP_Chat", context.SP_Chat},
                     {"SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands},
@@ -1750,6 +1785,7 @@ Namespace SharedLibrary
                     {"SP_MergePrompt2", context.SP_MergePrompt2},
                     {"SP_Add_MergePrompt", context.SP_Add_MergePrompt},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
+                    {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
@@ -1805,7 +1841,10 @@ Namespace SharedLibrary
                     {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
                     {"SP_SwitchParty", Default_SP_SwitchParty},
                     {"SP_Anonymize", Default_SP_Anonymize},
+                    {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
+                    {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
                     {"SP_Rename", Default_SP_Rename},
+                    {"SP_RemoveClutter", Default_SP_RemoveClutter},
                     {"SP_Redact", Default_SP_Redact},
                     {"SP_CheckforII", Default_SP_CheckforII},
                     {"SP_Extract", Default_SP_Extract},
@@ -1826,6 +1865,7 @@ Namespace SharedLibrary
                     {"SP_Add_Bubbles_Format", Default_SP_Add_Bubbles_Format},
                     {"SP_Add_Batch", Default_SP_Add_Batch},
                     {"SP_Add_Tooling", Default_SP_Add_Tooling},
+                    {"SP_Add_Markers", Default_SP_Add_Markers},
                     {"SP_Add_Slides", Default_SP_Add_Slides},
                     {"SP_Add_Chart", Default_SP_Add_Chart},
                     {"SP_BubblesExcel", Default_SP_BubblesExcel},
@@ -1835,6 +1875,11 @@ Namespace SharedLibrary
                     {"SP_HelpMe", Default_SP_HelpMe},
                     {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
                     {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
+                    {"SP_MailMover", Default_SP_MailMover},
+                    {"SP_InboxBoard", Default_SP_InboxBoard},
+                    {"SP_SplitPDF", Default_SP_SplitPDF},
+                    {"SP_AutoPilot", Default_SP_AutoPilot},
+                    {"SP_AutoPilot_NoTools", Default_SP_AutoPilot_NoTools},
                     {"SP_Chat", Default_SP_Chat},
                     {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
                     {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
@@ -2185,6 +2230,8 @@ Namespace SharedLibrary
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
+                    {"SnapshotLibPath", context.INI_SnapshotLibPath},
+                    {"SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal},
                     {"DocCheckPath", context.INI_DocCheckPath},
                     {"DocCheckPathLocal", context.INI_DocCheckPathLocal},
                     {"DocStylePath", context.INI_DocStylePath},
@@ -2196,6 +2243,8 @@ Namespace SharedLibrary
                     {"ExtractorPathLocal", context.INI_ExtractorPathLocal},
                     {"RenameLibPath", context.INI_RenameLibPath},
                     {"RenameLibPathLocal", context.INI_RenameLibPathLocal},
+                    {"MailMoverPath", context.INI_MailMoverPath},
+                    {"MailMoverPathLocal", context.INI_MailMoverPathLocal},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
                     {"DiscussInkyPath", context.INI_DiscussInkyPath},
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
@@ -2206,6 +2255,7 @@ Namespace SharedLibrary
                     {"LogoPathMedium", context.INI_LogoPathMedium},
                     {"LogoPathLarge", context.INI_LogoPathLarge},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
+                    {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
                     {"ToolingDryRun", context.INI_ToolingDryRun.ToString()},
                     {"ToolingMaximumIterations", context.INI_ToolingMaximumIterations.ToString()},
@@ -2388,6 +2438,7 @@ Namespace SharedLibrary
 
             Dim btnSaveClose As New System.Windows.Forms.Button() With {.Text = "Save && Close", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnEditIni As New System.Windows.Forms.Button() With {.Text = "Edit .ini Files", .AutoSize = True, .Margin = New Padding(10)}
+            Dim btnEditLibFiles As New System.Windows.Forms.Button() With {.Text = "Edit Lib Files", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnCancel As New System.Windows.Forms.Button() With {.Text = "Cancel", .AutoSize = True, .Margin = New Padding(10)}
             Dim btnImportIni As New System.Windows.Forms.Button() With {.Text = "Load Settings From A Source", .AutoSize = True, .Margin = New Padding(10)}
 
@@ -2404,7 +2455,7 @@ Namespace SharedLibrary
                     .Padding = New Padding(15, 15, 15, 15),
                     .WrapContents = False
                 }
-            pnlButtons.Controls.AddRange({btnCancel, btnSaveClose, btnEditIni, btnImportIni})
+            pnlButtons.Controls.AddRange({btnCancel, btnSaveClose, btnEditIni, btnEditLibFiles, btnImportIni})
 
             pnlGridHost.Controls.Add(dgv)
             form.Controls.Add(pnlGridHost)
@@ -2605,6 +2656,140 @@ Namespace SharedLibrary
 
                 End Sub
 
+            AddHandler btnEditLibFiles.Click,
+                            Sub()
+                                ' Build selectable library file list from configured path variables in context.
+                                ' Each entry: (FriendlyName, PathPropertyValue, IsFullPath, FilePrefix, FileExtension).
+                                '   IsFullPath = True  → the variable holds the direct path to a single .txt/.json file
+                                '   IsFullPath = False → the variable holds a directory; scan for files matching prefix/extension
+                                '   FilePrefix         → e.g. "redink-lib-", "redink-dc-", "redink-ag-", "redink-ds-"
+                                '   FileExtension      → e.g. ".txt", ".json"
+
+                                Dim entries As New List(Of Tuple(Of String, String, Boolean, String, String)) From {
+                                    Tuple.Create("Prompt Library", context.INI_PromptLibPath, True, "", ""),
+                                    Tuple.Create("Prompt Library (Local)", context.INI_PromptLibPathLocal, True, "", ""),
+                                    Tuple.Create("Prompt Library (Transcript)", context.INI_PromptLibPath_Transcript, True, "", ""),
+                                    Tuple.Create("My Style", context.INI_MyStylePath, True, "", ""),
+                                    Tuple.Create("Discuss Personas", context.INI_DiscussInkyPath, True, "", ""),
+                                    Tuple.Create("Discuss Personas (Local)", context.INI_DiscussInkyPathLocal, True, "", ""),
+                                    Tuple.Create("Extractor Library", context.INI_ExtractorPath, True, "", ""),
+                                    Tuple.Create("Extractor Library (Local)", context.INI_ExtractorPathLocal, True, "", ""),
+                                    Tuple.Create("Rename Library", context.INI_RenameLibPath, True, "", ""),
+                                    Tuple.Create("Rename Library (Local)", context.INI_RenameLibPathLocal, True, "", ""),
+                                    Tuple.Create("Snapshot Library", context.INI_SnapshotLibPath, True, "", ""),
+                                    Tuple.Create("Snapshot Library (Local)", context.INI_SnapshotLibPathLocal, True, "", ""),
+                                    Tuple.Create("Redaction Instructions", context.INI_RedactionInstructionsPath, True, "", ""),
+                                    Tuple.Create("Redaction Instructions (Local)", context.INI_RedactionInstructionsPathLocal, True, "", ""),
+                                    Tuple.Create("Mail Mover", context.INI_MailMoverPath, True, "", ""),
+                                    Tuple.Create("Mail Mover (Local)", context.INI_MailMoverPathLocal, True, "", ""),
+                                    Tuple.Create("Help Me", context.INI_HelpMeInkyPath, True, "", ""),
+                                    Tuple.Create("AutoPilot", context.INI_AutoPilot, True, "", ""),
+                                    Tuple.Create("Find Clause", context.INI_FindClausePath, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("Find Clause (Local)", context.INI_FindClausePathLocal, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("DocCheck", context.INI_DocCheckPath, False, AN2 & "-dc-", ".txt"),
+                                    Tuple.Create("DocCheck (Local)", context.INI_DocCheckPathLocal, False, AN2 & "-dc-", ".txt"),
+                                    Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
+                                    Tuple.Create("DocStyle (Local)", context.INI_DocStylePathLocal, False, AN2 & "-ds-", ".json"),
+                                    Tuple.Create("WebAgent", context.INI_WebAgentPath, False, AN2 & "-ag-", ".json"),
+                                    Tuple.Create("WebAgent (Local)", context.INI_WebAgentPathLocal, False, AN2 & "-ag-", ".json")
+                                }
+
+                                Dim fileMap As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+                                For Each entry In entries
+                                    Dim friendlyName As String = entry.Item1
+                                    Dim rawPath As String = entry.Item2
+                                    Dim isFullPath As Boolean = entry.Item3
+                                    Dim filePrefix As String = entry.Item4
+                                    Dim fileExt As String = entry.Item5
+
+                                    If String.IsNullOrWhiteSpace(rawPath) Then Continue For
+
+                                    Dim expandedPath As String = ExpandEnvironmentVariables(rawPath.Trim())
+
+                                    If isFullPath Then
+                                        ' Path points to a single file
+                                        If System.IO.File.Exists(expandedPath) Then
+                                            Dim label As String = $"{friendlyName} - {System.IO.Path.GetFileName(expandedPath)}"
+                                            If Not fileMap.ContainsKey(label) AndAlso Not fileMap.ContainsValue(expandedPath) Then
+                                                fileMap.Add(label, expandedPath)
+                                            End If
+                                        End If
+                                    Else
+                                        ' Path points to a directory — scan for files matching the specific prefix and extension
+                                        If System.IO.Directory.Exists(expandedPath) Then
+                                            Try
+                                                Dim searchPattern As String = filePrefix & "*" & fileExt
+                                                Dim files = System.IO.Directory.GetFiles(expandedPath, searchPattern, System.IO.SearchOption.TopDirectoryOnly) _
+                                                    .OrderBy(Function(f) System.IO.Path.GetFileName(f), StringComparer.OrdinalIgnoreCase)
+
+                                                For Each filePath In files
+                                                    Dim fileName As String = System.IO.Path.GetFileName(filePath)
+                                                    Dim label As String = $"{friendlyName}/{fileName}"
+                                                    If Not fileMap.ContainsKey(label) AndAlso Not fileMap.ContainsValue(filePath) Then
+                                                        fileMap.Add(label, filePath)
+                                                    End If
+                                                Next
+                                            Catch ex As Exception
+                                                Debug.WriteLine($"Error scanning directory '{expandedPath}': {ex.Message}")
+                                            End Try
+                                        End If
+                                    End If
+                                Next
+
+                                If fileMap.Count = 0 Then
+                                    ShowCustomMessageBox("No library files found. Make sure the relevant paths are configured in your settings and the files exist.", AN)
+                                    Exit Sub
+                                End If
+
+                                ' Z-order fix: temporarily disable form so selection UI is not blocked
+                                Dim wasTopMost = form.TopMost
+                                form.TopMost = False
+                                form.Enabled = False
+                                System.Windows.Forms.Application.DoEvents()
+
+                                Dim choice As String = Nothing
+                                Try
+                                    choice = ShowSelectionForm("Select a library file to edit (ESC to cancel):", "Library Files", fileMap.Keys)
+                                Finally
+                                    form.Enabled = True
+                                    form.TopMost = wasTopMost
+                                    form.Activate()
+                                End Try
+
+                                If String.IsNullOrWhiteSpace(choice) OrElse Not fileMap.ContainsKey(choice) Then Exit Sub
+                                Dim selectedPath = fileMap(choice)
+
+                                Try
+                                    Dim forceJson As Boolean = selectedPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+
+                                    ' If not already a .json file, peek at the content to detect embedded JSON
+                                    If Not forceJson Then
+                                        Try
+                                            Dim peek As String = System.IO.File.ReadAllText(selectedPath, System.Text.Encoding.UTF8)
+                                            If peek IsNot Nothing Then
+                                                Dim openCount As Integer = 0
+                                                Dim closeCount As Integer = 0
+                                                For Each ch As Char In peek
+                                                    If ch = "{"c Then openCount += 1
+                                                    If ch = "}"c Then closeCount += 1
+                                                Next
+                                                ' Multiple matched braces strongly suggest embedded JSON
+                                                If openCount >= 2 AndAlso closeCount >= 2 Then
+                                                    forceJson = True
+                                                End If
+                                            End If
+                                        Catch
+                                            ' Non-fatal: if read fails, just open without JSON mode
+                                        End Try
+                                    End If
+
+                                    ShowTextFileEditor(selectedPath, "Editing " & System.IO.Path.GetFileName(selectedPath), forceJson, context)
+                                Catch ex As Exception
+                                    ShowCustomMessageBox("Could not open editor: " & ex.Message, AN)
+                                End Try
+                            End Sub
+
 
             AddHandler btnSaveClose.Click,
         Sub()
@@ -2762,6 +2947,8 @@ Namespace SharedLibrary
             variableValues.Add("ExtractorPathLocal", context.INI_ExtractorPathLocal)
             variableValues.Add("RenameLibPath", context.INI_RenameLibPath)
             variableValues.Add("RenameLibPathLocal", context.INI_RenameLibPathLocal)
+            variableValues.Add("MailMoverPath", context.INI_MailMoverPath)
+            variableValues.Add("MailMoverPathLocal", context.INI_MailMoverPathLocal)
             variableValues.Add("SpeechModelPath", context.INI_SpeechModelPath)
             variableValues.Add("LocalModelPath", context.INI_LocalModelPath)
             variableValues.Add("TTSEndpoint", context.INI_TTSEndpoint)
@@ -2779,6 +2966,8 @@ Namespace SharedLibrary
             variableValues.Add("FindClausePathLocal", context.INI_FindClausePathLocal)
             variableValues.Add("WebAgentPath", context.INI_WebAgentPath)
             variableValues.Add("WebAgentPathLocal", context.INI_WebAgentPathLocal)
+            variableValues.Add("SnapshotLibPath", context.INI_SnapshotLibPath)
+            variableValues.Add("SnapshotLibPathLocal", context.INI_SnapshotLibPathLocal)
             variableValues.Add("DocCheckPath", context.INI_DocCheckPath)
             variableValues.Add("DocCheckPathLocal", context.INI_DocCheckPathLocal)
             variableValues.Add("DocStylePath", context.INI_DocStylePath)
@@ -2822,7 +3011,10 @@ Namespace SharedLibrary
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
             variableValues.Add("SP_SwitchParty", context.SP_SwitchParty)
             variableValues.Add("SP_Anonymize", context.SP_Anonymize)
+            variableValues.Add("SP_SwitchParty_Document", context.SP_SwitchParty_Document)
+            variableValues.Add("SP_Anonymize_Document", context.SP_Anonymize_Document)
             variableValues.Add("SP_Rename", context.SP_Rename)
+            variableValues.Add("SP_RemoveClutter", context.SP_RemoveClutter)
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
             variableValues.Add("SP_Extract", context.SP_Extract)
@@ -2843,6 +3035,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Bubbles_Format", context.SP_Add_Bubbles_Format)
             variableValues.Add("SP_Add_Batch", context.SP_Add_Batch)
             variableValues.Add("SP_Add_Tooling", context.SP_Add_Tooling)
+            variableValues.Add("SP_Add_Markers", context.SP_Add_Markers)
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
             variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
@@ -2852,6 +3045,11 @@ Namespace SharedLibrary
             variableValues.Add("SP_HelpMe", context.SP_HelpMe)
             variableValues.Add("SP_DiscussThis_SortOut", context.SP_DiscussThis_SortOut)
             variableValues.Add("SP_DiscussThis_SumUp", context.SP_DiscussThis_SumUp)
+            variableValues.Add("SP_MailMover", context.SP_MailMover)
+            variableValues.Add("SP_InboxBoard", context.SP_InboxBoard)
+            variableValues.Add("SP_SplitPDF", context.SP_SplitPDF)
+            variableValues.Add("SP_AutoPilot", context.SP_AutoPilot)
+            variableValues.Add("SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools)
             variableValues.Add("SP_Chat", context.SP_Chat)
             variableValues.Add("SP_Add_ChatWord_Commands", context.SP_Add_ChatWord_Commands)
             variableValues.Add("SP_Add_Chat_NoCommands", context.SP_Add_Chat_NoCommands)
@@ -2862,6 +3060,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MergePrompt", context.SP_MergePrompt)
             variableValues.Add("SP_MergePrompt2", context.SP_MergePrompt2)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
+            variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
             variableValues.Add("ToolingDryRun", context.INI_ToolingDryRun)
             variableValues.Add("ToolingMaximumIterations", context.INI_ToolingMaximumIterations)
@@ -2990,7 +3189,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
                 If updatedValues.ContainsKey("SP_SwitchParty") Then context.SP_SwitchParty = CStr(updatedValues("SP_SwitchParty"))
                 If updatedValues.ContainsKey("SP_Anonymize") Then context.SP_Anonymize = CStr(updatedValues("SP_Anonymize"))
+                If updatedValues.ContainsKey("SP_SwitchParty_Document") Then context.SP_SwitchParty_Document = CStr(updatedValues("SP_SwitchParty_Document"))
+                If updatedValues.ContainsKey("SP_Anonymize_Document") Then context.SP_Anonymize_Document = CStr(updatedValues("SP_Anonymize_Document"))
                 If updatedValues.ContainsKey("SP_Rename") Then context.SP_Rename = CStr(updatedValues("SP_Rename"))
+                If updatedValues.ContainsKey("SP_RemoveClutter") Then context.SP_RemoveClutter = CStr(updatedValues("SP_RemoveClutter"))
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
                 If updatedValues.ContainsKey("SP_Extract") Then context.SP_Extract = CStr(updatedValues("SP_Extract"))
@@ -3011,6 +3213,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Bubbles_Format") Then context.SP_Add_Bubbles_Format = CStr(updatedValues("SP_Add_Bubbles_Format"))
                 If updatedValues.ContainsKey("SP_Add_Batch") Then context.SP_Add_Batch = CStr(updatedValues("SP_Add_Batch"))
                 If updatedValues.ContainsKey("SP_Add_Tooling") Then context.SP_Add_Tooling = CStr(updatedValues("SP_Add_Tooling"))
+                If updatedValues.ContainsKey("SP_Add_Markers") Then context.SP_Add_Markers = CStr(updatedValues("SP_Add_Markers"))
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
                 If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
@@ -3020,6 +3223,11 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_HelpMe") Then context.SP_HelpMe = CStr(updatedValues("SP_HelpMe"))
                 If updatedValues.ContainsKey("SP_DiscussThis_SortOut") Then context.SP_DiscussThis_SortOut = CStr(updatedValues("SP_DiscussThis_SortOut"))
                 If updatedValues.ContainsKey("SP_DiscussThis_SumUp") Then context.SP_DiscussThis_SumUp = CStr(updatedValues("SP_DiscussThis_SumUp"))
+                If updatedValues.ContainsKey("SP_MailMover") Then context.SP_MailMover = CStr(updatedValues("SP_MailMover"))
+                If updatedValues.ContainsKey("SP_InboxBoard") Then context.SP_InboxBoard = CStr(updatedValues("SP_InboxBoard"))
+                If updatedValues.ContainsKey("SP_SplitPDF") Then context.SP_SplitPDF = CStr(updatedValues("SP_SplitPDF"))
+                If updatedValues.ContainsKey("SP_AutoPilot") Then context.SP_AutoPilot = CStr(updatedValues("SP_AutoPilot"))
+                If updatedValues.ContainsKey("SP_AutoPilot_NoTools") Then context.SP_AutoPilot_NoTools = CStr(updatedValues("SP_AutoPilot_NoTools"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))
                 If updatedValues.ContainsKey("SP_Add_ChatWord_Commands") Then context.SP_Add_ChatWord_Commands = CStr(updatedValues("SP_Add_ChatWord_Commands"))
                 If updatedValues.ContainsKey("SP_Add_Chat_NoCommands") Then context.SP_Add_Chat_NoCommands = CStr(updatedValues("SP_Add_Chat_NoCommands"))
@@ -3067,6 +3275,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ExtractorPathLocal") Then context.INI_ExtractorPathLocal = CStr(updatedValues("ExtractorPathLocal"))
                 If updatedValues.ContainsKey("RenameLibPath") Then context.INI_RenameLibPath = CStr(updatedValues("RenameLibPath"))
                 If updatedValues.ContainsKey("RenameLibPathLocal") Then context.INI_RenameLibPathLocal = CStr(updatedValues("RenameLibPathLocal"))
+                If updatedValues.ContainsKey("MailMoverPath") Then context.INI_MailMoverPath = CStr(updatedValues("MailMoverPath"))
+                If updatedValues.ContainsKey("MailMoverPathLocal") Then context.INI_MailMoverPathLocal = CStr(updatedValues("MailMoverPathLocal"))
                 If updatedValues.ContainsKey("SpeechModelPath") Then context.INI_SpeechModelPath = CStr(updatedValues("SpeechModelPath"))
                 If updatedValues.ContainsKey("LocalModelPath") Then context.INI_LocalModelPath = CStr(updatedValues("LocalModelPath"))
                 If updatedValues.ContainsKey("TTSEndpoint") Then context.INI_TTSEndpoint = CStr(updatedValues("TTSEndpoint"))
@@ -3079,6 +3289,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
                 If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
                 If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
+                If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))
+                If updatedValues.ContainsKey("SnapshotLibPathLocal") Then context.INI_SnapshotLibPathLocal = CStr(updatedValues("SnapshotLibPathLocal"))
                 If updatedValues.ContainsKey("DocCheckPath") Then context.INI_DocCheckPath = CStr(updatedValues("DocCheckPath"))
                 If updatedValues.ContainsKey("DocCheckPathLocal") Then context.INI_DocCheckPathLocal = CStr(updatedValues("DocCheckPathLocal"))
                 If updatedValues.ContainsKey("DocStylePath") Then context.INI_DocStylePath = CStr(updatedValues("DocStylePath"))
@@ -3089,6 +3301,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
                 If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                 If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))
                 If updatedValues.ContainsKey("ToolingMaximumIterations") Then context.INI_ToolingMaximumIterations = CInt(updatedValues("ToolingMaximumIterations"))

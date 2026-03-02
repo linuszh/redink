@@ -44,6 +44,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.IO
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -70,6 +71,9 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Whether tooling is enabled for the chat.</summary>
     Private _chatToolingEnabled As Boolean = False
+
+    ''' <summary>Whether agent mode (document tools) is enabled for the chat.</summary>
+    Private _chatAgentModeEnabled As Boolean = False
 
     ''' <summary>
     ''' Represents a single LLM background job (request/response lifecycle, cancellation, file context).
@@ -215,6 +219,28 @@ Partial Public Class ThisAddIn
 
                 Using os As System.IO.Stream = res.OutputStream
                     Await os.WriteAsync(bufUi, 0, bufUi.Length).ConfigureAwait(False)
+                End Using
+                res.Close()
+                Return
+            End If
+
+            ' ---- InkyPlay (GET /inky/play[/]) ----------------------------------
+            If req.HttpMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (req.RawUrl.Equals(InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                req.RawUrl.Equals(InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim html As System.String = BuildInkyPlayHtmlPage()
+                Dim bufPlay() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
+
+                res.ContentType = "text/html; charset=utf-8"
+                res.AddHeader("Cache-Control", "no-store")
+                res.KeepAlive = False
+                res.Headers("Connection") = "close"
+                res.SendChunked = False
+                res.ContentLength64 = bufPlay.LongLength
+
+                Using os As System.IO.Stream = res.OutputStream
+                    Await os.WriteAsync(bufPlay, 0, bufPlay.Length).ConfigureAwait(False)
                 End Using
                 res.Close()
                 Return
@@ -627,6 +653,7 @@ Partial Public Class ThisAddIn
         Public SupportsFileUploads As System.Boolean = False
         Public ToolingEnabled As System.Boolean = False
         Public SelectedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
+        Public AgentModeEnabled As System.Boolean = False
     End Class
 
     ''' <summary>
@@ -820,6 +847,48 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
+    ''' Ensures tooling selections are loaded and the tooling-enabled flag is consistent with model support.
+    ''' </summary>
+    Private Function SyncToolingState(ByVal st As InkyState, ByRef supportsTooling As Boolean) As Boolean
+        _selectedToolsForChat = Nothing
+        If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
+            Try
+                Dim availableTools = GetAvailableTools()
+                Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
+                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
+            Catch
+                _selectedToolsForChat = Nothing
+            End Try
+        End If
+
+        supportsTooling = CurrentModelSupportsTooling(st)
+
+        ' Block all tooling when AutoPilot is active
+        If _apActive Then
+            supportsTooling = False
+        End If
+
+        Dim hasTools As Boolean = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
+        Dim enabled As Boolean = st.ToolingEnabled AndAlso hasTools AndAlso supportsTooling
+
+        If st.ToolingEnabled <> enabled Then
+            st.ToolingEnabled = enabled
+            SaveInkyState(st)
+        End If
+
+        ' Also force-disable agent mode when tooling is blocked
+        If Not supportsTooling AndAlso st.AgentModeEnabled Then
+            st.AgentModeEnabled = False
+            _chatAgentModeEnabled = False
+            SaveInkyState(st)
+        End If
+
+        _chatToolingEnabled = enabled
+        _chatAgentModeEnabled = st.AgentModeEnabled AndAlso supportsTooling AndAlso Not _apActive
+        Return enabled
+    End Function
+
+    ''' <summary>
     ''' Determines whether the currently selected model supports tooling.
     ''' </summary>
     Private Function CurrentModelSupportsTooling(st As InkyState) As Boolean
@@ -864,6 +933,8 @@ Partial Public Class ThisAddIn
     ''' Checks if tooling should be used based on current settings and model capability.
     ''' </summary>
     Private Function ShouldUseTooling(st As InkyState) As Boolean
+        ' Agent mode implies tooling (tools come from ChatAgentSetupToolContext)
+        If _chatAgentModeEnabled AndAlso st.AgentModeEnabled AndAlso Not _apActive Then Return True
         If Not st.ToolingEnabled Then Return False
         If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then Return False
         Return CurrentModelSupportsTooling(st)
@@ -1006,6 +1077,11 @@ Partial Public Class ThisAddIn
         html.AppendLine(".toolingRow{display:flex;align-items:center;gap:6px;white-space:nowrap;} ")
         html.AppendLine(".toolingRow label{font-size:.8rem;color:var(--muted);cursor:pointer;user-select:none;} ")
         html.AppendLine(".toolingRow input{margin:0;} ")
+        html.AppendLine("#toolLogBtn{flex-shrink:0;} ")
+        html.AppendLine("#toolLogBtn.active{background:#222b35;border-color:var(--border-strong);color:#fff;box-shadow:inset 0 0 0 1px #303c46;} ")
+        html.AppendLine(":root.light #toolLogBtn.active{background:#e2e5e9;border-color:var(--border-strong);color:#0e1116;box-shadow:inset 0 0 0 1px #c9cfd6;} ")
+        html.AppendLine("#agentFiles{font-size:.7rem;color:var(--muted);padding:0 1rem .5rem;display:none;} ")
+        html.AppendLine("#agentFiles .file-tag{display:inline-block;background:var(--elev);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin:2px;font-size:.65rem;} ")
         html.AppendLine("</style>")
 
         html.AppendLine("</head><body>")
@@ -1035,12 +1111,14 @@ Partial Public Class ThisAddIn
         html.AppendLine("        <label for=""toolingChk"" id=""toolingLbl"">Use " & System.Net.WebUtility.HtmlEncode(ToolFriendlyName.ToLower()) & "</label>")
         html.AppendLine("      </div>")
         html.AppendLine("      <div class=""toolingRow"">")
-        html.AppendLine("        <input type=""checkbox"" id=""toolingLogChk"" title=""Show tooling log window"">")
-        html.AppendLine("        <label for=""toolingLogChk"" id=""toolingLogLbl"">Tooling log</label>")
+        html.AppendLine("        <input type=""checkbox"" id=""agentChk"" title=""Enable agent mode with document tools"">")
+        html.AppendLine("        <label for=""agentChk"" id=""agentLbl"">Use all tools</label>")
         html.AppendLine("      </div>")
         html.AppendLine("    </div>")
+        html.AppendLine("    <button id=""toolLogBtn"" title=""Toggle tooling log window"" style=""display:none;line-height:1;align-items:center;justify-content:center;padding:.45rem .5rem;""><svg viewBox=""0 0 24 24"" width=""16"" height=""16"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z""/><polyline points=""14 2 14 8 20 8""/><line x1=""16"" y1=""13"" x2=""8"" y2=""13""/><line x1=""16"" y1=""17"" x2=""8"" y2=""17""/><polyline points=""10 9 9 9 8 9""/></svg></button>")
 
-        html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"">Theme</button>")
+        html.AppendLine("    <button id=""playBtn"" title=""Open mini games"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""8"" width=""18"" height=""8"" rx=""4"" ry=""4""/><circle cx=""8"" cy=""12"" r=""1""/><circle cx=""12"" cy=""12"" r=""1""/><circle cx=""16"" cy=""12"" r=""1""/></svg></button>")
+        html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg id=""themeIcon"" viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/></svg></button>")
         html.AppendLine("  </div>")
 
         html.AppendLine("  <div id=""chat"" class=""chat""></div>")
@@ -1055,6 +1133,7 @@ Partial Public Class ThisAddIn
                     "<button id=""cancelBtn"" style=""display:none;"">Cancel</button>" &
                 "</div>")
         html.AppendLine("  </div>")
+        html.AppendLine("  <div id=""agentFiles""></div>")
         html.AppendLine("  <div class=""hint"">Drag & drop a file (only visible to the chatbot for the current prompt) • Enter=send • Shift+Enter=newline • Ctrl+L=clear</div>")
         html.AppendLine("</div>")
 
@@ -1085,6 +1164,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const toWordBtn=document.getElementById('toWordBtn');")
         html.AppendLine("const clearBtn=document.getElementById('clearBtn');")
         html.AppendLine("const themeBtn=document.getElementById('themeBtn');")
+        html.AppendLine("const playBtn=document.getElementById('playBtn');")
         html.AppendLine("const cancelBtn=document.getElementById('cancelBtn');")
         html.AppendLine("const chat1Btn=document.getElementById('chat1Btn');")
         html.AppendLine("const chat2Btn=document.getElementById('chat2Btn');")
@@ -1095,13 +1175,16 @@ Partial Public Class ThisAddIn
         html.AppendLine("const toolingSlot=document.getElementById('toolingSlot');")
         html.AppendLine("const toolingChk=document.getElementById('toolingChk');")
         html.AppendLine("const toolingLbl=document.getElementById('toolingLbl');")
-        html.AppendLine("const toolingLogChk=document.getElementById('toolingLogChk');")
-        html.AppendLine("const toolingLogLbl=document.getElementById('toolingLogLbl');")
+        html.AppendLine("const agentChk=document.getElementById('agentChk');")
+        html.AppendLine("const agentLbl=document.getElementById('agentLbl');")
+        html.AppendLine("const toolLogBtn=document.getElementById('toolLogBtn');")
+        html.AppendLine("const agentFilesEl=document.getElementById('agentFiles');")
+        html.AppendLine("let __agentEnabled=false;")
+        html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
-        html.AppendLine("let __toolingLogEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
 
-        html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);} ")
+        html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
         html.AppendLine("function forceExternalLinks(scope){try{(scope||document).querySelectorAll('a[href]').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});}catch{}}")
         html.AppendLine("function setActiveChatBtn(id){document.querySelectorAll('.chatTab').forEach(b=>b.classList.toggle('active',b.dataset.chat==String(id)));}")
         html.AppendLine("function disableChatSwitch(dis){chat1Btn.disabled=dis;chat2Btn.disabled=dis;}")
@@ -1124,10 +1207,10 @@ Partial Public Class ThisAddIn
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
         ' Boot
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);__toolingLogEnabled=(st.toolingLogEnabled===true);toolingChk.checked=__toolingEnabled;toolingLogChk.checked=__toolingLogEnabled;updateToolingVisibility();adjustModelSel();} ")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);updateToolingVisibility();applyCoupling();adjustModelSel();} ")
 
         ' Poll job
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
         html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -1136,28 +1219,42 @@ Partial Public Class ThisAddIn
         html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' drag/drop
-        html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
+        html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;")
+        html.AppendLine("if(__agentEnabled){")
+        html.AppendLine("  const tempId=addTempAssistantBubble(`Loading ${files.length} file(s) for agent mode…`);")
+        html.AppendLine("  try{const paths=[];for(const f of files){const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const up=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(up.ok&&up.path)paths.push(up.path);}if(paths.length>0){const r=await api('inky_agentaddfiles',{Paths:paths});if(r.ok){replaceAssistantBubble(tempId,`Loaded ${r.addedCount} file(s) for agent mode.`);updateAgentFilesDisplay(r.files||[]);}else{replaceAssistantBubble(tempId,'Failed to add files: '+(r.error||'unknown'));}}else{replaceAssistantBubble(tempId,'No files could be uploaded.');}}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}return;}")
+        html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
-        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;updateToolingVisibility();});")
-        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
+        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}toolingChk.checked=__toolingEnabled;updateToolingVisibility();applyCoupling();});")
+        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
+        html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
         html.AppendLine("themeBtn.addEventListener('click',async()=>{if(__currentJobId)return;const target=!dark;setTheme(target);const r=await api('inky_toggletheme');if(!r.ok){setTheme(!target);alert(r.error||'Theme switch failed');return;}if(typeof r.darkMode==='boolean')setTheme(r.darkMode===true);adjustModelSel();});")
         html.AppendLine("msgEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}updateModelTooltip();adjustModelSel();}")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);updateModelTooltip();applyCoupling();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
-        ' Tooling UI visibility
-        html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;}}")
-        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools');if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}});")
-        html.AppendLine("toolingChk.addEventListener('change',async()=>{const r=await api('inky_settooling',{Enabled:toolingChk.checked});if(!r.ok){toolingChk.checked=!toolingChk.checked;alert(r.error||'Failed to toggle tooling');return;}__toolingEnabled=!!r.enabled;});")
-        html.AppendLine("toolingLogChk.addEventListener('change',async()=>{const r=await api('inky_settoolinglog',{Enabled:toolingLogChk.checked});if(!r.ok){toolingLogChk.checked=!toolingLogChk.checked;alert(r.error||'Failed to toggle tooling log');return;}__toolingLogEnabled=!!r.enabled;});")
+        ' Tooling UI visibility + coupling logic
+        html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__agentEnabled=false;agentChk.checked=false;updateAgentFilesDisplay([]);}applyCoupling();}")
+        html.AppendLine("function applyCoupling(){if(__agentEnabled){toolingChk.checked=true;toolingChk.disabled=true;}else{toolingChk.disabled=false;}}")
+        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools');if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}applyCoupling();});")
+        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools');if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
+
+        ' Agent mode checkbox — coupled with sources
+        html.AppendLine("agentChk.addEventListener('change',async()=>{if(agentChk.checked){const r=await api('inky_setagent',{Enabled:true});if(!r.ok){agentChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools');if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;if(__toolingEnabled){const r2=await api('inky_setagent',{Enabled:true});if(r2.ok){__agentEnabled=!!r2.enabled;agentChk.checked=__agentEnabled;updateAgentFilesDisplay(r2.files||[]);}}}applyCoupling();return;}alert(r.error||'Failed to toggle agent mode');applyCoupling();return;}__agentEnabled=!!r.enabled;if(__agentEnabled){__toolingEnabled=true;toolingChk.checked=true;const tr=await api('inky_settooling',{Enabled:true});if(tr.ok){__toolingEnabled=!!tr.enabled;}}updateAgentFilesDisplay(r.files||[]);applyCoupling();}else{const r=await api('inky_setagent',{Enabled:false});if(!r.ok){agentChk.checked=true;alert(r.error||'Failed to toggle agent mode');applyCoupling();return;}__agentEnabled=!!r.enabled;updateAgentFilesDisplay(r.files||[]);applyCoupling();}});")
+
+        ' Tooling log button (toggle)
+        html.AppendLine("toolLogBtn.addEventListener('click',async()=>{__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);const r=await api('inky_settoolinglog',{Enabled:__toolLogEnabled});if(!r.ok){__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);}});")
+
+        ' Agent files display
+        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__agentEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
 
         html.AppendLine("boot();")
         html.AppendLine("</script>")
@@ -1202,6 +1299,95 @@ Partial Public Class ThisAddIn
                 Dim cmd As System.String = j("Command")?.ToString()
 
                 Select Case cmd
+
+                                        ' ---- InkyPlay commands ----
+                    Case "inkyplay_generate", "inkyplay_gethighscores", "inkyplay_savescore", "inkyplay_clearhighscores"
+                        Dim playResult As String = Await ProcessInkyPlayCommand(cmd, j).ConfigureAwait(False)
+                        If playResult IsNot Nothing Then Return playResult
+
+                    Case "inky_setagent"
+                        Try
+                            If IsChatAgentBlocked() Then
+                                Return JsonErr("Agent mode is not available while AutoPilot is running.")
+                            End If
+
+                            Dim enabled As Boolean = CBool(j("Enabled"))
+                            Dim st = LoadInkyState()
+
+                            If enabled AndAlso Not CurrentModelSupportsTooling(st) Then
+                                Return JsonErr("The selected model does not support tool calling.")
+                            End If
+
+                            ' When enabling agent mode, ensure sources are selected first
+                            If enabled AndAlso Not EnsureToolsSelected(st) Then
+                                Return JsonOk(New With {.ok = False, .openSources = True, .error = "No sources selected"})
+                            End If
+
+                            st.AgentModeEnabled = enabled
+                            _chatAgentModeEnabled = enabled
+
+                            ' When enabling agent mode, also force-enable tooling (sources)
+                            If enabled Then
+                                st.ToolingEnabled = True
+                                _chatToolingEnabled = True
+                            End If
+
+                            If Not enabled Then
+                                ' Clear loaded files when agent mode is turned off
+                                ChatAgentClearFiles()
+                            End If
+
+                            SaveInkyState(st)
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .enabled = enabled,
+                                .files = GetAgentFileListForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to toggle agent mode: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentaddfiles"
+                        ' Called after drag-and-drop when agent mode is on
+                        Try
+                            If Not _chatAgentModeEnabled Then
+                                Return JsonErr("Agent mode is not enabled.")
+                            End If
+                            If IsChatAgentBlocked() Then
+                                Return JsonErr("Agent mode is not available while AutoPilot is running.")
+                            End If
+
+                            Dim paths = j("Paths")
+                            If paths Is Nothing Then Return JsonErr("No file paths provided.")
+
+                            Dim addedFiles As New List(Of String)()
+                            For Each p In paths
+                                Dim filePath = p?.ToString()
+                                If String.IsNullOrWhiteSpace(filePath) Then Continue For
+                                Dim att = ChatAgentAddFile(filePath)
+                                If att IsNot Nothing Then addedFiles.Add(att.OriginalFileName)
+                            Next
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .addedCount = addedFiles.Count,
+                                .files = GetAgentFileListForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to add files: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentclearfiles"
+                        Try
+                            ChatAgentClearFiles()
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .files = GetAgentFileListForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to clear files: " & ex.Message)
+                        End Try
 
                     Case "inky_settoolinglog"
                         Try
@@ -1266,18 +1452,8 @@ Partial Public Class ThisAddIn
                             End If
 
                             If enabled AndAlso Not EnsureToolsSelected(st) Then
-                                ' Need to select tools first
-                                Dim selectedTools As List(Of ModelConfig) = Nothing
-                                Await SwitchToUi(Sub()
-                                                     selectedTools = SelectToolsForSession(True, ToolFriendlyName)
-                                                 End Sub).ConfigureAwait(False)
-
-                                If selectedTools Is Nothing OrElse selectedTools.Count = 0 Then
-                                    Return JsonOk(New With {.ok = True, .enabled = False, .reason = "No tools selected"})
-                                End If
-
-                                _selectedToolsForChat = selectedTools
-                                st.SelectedToolNames = selectedTools.Select(Function(t) t.ToolName).ToList()
+                                ' No tools selected — tell the browser to open the Sources window
+                                Return JsonOk(New With {.ok = False, .openSources = True, .error = "No sources selected"})
                             End If
 
                             st.ToolingEnabled = enabled
@@ -1325,31 +1501,8 @@ Partial Public Class ThisAddIn
                         Dim models As System.Collections.Generic.List(Of System.Object) =
                             Await GetModelListForBrowserAsync(st)
 
-                        ' Load tooling state - must load tools BEFORE setting enabled flag
-                        _selectedToolsForChat = Nothing
-                        If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
-
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        If st.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(st)
-                            _chatToolingEnabled = hasTools AndAlso modelSupports
-                            ' Update persisted state if tooling was disabled due to missing tools/support
-                            If st.ToolingEnabled AndAlso Not _chatToolingEnabled Then
-                                st.ToolingEnabled = False
-                                SaveInkyState(st)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim toolingEnabled As Boolean = SyncToolingState(st, supportsTooling)
 
                         Return JsonOk(New With {
                             .ok = True,
@@ -1360,10 +1513,12 @@ Partial Public Class ThisAddIn
                             .darkMode = st.DarkMode,
                             .supportsFiles = st.SupportsFileUploads,
                             .activeChat = activeChatId,
-                            .toolingEnabled = _chatToolingEnabled,
-                            .supportsTooling = CurrentModelSupportsTooling(st),
+                            .toolingEnabled = toolingEnabled,
+                            .supportsTooling = supportsTooling,
                             .toolingLogEnabled = INI_ToolingLogWindow,
-                            .tools = GetToolListForBrowser()
+                            .tools = GetToolListForBrowser(),
+                            .agentEnabled = _chatAgentModeEnabled,
+                            .agentFiles = GetAgentFileListForBrowser()
                         })
 
                     ' Remaining cases kept intact (command-specific logic)
@@ -1381,32 +1536,11 @@ Partial Public Class ThisAddIn
                         Catch
                         End Try
 
-                        ' Re-sync in-memory tooling state from persisted state
-                        _selectedToolsForChat = Nothing
-                        If stSw.SelectedToolNames IsNot Nothing AndAlso stSw.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(stSw.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim effectiveToolingEnabled As Boolean = SyncToolingState(stSw, supportsTooling)
 
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        Dim effectiveToolingEnabled As Boolean = False
-                        If stSw.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(stSw)
-                            effectiveToolingEnabled = hasTools AndAlso modelSupports
-                            _chatToolingEnabled = effectiveToolingEnabled
-                            If stSw.ToolingEnabled AndAlso Not effectiveToolingEnabled Then
-                                stSw.ToolingEnabled = False
-                                SaveInkyState(stSw)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        ' Build model list for the switched chat's state
+                        Dim models As List(Of Object) = Await GetModelListForBrowserAsync(stSw)
 
                         Return JsonOk(New With {
                                 .ok = True,
@@ -1416,8 +1550,11 @@ Partial Public Class ThisAddIn
                                 .supportsFiles = ComputeSupportsFiles(stSw.UseSecondApi, stSw.SelectedModelKey),
                                 .greeting = greetingSwitch,
                                 .toolingEnabled = effectiveToolingEnabled,
-                                .supportsTooling = CurrentModelSupportsTooling(stSw),
-                                .toolingLogEnabled = INI_ToolingLogWindow
+                                .supportsTooling = supportsTooling,
+                                .toolingLogEnabled = INI_ToolingLogWindow,
+                                .models = models,
+                                .agentEnabled = _chatAgentModeEnabled,
+                                .agentFiles = GetAgentFileListForBrowser()
                             })
 
                     Case "inky_upload"
@@ -1644,6 +1781,21 @@ Partial Public Class ThisAddIn
                             sbDialog.AppendLine(extractedDoc)
                             sbDialog.AppendLine("</ATTACHED_DOCUMENT>")
                         End If
+
+                        ' Add agent file listing so the model knows which files are loaded
+                        If _chatAgentModeEnabled AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
+                            sbDialog.AppendLine()
+                            sbDialog.AppendLine("[LOADED FILES]")
+                            For i As Integer = 0 To _chatAgentFiles.Count - 1
+                                Dim att = _chatAgentFiles(i)
+                                Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
+                                Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT - cannot process]", "")
+                                sbDialog.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{statusStr}")
+                            Next
+                            sbDialog.AppendLine("[/LOADED FILES]")
+                            sbDialog.AppendLine()
+                            sbDialog.AppendLine("You have tools available to process these files. Use the appropriate tool (e.g., word_to_pdf to convert a Word document to PDF, read_attachment to read content, process_word_document to edit/translate, etc.).")
+                        End If
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
@@ -1717,49 +1869,97 @@ Partial Public Class ThisAddIn
                                     End If
                                     ' (2) Run LLM - with or without tooling
                                     Dim stForTooling = LoadInkyState()
-                                    If ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
-                                        localOutput = ExecuteToolingLoop(
-                                                sysPromptBase,
-                                                "",  ' userText handled via fullPromptOverride
-                                                _selectedToolsForChat,
-                                                useSecondApiLocal,
-                                                finalFileObject,
-                                                False, ' doTPMarkup
-                                                "",    ' bubblesText
-                                                False, ' noFormatting
-                                                False, ' keepFormat
-                                                "",    ' slideDeck
-                                                False, ' doMyStyle
-                                                "",    ' myStyleInsert
-                                                False, ' addDocs
-                                                "",    ' insertDocs
-                                                "",    ' slideInsert
-                                                "",    ' otherPrompt
-                                                sbDialog.ToString(), ' fullPromptOverride
-                                                True,  ' hideSplash
-                                                Not INI_ToolingLogWindow,  ' hideLogWindow
-                                                False, ' DoChart
-                                                jobCts.Token  ' Pass cancellation token
-                                            ).GetAwaiter().GetResult()
+                                    Dim useAgentMode As Boolean = _chatAgentModeEnabled AndAlso stForTooling.AgentModeEnabled AndAlso Not _apActive
+                                    Dim agentToolsForJob As List(Of ModelConfig) = Nothing
 
-                                        ' Restore config AFTER tooling completes
-                                        If snapshotTaken Then
-                                            SyncLock AlternateModelLock
-                                                RestoreDefaults(_context, configSnapshot)
-                                            End SyncLock
-                                            snapshotTaken = False
-                                        End If
-                                    Else
-                                        ' Standard LLM call
-                                        localOutput = RunLlmAsync(
-                                                sysPromptBase,
-                                                sbDialog.ToString(),
-                                                useSecondApiLocal,
-                                                False,
-                                                finalFileObject,
-                                                jobCts.Token
-                                            ).GetAwaiter().GetResult()
+                                    If useAgentMode Then
+                                        agentToolsForJob = ChatAgentSetupToolContext()
                                     End If
+
+                                    Try
+                                        If useAgentMode AndAlso agentToolsForJob IsNot Nothing AndAlso agentToolsForJob.Count > 0 Then
+                                            ' Match AutoPilot's iteration limit for agent/tool mode
+                                            Dim previousMaxIterations = INI_ToolingMaximumIterations
+                                            INI_ToolingMaximumIterations = AP_MaxToolIterations
+                                            Try
+                                                localOutput = ExecuteToolingLoop(
+                                                    sysPromptBase,
+                                                    "",
+                                                    agentToolsForJob,
+                                                    useSecondApiLocal,
+                                                    finalFileObject,
+                                                    False, "",
+                                                    False, False, "",
+                                                    False, "",
+                                                    False, "", "", "",
+                                                    sbDialog.ToString(),
+                                                    True,
+                                                    Not INI_ToolingLogWindow,
+                                                    False,
+                                                    jobCts.Token,
+                                                    _chatAgentTempDir
+                                                ).GetAwaiter().GetResult()
+                                            Finally
+                                                INI_ToolingMaximumIterations = previousMaxIterations
+                                            End Try
+
+                                            ' Restore config AFTER tooling completes
+                                            If snapshotTaken Then
+                                                SyncLock AlternateModelLock
+                                                    RestoreDefaults(_context, configSnapshot)
+                                                End SyncLock
+                                                snapshotTaken = False
+                                            End If
+
+                                            ' Collect outputs to Desktop\Inky\...
+                                            Dim outputFiles = ChatAgentCollectAndCopyOutputs()
+                                            If outputFiles IsNot Nothing AndAlso outputFiles.Count > 0 Then
+                                                Dim fileList = String.Join(vbCrLf, outputFiles.Select(Function(f) "- " & Path.GetFileName(f)))
+                                                localOutput = If(localOutput, "") & vbCrLf & vbCrLf &
+                                                "**Output files (" & outputFiles.Count.ToString() & "):**" & vbCrLf & fileList
+                                            End If
+
+                                        ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                            localOutput = ExecuteToolingLoop(
+                                                    sysPromptBase,
+                                                    "",
+                                                    _selectedToolsForChat,
+                                                    useSecondApiLocal,
+                                                    finalFileObject,
+                                                    False, "",
+                                                    False, False, "",
+                                                    False, "",
+                                                    False, "", "", "",
+                                                    sbDialog.ToString(),
+                                                    True,
+                                                    Not INI_ToolingLogWindow,
+                                                    False,
+                                                    jobCts.Token
+                                                ).GetAwaiter().GetResult()
+
+                                            ' Restore config AFTER tooling completes
+                                            If snapshotTaken Then
+                                                SyncLock AlternateModelLock
+                                                    RestoreDefaults(_context, configSnapshot)
+                                                End SyncLock
+                                                snapshotTaken = False
+                                            End If
+                                        Else
+                                            ' Standard LLM call
+                                            localOutput = RunLlmAsync(
+                                                    sysPromptBase,
+                                                    sbDialog.ToString(),
+                                                    useSecondApiLocal,
+                                                    False,
+                                                    finalFileObject,
+                                                    jobCts.Token
+                                                ).GetAwaiter().GetResult()
+                                        End If
+                                    Finally
+                                        If useAgentMode Then
+                                            ChatAgentTeardownToolContext()
+                                        End If
+                                    End Try
                                     If localOutput Is Nothing Then localOutput = String.Empty
                                     localOutput = SanitizeModelOutputForBrowser(localOutput).Trim()
                                     If localOutput.Length > 0 AndAlso
@@ -2037,42 +2237,21 @@ Partial Public Class ThisAddIn
                         stClear.History = New System.Collections.Generic.List(Of ChatTurn)()
                         stClear.LastAssistantText = ""
 
+                        ' Clear agent files on chat clear
+                        ChatAgentClearFiles()
+
                         ' Keep ToolingEnabled / SelectedToolNames / model selection / dark mode as-is
                         SaveInkyState(stClear)
 
-                        ' Re-sync in-memory tooling state from persisted state
-                        _selectedToolsForChat = Nothing
-                        If stClear.SelectedToolNames IsNot Nothing AndAlso stClear.SelectedToolNames.Count > 0 Then
-                            Try
-                                Dim availableTools = GetAvailableTools()
-                                Dim selectedNameSet = New HashSet(Of String)(stClear.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
-                            Catch
-                                _selectedToolsForChat = Nothing
-                            End Try
-                        End If
-
-                        ' Only enable tooling if tools were actually loaded AND model supports it
-                        Dim effectiveToolingEnabled As Boolean = False
-                        If stClear.ToolingEnabled Then
-                            Dim hasTools = _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
-                            Dim modelSupports = CurrentModelSupportsTooling(stClear)
-                            effectiveToolingEnabled = hasTools AndAlso modelSupports
-                            _chatToolingEnabled = effectiveToolingEnabled
-                            If stClear.ToolingEnabled AndAlso Not effectiveToolingEnabled Then
-                                stClear.ToolingEnabled = False
-                                SaveInkyState(stClear)
-                            End If
-                        Else
-                            _chatToolingEnabled = False
-                        End If
+                        Dim supportsTooling As Boolean = False
+                        Dim effectiveToolingEnabled As Boolean = SyncToolingState(stClear, supportsTooling)
 
                         Return JsonOk(New With {
                             .ok = True,
                             .activeChat = activeChatId,
                             .greeting = GetFriendlyGreeting(),
                             .toolingEnabled = effectiveToolingEnabled,
-                            .supportsTooling = CurrentModelSupportsTooling(stClear)
+                            .supportsTooling = supportsTooling
                         })
 
                     Case "inky_copylast"
@@ -2126,6 +2305,31 @@ Partial Public Class ThisAddIn
                             st.ToolingEnabled = False
                             _chatToolingEnabled = False
                         End If
+                        If Not supportsTooling AndAlso st.AgentModeEnabled Then
+                            st.AgentModeEnabled = False
+                            _chatAgentModeEnabled = False
+                            ChatAgentClearFiles()
+                        End If
+
+                        ' Auto-enable tooling and agent mode when switching TO a tooling-capable model
+                        If supportsTooling Then
+                            ' Auto-enable "Use sources" if tools are already selected (or were previously)
+                            If Not st.ToolingEnabled Then
+                                Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
+                                                          (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
+                                If hasTools Then
+                                    st.ToolingEnabled = True
+                                    _chatToolingEnabled = True
+                                End If
+                            End If
+
+                            ' Auto-enable "Use tools" (agent mode)
+                            If Not st.AgentModeEnabled Then
+                                st.AgentModeEnabled = True
+                                _chatAgentModeEnabled = True
+                            End If
+                        End If
+
                         SaveInkyState(st)
 
                         Return JsonOk(New With {
@@ -2133,7 +2337,8 @@ Partial Public Class ThisAddIn
                             .supportsFiles = st.SupportsFileUploads,
                             .activeChat = activeChatId,
                             .supportsTooling = supportsTooling,
-                            .toolingEnabled = st.ToolingEnabled
+                            .toolingEnabled = st.ToolingEnabled,
+                            .agentEnabled = st.AgentModeEnabled
                         })
 
                     Case "inky_toggletheme"
@@ -2454,22 +2659,10 @@ Partial Public Class ThisAddIn
             End Try
         End If
 
-        ' 1) Reconcile persisted preference
-        Try
-            Dim savedSecond As Boolean = My.Settings.Inky_UseSecondApiSelected
-            Dim savedKey As String = My.Settings.Inky_SelectedModelKey
-            Dim shouldApply As Boolean =
-                (savedSecond <> st.UseSecondApi) OrElse
-                (savedSecond AndAlso Not String.Equals(savedKey, st.SelectedModelKey, StringComparison.OrdinalIgnoreCase))
-            If shouldApply Then
-                st.UseSecondApi = savedSecond
-                st.SelectedModelKey = If(savedSecond, savedKey, "")
-                SaveInkyState(st)
-            End If
-        Catch
-        End Try
+        ' NOTE: Do NOT reconcile from My.Settings here - the passed-in st already has
+        ' the per-chat state. Overwriting it would break independent per-chat model selection.
 
-        ' 2) Availability
+        ' 1) Availability
         Dim hasPrimary As Boolean = Not String.IsNullOrWhiteSpace(INI_Model)
         Dim hasSecondApi As Boolean = INI_SecondAPI
         Dim hasSecondModelName As Boolean = Not String.IsNullOrWhiteSpace(INI_Model_2)
@@ -2488,7 +2681,7 @@ Partial Public Class ThisAddIn
             alts = Nothing
         End Try
 
-        ' 3) Normalize stale alternate selection EVEN if alts could not be loaded
+        ' 2) Normalize stale alternate selection EVEN if alts could not be loaded
         If st.UseSecondApi AndAlso Not String.IsNullOrWhiteSpace(st.SelectedModelKey) Then
             Dim exists As Boolean = False
             If alts IsNot Nothing Then
@@ -2506,7 +2699,7 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        ' 4) Only primary
+        ' 3) Only primary
         If hasPrimary AndAlso Not hasSecondary AndAlso altCount = 0 Then
             list.Add(New With {
                 .key = "default",
@@ -2518,7 +2711,7 @@ Partial Public Class ThisAddIn
             Return list
         End If
 
-        ' 5) Build list
+        ' 4) Build list
         If hasPrimary Then
             list.Add(New With {.key = "__hdr_primary__", .label = "Primary model:", .selected = False, .disabled = True, .isSeparator = False})
             list.Add(New With {
@@ -2557,7 +2750,7 @@ Partial Public Class ThisAddIn
             Next
         End If
 
-        ' 6) Never return an empty list → synthesize a safe primary entry
+        ' 5) Never return an empty list → synthesize a safe primary entry
         If list.Count = 0 Then
             Dim lbl = If(String.IsNullOrWhiteSpace(INI_Model), "Primary model (not configured)", INI_Model)
             list.Add(New With {

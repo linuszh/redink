@@ -104,6 +104,7 @@ Namespace SharedLibrary
             End Get
         End Property
 
+
 #End Region
 
 
@@ -201,12 +202,30 @@ Namespace SharedLibrary
         ' Current license state
         Private Shared _currentLicenseState As LicenseState = LicenseState.None
 
+        ' Tracks whether a registry backup restore occurred during this startup
+        Private Shared _restoredFromRegistryBackup As Boolean = False
+
         ''' <summary>
         ''' Gets the current license state as determined by `LicenseOK` and subsequent processing.
         ''' </summary>
         Public Shared ReadOnly Property CurrentLicenseState As LicenseState
             Get
                 Return _currentLicenseState
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Gets the stored Product ID of the current Pro license, or empty if none.
+        ''' </summary>
+        Public Shared ReadOnly Property StoredProductId As String
+            Get
+                Try
+                    If HasStoredProLicense() Then
+                        Return My.Settings.License_ProductID
+                    End If
+                Catch
+                End Try
+                Return ""
             End Get
         End Property
 
@@ -259,6 +278,17 @@ Namespace SharedLibrary
                     LogLicenseEvent("Flow", "Stored Pro License path")
                     Return ProcessStoredProLicense(context)
                 End If
+
+                ' ═══════════════════════════════════════════════════════════════
+                ' STEP 2b: Registry Backup Restore
+                ' If My.Settings was wiped (e.g., VSTO update, profile reset),
+                ' attempt silent restore from registry backup before continuing.
+                ' ═══════════════════════════════════════════════════════════════
+                If TryRestoreProLicenseFromRegistry() Then
+                    LogLicenseEvent("Flow", "Pro License restored from registry backup")
+                    Return ProcessStoredProLicense(context)
+                End If
+
 
                 ' ═══════════════════════════════════════════════════════════════
                 ' STEP 3: Legacy Pro License (valid until LegacyRegimeEndDate)
@@ -741,6 +771,15 @@ Namespace SharedLibrary
                 Dim licenseClearAll = ParseBoolean(configDict, "LicenseClearAll", False)
 
                 ' ═══════════════════════════════════════════════════════════════
+                ' REGISTRY BACKUP RESTORE (before evaluating stored licenses)
+                ' If My.Settings was wiped, restore from registry so the
+                ' matching/preservation checks below can find the stored license.
+                ' ═══════════════════════════════════════════════════════════════
+                If Not HasStoredProLicense() AndAlso Not HasStoredPrivateLicense() Then
+                    TryRestoreProLicenseFromRegistry()
+                End If
+
+                ' ═══════════════════════════════════════════════════════════════
                 ' CHECK "DO NOT TOUCH" CONDITIONS FIRST (highest priority)
                 ' If stored Pro license matches any DoNotTouch values, preserve it
                 ' ═══════════════════════════════════════════════════════════════
@@ -997,6 +1036,11 @@ Namespace SharedLibrary
         ''' </summary>
         Private Shared Function PerformAutoModeActivation(context As ISharedContext, productId As String, licenseKey As String, userId As String) As Boolean
             Try
+                Dim autoModeSilent As Boolean = False
+                If _licenseConfigDict IsNot Nothing Then
+                    autoModeSilent = ParseBoolean(_licenseConfigDict, "LicenseAutoModeSilent", False)
+                End If
+
                 ' Check if LicenseClearAll is set - if so, clear all licenses before proceeding
                 If _licenseConfigDict IsNot Nothing AndAlso ParseBoolean(_licenseConfigDict, "LicenseClearAll", False) Then
                     LogLicenseEvent("Auto Activation", "LicenseClearAll=True - clearing all licenses including legacy")
@@ -1036,7 +1080,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    End If
 
                     Return True
                 End If
@@ -1095,7 +1141,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Activated")
+                    End If
 
                     Return True
                 End If
@@ -1125,7 +1173,9 @@ Namespace SharedLibrary
                         successMsg.AppendLine($"Contact: {LicenseContact}")
                     End If
 
-                    ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    If Not autoModeSilent AndAlso Not _restoredFromRegistryBackup Then
+                        ShowCustomMessageBox(successMsg.ToString(), $"{AN} - License Active")
+                    End If
 
                     Return True
                 ElseIf recheckResponse.Success AndAlso recheckResponse.ActivationsRemaining <= 0 Then
@@ -1133,7 +1183,7 @@ Namespace SharedLibrary
                     LogLicenseEvent("Auto Activation Failed", $"No activation slots remaining. Used: {recheckResponse.TotalActivations}/{recheckResponse.TotalActivationsPurchased}", alwaysLog:=True)
                     ShowCustomMessageBox(
                         $"Automatic license activation failed: No activation slots remaining." & vbCrLf & vbCrLf &
-                        $"Product: {recheckResponse.ProductTitle}" & vbCrLf &
+                        $"Product: {StripHtmlFromLicenseMessage(recheckResponse.ProductTitle)}" & vbCrLf &
                         $"Activations: {recheckResponse.TotalActivations} of {recheckResponse.TotalActivationsPurchased} used" & vbCrLf & vbCrLf &
                         "You will first need to deactivate another User ID or obtain additional licenses." & vbCrLf & vbCrLf &
                         StandardSupportContactMessage,
@@ -1144,7 +1194,7 @@ Namespace SharedLibrary
                 ' Genuine failure
                 LogLicenseEvent("Auto Activation Failed", activateResponse.ErrorMessage, alwaysLog:=True)
                 ShowCustomMessageBox(
-                    $"Automatic license activation failed: {activateResponse.ErrorMessage}" & vbCrLf & vbCrLf &
+                    $"Automatic license activation failed: {StripHtmlFromLicenseMessage(activateResponse.ErrorMessage)}" & vbCrLf & vbCrLf &
                     $"Product ID: {productId}" & vbCrLf &
                     $"User ID: {userId}" & vbCrLf & vbCrLf &
                     StandardSupportContactMessage,
@@ -1335,7 +1385,7 @@ Namespace SharedLibrary
                     $"  Product ID: {productId}" & vbCrLf &
                     $"  License Key: {TruncateLicenseKey(licenseKey)}" & vbCrLf &
                     $"  User ID: {userId}" & vbCrLf & vbCrLf &
-                    $"Server response: {errorMessage}" & vbCrLf & vbCrLf &
+                    $"Server response: {StripHtmlFromLicenseMessage(errorMessage)}" & vbCrLf & vbCrLf &
                     "This may indicate:" & vbCrLf &
                     "  • The license key is incorrect or has a typo" & vbCrLf &
                     "  • The Product ID does not match the license" & vbCrLf &
@@ -1817,6 +1867,9 @@ Namespace SharedLibrary
                 ' Clear any legacy license data
                 ClearLegacyLicense()
 
+                ' Backup to registry in case user.config gets deleted
+                BackupProLicenseToRegistry(productId, licenseKey, userId, productName, apiConfirmed)
+
             Catch ex As Exception
                 LogLicenseEvent("Save Pro Error", ex.Message)
             End Try
@@ -1864,6 +1917,9 @@ Namespace SharedLibrary
                 ' Reset global variables
                 LicenseStatus = ""
                 _currentLicenseState = LicenseState.None
+
+                ' Clear registry backup as well
+                ClearLicenseRegistryBackup()
 
             Catch ex As Exception
                 LogLicenseEvent("Clear License Error", ex.Message)
@@ -2177,6 +2233,31 @@ Namespace SharedLibrary
                 Return Environment.ExpandEnvironmentVariables(value)
             Catch
                 Return value
+            End Try
+        End Function
+
+
+        ''' <summary>
+        ''' Strips HTML tags from a license-related message string so it can be displayed
+        ''' in plain-text message boxes. Decodes HTML entities and normalizes whitespace.
+        ''' </summary>
+        ''' <param name="message">Message that may contain HTML markup from the license API.</param>
+        Private Shared Function StripHtmlFromLicenseMessage(message As String) As String
+            If String.IsNullOrWhiteSpace(message) Then Return message
+
+            Try
+                ' Check if the message actually contains HTML tags
+                If Not message.Contains("<") Then Return message
+
+                ' Use the existing RemoveHTML function if available, otherwise do simple strip
+                Dim cleaned = RemoveHTML(message)
+
+                ' Normalize multiple whitespace/newlines into single spaces
+                cleaned = System.Text.RegularExpressions.Regex.Replace(cleaned, "\s+", " ").Trim()
+
+                Return If(String.IsNullOrWhiteSpace(cleaned), message, cleaned)
+            Catch
+                Return message
             End Try
         End Function
 

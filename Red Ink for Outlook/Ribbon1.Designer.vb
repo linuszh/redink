@@ -422,7 +422,6 @@ Partial Class ThisRibbonCollection
 End Class
 
 
-
 Partial Class Ribbon2
     Inherits RibbonBase
 
@@ -488,7 +487,11 @@ Partial Class Ribbon2
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
+        Me.RI_MailMover = Me.Factory.CreateRibbonButton
+        Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
+        Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
+        Me.RI_OpenChat = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
@@ -533,7 +536,11 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
+        Me.Menu1.Items.Add(Me.RI_MailMover)
+        Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
+        Me.Menu1.Items.Add(Me.RI_AutoPilot)
+        Me.Menu1.Items.Add(Me.RI_OpenChat)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
         Me.Menu1.KeyTip = "S"
@@ -689,6 +696,22 @@ Partial Class Ribbon2
     "audio, image)"
         Me.RI_Clipboard.ShowImage = True
         '
+        'RI_MailMover
+        '
+        Me.RI_MailMover.Label = "Mail Mover"
+        Me.RI_MailMover.Name = "RI_MailMover"
+        Me.RI_MailMover.OfficeImageId = "SearchUpscopeToThisMailbox"
+        Me.RI_MailMover.ScreenTip = "This will move all or the selected items of the current folder to their final folder based on a rule set"
+        Me.RI_MailMover.ShowImage = True
+        '
+        'RI_InboxBoard
+        '
+        Me.RI_InboxBoard.Label = "Inbox Board"
+        Me.RI_InboxBoard.Name = "RI_InboxBoard"
+        Me.RI_InboxBoard.OfficeImageId = "DatabaseAnalyzeTable"
+        Me.RI_InboxBoard.ScreenTip = "Will open a board that provides you an overview of all marked emails and allows you to manage them"
+        Me.RI_InboxBoard.ShowImage = True
+        '
         'RI_DefineMyStyle
         '
         Me.RI_DefineMyStyle.Label = "Define MyStyle"
@@ -696,6 +719,22 @@ Partial Class Ribbon2
         Me.RI_DefineMyStyle.OfficeImageId = "DisplayForm"
         Me.RI_DefineMyStyle.ScreenTip = "Analyze your writing style and create a MyStyle prompt based on it"
         Me.RI_DefineMyStyle.ShowImage = True
+        '
+        'RI_AutoPilot
+        '
+        Me.RI_AutoPilot.Label = "AutoPilot (Experts Only)"
+        Me.RI_AutoPilot.Name = "RI_AutoPilot"
+        Me.RI_AutoPilot.OfficeImageId = "ResourcePoolRefresh"
+        Me.RI_AutoPilot.ScreenTip = "Starts the feature that allows Inky to respond to defined emails automatically (use only if you know what you are doing)."
+        Me.RI_AutoPilot.ShowImage = True
+        '
+        'RI_OpenChat
+        '
+        Me.RI_OpenChat.Label = "Open Local Chat"
+        Me.RI_OpenChat.Name = "RI_OpenChat"
+        Me.RI_OpenChat.OfficeImageId = "TechnicalSupport"
+        Me.RI_OpenChat.ScreenTip = "Opens the local chat bot in your browser"
+        Me.RI_OpenChat.ShowImage = True
         '
         'RI_HelpMe
         '
@@ -794,6 +833,14 @@ Partial Class Ribbon2
             Me.RI_ApplyMyStyle.Visible = True
         End If
 
+        Me.RI_AutoPilot.Visible = ThisAddIn.IsAutoPilotPermitted()
+
+        If String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_MailMoverPathLocal) Then
+            Me.RI_MailMover.Visible = False
+        Else
+            Me.RI_MailMover.Visible = True
+        End If
+
         ApplyThemeAwareMenuIcon()
 
     End Function
@@ -809,6 +856,8 @@ Partial Class Ribbon2
     Friend WithEvents RI_Summarize As RibbonButton
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
+    Friend WithEvents RI_MailMover As RibbonButton
+    Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
     Friend WithEvents RI_QuickTranslate As RibbonButton
     Friend WithEvents RI_Primlang As RibbonButton
@@ -825,6 +874,8 @@ Partial Class Ribbon2
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
+    Friend WithEvents RI_AutoPilot As RibbonButton
+    Friend WithEvents RI_OpenChat As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
     Friend WithEvents RI_CompareSelected As RibbonButton
 End Class

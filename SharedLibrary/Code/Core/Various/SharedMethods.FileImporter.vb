@@ -210,6 +210,10 @@ Namespace SharedLibrary
                 Dim totalChars As Integer = 0
                 Dim hasLowQualityText As Boolean = False
                 Dim reasons As New List(Of String)()
+                Dim sparsePageCount As Integer = 0
+                Dim perPageChars As New List(Of Integer)()
+                Dim pagesWithImagesButNoText As Integer = 0
+                Dim pagesWithGarbledText As Integer = 0
 
                 Using document As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath)
                     pageCount = document.NumberOfPages
@@ -217,7 +221,24 @@ Namespace SharedLibrary
                     For Each page As UglyToad.PdfPig.Content.Page In document.GetPages()
                         Dim pageText As String = page.Text
                         sb.AppendLine(pageText)
-                        totalChars += If(pageText IsNot Nothing, pageText.Length, 0)
+                        Dim pageCharCount As Integer = If(pageText IsNot Nothing, pageText.Length, 0)
+                        totalChars += pageCharCount
+                        perPageChars.Add(pageCharCount)
+
+                        ' Track pages with very little text (likely scanned/image pages)
+                        If pageCharCount < 50 Then
+                            sparsePageCount += 1
+                        End If
+
+                        ' Check for pages that have images but little/no text (scanned documents)
+                        Try
+                            Dim images = page.GetImages()
+                            If images IsNot Nothing AndAlso images.Count > 0 AndAlso pageCharCount < 100 Then
+                                pagesWithImagesButNoText += 1
+                            End If
+                        Catch
+                            ' Some PDFs may fail image enumeration; ignore
+                        End Try
 
                         ' Check for low-quality text indicators
                         If pageText IsNot Nothing Then
@@ -225,6 +246,16 @@ Namespace SharedLibrary
                             Dim avgWordLen = If(words.Length > 0, words.Average(Function(w) w.Length), 0)
                             If avgWordLen < 2 AndAlso words.Length > 10 Then
                                 hasLowQualityText = True
+                            End If
+
+                            ' Check for garbled/non-printable characters (broken font encoding)
+                            If pageCharCount > 20 Then
+                                Dim nonPrintableCount As Integer = pageText.Count(Function(c) Char.IsControl(c) AndAlso c <> vbLf(0) AndAlso c <> vbCr(0) AndAlso c <> vbTab(0))
+                                Dim replacementCount As Integer = pageText.Count(Function(c) c = ChrW(&HFFFD) OrElse c = "?"c)
+                                Dim suspiciousRatio As Double = (nonPrintableCount + replacementCount) / pageCharCount
+                                If suspiciousRatio > 0.15 Then
+                                    pagesWithGarbledText += 1
+                                End If
                             End If
                         End If
                     Next
@@ -251,16 +282,62 @@ Namespace SharedLibrary
                     reasons.Add("No text could be extracted from any page")
                 End If
 
+                ' Check if a significant portion of pages are sparse (mixed document scenario)
+                If pageCount >= 2 AndAlso sparsePageCount > 0 Then
+                    Dim sparseRatio As Double = sparsePageCount / pageCount
+                    If sparseRatio >= 0.1 Then
+                        shouldSuggestOcr = True
+                        reasons.Add($"{sparsePageCount} of {pageCount} pages contain very little or no text (likely scanned images)")
+                    End If
+                End If
+
+                ' Check for pages with images but no meaningful text (scanned pages)
+                If pagesWithImagesButNoText > 0 Then
+                    shouldSuggestOcr = True
+                    reasons.Add($"{pagesWithImagesButNoText} of {pageCount} pages contain images but little or no extractable text")
+                End If
+
+                ' Check for garbled text (broken font encoding / CID mapping issues)
+                If pagesWithGarbledText > 0 Then
+                    shouldSuggestOcr = True
+                    reasons.Add($"{pagesWithGarbledText} of {pageCount} pages contain garbled or non-printable characters (likely encoding issues)")
+                End If
+
+                ' Check for extreme variance between pages (some rich, some empty)
+                If pageCount >= 3 AndAlso perPageChars.Count >= 3 Then
+                    Dim maxChars As Integer = perPageChars.Max()
+                    Dim minChars As Integer = perPageChars.Min()
+                    If maxChars > 500 AndAlso minChars < 50 Then
+                        Dim pagesAbove500 As Integer = perPageChars.Where(Function(c) c > 500).Count()
+                        Dim pagesBelow50 As Integer = perPageChars.Where(Function(c) c < 50).Count()
+                        If pagesAbove500 >= 1 AndAlso pagesBelow50 >= 1 AndAlso Not shouldSuggestOcr Then
+                            shouldSuggestOcr = True
+                            reasons.Add($"Large variation in text content across pages ({pagesBelow50} pages nearly empty, {pagesAbove500} pages with substantial text)")
+                        End If
+                    End If
+                End If
+
                 ' Disable OCR if no OCR-capable call is configured or context missing
+                Dim ocrUnavailable As Boolean = False
                 If DoOCR AndAlso (context Is Nothing OrElse Not IsOcrAvailable(context)) Then
                     DoOCR = False
+                    ocrUnavailable = True
                 End If
 
                 ' If DoOCR is disabled → just return whatever text we found (or empty string)
                 If Not DoOCR Then
-                    ' If we would have suggested OCR but it's not available, flag it
+                    ' If we would have suggested OCR but it's not available, flag and warn the user
                     If shouldSuggestOcr Then
                         result.OcrWasSkippedDueToHeuristics = True
+
+                        If AskUser AndAlso ocrUnavailable Then
+                            Dim formattedReasons As String = String.Join(Environment.NewLine, reasons.ConvertAll(Function(r) "- " & r))
+                            ShowCustomMessageBox(
+                                "The PDF appears to contain pages that may need OCR:" & Environment.NewLine & Environment.NewLine &
+                                formattedReasons & Environment.NewLine & Environment.NewLine &
+                                "OCR is not available with your current model configuration." & Environment.NewLine &
+                                "The extracted text may be incomplete.")
+                        End If
                     End If
                     result.Content = extractedText
                     Return result
@@ -269,9 +346,19 @@ Namespace SharedLibrary
                 If shouldSuggestOcr Then
                     ' Check if OCR is actually available
                     If Not IsOcrAvailable(context) Then
-                        ' OCR would be suggested but is not available - silently continue with extracted text
+                        ' OCR would be suggested but is not available - warn user if allowed
                         Debug.WriteLine("OCR suggested by heuristics but not available - skipping OCR prompt.")
                         result.OcrWasSkippedDueToHeuristics = True
+
+                        If AskUser Then
+                            Dim formattedReasons As String = String.Join(Environment.NewLine, reasons.ConvertAll(Function(r) "- " & r))
+                            ShowCustomMessageBox(
+                                "The PDF appears to contain pages that may need OCR:" & Environment.NewLine & Environment.NewLine &
+                                formattedReasons & Environment.NewLine & Environment.NewLine &
+                                "OCR is not available with your current model configuration." & Environment.NewLine &
+                                "The extracted text may be incomplete.")
+                        End If
+
                         result.Content = extractedText
                         Return result
                     End If
@@ -290,7 +377,7 @@ Namespace SharedLibrary
                         End If
                     End If
 
-                    Dim ocrText As String = Await PerformOCR(pdfPath, context)
+                    Dim ocrText As String = Await PerformOCR(pdfPath, context, AskUser)
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
                         result.Content = ocrText
                         Return result
@@ -412,12 +499,15 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="pdfPath">Path to the PDF file to OCR.</param>
         ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="askUser">If False, suppresses all UI dialogs (for non-interactive callers like AutoPilot).</param>
         ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
-        Private Shared Async Function PerformOCR(ByVal pdfPath As String, context As ISharedContext) As Task(Of String)
+        Private Shared Async Function PerformOCR(ByVal pdfPath As String, context As ISharedContext, Optional askUser As Boolean = True) As Task(Of String)
 
             ' Use the comprehensive OCR availability check
             If Not IsOcrAvailable(context) Then
-                ShowCustomMessageBox($"OCR is not available with your current model configuration.")
+                If askUser Then
+                    ShowCustomMessageBox($"OCR is not available with your current model configuration.")
+                End If
                 Return ""
             End If
 
@@ -434,7 +524,7 @@ Namespace SharedLibrary
                 End If
             End If
 
-            Dim result As System.String = Await LLM(context, context.SP_InsertClipboard, "", "", "", TimeOut * 2, UseSecondAPI, False, "", pdfPath)
+            Dim result As System.String = Await LLM(context, context.SP_InsertClipboard, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", pdfPath)
 
             ' Restore model if temporarily switched
             If UseSecondAPI AndAlso originalConfigLoaded Then

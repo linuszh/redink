@@ -5,28 +5,30 @@
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
 ' Purpose:
-'   Implements a model-agnostic tool/function-calling loop used by the LLM layer.
-'   The loop detects tool calls in model output, extracts tool call payloads, runs the
-'   requested tools (internal and external), and injects tool responses into the next
-'   model iteration until a final answer is produced or limits/cancellation are reached.
+'   Implements a model-agnostic tool/function-calling loop for LLM interactions.
+'   Detects tool calls in model output, executes internal/external tools, and
+'   injects tool responses into subsequent model iterations until a final answer
+'   is produced or limits/cancellation are reached.
 '
 ' Responsibilities:
 '   - Tool loop orchestration via `ExecuteToolingLoop`:
-'       * Build enhanced system prompt including tool usage guidance.
-'       * Generate model-specific tool definition payload and assign it to `INI_APICall_ToolInstructions_2`.
-'       * Invoke `LLM(...)` iteratively and determine whether tool calls are present.
-'       * Serialize tool results and assign them to `INI_APICall_ToolResponses_2` for the next iteration.
+'       * Build enhanced system prompt with tool usage guidance.
+'       * Generate model-specific tool definition payloads for `INI_APICall_ToolInstructions_2`.
+'       * Invoke `LLM(...)` iteratively, detect tool calls, and inject responses via
+'         `INI_APICall_ToolResponses_2`.
+'       * Enforce iteration limits, timeouts, cancellation, and forced final synthesis.
 '   - Tool call parsing:
-'       * Detect tool calls via regex (`ContainsToolCalls`) using `ToolCallDetectionPattern` or derived pattern.
-'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided extraction map.
+'       * Detect tool calls via regex (`ContainsToolCalls`) using tooling model patterns.
+'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided map.
 '   - Tool execution:
-'       * Internal tool: `retrieve_web_content` performs web retrieval with SSRF safeguards.
-'       * External tools: apply a selected `ModelConfig` to `_context`, build an API-call payload, force JSON
-'         response mode, invoke the model, then restore the prior config.
+'       * Internal tool: `retrieve_web_content` with SSRF safeguards (WebView2 or HTTP fallback).
+'       * External tools: apply selected `ModelConfig`, build API call payloads, force JSON
+'         response mode, invoke the model, and restore prior config.
+'       * AutoPilot routing for internal tools when AutoPilot is active.
 '   - Tool selection and persistence:
 '       * Load tool configurations from `INI_SpecialServicePath`.
 '       * Add a built-in web retrieval tool.
-'       * Persist selected tool names via application settings and restore them on demand.
+'       * Persist selected tool names and restore them on demand.
 '   - Diagnostics:
 '       * Optional per-run file logging via `ToolingFileLogger` (controlled by `INI_APIDebug`).
 '       * Optional UI logging via `LogWindow` when enabled.
@@ -35,7 +37,6 @@
 '   - This file is a partial definition of `ThisAddIn` and depends on shared configuration
 '     values (INI variables), `_context`, and the `LLM(...)` entry point provided elsewhere.
 '   - Web retrieval uses WebView2 when enabled to capture JavaScript-rendered content.
-'   - This file mirrors similar tooling support in Red Ink for Word (which is the master).
 ' =============================================================================
 
 Option Explicit On
@@ -89,7 +90,13 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Maximum tool loop iterations used by prompt-building helpers.
     ''' </summary>
-    Private MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = 10
+
+    ''' <summary>
+    ''' Holds the active ToolExecutionContext during an ExecuteToolingLoop run.
+    ''' Used by ApDashboardLog to route messages to the Chat Agent's LogWindow.
+    ''' </summary>
+    Private _activeToolingContext As ToolExecutionContext = Nothing
 
 #Region "WebView2 Web Content Retrieval"
 
@@ -646,14 +653,26 @@ Partial Public Class ThisAddIn
 
         ''' <summary>
         ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
+        ''' Tool instructions and tool responses are logged as length stubs only (full content is already
+        ''' recorded via <see cref="LogModelConfigOnce"/> and <see cref="LogRawResponse"/>).
         ''' </summary>
         Public Shared Sub LogPreMainLlmCallSnapshot()
             If Not _isEnabled Then Return
             WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
             WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
             WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: {SafeStr(INI_APICall_ToolInstructions_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {SafeStr(INI_APICall_ToolResponses_2)}")
+
+            Dim toolInstr = SafeStr(INI_APICall_ToolInstructions_2)
+            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: ({toolInstr.Length} chars)")
+
+            Dim toolResp = SafeStr(INI_APICall_ToolResponses_2)
+            If toolResp.Length <= 500 Then
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {toolResp}")
+            Else
+                Dim excerpt = toolResp.Substring(0, 500) & "..."
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: ({toolResp.Length} chars) {excerpt}")
+            End If
+
             WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
         End Sub
 
@@ -684,6 +703,28 @@ Partial Public Class ThisAddIn
             WriteLine("RESP", $"Raw response ({source}) begins:")
             WriteRaw("RESP", vbCrLf & vbCrLf & SafeStr(rawResponse) & vbCrLf & vbCrLf)
             WriteLine("RESP", $"Raw response ({source}) ends.")
+        End Sub
+
+        ''' <summary>
+        ''' Logs a brief stub of a raw response (length + short excerpt) without the full content.
+        ''' Used for main LLM responses to keep the log file focused on tool calls.
+        ''' </summary>
+        ''' <param name="source">Source label (e.g. "Main LLM()").</param>
+        ''' <param name="rawResponse">Raw response text.</param>
+        ''' <param name="excerptLength">Maximum number of characters to include in the excerpt.</param>
+        Public Shared Sub LogRawResponseStub(source As String, rawResponse As String, Optional excerptLength As Integer = 200)
+            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
+
+            Dim safe As String = SafeStr(rawResponse)
+            Dim charCount As Integer = safe.Length
+            Dim excerpt As String = If(charCount <= excerptLength,
+                safe,
+                safe.Substring(0, excerptLength) & "...")
+
+            WriteLine("RESP", $"Raw response ({source}): {charCount} chars")
+            If charCount > 0 Then
+                WriteLine("RESP", $"Excerpt: {excerpt}")
+            End If
         End Sub
 
         ''' <summary>
@@ -992,7 +1033,8 @@ Partial Public Class ThisAddIn
         Optional hideSplash As Boolean = False,
         Optional hideLogWindow As Boolean = False,
         Optional DoChart As Boolean = False,
-        Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of String)
+        Optional cancellationToken As System.Threading.CancellationToken = Nothing,
+        Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1040,6 +1082,9 @@ Partial Public Class ThisAddIn
                 AddHandler logForm.CancelRequested, Sub() context.IsCancelled = True
             End If
         End If
+
+        ' Make context available to ApDashboardLog for Chat Agent routing
+        _activeToolingContext = context
 
         context.Log("Starting tooling session...")
         If selectedTools IsNot Nothing Then
@@ -1172,7 +1217,7 @@ Partial Public Class ThisAddIn
                                 otherPrompt,
                                 fileObject,
                                 combinedCts.Token,
-                                True, True)
+                                True, True, binaryOutputDirectory:=binaryOutputDirectory)
 
                         Catch ex As OperationCanceledException When timeoutCts.IsCancellationRequested
                             context.LogError($"LLM call timed out after {totalTimeout}s")
@@ -1192,7 +1237,7 @@ Partial Public Class ThisAddIn
                     End Using
                 End Using
 
-                ToolingFileLogger.LogRawResponse("Main LLM()", currentResponse)
+                ToolingFileLogger.LogRawResponseStub("Main LLM()", currentResponse)
 
                 If String.IsNullOrWhiteSpace(currentResponse) Then
                     context.LogWarn("Empty response from LLM", details:="LLM() returned null/empty/whitespace.")
@@ -1324,12 +1369,12 @@ Partial Public Class ThisAddIn
                                 otherPrompt,
                                 fileObject,
                                 combinedCts.Token,
-                                True, True)
+                                True, True, binaryOutputDirectory:=binaryOutputDirectory)
 
                             If Not String.IsNullOrWhiteSpace(finalResponse) Then
                                 currentResponse = finalResponse
                                 context.Log($"Final response received ({currentResponse.Length} chars)")
-                                ToolingFileLogger.LogRawResponse("Main LLM() - Forced Final", currentResponse)
+                                ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
                             Else
                                 context.LogWarn("Empty response from forced final LLM call")
                             End If
@@ -1392,6 +1437,9 @@ Partial Public Class ThisAddIn
                     context.Log($"Log saved to: {ToolingFileLogger.LogFilePath}")
                 End If
             End If
+
+            ' Clear the context reference so ApDashboardLog stops routing
+            _activeToolingContext = Nothing
         End Try
     End Function
 #End Region
@@ -1857,6 +1905,30 @@ Partial Public Class ThisAddIn
     ''' Executes a single tool call using either the internal tool implementation or an external tool configuration.
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        ' ── AutoPilot / Chat Agent internal tool routing ──
+        If (_apActive OrElse _chatAgentActive) AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
+            Dim apResult = Await TryExecuteAutoPilotTool(toolCall, context, cancellationToken)
+            If apResult IsNot Nothing Then
+                ' Record for "Sources used:" footer
+                If _apCurrentToolCallLog IsNot Nothing Then
+                    Dim elapsed = DateTime.Now - apResult.Timestamp
+                    Dim excerpt = BuildResultExcerpt(apResult.Response, 80)
+                    RecordAutoPilotToolCall(
+                        toolCall.ToolName,
+                        If(toolConfig?.ModelDescription, toolCall.ToolName),
+                        BuildCondensedParamSummary(toolCall.Arguments),
+                        isInternalTool:=True,
+                        wasSuccessful:=apResult.Success,
+                        resultExcerpt:=excerpt,
+                        elapsed:=elapsed,
+                        urls:=Nothing)
+                End If
+
+                Return apResult
+            End If
+        End If
+
         Dim response As New ToolResponse() With {
             .CallId = toolCall.CallId,
             .ToolName = toolCall.ToolName
@@ -1873,10 +1945,10 @@ Partial Public Class ThisAddIn
 
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalWebTool(toolCall, context, cancellationToken)
-                ToolingFileLogger.LogRawResponse($"Internal tool ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
             Else
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
-                ToolingFileLogger.LogRawResponse($"Tool LLM() ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
 
             ' Log completion with excerpt
@@ -1885,6 +1957,45 @@ Partial Public Class ThisAddIn
                 context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
             Else
                 context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+            End If
+
+            ' ── AutoPilot / Chat Agent: record tool call for dashboard + sources footer ──
+            If (_apActive OrElse _chatAgentActive) AndAlso _apCurrentToolCallLog IsNot Nothing Then
+                Dim elapsed = DateTime.Now - response.Timestamp
+                Dim excerpt = BuildResultExcerpt(response.Response, 80)
+
+                ' Log to dashboard (ApDashboardLog routes to AutoPilot OR Chat Agent automatically)
+                ApDashboardLog($"🔧 External tool: {toolCall.ToolName}{paramSummary}", "info")
+                If response.Success Then
+                    ApDashboardLog($"   ✓ {excerpt}", "info")
+                Else
+                    ApDashboardLog($"   ✗ {If(response.ErrorMessage, excerpt)}", "error")
+                End If
+
+                ' Record for "Sources used:" footer
+                Dim toolUrls As List(Of String) = Nothing
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("urls") Then
+                    Try
+                        Dim urlsObj = toolCall.Arguments("urls")
+                        If TypeOf urlsObj Is JArray Then
+                            toolUrls = DirectCast(urlsObj, JArray).Select(Function(t) t.ToString()).ToList()
+                        ElseIf TypeOf urlsObj Is IEnumerable(Of Object) Then
+                            toolUrls = DirectCast(urlsObj, IEnumerable(Of Object)).Select(Function(o) o.ToString()).ToList()
+                        ElseIf TypeOf urlsObj Is String Then
+                            toolUrls = New List(Of String) From {CStr(urlsObj)}
+                        End If
+                    Catch
+                    End Try
+                End If
+                RecordAutoPilotToolCall(
+                    toolCall.ToolName,
+                    If(toolConfig?.ModelDescription, toolCall.ToolName),
+                    paramSummary,
+                    isInternalTool:=False,
+                    wasSuccessful:=response.Success,
+                    resultExcerpt:=excerpt,
+                    elapsed:=elapsed,
+                    urls:=toolUrls)
             End If
 
         Catch ex As OperationCanceledException
@@ -2103,6 +2214,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
     ''' the tool API call payload, and invoking <c>LLM</c> in JSON response mode.
+    ''' For SSE/MCP endpoints (prefixed with "sse:"), bypasses LLM() and calls the MCP server directly.
     ''' </summary>
     ''' <param name="toolCall">Tool call extracted from the LLM response.</param>
     ''' <param name="toolConfig">Tool configuration to apply for this call.</param>
@@ -2135,7 +2247,35 @@ Partial Public Class ThisAddIn
 
             For Each kvp In toolCall.Arguments
                 Dim placeholder = "{" & kvp.Key & "}"
-                Dim value = If(kvp.Value?.ToString(), "")
+                Dim value As String
+                If kvp.Value Is Nothing Then
+                    value = ""
+                ElseIf TypeOf kvp.Value Is Boolean Then
+                    ' JSON requires lowercase true/false
+                    value = If(CBool(kvp.Value), "true", "false")
+                ElseIf TypeOf kvp.Value Is JToken Then
+                    Dim jt = DirectCast(kvp.Value, JToken)
+                    If jt.Type = JTokenType.String Then
+                        ' Escape the string value for safe JSON embedding in the template
+                        value = JsonConvert.ToString(jt.Value(Of String)())
+                        ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                        value = value.Substring(1, value.Length - 2)
+                    Else
+                        ' Preserve JSON token as-is (handles nested objects/arrays)
+                        value = jt.ToString(Formatting.None)
+                    End If
+                ElseIf TypeOf kvp.Value Is Double OrElse TypeOf kvp.Value Is Single OrElse TypeOf kvp.Value Is Decimal Then
+                    ' Ensure invariant culture (dot decimal separator)
+                    value = System.Convert.ToDouble(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                ElseIf TypeOf kvp.Value Is Long OrElse TypeOf kvp.Value Is Integer OrElse TypeOf kvp.Value Is Short Then
+                    value = System.Convert.ToInt64(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                Else
+                    ' Escape the string for safe JSON embedding (handles ", \, newlines, etc.)
+                    Dim raw = kvp.Value.ToString()
+                    Dim escaped = JsonConvert.ToString(raw)
+                    ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                    value = escaped.Substring(1, escaped.Length - 2)
+                End If
                 apiCall = apiCall.Replace(placeholder, value)
             Next
 
@@ -2169,6 +2309,7 @@ Partial Public Class ThisAddIn
                     apiCall = apiCall.Replace(m.Value, defaultValue)
                 Next
 
+                ' Re-check: if anything remains unreplaced after applying defaults, that's a real error.
                 Dim remainingMatches = unreplacedPattern.Matches(apiCall)
                 If remainingMatches.Count > 0 Then
                     Dim remainingNames = remainingMatches.
@@ -2188,6 +2329,45 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' ── SSE transport: full round-trip bypassing LLM() ───────────
+            If Not String.IsNullOrWhiteSpace(toolConfig.Endpoint) AndAlso
+               toolConfig.Endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+
+                Dim sseBase = toolConfig.Endpoint.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
+                Dim resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
+
+                context.Log($"SSE transport: executing tool {toolCall.ToolName} via {sseBase}")
+                ToolingFileLogger.LogStep($"SSE round-trip for {toolCall.ToolName} at {sseBase}")
+                ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
+
+                Try
+                    Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                        sseBase, apiCall,
+                        If(toolConfig.HeaderA, ""), resolvedHeaderB,
+                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+
+                    ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
+
+                    If Not String.IsNullOrWhiteSpace(rawResult) Then
+                        response.Response = rawResult
+                        response.Success = True
+                    Else
+                        response.Success = False
+                        response.ErrorMessage = "Empty response from SSE tool service"
+                        ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
+                    End If
+
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
+                    ToolingFileLogger.LogError("SSE tool call failed.",
+                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
+                End Try
+
+                Return response
+            End If
+
+            ' ── Standard transport: route through LLM() ──────────────────
             Dim backupConfig = GetCurrentConfig(_context)
 
             Try
@@ -2215,7 +2395,7 @@ Partial Public Class ThisAddIn
                 ' Pass cancellation token to LLM call
                 Dim result = Await LLM("", "", "", "", 0, True, True, "", "", cancellationToken, EnsureUI:=False)
 
-                ToolingFileLogger.LogRawResponse($"Tool LLM() result ({toolCall.ToolName})", result)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
 
                 _context.INI_Response_2 = originalResponse
 

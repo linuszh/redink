@@ -318,8 +318,8 @@ Namespace SharedLibrary
                 .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
                 .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
             }
-            Me.pnlButtons.Controls.Add(Me.btnOK)
             Me.pnlButtons.Controls.Add(Me.btnCancel)
+            Me.pnlButtons.Controls.Add(Me.btnOK)
 
             Me.outer.Controls.Add(Me.lblTitle, 0, 0)
             Me.outer.Controls.Add(Me.txtFilter, 0, 1)

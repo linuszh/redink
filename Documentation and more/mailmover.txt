@@ -1,0 +1,16 @@
+; Mail Mover Rules
+; Lines starting with ; are comments and will be ignored.
+; You can define segments using [SegmentTitle] headers.
+; Within each segment, write natural-language rules that describe
+; how mails should be sorted into folders.
+;
+; Example:
+; [Client Sorting]
+; Mails from @clientA.com or mentioning "Project Alpha" -> Inbox\Clients\Alpha
+; Mails from john.doe@example.com -> Inbox\Internal\John
+; Newsletter or marketing mails -> Inbox\Newsletters
+;
+; [Personal]
+; Mails from family members or personal contacts -> Inbox\Personal
+
+Mails shall be transferred to those folders that are, based on their name, clearly applicable.
