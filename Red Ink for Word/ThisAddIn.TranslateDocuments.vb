@@ -1297,6 +1297,10 @@ Partial Public Class ThisAddIn
         Dim totalBatches As Integer = CInt(Math.Ceiling(processableParagraphs.Count / TranslateParagraphsPerBatch))
         Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", "Correcting")
 
+        ' Switch progress bar to batch-level granularity for this file
+        ProgressBarModule.GlobalProgressMax = totalBatches
+        ProgressBarModule.GlobalProgressValue = 0
+
         While batchIndex < processableParagraphs.Count
             If ProgressBarModule.CancelOperation Then Return False
 
@@ -1396,10 +1400,14 @@ Partial Public Class ThisAddIn
             ParseTranslateResponse(Response, processableParagraphs, batchStart, batchEnd)
 
             batchIndex = batchEnd + 1
+
+            ' Advance progress bar after each batch completes
+            ProgressBarModule.GlobalProgressValue = currentBatch
         End While
 
         Return True
     End Function
+
     ''' <summary>
     ''' Parses LLM response and stores translations/corrections.
     ''' </summary>

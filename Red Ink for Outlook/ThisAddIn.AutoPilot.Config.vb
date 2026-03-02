@@ -281,9 +281,9 @@ Partial Public Class ThisAddIn
             config.MaxRepliesPerSession = maxReplies
         End If
 
-        Dim maxMb As Double
-        If Double.TryParse(params(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
-            config.MaxAttachmentBytes = CLng(maxMb * 1024 * 1024)
+        Dim maxMb As Integer
+        If Integer.TryParse(params(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
+            config.MaxAttachmentBytes = CLng(maxMb) * 1024 * 1024
         End If
 
         ' ── Step 6: Source selection (only if model supports tooling) ──

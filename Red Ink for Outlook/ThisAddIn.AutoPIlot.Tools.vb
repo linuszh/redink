@@ -165,17 +165,33 @@ Partial Public Class ThisAddIn
                 "Use this for translation, correction, proofreading, anonymization, data updates, formula changes, or any text/data transformation. " &
                 "For Word documents, returns both a clean version and a compare document showing changes. " &
                 "For PowerPoint and Excel files, returns the processed version (no compare document). " &
-                "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter.",
+                "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
+                "CRITICAL — ONE OPERATION PER CALL: This tool applies exactly ONE instruction per call. " &
+                "If the user requests multiple distinct operations (e.g., 'correct and translate', 'anonymize and summarize', 'fix grammar then make more concise'), " &
+                "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
+                "Wait for the result. Second call: apply the second operation to the output file from the first call (the '_processed' file). " &
+                "Example for 'correct and translate to German': " &
+                "(1) Call process_word_document with instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
+                "(2) Call process_word_document with instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
+                "NEVER combine two distinct operations into a single instruction string. " &
+                "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
+                "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
-                """description"":""Applies a processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
+                """description"":""Applies exactly ONE processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
                 "Supports translation, correction, anonymization, data updates, formula modifications, and freestyle operations. " &
-                "For Word documents, produces clean output and a compare document with tracked changes. " &
+                "For Word documents, produces clean output plus a compare document with tracked changes. " &
                 "For PowerPoint and Excel, produces the processed file only. " &
-                "For Excel, can process all cell types including text, numbers, formulas, and booleans.""," &
+                "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
+                "make separate sequential calls — first correct, then translate the corrected output file. " &
+                "Output files are named '<original>_processed.<ext>' and can be used as input for the next call via attachment_names.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """instruction"":{""type"":""string"",""description"":""The instruction to apply to the document (e.g., 'Translate to German', 'Anonymize all personal names', 'Update all 2024 dates to 2025', 'Change SUM formulas to AVERAGE')""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
+                """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
+                "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
+                "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
+                "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
+                "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
                 """sheet_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional: for Excel files only, restrict processing to these sheet names. If omitted, all sheets are processed.""}" &
                 "},""required"":[""instruction""]}}"
         })

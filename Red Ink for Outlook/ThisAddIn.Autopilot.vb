@@ -112,10 +112,15 @@ Partial Public Class ThisAddIn
         "1702",
         "1727",
         "1827",
-        "2040",
-        "2150",
-        "1693"
+        "2040"
     }
+
+    '  1702 Pro Special
+    '  1727 Pro Test Tec
+    '  1827 Pro Test
+    '  2040 Pro Support
+    '  2150 Pro Special 2 -- NO
+    '  1693 Pro -- NO
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
@@ -1237,11 +1242,69 @@ Partial Public Class ThisAddIn
                     Next
                 End If
 
+                ' ── Early exit: ALL attachments over size limit ──
+                ' If the mail has attachments and every single one exceeds the size limit,
+                ' skip the LLM call entirely and send a static rejection message.
+                ' This prevents the LLM from generating unwanted advice (Red Ink features,
+                ' third-party tools) when the only issue is file size.
+                Dim oversizedAttachments = attachmentPaths.Where(Function(a) a.IsOverSizeLimit).ToList()
+                If attachmentPaths.Count > 0 AndAlso oversizedAttachments.Count = attachmentPaths.Count Then
+                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+                    Dim oversizedSb As New StringBuilder()
+                    oversizedSb.AppendLine($"I'm sorry, but I was unable to process your request because all attachments exceed the maximum permitted size of {limitMB:F0} MB:")
+                    oversizedSb.AppendLine()
+                    For Each att In oversizedAttachments
+                        oversizedSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
+                    Next
+                    oversizedSb.AppendLine()
+                    oversizedSb.AppendLine($"Please split large documents into smaller parts and resend, or use the {AN} add-in locally to process the file(s) directly on your computer.")
+                    oversizedSb.AppendLine()
+                    oversizedSb.Append($"— {AN6}")
+
+                    Dim oversizedMessage = oversizedSb.ToString()
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True))
+                    Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                    Interlocked.Increment(_apSessionReplyCount)
+                    RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordLastProcessedTime()
+                    ApDashboardLog($"✉ Sent size-limit rejection to: {mailInfo.SenderEmail} (all {attachmentPaths.Count} attachment(s) over limit)", "info")
+                    Return
+                End If
+
+                ' ── Partial oversized: warn about skipped attachments in the prompt ──
+                ' When some attachments are processable but others exceed the limit,
+                ' build the prompt using only the processable ones. The oversized files
+                ' are mentioned as a brief note so the LLM can inform the sender, but
+                ' WITHOUT the [OVER SIZE LIMIT] tag that causes the LLM to generate
+                ' unwanted tool/service recommendations.
+                Dim processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
+                Dim oversizedNote As String = Nothing
+                If oversizedAttachments.Count > 0 AndAlso processableAttachments.Count > 0 Then
+                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+                    Dim noteSb As New StringBuilder()
+                    noteSb.AppendLine()
+                    noteSb.AppendLine("[NOTE TO ASSISTANT — include this information in your reply to the sender]")
+                    noteSb.AppendLine($"The following attachment(s) could NOT be processed because they exceed the {limitMB:F0} MB size limit:")
+                    For Each att In oversizedAttachments
+                        noteSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
+                    Next
+                    noteSb.AppendLine($"Tell the sender to split these files into smaller parts and resend them, or to use the {AN} add-in locally.")
+                    noteSb.AppendLine("Do NOT suggest any other tools, services, or workarounds for the oversized files.")
+                    noteSb.AppendLine("[/NOTE]")
+                    oversizedNote = noteSb.ToString()
+                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
+                End If
+
                 ' Initialize tool call log for this e-mail
                 _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
 
                 ' ── Build LLM prompt ──
-                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, attachmentPaths)
+                ' Use only processable attachments in the prompt so the LLM doesn't see
+                ' [OVER SIZE LIMIT] tags that trigger unwanted tool recommendations.
+                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments)
+                If oversizedNote IsNot Nothing Then
+                    userPrompt &= oversizedNote
+                End If
                 Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
 
                 ' ── Set AutoPilot tool context ──
@@ -1684,7 +1747,8 @@ Partial Public Class ThisAddIn
                     If att.TempFilePath IsNot Nothing Then originalPaths.Add(att.TempFilePath)
                 Next
             End If
-            For Each filePath In Directory.GetFiles(tempDir)
+            ' Scan all files recursively (tools may create output in subdirectories)
+            For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
                 If Not originalPaths.Contains(filePath) Then results.Add(filePath)
             Next
         End If
@@ -2298,24 +2362,27 @@ Partial Public Class ThisAddIn
 
         Dim sb As New StringBuilder()
 
-        ' ── Static preamble ──
-        sb.AppendLine($"I'm sorry, but I was unable to fulfill your request.")
-        sb.AppendLine()
-
         ' ── Attachment size limit detail ──
         Dim hasOversized = attachments IsNot Nothing AndAlso attachments.Any(Function(a) a.IsOverSizeLimit)
         If hasOversized Then
             Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
             Dim oversizedNames = attachments.Where(Function(a) a.IsOverSizeLimit).
                 Select(Function(a) $"{a.OriginalFileName} ({a.SizeBytes / 1024.0 / 1024.0:F1} MB)").ToList()
-            sb.AppendLine($"**Attachment size limit:** The maximum permitted attachment size is {limitMB:F0} MB. " &
-                          $"The following attachment(s) exceeded this limit and could not be processed:")
+            sb.AppendLine($"I'm sorry, but I was unable to process your request because one or more attachments exceed the maximum permitted size of {limitMB:F0} MB:")
+            sb.AppendLine()
             For Each name In oversizedNames
                 sb.AppendLine($"  - {name}")
             Next
-            sb.AppendLine($"Please send smaller files or split large documents into parts.")
             sb.AppendLine()
+            sb.AppendLine($"Please split large documents into smaller parts and resend, or use the {AN} add-in locally to process the file(s) directly on your computer.")
+            sb.AppendLine()
+            sb.Append($"— {AN6}")
+            Return sb.ToString()
         End If
+
+        ' ── Static preamble ──
+        sb.AppendLine($"I'm sorry, but I was unable to fulfill your request.")
+        sb.AppendLine()
 
         ' ── Red Ink add-in suggestion (via HelpMeInky manual) ──
         Dim redInkSuggestion As String = Nothing
@@ -2621,9 +2688,9 @@ Partial Public Class ThisAddIn
 
         Try
             Dim systemPrompt =
-                $"You are a concise assistant. In 2-4 SHORT sentences, suggest other practical ways " &
+                $"You are a concise assistant. In 1-3 SHORT sentences, suggest other practical ways " &
                 $"(other than {AN}) that could help the user accomplish the task described below without the help of another person. Focus on the most popular/common approaches. " &
-                $"Be specific (name the tool/service/website, if applicable) but brief. If unsure, respond with exactly: NONE"
+                $"However, do not name specific tools, products, services or websites and stay very brief. If unsure, respond with exactly: NONE"
 
             Dim userPrompt =
                 $"Task: {mailInfo.Subject}" & vbCrLf &

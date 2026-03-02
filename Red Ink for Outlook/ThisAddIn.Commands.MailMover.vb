@@ -119,6 +119,7 @@ Partial Public Class ThisAddIn
         Public Property EntryID As String
         Public Property OriginalFolderPath As String
         Public Property TargetFolderPath As String
+        Public Property StoreID As String
     End Class
 
     ''' <summary>Persisted undo state from the last MailMover operation.</summary>
@@ -138,8 +139,9 @@ Partial Public Class ThisAddIn
             Dim selectedRules As String = SelectMailMoverRules()
             If selectedRules Is Nothing Then Return
 
-            ' 2. Determine mail source
-            Dim mails As List(Of MailMoverEntry) = CollectMailsForProcessing()
+            ' 2. Determine mail source and the store that owns the current folder
+            Dim activeStore As Outlook.Store = Nothing
+            Dim mails As List(Of MailMoverEntry) = CollectMailsForProcessing(activeStore)
             If mails Is Nothing OrElse mails.Count = 0 Then Return
 
             ' 3. Ask body mode: latest reply only or full body (capped)
@@ -163,8 +165,8 @@ Partial Public Class ThisAddIn
                 If confirmChoice <> 1 Then Return
             End If
 
-            ' 5. Collect folder list
-            Dim folders As List(Of String) = CollectAllFolders()
+            ' 5. Collect folder list from the active store (not the default store)
+            Dim folders As List(Of String) = CollectAllFolders(activeStore)
             If folders Is Nothing OrElse folders.Count = 0 Then
                 ShowCustomMessageBox("No mailbox folders found.", $"{AN} - Mail Mover")
                 Return
@@ -179,7 +181,7 @@ Partial Public Class ThisAddIn
             If Not approved Then Return
 
             ' 8. Move mails
-            MoveApprovedMails(mails)
+            MoveApprovedMails(mails, activeStore)
 
         Catch ex As System.Exception
             ShowCustomMessageBox($"MailMover error: {ex.Message}", $"{AN} - Mail Mover")
@@ -216,7 +218,14 @@ Partial Public Class ThisAddIn
                         Continue For
                     End If
 
-                    Dim targetFolder As MAPIFolder = FindFolderByPath(ns, entry.OriginalFolderPath)
+                    ' Resolve the store that was used for the original operation
+                    Dim undoStore As Outlook.Store = Nothing
+                    If Not String.IsNullOrEmpty(entry.StoreID) Then
+                        Try : undoStore = ns.GetStoreFromID(entry.StoreID) : Catch : End Try
+                    End If
+                    If undoStore Is Nothing Then undoStore = ns.DefaultStore
+
+                    Dim targetFolder As MAPIFolder = FindFolderByPath(ns, entry.OriginalFolderPath, undoStore)
                     If targetFolder Is Nothing Then
                         failedCount += 1
                         Continue For
@@ -400,14 +409,30 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Determines mail source (selected mails or current folder) and collects MailMoverEntry items.
+    ''' Also sets <paramref name="activeStore"/> to the store that owns the current folder.
     ''' Returns Nothing if cancelled.
     ''' </summary>
-    Private Function CollectMailsForProcessing() As List(Of MailMoverEntry)
+    Private Function CollectMailsForProcessing(ByRef activeStore As Outlook.Store) As List(Of MailMoverEntry)
         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
         Dim explorer As Outlook.Explorer = ComRetry(Of Outlook.Explorer)(Function() outlookApp.ActiveExplorer())
         If explorer Is Nothing Then
             ShowCustomMessageBox("No active Outlook window found.", $"{AN} - Mail Mover")
             Return Nothing
+        End If
+
+        ' Determine the store from the currently viewed folder
+        Dim currentFolder As MAPIFolder = Nothing
+        Try
+            currentFolder = ComRetry(Of MAPIFolder)(Function() explorer.CurrentFolder)
+        Catch
+        End Try
+
+        If currentFolder IsNot Nothing Then
+            Try : activeStore = currentFolder.Store : Catch : End Try
+        End If
+        If activeStore Is Nothing Then
+            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+            activeStore = ns.DefaultStore
         End If
 
         Dim sel As Outlook.Selection = ComRetry(Of Outlook.Selection)(Function() explorer.Selection)
@@ -426,13 +451,6 @@ Partial Public Class ThisAddIn
                 Return ExtractMailsFromSelection(sel)
             End If
         End If
-
-        ' Use the folder the user is currently viewing
-        Dim currentFolder As MAPIFolder = Nothing
-        Try
-            currentFolder = ComRetry(Of MAPIFolder)(Function() explorer.CurrentFolder)
-        Catch
-        End Try
 
         If currentFolder Is Nothing Then
             ShowCustomMessageBox("Could not determine the current folder.", $"{AN} - Mail Mover")
@@ -573,15 +591,17 @@ Partial Public Class ThisAddIn
 #Region "MailMover Folder Enumeration"
 
     ''' <summary>
-    ''' Collects all mailbox folders from the default store.
+    ''' Collects all mailbox folders from the given store.
     ''' </summary>
-    Private Function CollectAllFolders() As List(Of String)
+    Private Function CollectAllFolders(store As Outlook.Store) As List(Of String)
         Dim folders As New List(Of String)()
         Try
-            Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
-            Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
-            Dim defaultStore As Outlook.Store = ns.DefaultStore
-            Dim rootFolder As MAPIFolder = defaultStore.GetRootFolder()
+            If store Is Nothing Then
+                Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+                Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+                store = ns.DefaultStore
+            End If
+            Dim rootFolder As MAPIFolder = store.GetRootFolder()
             EnumerateFolders(rootFolder, folders)
         Catch ex As System.Exception
             Debug.WriteLine($"CollectAllFolders error: {ex.Message}")
@@ -604,16 +624,16 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Finds a folder by full folder path in the default store.
+    ''' Finds a folder by full folder path in the given store.
     ''' </summary>
-    Private Function FindFolderByPath(ns As Outlook.NameSpace, folderPath As String) As MAPIFolder
+    Private Function FindFolderByPath(ns As Outlook.NameSpace, folderPath As String, store As Outlook.Store) As MAPIFolder
         If String.IsNullOrWhiteSpace(folderPath) Then Return Nothing
         Try
             Dim parts As String() = folderPath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
             If parts.Length < 1 Then Return Nothing
 
-            Dim defaultStore As Outlook.Store = ns.DefaultStore
-            Dim current As MAPIFolder = defaultStore.GetRootFolder()
+            If store Is Nothing Then store = ns.DefaultStore
+            Dim current As MAPIFolder = store.GetRootFolder()
 
             For i As Integer = 1 To parts.Length - 1
                 Dim partName As String = parts(i)
@@ -1208,12 +1228,17 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Moves all mails that have a SelectedFolder and records undo metadata.
     ''' </summary>
-    Private Sub MoveApprovedMails(mails As List(Of MailMoverEntry))
+    Private Sub MoveApprovedMails(mails As List(Of MailMoverEntry), store As Outlook.Store)
         Dim toMove As List(Of MailMoverEntry) = mails.Where(Function(m) m.SelectedFolder IsNot Nothing).ToList()
         If toMove.Count = 0 Then Return
 
         Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
         Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+
+        ' Capture the store ID for undo
+        Dim storeID As String = ""
+        Try : If store IsNot Nothing Then storeID = store.StoreID
+        Catch : End Try
 
         Dim undoList As New List(Of MailMoverUndoEntry)()
         Dim movedCount As Integer = 0
@@ -1243,7 +1268,7 @@ Partial Public Class ThisAddIn
                         Continue For
                     End If
 
-                    Dim targetFolder As MAPIFolder = FindFolderByPath(ns, entry.SelectedFolder)
+                    Dim targetFolder As MAPIFolder = FindFolderByPath(ns, entry.SelectedFolder, store)
                     If targetFolder Is Nothing Then
                         failedCount += 1
                         failedNames.Add($"{entry.Subject} (folder not found: {entry.SelectedFolder})")
@@ -1253,7 +1278,8 @@ Partial Public Class ThisAddIn
                     undoList.Add(New MailMoverUndoEntry With {
                         .EntryID = entry.EntryID,
                         .OriginalFolderPath = entry.SourceFolderPath,
-                        .TargetFolderPath = entry.SelectedFolder
+                        .TargetFolderPath = entry.SelectedFolder,
+                        .StoreID = storeID
                     })
 
                     Dim movedItem As Object = mi.Move(targetFolder)
