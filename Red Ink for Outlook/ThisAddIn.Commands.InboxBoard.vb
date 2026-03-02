@@ -1,64 +1,64 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.Commands.InboxBoard.vb
-' Purpose: Visual Kanban-style board for categorized Inbox emails. Displays
-'          flagged (categorized) mails as draggable tiles grouped by category.
-'          Supports drag-and-drop to change categories, unmarking, opening mails
-'          in Outlook, and async AI summary generation.
+' Purpose:
+'   Interactive Inbox board (Kanban-style) for Outlook mails. Displays categorized
+'   and optionally flagged messages as draggable cards, supports category/flag
+'   updates via drag-and-drop, board-folder organization, and asynchronous AI
+'   summaries.
 '
 ' Architecture:
-'  - Mail collection: Scans default Inbox for mails with at least one category.
-'    Optionally also includes flagged mails (follow-up flags). If >50 found,
-'    asks user how many to load via dropdown.
-'  - Flag support: Mails flagged for follow-up (olFlagMarked) can be included
-'    via a settings toggle. They appear in a synthetic "⚑ Flagged" column
-'    (unless they also have categories, in which case they appear in their
-'    category columns with a flag badge). The FlagRequest text (e.g. "Follow up")
-'    and optional due date are shown on the card. Completed flags (olFlagComplete)
-'    are hidden by default via a "Hide completed flags" toggle.
-'  - Conversation grouping: Mails sharing the same ConversationTopic are merged
-'    into a single card showing the latest mail, with an accurate message count.
-'    Toggle via a checkbox in the settings panel; persisted in My.Settings.
-'  - Category columns: Dynamically built from Outlook's category list. Always-
-'    present columns stored in My.Settings.InboxBoardColumns (semicolon-delimited).
-'  - Board UI: Full HTML/CSS/JS board rendered in WebView2 inside a WinForms Form.
-'    Supports dark/light theme, search, column filter, card field toggles, and
-'    drag-and-drop reordering.
-'  - JS↔VB.NET bridge: WebView2 postMessage for move/moveAdd/unmark/open/reload
-'    actions. VB.NET responds by modifying MailItem categories via COM and pushing
-'    updated data back to the board.
-'  - Drag modes: Normal drag replaces all categories with the target column's
-'    category. Ctrl+drag adds the target category while keeping existing ones
-'    (like copy vs. move in file managers). Visual feedback: green drop indicator
-'    and "+" badge when Ctrl is held.
-'  - AI Summaries: Generated asynchronously in batches after the board is displayed.
-'    Uses the existing LLM() helper with a summarization system prompt.
-'    Summaries are cached in My.Settings (JSON dict, capped at 500 entries).
-'    Summary language is selectable via a dropdown, persisted in My.Settings.
-'  - Threading: All Outlook COM access on the UI thread; LLM calls are async.
-'  - Persistence: Theme, window position/size/maximized state, card field toggles,
-'    last load count, column filter, pinned columns, summary cache, summary
-'    language, conversation grouping toggle, include-flagged toggle, and
-'    hide-done-flags toggle are all persisted via My.Settings (not localStorage).
+'  - Data collection:
+'      * Scans default Inbox and builds board entries from MailItem metadata.
+'      * Includes categorized mails; optionally includes flagged mails.
+'      * Prompts for load cap when qualifying mail volume exceeds configurable threshold.
+'  - Conversation mode:
+'      * Optional grouping by ConversationTopic into a representative card with
+'        aggregated message count and merged metadata.
+'  - Column model:
+'      * Category columns from Outlook category master list + pinned columns from settings.
+'      * Optional flagged columns:
+'          - single synthetic flagged column, or
+'          - date-bucketed flag columns (Overdue/Today/Tomorrow/This Week/.../Done).
+'  - Folder model:
+'      * User-defined board folders (separate from Outlook folders) persisted in settings.
+'      * Card assignment persisted per mail via UserProperty: `RedInkBoardFolder`.
+'  - UI host:
+'      * WinForms dialog with WebView2 rendering full HTML/CSS/JS board.
+'      * Supports search, column filter, column reorder, field toggles, theme toggle,
+'        sort per column, and card drag/drop gestures.
+'  - JS ↔ VB bridge:
+'      * WebView2 postMessage actions for move, moveAdd, unmark, open, reload,
+'        settings persistence, folder operations, and card refresh.
+'  - AI summaries:
+'      * Background batch summarization using existing `LLM()` helper and
+'        `SP_InboxBoard` prompt.
+'      * EntryID-based summary cache persisted in `My.Settings` (bounded size).
+'
+' COM / Threading:
+'  - Outlook COM operations run on UI thread (with `ComRetry` access pattern).
+'  - LLM summary generation is asynchronous with cancellation on reload/close.
+'
+' Persistence (`My.Settings`):
+'  - Window geometry/state, theme, card field toggles, column filter/order,
+'    pinned category/flag columns, load threshold + last load count,
+'    include-flagged/hide-done/grouping toggles, summary language,
+'    summary cache, board folder list, expanded folder state.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
-Imports System.Runtime.InteropServices
-Imports System.Text
 Imports System.Threading
-Imports System.Threading.Tasks
 Imports System.Windows.Forms
-Imports System.Windows.Forms.VisualStyles.VisualStyleElement.TextBox
-Imports System.Windows.Forms.VisualStyles.VisualStyleElement.ToolTip
 Imports Microsoft.Office.Interop.Outlook
 Imports Microsoft.Web.WebView2.Core
 Imports Microsoft.Web.WebView2.WinForms
-Imports Newtonsoft
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 Imports SharedLibrary.SharedLibrary
@@ -98,6 +98,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Maximum number of board folders a user can create.</summary>
     Private Const InboxBoard_MaxFolders As Integer = 20
+
+    ''' <summary>Display label for the currently tracked folder (updated on each scan).</summary>
+    Private _inboxBoardTrackedFolderLabel As String = "Inbox"
+
 
     ''' <summary>Column IDs for date-bucketed flagged columns.</summary>
     Private Const InboxBoard_FlagBucket_Overdue As String = "⚑ Overdue"
@@ -257,6 +261,12 @@ Partial Public Class ThisAddIn
 
 #Region "InboxBoard Folder Operations"
 
+    ''' <summary>
+    ''' Reads the board-folder assignment from a mail item's user property.
+    ''' </summary>
+    ''' <returns>
+    ''' Folder name if assigned; otherwise empty string.
+    ''' </returns>
     Private Function GetMailBoardFolder(mi As MailItem) As String
         Try
             Dim prop As Outlook.UserProperty = Nothing
@@ -276,6 +286,13 @@ Partial Public Class ThisAddIn
         Return ""
     End Function
 
+    ''' <summary>
+    ''' Sets or clears the board-folder assignment user property on a mail item.
+    ''' </summary>
+    ''' <param name="entryId">Target MailItem EntryID.</param>
+    ''' <param name="folderName">
+    ''' Folder name to assign; empty value clears assignment.
+    ''' </param>
     Private Sub SetMailBoardFolder(entryId As String, folderName As String)
         Try
             Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
@@ -503,19 +520,23 @@ Partial Public Class ThisAddIn
 #Region "InboxBoard Mail Collection"
 
     ''' <summary>
-    ''' Scans the default Inbox for mails that have at least one category assigned,
-    ''' and optionally mails that are flagged for follow-up.
+    ''' Scans the configured target folder (defaulting to default Inbox) for mails that
+    ''' have at least one category assigned, and optionally mails that are flagged for follow-up.
     ''' If qualifying mails exceed the user's load threshold, asks how many to load.
+    ''' When "include subfolders" is enabled, recursively scans child folders as well.
     ''' </summary>
     Private Function CollectCategorizedInboxMails(Optional maxOverride As Integer = 0) As List(Of InboxBoardEntry)
-        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
-        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
-        Dim inbox As MAPIFolder = ComRetry(Of MAPIFolder)(Function() ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox))
+        ' Resolve target folder from My.Settings (StoreId + FolderPath)
+        Dim targetFolder As MAPIFolder = GetInboxBoardTargetFolder()
 
-        If inbox Is Nothing Then
-            ShowCustomMessageBox("Could not access the Inbox folder.", $"{AN} - Inbox Board")
+        If targetFolder Is Nothing Then
+            ShowCustomMessageBox("Could not access the target folder.", $"{AN} - Inbox Board")
             Return Nothing
         End If
+
+        ' Read subfolder setting
+        Dim includeSubfolders As Boolean = True
+        Try : includeSubfolders = My.Settings.InboxBoardIncludeSubfolders : Catch : End Try
 
         ' Read flag-related settings
         Dim includeFlagged As Boolean = False
@@ -528,33 +549,21 @@ Partial Public Class ThisAddIn
         Try : loadThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
         If loadThreshold <= 0 Then loadThreshold = InboxBoard_DefaultLoadThreshold
 
-        Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() inbox.Items)
-        Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
+        ' Collect all mail items from target folder (+ subfolders)
+        Dim allMailItems As List(Of MailItem) = CollectMailItemsFromFolder(targetFolder, includeSubfolders)
 
-        ' Count qualifying mails (manual check to avoid Restrict miscounting)
-        ' Note: Flagged mails are ALWAYS counted here regardless of the includeFlagged
-        ' toggle, so the board opens when flagged mails exist. The toggle only controls
-        ' whether flagged mails are *displayed* (via BuildInboxBoardEntry/BuildBoardColumns).
+        ' Count qualifying mails
         Dim totalQualifying As Integer = 0
-        For i As Integer = 1 To totalItems
+        For Each mi In allMailItems
             Try
-                Dim idx As Integer = i
-                Dim item As Object = ComRetry(Function() folderItems.Item(idx))
-                Dim mi As MailItem = TryCast(item, MailItem)
-                If mi Is Nothing Then Continue For
-
                 Dim cats As String = ""
                 Try : cats = ComRetry(Of String)(Function() If(mi.Categories, "")) : Catch : End Try
                 Dim hasCats As Boolean = Not String.IsNullOrWhiteSpace(cats)
 
                 Dim qualifies As Boolean = hasCats
                 If Not qualifies Then
-                    ' Always count flagged mails so the board can open.
-                    ' The includeFlagged toggle only affects display, not whether
-                    ' the board launches.
                     Dim flagStatus As Integer = 0
                     Try : flagStatus = ComRetry(Of Integer)(Function() CInt(mi.FlagStatus)) : Catch : End Try
-                    ' olFlagMarked = 2, olFlagComplete = 1
                     If flagStatus = 2 Then
                         qualifies = True
                     ElseIf flagStatus = 1 AndAlso Not hideDoneFlags Then
@@ -568,8 +577,6 @@ Partial Public Class ThisAddIn
         Next
 
         If totalQualifying = 0 Then
-            ' Also allow the board to open if there are pinned columns
-            ' (even with zero qualifying mails, empty columns are useful as drop targets)
             Dim hasPinnedColumns As Boolean = False
             Try
                 Dim pinned As String = If(My.Settings.InboxBoardColumns, "")
@@ -585,11 +592,10 @@ Partial Public Class ThisAddIn
             End Try
 
             If Not hasPinnedColumns AndAlso Not hasPinnedFlagColumns Then
-                ShowCustomMessageBox("No categorized or flagged mails found in the Inbox.", $"{AN} - Inbox Board")
+                ShowCustomMessageBox($"No categorized or flagged mails found in ""{_inboxBoardTrackedFolderLabel}"".", $"{AN} - Inbox Board")
                 Return Nothing
             End If
 
-            ' Return an empty list — the board will show pinned columns with no cards
             Return New List(Of InboxBoardEntry)()
         End If
 
@@ -597,13 +603,9 @@ Partial Public Class ThisAddIn
 
         ' Prompt user if qualifying mails exceed the threshold
         If totalQualifying > loadThreshold Then
-            ' On reload within the same session, reuse the user's last choice
-            ' without re-prompting. _inboxBoardLastMaxToLoad is only set to a
-            ' non-zero value after the user has made a choice in this session.
             If _inboxBoardLastMaxToLoad > 0 Then
                 maxToLoad = _inboxBoardLastMaxToLoad
             Else
-                ' Build selection options: threshold, then 2x, 5x, and All
                 Dim items As New List(Of SelectionItem)()
                 items.Add(New SelectionItem($"{loadThreshold} mails", loadThreshold))
                 If loadThreshold * 2 < totalQualifying Then
@@ -618,7 +620,7 @@ Partial Public Class ThisAddIn
                 items.Add(New SelectionItem($"All ({totalQualifying} mails)", totalQualifying))
 
                 Dim chosen As Integer = SelectValue(items, loadThreshold,
-                    $"Found {totalQualifying} qualifying mails in Inbox (threshold: {loadThreshold})." & vbCrLf &
+                    $"Found {totalQualifying} qualifying mails in ""{_inboxBoardTrackedFolderLabel}"" (threshold: {loadThreshold})." & vbCrLf &
                     "How many should be loaded?",
                     $"{AN} - Inbox Board")
                 If chosen = 0 Then Return Nothing
@@ -626,7 +628,6 @@ Partial Public Class ThisAddIn
             End If
         End If
 
-        ' Remember the effective load count for Refresh and persist
         _inboxBoardLastMaxToLoad = maxToLoad
         Try
             My.Settings.InboxBoardLastLoadCount = maxToLoad
@@ -635,19 +636,16 @@ Partial Public Class ThisAddIn
         End Try
 
         ' Build the category color map from Outlook
+        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
         Dim categoryColors As Dictionary(Of String, String) = GetOutlookCategoryColors(ns)
 
-        ' Extract entries (manual filter, then sort)
+        ' Extract entries
         Dim entries As New List(Of InboxBoardEntry)()
-        For i As Integer = 1 To totalItems
+        For Each mi In allMailItems
             Try
-                Dim idx As Integer = i
-                Dim item As Object = ComRetry(Function() folderItems.Item(idx))
-                Dim mi As MailItem = TryCast(item, MailItem)
-                If mi IsNot Nothing Then
-                    Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors, includeFlagged, hideDoneFlags)
-                    If entry IsNot Nothing Then entries.Add(entry)
-                End If
+                Dim entry As InboxBoardEntry = BuildInboxBoardEntry(mi, categoryColors, includeFlagged, hideDoneFlags)
+                If entry IsNot Nothing Then entries.Add(entry)
             Catch
             End Try
         Next
@@ -676,7 +674,6 @@ Partial Public Class ThisAddIn
         Next
 
         ' Auto-register any orphaned board folder names found on mails
-        ' (e.g. folder was deleted from settings but the UserProperty remains)
         Dim knownFolders = GetBoardFolderNames()
         Dim foldersChanged As Boolean = False
         For Each entry In entries
@@ -691,6 +688,7 @@ Partial Public Class ThisAddIn
 
         Return entries
     End Function
+
 
     ''' <summary>
     ''' Groups entries by ConversationTopic. For each conversation with 2+ mails,
@@ -1070,8 +1068,8 @@ Partial Public Class ThisAddIn
                 Next
 
                 ' Always show Today and Tomorrow even if empty, so users can drag into them
-                usedBuckets.Add(InboxBoard_FlagBucket_Today)
-                usedBuckets.Add(InboxBoard_FlagBucket_Tomorrow)
+                'usedBuckets.Add(InboxBoard_FlagBucket_Today)
+                'usedBuckets.Add(InboxBoard_FlagBucket_Tomorrow)
 
                 ' Add pinned flag columns from settings (user-chosen always-visible buckets)
                 Dim pinnedFlagCols As String = ""
@@ -1135,6 +1133,394 @@ Partial Public Class ThisAddIn
 
         Return columns
     End Function
+
+#End Region
+
+#Region "InboxBoard Target Folder"
+
+    ''' <summary>
+    ''' Resolves the target MAPI folder for the board based on persisted
+    ''' My.Settings (StoreId + FolderPath). Falls back to the default Inbox.
+    ''' Also sets <see cref="_inboxBoardTrackedFolderLabel"/> for UI display.
+    ''' </summary>
+    ''' <returns>The resolved MAPIFolder, or Nothing if unreachable.</returns>
+    Private Function GetInboxBoardTargetFolder() As MAPIFolder
+        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+
+        Dim savedStoreId As String = ""
+        Dim savedFolderPath As String = ""
+        Try : savedStoreId = If(My.Settings.InboxBoardStoreId, "") : Catch : End Try
+        Try : savedFolderPath = If(My.Settings.InboxBoardFolderPath, "") : Catch : End Try
+
+        ' If both are empty, use the currently open folder in the Explorer
+        If String.IsNullOrWhiteSpace(savedStoreId) AndAlso String.IsNullOrWhiteSpace(savedFolderPath) Then
+            Dim explorerFolder As MAPIFolder = Nothing
+            Try
+                Dim explorer As Outlook.Explorer = outlookApp.ActiveExplorer()
+                If explorer IsNot Nothing Then
+                    explorerFolder = ComRetry(Of MAPIFolder)(Function() explorer.CurrentFolder)
+                End If
+            Catch
+            End Try
+
+            If explorerFolder Is Nothing Then
+                explorerFolder = ComRetry(Of MAPIFolder)(Function() ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox))
+            End If
+
+            _inboxBoardTrackedFolderLabel = GetFolderDisplayLabel(explorerFolder)
+            Return explorerFolder
+        End If
+
+        ' Try to resolve the store
+        Dim targetStore As Outlook.Store = Nothing
+        If Not String.IsNullOrWhiteSpace(savedStoreId) Then
+            Try
+                For Each st As Outlook.Store In ns.Stores
+                    Try
+                        If st.StoreID = savedStoreId Then
+                            targetStore = st
+                            Exit For
+                        End If
+                    Catch
+                    End Try
+                Next
+            Catch
+            End Try
+        End If
+
+        ' If no specific folder path, use the store's default Inbox
+        If String.IsNullOrWhiteSpace(savedFolderPath) Then
+            If targetStore IsNot Nothing Then
+                Try
+                    Dim storeInbox As MAPIFolder = ComRetry(Of MAPIFolder)(Function() targetStore.GetDefaultFolder(OlDefaultFolders.olFolderInbox))
+                    If storeInbox IsNot Nothing Then
+                        _inboxBoardTrackedFolderLabel = GetFolderDisplayLabel(storeInbox)
+                        Return storeInbox
+                    End If
+                Catch
+                End Try
+            End If
+
+            ' Fallback
+            Dim fallback As MAPIFolder = ComRetry(Of MAPIFolder)(Function() ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox))
+            _inboxBoardTrackedFolderLabel = GetFolderDisplayLabel(fallback)
+            Return fallback
+        End If
+
+        ' Resolve a specific folder by path within the store
+        Dim targetFolder As MAPIFolder = Nothing
+        If targetStore IsNot Nothing Then
+            targetFolder = FindFolderByPathInStore(targetStore, savedFolderPath)
+        End If
+
+        ' If store-based lookup failed, try all stores (in case the store was re-added)
+        If targetFolder Is Nothing Then
+            Try
+                For Each st As Outlook.Store In ns.Stores
+                    targetFolder = FindFolderByPathInStore(st, savedFolderPath)
+                    If targetFolder IsNot Nothing Then Exit For
+                Next
+            Catch
+            End Try
+        End If
+
+        If targetFolder IsNot Nothing Then
+            _inboxBoardTrackedFolderLabel = GetFolderDisplayLabel(targetFolder)
+            Return targetFolder
+        End If
+
+        ' Final fallback
+        Debug.WriteLine($"[InboxBoard] Could not resolve saved folder StoreId={savedStoreId}, Path={savedFolderPath}. Falling back to default Inbox.")
+        Dim defaultInbox As MAPIFolder = ComRetry(Of MAPIFolder)(Function() ns.GetDefaultFolder(OlDefaultFolders.olFolderInbox))
+        _inboxBoardTrackedFolderLabel = GetFolderDisplayLabel(defaultInbox)
+        Return defaultInbox
+    End Function
+
+    ''' <summary>
+    ''' Navigates a store's folder tree to find a folder by its relative path
+    ''' (e.g. "Inbox\Projects\Active"). Path parts are separated by backslash.
+    ''' </summary>
+    Private Function FindFolderByPathInStore(store As Outlook.Store, relativePath As String) As MAPIFolder
+        If store Is Nothing OrElse String.IsNullOrWhiteSpace(relativePath) Then Return Nothing
+        Try
+            Dim parts As String() = relativePath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
+            If parts.Length = 0 Then Return Nothing
+
+            Dim root As MAPIFolder = store.GetRootFolder()
+            Dim current As MAPIFolder = root
+
+            For Each partName In parts
+                Dim found As Boolean = False
+                Dim subFolders As Outlook.Folders = current.Folders
+                For Each subF As MAPIFolder In subFolders
+                    If String.Equals(subF.Name, partName, StringComparison.OrdinalIgnoreCase) Then
+                        current = subF
+                        found = True
+                        Exit For
+                    End If
+                Next
+                If Not found Then Return Nothing
+            Next
+
+            Return current
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Builds a human-readable display label for a folder, e.g. "user@example.com / Inbox".
+    ''' </summary>
+    Private Function GetFolderDisplayLabel(folder As MAPIFolder) As String
+        If folder Is Nothing Then Return "Inbox"
+        Try
+            Dim folderPath As String = folder.FolderPath
+            ' FolderPath looks like "\\account@mail.com\Inbox\Sub"
+            ' Strip the leading \\ and split into store-name + relative path
+            Dim trimmed As String = folderPath.TrimStart("\"c)
+            Dim sepIdx As Integer = trimmed.IndexOf("\"c)
+            If sepIdx > 0 Then
+                Dim storeName As String = trimmed.Substring(0, sepIdx)
+                Dim relPath As String = trimmed.Substring(sepIdx + 1)
+                Return storeName & " / " & relPath.Replace("\", " / ")
+            End If
+            Return trimmed.Replace("\", " / ")
+        Catch
+            Return "Inbox"
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Builds the relative folder path (within its store) from the full FolderPath.
+    ''' E.g. "\\account\Inbox\Sub" → "Inbox\Sub".
+    ''' </summary>
+    Private Shared Function GetRelativeFolderPath(folder As MAPIFolder) As String
+        If folder Is Nothing Then Return ""
+        Try
+            Dim folderPath As String = folder.FolderPath
+            Dim trimmed As String = folderPath.TrimStart("\"c)
+            Dim sepIdx As Integer = trimmed.IndexOf("\"c)
+            If sepIdx > 0 Then Return trimmed.Substring(sepIdx + 1)
+            Return trimmed
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Prompts the user to select a mailbox (Store) and then a folder within it.
+    ''' Persists the choice to My.Settings. Returns True if the user confirmed,
+    ''' False if cancelled.
+    ''' </summary>
+    Private Function PromptSelectTargetFolder() As Boolean
+        Dim outlookApp As Microsoft.Office.Interop.Outlook.Application = Globals.ThisAddIn.Application
+        Dim ns As Outlook.NameSpace = outlookApp.GetNamespace("MAPI")
+
+        ' ── Step 1: Select mailbox (Store) ──
+        Dim stores As New List(Of Outlook.Store)()
+        Try
+            For Each st As Outlook.Store In ns.Stores
+                Try
+                    ' Only include stores that have a valid display name and root folder
+                    Dim rootF As MAPIFolder = st.GetRootFolder()
+                    If rootF IsNot Nothing Then stores.Add(st)
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+
+        If stores.Count = 0 Then
+            ShowCustomMessageBox("No mailbox stores found.", $"{AN} - Inbox Board")
+            Return False
+        End If
+
+        ' Read currently saved StoreId for pre-selection
+        Dim currentStoreId As String = ""
+        Try : currentStoreId = If(My.Settings.InboxBoardStoreId, "") : Catch : End Try
+
+        Dim storeItems As New List(Of SelectionItem)()
+        Dim defaultStoreIdx As Integer = 1
+        For i As Integer = 0 To stores.Count - 1
+            Dim displayName As String = ""
+            Try : displayName = stores(i).DisplayName : Catch : End Try
+            If String.IsNullOrWhiteSpace(displayName) Then displayName = $"Store {i + 1}"
+            storeItems.Add(New SelectionItem(displayName, i + 1))
+            If Not String.IsNullOrWhiteSpace(currentStoreId) AndAlso stores(i).StoreID = currentStoreId Then
+                defaultStoreIdx = i + 1
+            End If
+        Next
+
+        Dim selectedStoreVal As Integer = SelectValue(
+            storeItems, defaultStoreIdx,
+            "Select the mailbox (account) to track:",
+            $"{AN} - Inbox Board — Mailbox")
+        If selectedStoreVal <= 0 Then Return False
+
+        Dim chosenStore As Outlook.Store = stores(selectedStoreVal - 1)
+
+        ' ── Step 2: Select folder within the store ──
+        Dim folderPaths As New List(Of String)()
+        Dim folderObjects As New List(Of MAPIFolder)()
+        Try
+            Dim rootFolder As MAPIFolder = chosenStore.GetRootFolder()
+            CollectFoldersRecursive(rootFolder, folderPaths, folderObjects, 0)
+        Catch
+        End Try
+
+        If folderPaths.Count = 0 Then
+            ShowCustomMessageBox("No folders found in the selected mailbox.", $"{AN} - Inbox Board")
+            Return False
+        End If
+
+        ' Read currently saved folder path for pre-selection
+        Dim currentFolderPath As String = ""
+        Try : currentFolderPath = If(My.Settings.InboxBoardFolderPath, "") : Catch : End Try
+
+        Dim folderItems As New List(Of SelectionItem)()
+        Dim defaultFolderIdx As Integer = 1
+        For i As Integer = 0 To folderPaths.Count - 1
+            folderItems.Add(New SelectionItem(folderPaths(i), i + 1))
+            ' Pre-select either the saved folder or the Inbox
+            Dim relPath As String = GetRelativeFolderPath(folderObjects(i))
+            If Not String.IsNullOrWhiteSpace(currentFolderPath) AndAlso
+               chosenStore.StoreID = currentStoreId AndAlso
+               relPath.Equals(currentFolderPath, StringComparison.OrdinalIgnoreCase) Then
+                defaultFolderIdx = i + 1
+            ElseIf String.IsNullOrWhiteSpace(currentFolderPath) Then
+                ' Default to Inbox folder
+                Try
+                    If folderObjects(i).DefaultItemType = OlItemType.olMailItem AndAlso
+                       folderObjects(i).Name.Equals("Inbox", StringComparison.OrdinalIgnoreCase) Then
+                        defaultFolderIdx = i + 1
+                    End If
+                Catch
+                End Try
+            End If
+        Next
+
+        Dim selectedFolderVal As Integer = SelectValue(
+            folderItems, defaultFolderIdx,
+            $"Select the folder to track in ""{chosenStore.DisplayName}"":",
+            $"{AN} - Inbox Board — Folder")
+        If selectedFolderVal <= 0 Then Return False
+
+        Dim chosenFolder As MAPIFolder = folderObjects(selectedFolderVal - 1)
+        Dim chosenRelPath As String = GetRelativeFolderPath(chosenFolder)
+
+        ' ── Persist ──
+        Try
+            My.Settings.InboxBoardStoreId = chosenStore.StoreID
+            My.Settings.InboxBoardFolderPath = chosenRelPath
+            My.Settings.Save()
+        Catch
+        End Try
+
+        ' Reset load count so user is re-prompted on next scan
+        _inboxBoardLastMaxToLoad = 0
+
+        Debug.WriteLine($"[InboxBoard] Target folder set: Store={chosenStore.DisplayName}, Path={chosenRelPath}")
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Recursively collects all folders in a store for display in the folder picker.
+    ''' Caps at a maximum depth and total folder count to prevent crashes on large mailboxes.
+    ''' </summary>
+    Private Sub CollectFoldersRecursive(folder As MAPIFolder, paths As List(Of String),
+                                         folders As List(Of MAPIFolder), depth As Integer)
+        ' Guard: cap recursion depth and total folder count to protect against
+        ' huge Exchange/public-folder trees that can exhaust COM resources.
+        Const MaxDepth As Integer = 15
+        Const MaxFolders As Integer = 500
+
+        If depth > MaxDepth OrElse paths.Count >= MaxFolders Then Return
+
+        Try
+            ' Build an indented display name
+            Dim indent As String = New String(" "c, depth * 3)
+            Dim displayName As String = indent & folder.Name
+            paths.Add(displayName)
+            folders.Add(folder)
+
+            Dim subFolders As Outlook.Folders = Nothing
+            Try
+                subFolders = folder.Folders
+            Catch
+                Return
+            End Try
+
+            If subFolders Is Nothing Then Return
+
+            Dim subCount As Integer = 0
+            Try : subCount = subFolders.Count : Catch : Return : End Try
+
+            For i As Integer = 1 To subCount
+                If paths.Count >= MaxFolders Then Exit For
+                Try
+                    Dim idx As Integer = i
+                    Dim subF As MAPIFolder = TryCast(subFolders.Item(idx), MAPIFolder)
+                    If subF IsNot Nothing Then
+                        CollectFoldersRecursive(subF, paths, folders, depth + 1)
+                    End If
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Collects all MailItems from a folder, optionally including subfolders.
+    ''' Returns the aggregated Items-like list of (index, MailItem) pairs for
+    ''' the caller to iterate.
+    ''' </summary>
+    Private Function CollectMailItemsFromFolder(folder As MAPIFolder, includeSubfolders As Boolean) As List(Of MailItem)
+        Dim result As New List(Of MailItem)()
+        If folder Is Nothing Then Return result
+
+        Try
+            Dim folderItems As Outlook.Items = ComRetry(Of Outlook.Items)(Function() folder.Items)
+            Dim totalItems As Integer = ComRetry(Of Integer)(Function() folderItems.Count)
+            For i As Integer = 1 To totalItems
+                Try
+                    Dim idx As Integer = i
+                    Dim item As Object = ComRetry(Function() folderItems.Item(idx))
+                    Dim mi As MailItem = TryCast(item, MailItem)
+                    If mi IsNot Nothing Then result.Add(mi)
+                Catch
+                End Try
+            Next
+        Catch
+        End Try
+
+        If includeSubfolders Then
+            Try
+                Dim subFolders As Outlook.Folders = folder.Folders
+                For Each subF As MAPIFolder In subFolders
+                    result.AddRange(CollectMailItemsFromFolder(subF, True))
+                Next
+            Catch
+            End Try
+        End If
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Resets the tracked folder to the default Inbox and clears persisted settings.
+    ''' </summary>
+    Private Sub ResetInboxBoardTargetFolder()
+        Try
+            My.Settings.InboxBoardStoreId = ""
+            My.Settings.InboxBoardFolderPath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+        _inboxBoardLastMaxToLoad = 0
+        _inboxBoardTrackedFolderLabel = "Inbox"
+    End Sub
 
 #End Region
 
@@ -1940,6 +2326,47 @@ Partial Public Class ThisAddIn
                         expandedSet.Remove(folderName)
                     End If
                     SaveExpandedFolders(expandedSet)
+
+                Case "changeTargetFolder"
+                    ' Prompt user to select a new mailbox and folder
+                    Dim changed As Boolean = PromptSelectTargetFolder()
+                    If changed Then
+                        ' Trigger a full reload with the new folder
+                        HandleBoardReload(mails, columns, webView, frm, summaryCts)
+                        ' Push the updated folder label to JS
+                        Try
+                            webView.CoreWebView2.PostWebMessageAsJson(
+                                JsonConvert.SerializeObject(New With {
+                                    .action = "updateFolderLabel",
+                                    .label = _inboxBoardTrackedFolderLabel
+                                }))
+                        Catch
+                        End Try
+                    End If
+
+                Case "resetTargetFolder"
+                    ' Reset to default Inbox
+                    ResetInboxBoardTargetFolder()
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
+                    Try
+                        webView.CoreWebView2.PostWebMessageAsJson(
+                            JsonConvert.SerializeObject(New With {
+                                .action = "updateFolderLabel",
+                                .label = _inboxBoardTrackedFolderLabel
+                            }))
+                    Catch
+                    End Try
+
+                Case "setIncludeSubfolders"
+                    ' Persist include-subfolders toggle and reload
+                    Try
+                        Dim enabled As Boolean = CBool(msg("enabled"))
+                        My.Settings.InboxBoardIncludeSubfolders = enabled
+                        My.Settings.Save()
+                    Catch
+                    End Try
+                    HandleBoardReload(mails, columns, webView, frm, summaryCts)
+
             End Select
 
         Catch ex As System.Exception
@@ -2454,6 +2881,8 @@ Partial Public Class ThisAddIn
         Next
         root("folders") = foldersArr
 
+        root("trackedFolder") = If(_inboxBoardTrackedFolderLabel, "Inbox")
+
         Return root.ToString(Formatting.None)
     End Function
 
@@ -2476,6 +2905,8 @@ Partial Public Class ThisAddIn
         Dim savedIncludeFlagged As Boolean = False
         Dim savedHideDoneFlags As Boolean = True
         Dim savedGroupFlagsByDate As Boolean = False
+        Dim savedIncludeSubfolders As Boolean = True
+        Try : savedIncludeSubfolders = My.Settings.InboxBoardIncludeSubfolders : Catch : End Try
         Try : savedTheme = If(My.Settings.InboxBoardTheme, "") : Catch : End Try
         Try : savedFields = If(My.Settings.InboxBoardFields, "") : Catch : End Try
         Try : savedColumnFilter = If(My.Settings.InboxBoardColumnFilter, "") : Catch : End Try
@@ -2542,6 +2973,8 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"const SAVED_GROUP_FLAGS_BY_DATE = {If(savedGroupFlagsByDate, "true", "false")};")
         sb.AppendLine($"const FLAGGED_COLUMN_ID = {JsonConvert.SerializeObject(InboxBoard_FlaggedColumnId)};")
         sb.AppendLine($"const SAVED_FOLDERS = {savedFoldersJson};")
+        sb.AppendLine($"const SAVED_INCLUDE_SUBFOLDERS = {If(savedIncludeSubfolders, "true", "false")};")
+        sb.AppendLine($"const SAVED_TRACKED_FOLDER = {JsonConvert.SerializeObject(_inboxBoardTrackedFolderLabel)};")
         sb.AppendLine(GetBoardJavaScript())
         sb.AppendLine("</script>")
         sb.AppendLine("</body>")
@@ -2550,6 +2983,9 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+    ''' <summary>
+    ''' Returns the full CSS stylesheet used by the Inbox Board HTML host.
+    ''' </summary>
     Private Function GetBoardCss() As String
         Return "
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2695,7 +3131,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .card-categories { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 4px; }
 .card-cat-badge { font-size: 9px; padding: 1px 6px; border-radius: 8px; color: #fff;
   white-space: nowrap; line-height: 1.4; font-weight: 500; }
-.card-folder-badge { font-size: 10px; color: #8b5cf6; margin-bottom: 3px; white-space: nowrap;
+.card-folder-badge { font-size: 10px; color: #b91c1c; margin-bottom: 3px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; }
 .toast-container { position: fixed; bottom: 16px; right: 16px; display: flex;
   flex-direction: column-reverse; gap: 6px; z-index: 1000; pointer-events: none; }
@@ -2721,13 +3157,13 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
 .folder-tile { background: var(--col-bg); border: 2px dashed var(--col-border); border-radius: 8px;
   padding: 9px 11px; cursor: pointer; user-select: none; margin-bottom: 6px;
   transition: background 0.2s, border-color 0.2s; display: flex; align-items: center; gap: 8px; }
-.folder-tile:hover { border-color: #3b82f6; background: var(--drop-highlight); }
-.folder-tile.drag-over { border-color: #3b82f6; background: var(--drop-highlight); border-style: solid; }
-.folder-tile.selected { border-color: #8b5cf6; background: rgba(139,92,246,0.15); border-style: solid; }
+.folder-tile:hover { border-color: #dc2626; background: rgba(185,28,28,0.08); }
+.folder-tile.drag-over { border-color: #dc2626; background: rgba(185,28,28,0.08); border-style: solid; }
+.folder-tile.selected { border-color: #991b1b; background: rgba(153,27,27,0.15); border-style: solid; }
 .folder-tile.show-all { border-color: var(--text-muted); }
 .folder-tile.show-all:hover { border-color: #ef4444; }
 .folder-tile.show-foldered-toggle { border-color: var(--text-muted); border-style: dashed; }
-.folder-tile.show-foldered-toggle:hover { border-color: #8b5cf6; }
+.folder-tile.show-foldered-toggle:hover { border-color: #b91c1c; }
 .folder-tile .folder-icon { font-size: 16px; flex-shrink: 0; }
 .folder-tile .folder-name { font-weight: 600; font-size: 13px; flex: 1; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap; }
@@ -2815,6 +3251,11 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Try : savedThreshold = My.Settings.InboxBoardLoadThreshold : Catch : End Try
         If savedThreshold <= 0 Then savedThreshold = InboxBoard_DefaultLoadThreshold
 
+        ' Include subfolders checkbox
+        Dim subfoldersChecked As String = ""
+        Try : If My.Settings.InboxBoardIncludeSubfolders Then subfoldersChecked = " checked"
+        Catch : subfoldersChecked = " checked" : End Try
+
         Return $"
 <div class=""header"">
   <div class=""topline"">
@@ -2852,6 +3293,16 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         </div>
         <input type=""number"" id=""loadThresholdInput"" value=""{savedThreshold}"" min=""50"" max=""50000"" step=""50""
           style=""padding:4px 6px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;outline:none;width:100%"">
+        <h3 class=""section-divider"">Tracked Folder</h3>
+        <div style=""font-size:11px;color:var(--text-muted);line-height:1.4;padding:0 0 4px 0"">
+          Currently tracking:
+        </div>
+        <div id=""trackedFolderLabel"" style=""font-size:12px;font-weight:600;color:var(--text);padding:2px 0 6px 0;word-break:break-all""></div>
+        <div style=""display:flex;gap:4px;margin-bottom:6px"">
+          <button id=""changeFolderBtn"" style=""flex:1;padding:5px 8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;cursor:pointer"">Change…</button>
+          <button id=""resetFolderBtn"" style=""padding:5px 8px;border:1px solid var(--input-border);border-radius:4px;background:var(--input-bg);color:var(--text);font-size:12px;cursor:pointer"" title=""Reset to default Inbox"">↺</button>
+        </div>
+        <label><input type=""checkbox"" id=""includeSubfoldersChk""{subfoldersChecked}> Include subfolders</label>
         <h3 class=""section-divider"">Pinned Columns</h3>
 {pinnedHtml.ToString().TrimEnd()}
         <h3 class=""section-divider"">Pinned Flag Columns</h3>
@@ -2913,7 +3364,6 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         Return sb.ToString().TrimEnd()
     End Function
 
-
     ''' <summary>Returns the JavaScript for the board.</summary>
     Private Function GetBoardJavaScript() As String
         Dim js As New StringBuilder(30000)
@@ -2935,6 +3385,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    COLUMNS = d.columns || [];")
         js.AppendLine("    cards = (d.cards || []).map(function(c, i) { return Object.assign({}, c, { id: i + 1 }); });")
         js.AppendLine("    if (d.folders) { boardFolders = d.folders; }")
+        js.AppendLine("    if (d.trackedFolder) { var lbl = document.getElementById('trackedFolderLabel'); if (lbl) lbl.textContent = d.trackedFolder; }")
         js.AppendLine("    console.log('InboxBoard init: ' + cards.length + ' cards, ' + COLUMNS.length + ' columns');")
         js.AppendLine("    populateColumnFilter();")
         js.AppendLine("    renderBoard();")
@@ -3082,6 +3533,22 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("  threshInput.addEventListener('input', function() { if (threshTimer) clearTimeout(threshTimer); threshTimer = setTimeout(commitThreshold, 1500); });")
         js.AppendLine("  threshInput.addEventListener('blur', function() { if (threshTimer) { clearTimeout(threshTimer); threshTimer = null; } commitThreshold(); });")
         js.AppendLine("  threshInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); if (threshTimer) { clearTimeout(threshTimer); threshTimer = null; } commitThreshold(); threshInput.blur(); } });")
+        js.AppendLine("})();")
+        js.AppendLine()
+        ' --- Tracked folder controls ---
+        js.AppendLine("document.getElementById('changeFolderBtn').addEventListener('click', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'changeTargetFolder' }));")
+        js.AppendLine("});")
+        js.AppendLine("document.getElementById('resetFolderBtn').addEventListener('click', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'resetTargetFolder' }));")
+        js.AppendLine("  showToast('Reset to default Inbox');")
+        js.AppendLine("});")
+        js.AppendLine("document.getElementById('includeSubfoldersChk').addEventListener('change', function() {")
+        js.AppendLine("  window.chrome.webview.postMessage(JSON.stringify({ action: 'setIncludeSubfolders', enabled: this.checked }));")
+        js.AppendLine("});")
+        js.AppendLine("(function() {")
+        js.AppendLine("  var lbl = document.getElementById('trackedFolderLabel');")
+        js.AppendLine("  if (lbl) lbl.textContent = (typeof SAVED_TRACKED_FOLDER !== 'undefined') ? SAVED_TRACKED_FOLDER : 'Inbox';")
         js.AppendLine("})();")
         js.AppendLine()
         ' --- Folder helpers (new: dedicated folder column + filter) ---
@@ -3235,10 +3702,9 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("    folderCol.className = 'column folder-column';")
         js.AppendLine("    folderCol.dataset.column = '__folders__';")
         js.AppendLine("    var fHeader = document.createElement('div'); fHeader.className = 'column-header'; fHeader.draggable = false; fHeader.style.cursor = 'default';")
-        js.AppendLine("    var fDot = document.createElement('span'); fDot.className = 'dot'; fDot.style.background = '#3b82f6';")
         js.AppendLine("    var fTitle = document.createElement('span'); fTitle.textContent = '\uD83D\uDCC1 Folders';")
         js.AppendLine("    var fCount = document.createElement('span'); fCount.className = 'count'; fCount.textContent = allFolderNames.length;")
-        js.AppendLine("    fHeader.appendChild(fDot); fHeader.appendChild(fTitle); fHeader.appendChild(fCount);")
+        js.AppendLine("    fHeader.appendChild(fTitle); fHeader.appendChild(fCount);")
         js.AppendLine("    folderCol.appendChild(fHeader);")
         js.AppendLine("    var fList = document.createElement('div'); fList.className = 'card-list'; fList.dataset.column = '__folders__';")
         ' Show All button (only visible when a folder is selected)
@@ -3535,6 +4001,10 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
         js.AppendLine("        card.flagRequest = msg.flagRequest || ''; card.flagDueDate = msg.flagDueDate || '';")
         js.AppendLine("        card.flagBucket = msg.flagBucket || ''; card.boardFolder = msg.boardFolder || ''; }")
         js.AppendLine("      renderBoard();")
+        js.AppendLine("    } else if (msg.action === 'updateFolderLabel') {")
+        js.AppendLine("      var lbl = document.getElementById('trackedFolderLabel');")
+        js.AppendLine("      if (lbl) lbl.textContent = msg.label || 'Inbox';")
+        js.AppendLine("      showToast('\uD83D\uDCC2 Now tracking: ' + (msg.label || 'Inbox'));")
         js.AppendLine("    }")
         js.AppendLine("  });")
         js.AppendLine("}")
@@ -3550,5 +4020,7 @@ body { font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
     End Function
 
 #End Region
+
+
 
 End Class

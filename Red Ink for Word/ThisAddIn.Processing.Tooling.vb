@@ -257,18 +257,6 @@ Partial Public Class ThisAddIn
             End Try
         End Sub
 
-        ''' <summary>
-        ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
-        ''' </summary>
-        Public Shared Sub LogPreMainLlmCallSnapshot()
-            If Not _isEnabled Then Return
-            WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
-            WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
-            WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: {SafeStr(INI_APICall_ToolInstructions_2)}")
-            WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {SafeStr(INI_APICall_ToolResponses_2)}")
-            WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
-        End Sub
 
         ''' <summary>
         ''' Logs a snapshot of selected variables prior to calling an external tool/service via <c>LLM</c>.
@@ -287,6 +275,31 @@ Partial Public Class ThisAddIn
         End Sub
 
         ''' <summary>
+        ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
+        ''' Tool instructions and tool responses are logged as length stubs only (full content is already
+        ''' recorded via <see cref="LogModelConfigOnce"/>).
+        ''' </summary>
+        Public Shared Sub LogPreMainLlmCallSnapshot()
+            If Not _isEnabled Then Return
+            WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
+            WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
+            WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
+
+            Dim toolInstr = SafeStr(INI_APICall_ToolInstructions_2)
+            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: ({toolInstr.Length} chars)")
+
+            Dim toolResp = SafeStr(INI_APICall_ToolResponses_2)
+            If toolResp.Length <= 500 Then
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {toolResp}")
+            Else
+                Dim excerpt = toolResp.Substring(0, 500) & "..."
+                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: ({toolResp.Length} chars) {excerpt}")
+            End If
+
+            WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
+        End Sub
+
+        ''' <summary>
         ''' Logs raw response content (unmodified) with two blank lines before and after.
         ''' </summary>
         ''' <param name="source">Source label (e.g. "Main LLM()" or tool name).</param>
@@ -297,6 +310,28 @@ Partial Public Class ThisAddIn
             WriteLine("RESP", $"Raw response ({source}) begins:")
             WriteRaw("RESP", vbCrLf & vbCrLf & SafeStr(rawResponse) & vbCrLf & vbCrLf)
             WriteLine("RESP", $"Raw response ({source}) ends.")
+        End Sub
+
+        ''' <summary>
+        ''' Logs a brief stub of a raw response (length + short excerpt) without the full content.
+        ''' Used for LLM and tool responses to keep the log file focused on diagnostics.
+        ''' </summary>
+        ''' <param name="source">Source label (e.g. "Main LLM()").</param>
+        ''' <param name="rawResponse">Raw response text.</param>
+        ''' <param name="excerptLength">Maximum number of characters to include in the excerpt.</param>
+        Public Shared Sub LogRawResponseStub(source As String, rawResponse As String, Optional excerptLength As Integer = 200)
+            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
+
+            Dim safe As String = SafeStr(rawResponse)
+            Dim charCount As Integer = safe.Length
+            Dim excerpt As String = If(charCount <= excerptLength,
+                safe,
+                safe.Substring(0, excerptLength) & "...")
+
+            WriteLine("RESP", $"Raw response ({source}): {charCount} chars")
+            If charCount > 0 Then
+                WriteLine("RESP", $"Excerpt: {excerpt}")
+            End If
         End Sub
 
         ''' <summary>
@@ -751,7 +786,7 @@ Partial Public Class ThisAddIn
                     fileObject,
                     True)
 
-                ToolingFileLogger.LogRawResponse("Main LLM()", currentResponse)
+                ToolingFileLogger.LogRawResponseStub("Main LLM()", currentResponse)
 
                 If String.IsNullOrWhiteSpace(currentResponse) Then
                     context.LogWarn("Empty response from LLM", details:="LLM() returned null/empty/whitespace.")
@@ -873,7 +908,7 @@ Partial Public Class ThisAddIn
                     If Not String.IsNullOrWhiteSpace(finalResponse) Then
                         currentResponse = finalResponse
                         context.Log($"Final response received ({currentResponse.Length} chars)")
-                        ToolingFileLogger.LogRawResponse("Main LLM() - Forced Final", currentResponse)
+                        ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
                     Else
                         context.LogWarn("Empty response from forced final LLM call")
                     End If
@@ -1399,24 +1434,25 @@ Partial Public Class ThisAddIn
         context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
 
         Try
+
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
-                response = Await ExecuteInternalWebTool(toolCall, context)
-                ToolingFileLogger.LogRawResponse($"Internal tool ({toolCall.ToolName})", response.Response)
-            Else
-                response = Await ExecuteExternalTool(toolCall, toolConfig, context)
-                ToolingFileLogger.LogRawResponse($"Tool LLM() ({toolCall.ToolName})", response.Response)
-            End If
+                    response = Await ExecuteInternalWebTool(toolCall, context)
+                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                Else
+                    response = Await ExecuteExternalTool(toolCall, toolConfig, context)
+                    ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
+                End If
 
-            ' Log completion with excerpt
-            If response.Success Then
-                Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
-                context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
-            Else
-                context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
-            End If
+                ' Log completion with excerpt
+                If response.Success Then
+                    Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
+                    context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
+                Else
+                    context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+                End If
 
-        Catch ex As Exception
-            response.Success = False
+            Catch ex As Exception
+                response.Success = False
             response.ErrorMessage = ex.Message
             context.Log($"Tool {toolCall.ToolName} error: {ex.Message}")
             ToolingFileLogger.LogError($"Tool {toolCall.ToolName} execution error.", ex:=ex)
@@ -1632,7 +1668,35 @@ Partial Public Class ThisAddIn
 
             For Each kvp In toolCall.Arguments
                 Dim placeholder = "{" & kvp.Key & "}"
-                Dim value = If(kvp.Value?.ToString(), "")
+                Dim value As String
+                If kvp.Value Is Nothing Then
+                    value = ""
+                ElseIf TypeOf kvp.Value Is Boolean Then
+                    ' JSON requires lowercase true/false
+                    value = If(CBool(kvp.Value), "true", "false")
+                ElseIf TypeOf kvp.Value Is JToken Then
+                    Dim jt = DirectCast(kvp.Value, JToken)
+                    If jt.Type = JTokenType.String Then
+                        ' Escape the string value for safe JSON embedding in the template
+                        value = JsonConvert.ToString(jt.Value(Of String)())
+                        ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                        value = value.Substring(1, value.Length - 2)
+                    Else
+                        ' Preserve JSON token as-is (handles nested objects/arrays)
+                        value = jt.ToString(Formatting.None)
+                    End If
+                ElseIf TypeOf kvp.Value Is Double OrElse TypeOf kvp.Value Is Single OrElse TypeOf kvp.Value Is Decimal Then
+                    ' Ensure invariant culture (dot decimal separator)
+                    value = System.Convert.ToDouble(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                ElseIf TypeOf kvp.Value Is Long OrElse TypeOf kvp.Value Is Integer OrElse TypeOf kvp.Value Is Short Then
+                    value = System.Convert.ToInt64(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
+                Else
+                    ' Escape the string for safe JSON embedding (handles ", \, newlines, etc.)
+                    Dim raw = kvp.Value.ToString()
+                    Dim escaped = JsonConvert.ToString(raw)
+                    ' JsonConvert.ToString wraps in quotes → strip the outer quotes
+                    value = escaped.Substring(1, escaped.Length - 2)
+                End If
                 apiCall = apiCall.Replace(placeholder, value)
             Next
 
@@ -1688,6 +1752,45 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' ── SSE transport: full round-trip bypassing LLM() ───────────
+            If Not String.IsNullOrWhiteSpace(toolConfig.Endpoint) AndAlso
+               toolConfig.Endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+
+                Dim sseBase = toolConfig.Endpoint.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
+                Dim resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
+
+                context.Log($"SSE transport: executing tool {toolCall.ToolName} via {sseBase}")
+                ToolingFileLogger.LogStep($"SSE round-trip for {toolCall.ToolName} at {sseBase}")
+                ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
+
+                Try
+                    Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                        sseBase, apiCall,
+                        If(toolConfig.HeaderA, ""), resolvedHeaderB,
+                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+
+                    ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
+
+                    If Not String.IsNullOrWhiteSpace(rawResult) Then
+                        response.Response = rawResult
+                        response.Success = True
+                    Else
+                        response.Success = False
+                        response.ErrorMessage = "Empty response from SSE tool service"
+                        ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
+                    End If
+
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
+                    ToolingFileLogger.LogError("SSE tool call failed.",
+                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
+                End Try
+
+                Return response
+            End If
+
+            ' ── Standard transport: route through LLM() ──────────────────
             Dim backupConfig = GetCurrentConfig(_context)
 
             Try
@@ -1711,7 +1814,7 @@ Partial Public Class ThisAddIn
 
                 Dim result = Await LLM("", "", "", "", 0, True, True)
 
-                ToolingFileLogger.LogRawResponse($"Tool LLM() result ({toolCall.ToolName})", result)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
 
                 _context.INI_Response_2 = originalResponse
 
@@ -1736,6 +1839,7 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
 
     ''' <summary>
     ''' Loads tooling service configurations from an INI file and returns tool-capable <see cref="ModelConfig"/> entries.

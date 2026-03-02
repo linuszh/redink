@@ -57,7 +57,7 @@ Snapshot Library; {AppsUrl}{AppsUrlDir}snapshotlib.txt; Word; SnapshotLibPath; T
 
 Snapshot Library (Local); ; Word; SnapshotLibPathLocal; True; %APPDATA%\microsoft\word; snapshotliblocal.txt
 
-Mail Mover Rules; {AppsUrl}{AppsUrlDir}mailmover.txt; Outlook; MailMoverPath; True; %APPDATA%\microsoft\word; mailmover.txt
+Mail Mover Rules; {AppsUrl}{AppsUrlDir}mailmover.txt; Word, Outlook; MailMoverPath; True; %APPDATA%\microsoft\word; mailmover.txt
 
-Mail Mover Rules (Local); ; Outlook; MailMoverPathLocal; True; %APPDATA%\microsoft\word; mailmoverlocal.txt
+Mail Mover Rules (Local); ; Word, Outlook; MailMoverPathLocal; True; %APPDATA%\microsoft\word; mailmoverlocal.txt
 

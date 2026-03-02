@@ -618,6 +618,7 @@
     <Compile Include="ThisAddIn.FindClause.vb" />
     <Compile Include="ThisAddIn.FindHiddenPrompt.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
+    <Compile Include="ThisAddIn.MCPImporter.vb" />
     <Compile Include="ThisAddIn.Menu.vb" />
     <Compile Include="ThisAddIn.PaneAndMerge.vb" />
     <Compile Include="ThisAddIn.Processing.Comments.vb" />

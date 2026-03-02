@@ -446,6 +446,7 @@
     <Compile Include="ThisAddIn.vb">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.WebExtension.Agent.vb" />
     <Compile Include="ThisAddIn.WebExtension.FileHelpers.vb" />
     <Compile Include="ThisAddIn.WebExtension.InkyPlay.vb" />
     <Compile Include="ThisAddIn.WebExtension.ListenerAndPower.vb" />

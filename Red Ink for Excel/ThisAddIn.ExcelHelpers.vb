@@ -1,5 +1,5 @@
 ﻿' Part of "Red Ink for Excel"
-' Copy{AN5}ght (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 
 ' =============================================================================
 ' File: ThisAddIn.ExcelHelpers.vb
