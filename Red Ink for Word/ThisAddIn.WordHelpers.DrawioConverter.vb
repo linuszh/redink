@@ -685,6 +685,15 @@ Partial Public Class ThisAddIn
                     return true;
                 });
 
+                /* Sort buttons in reverse alphabetical order (e.g. Yes before No) */
+                uniqueOutgoing.sort(function(a, b) {
+                    var labelA = (a.label || '').toLowerCase();
+                    var labelB = (b.label || '').toLowerCase();
+                    if (labelA < labelB) return 1;
+                    if (labelA > labelB) return -1;
+                    return 0;
+                });
+
                 var isSinglePath = (uniqueOutgoing.length === 1);
                 var isFirstNode = (navHistory.length <= 1);
 

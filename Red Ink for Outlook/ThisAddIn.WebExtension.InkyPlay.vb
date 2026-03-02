@@ -5,28 +5,33 @@
 ' =============================================================================
 ' File: ThisAddIn.WebExtension.InkyPlay.vb
 ' Purpose:
-'   Provides four arcade-style security awareness mini games served under
-'   `/inky/play`.  Each game optionally uses the LLM to generate fresh
-'   phishing / legitimate email content at runtime.
+'   Hosts the InkyPlay browser mini-game suite under `/inky/play`, including
+'   AI-generated phishing/safe email scenarios and persisted high scores.
 '
-' Games:
-'   1) Inbox Invaders   – Space-Invaders-style shoot-the-phish
-'   2) Phish Pong       – Pong-style deflect emails to inbox/sandbox
-'   3) Data Defender    – Pac-Man-style maze collecting safe emails
-'   4) Risk Stack       – Tetris-style categorization of incoming messages
+' Features:
+'  - Four arcade-style awareness games:
+'      1) Inbox Invaders
+'      2) Phish Pong
+'      3) Data Defender
+'      4) Risk Stack
+'  - Optional runtime scenario generation via LLM (`inkyplay_generate`).
+'  - Local high-score persistence via `My.Settings.InkyPlay_HighScores`.
 '
-' Routes:
-'   GET  /inky/play          → Game selector + full HTML/JS game suite
-'   POST /inky/api           → Commands prefixed with `inkyplay_*`
+' Routes / Commands:
+'  - GET  `/inky/play` → full single-file HTML/CSS/JS game UI
+'  - API commands routed via `/inky/api`:
+'      * `inkyplay_generate`
+'      * `inkyplay_gethighscores`
+'      * `inkyplay_savescore`
+'      * `inkyplay_clearhighscores`
 '
-' API Commands:
-'   inkyplay_generate        → Ask LLM to produce fresh email batch (JSON)
-'   inkyplay_gethighscores   → Return persisted high scores
-'   inkyplay_savescore       → Persist a new high score entry
-'   inkyplay_clearhighscores → Reset all high scores
-'
-' High Scores:
-'   Stored per-game via My.Settings.InkyPlay_HighScores (JSON string).
+' Architecture:
+'  - `BuildInkyPlayHtmlPage` returns a self-contained game page with all assets
+'    and logic embedded inline.
+'  - `ProcessInkyPlayCommand` acts as command dispatcher and JSON response producer.
+'  - Scoreboard model is serialized/deserialized as JSON and capped during save.
+'  - AI model selection prefers alternate "Play" model when configured, then
+'    falls back to primary model and finally to internal fallback email dataset.
 ' =============================================================================
 
 Option Explicit On
@@ -42,6 +47,10 @@ Partial Public Class ThisAddIn
     Private Const InkyPlayRoute As String = "/inky/play"   ' GET → game HTML
 
     ' ─── High-Score Persistence ───────────────────────────────────────────────
+
+    ''' <summary>
+    ''' Represents a single high-score entry for one game run.
+    ''' </summary>
     <Serializable>
     Private Class InkyPlayHighScore
         Public PlayerName As String = ""
@@ -51,12 +60,22 @@ Partial Public Class ThisAddIn
         Public Utc As DateTime = DateTime.UtcNow
     End Class
 
+    ''' <summary>
+    ''' Container for persisted InkyPlay high-score entries.
+    ''' </summary>
     <Serializable>
     Private Class InkyPlayScoreBoard
         Public Scores As System.Collections.Generic.List(Of InkyPlayHighScore) =
             New System.Collections.Generic.List(Of InkyPlayHighScore)()
     End Class
 
+
+    ''' <summary>
+    ''' Loads persisted InkyPlay high scores from settings.
+    ''' </summary>
+    ''' <returns>
+    ''' A valid scoreboard object; returns an empty scoreboard on missing/invalid data.
+    ''' </returns>
     Private Function LoadPlayScores() As InkyPlayScoreBoard
         Try
             Dim raw As String = ""
@@ -74,6 +93,9 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>
+    ''' Persists the InkyPlay high-score board to settings as JSON.
+    ''' </summary>
     Private Sub SavePlayScores(board As InkyPlayScoreBoard)
         Try
             Dim json = Newtonsoft.Json.JsonConvert.SerializeObject(board)

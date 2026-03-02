@@ -2,43 +2,57 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.AutoPilot.vb
-' Purpose: Inky AutoPilot — AI mail watcher that monitors incoming e-mails,
-'          filters them by domain/sender/subject rules, processes them via the
-'          LLM tooling loop, and replies to the sender with AI-generated responses.
+' File: ThisAddIn.Autopilot.vb
+' Purpose:
+'   Inky AutoPilot — AI-assisted mail watcher for Outlook that monitors incoming
+'   e-mails, applies sender/domain/subject policy filters, processes requests via
+'   LLM (with optional tool-calling), and sends or stages replies.
 '
 ' Architecture:
-'  - Event-based mail watching via Outlook's Application.NewMailEx event.
-'  - Dual-mode operation: AutoPilot (auto-send for whitelisted senders) and
-'    CoPilot (approval required, with holding response for non-whitelisted).
-'  - Filter engine: domain wildcards, sender wildcards, subject trigger words,
-'    folder filtering, negative filters, auto-reply/OOF detection, loop prevention.
-'  - Anti-loop safeguards: custom MAPI property, per-sender cooldown, max replies
-'    per session, thread depth limit, auto-reply header detection.
-'  - Stateless: each incoming mail is processed independently using the e-mail
-'    thread body for context.
-'  - Integrates with existing ExecuteToolingLoop for tool calls (document processing,
-'    PDF tools, web retrieval, and all existing specialservices tools).
-'  - Dashboard via extended LogWindow for live monitoring.
-'  - Replies are placed in Sent Items\Inky Replies subfolder.
+'  - Event-driven intake via Outlook `Application.NewMailEx`.
+'  - Dual mode:
+'      * AutoPilot: auto-send when policy permits.
+'      * CoPilot: approval workflow for non-whitelisted senders.
+'  - Trust boundary:
+'      * Positive/negative filter rules (domain/sender/folder) are always enforced.
+'      * Reply-To mismatch is logged as warning (processing continues).
+'  - Loop prevention:
+'      * Custom MAPI marker (`X-RedInk-AutoReply`) on sent replies.
+'      * Subject/header auto-reply detection (OOF/DSN patterns).
+'      * Per-sender cooldown, per-session reply limits, thread-depth limit.
+'  - Conversation awareness:
+'      * Detects prior AutoPilot participation via conversation traversal and
+'        session fallback map (`ConversationID`) to support follow-up replies.
+'  - Catch-up processing:
+'      * On start, scans recent mailbox history since last processed UTC timestamp,
+'        applies full filter pipeline, and offers operator selection dialog.
+'  - Queue + timing:
+'      * Central mail queue with processing pump.
+'      * Attachment-based category classification (text/light/heavy-doc/heavy-pdf).
+'      * Rolling timing estimates and queue position notifications for delayed jobs.
+'  - Tooling integration:
+'      * Uses existing `ExecuteToolingLoop` and AutoPilot internal tools.
+'      * Supports per-mail `#model:` override with tooling-capability checks.
+'  - Reply handling:
+'      * Sends HTML replies with optional generated attachments.
+'      * Optional approval dialog and "Sources used" footer.
+'      * Moves AutoPilot replies to Sent Items\Inky Replies.
 '
 ' Security Model for Attachments:
-'  - Each incoming e-mail gets a unique temp directory (GUID-based) under %TEMP%.
-'  - Attachments are saved into this isolated directory before processing.
-'  - Output files (processed docs, merged PDFs, compare docs) are also written
-'    into the same per-mail temp directory.
-'  - CollectResultAttachments only picks up files registered in OutputFiles AND
-'    validates they reside within the per-mail temp directory (path prefix check).
-'  - After the reply is sent (or if processing fails/is rejected), the entire
-'    temp directory is deleted recursively in the Finally block.
-'  - This ensures no sensitive attachment data persists on disk after processing.
+'  - Per-mail isolated temp directory under `%TEMP%` (GUID-based).
+'  - Attachments and tool outputs are constrained to that directory.
+'  - Result collection validates path-prefix containment before attaching outputs.
+'  - Text caches are cleared after processing.
+'  - Temp directory is deleted recursively in `Finally` (best effort).
 '
-' Model Override Command (#model:):
-'  - The sender can include "#model: <ModelName>" in the first few lines of the
-'    latest e-mail body (not in quoted replies) to request a specific model.
-'  - Only the latest/top-most portion of the body is scanned (before reply separators).
-'  - The command line is stripped from the body before passing to the LLM.
-'  - The model is applied only for this single e-mail, then restored.
+' Licensing & Access:
+'  - AutoPilot requires valid license state (`Private` or permitted `Pro` product).
+'  - Additional user whitelist gate via `INI_AutoPilot` (`*` = all licensed users).
+'
+' Threading Model:
+'  - Outlook COM access is marshaled to UI thread (`SwitchToUi`).
+'  - LLM and queue operations run asynchronously with cancellation support.
+'  - Dashboard updates are thread-safe through `LogWindow` invocation guards.
 ' =============================================================================
 
 Option Explicit On
@@ -98,10 +112,15 @@ Partial Public Class ThisAddIn
         "1702",
         "1727",
         "1827",
-        "2040",
-        "2150",
-        "1693"
+        "2040"
     }
+
+    '  1702 Pro Special
+    '  1727 Pro Test Tec
+    '  1827 Pro Test
+    '  2040 Pro Support
+    '  2150 Pro Special 2 -- NO
+    '  1693 Pro -- NO
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
@@ -137,6 +156,53 @@ Partial Public Class ThisAddIn
     ''' <summary>Captured at AutoPilot startup — the model config to re-apply before every LLM call.</summary>
     Private _apBaseModelConfig As ModelConfig = Nothing
 
+    ''' <summary>Minimum estimated queue wait (seconds) before a queue notification is sent.</summary>
+    Private Const AP_QueueNotifyThresholdSeconds As Integer = 60
+
+    ''' <summary>Extensions that indicate heavy document processing (doc processor, comment processor).</summary>
+    Private Shared ReadOnly AP_HeavyDocExtensions As String() = {".docx", ".pptx", ".xlsx", ".xls", ".doc"}
+
+    ''' <summary>Threshold (bytes) above which a PDF is considered heavy (likely OCR).</summary>
+    Private Const AP_HeavyPdfThreshold As Long = 2 * 1024 * 1024
+
+    ''' <summary>
+    ''' Internal time seeds per mail category (seconds). Used solely to decide whether
+    ''' the 60-second notification threshold is crossed — never exposed to the sender.
+    ''' </summary>
+    Private Const AP_SeedSeconds_TextOnly As Double = 15.0
+    Private Const AP_SeedSeconds_LightAttachments As Double = 30.0
+    Private Const AP_SeedSeconds_HeavyDoc As Double = 300.0
+    Private Const AP_SeedSeconds_HeavyPdf As Double = 600.0
+
+    ''' <summary>Tracks when each queued mail was first seen in the queue (EntryId → UTC enqueue time).</summary>
+    Private ReadOnly _apQueueEnqueueTimes As New ConcurrentDictionary(Of String, DateTime)()
+
+    ''' <summary>Entry IDs that have already received a queue holding notification.</summary>
+    Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ''' <summary>Rolling average processing time per mail category. Key = category tag, Value = (avg, count).</summary>
+    Private ReadOnly _apCategoryTimings As New ConcurrentDictionary(Of String, (AvgSeconds As Double, SampleCount As Integer))(StringComparer.OrdinalIgnoreCase)
+
+    ''' <summary>Stopwatch tracking the current mail's processing time.</summary>
+    Private _apCurrentProcessingStopwatch As Stopwatch = Nothing
+
+    ''' <summary>Category tag of the mail currently being processed (for timing updates).</summary>
+    Private _apCurrentProcessingCategory As String = Nothing
+
+    ''' <summary>
+    ''' Periodic timer that checks for queued mails needing holding notifications.
+    ''' Runs independently of the processing pump so notifications fire even during
+    ''' long-running tool executions (e.g. multi-hour document processing).
+    ''' </summary>
+    Private _apNotificationTimer As System.Threading.Timer = Nothing
+
+    ''' <summary>Guard to prevent overlapping notification checks.</summary>
+    Private _apNotificationCheckRunning As Integer = 0
+
+    ''' <summary>Cached HelpMeInky manual text, loaded once per AutoPilot session.</summary>
+    Private _apHelpMeManualCache As String = Nothing
+    Private _apHelpMeManualCacheLoaded As Boolean = False
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -151,6 +217,8 @@ Partial Public Class ThisAddIn
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
             End If
         Catch : End Try
+        Try : _apNotificationTimer?.Dispose() : Catch : End Try
+        _apNotificationTimer = Nothing
         Try : _apCts?.Cancel() : Catch : End Try
         Try : _apCts?.Dispose() : Catch : End Try
         _apCts = Nothing
@@ -163,6 +231,13 @@ Partial Public Class ThisAddIn
         _apBaseModelConfig = Nothing
         _apSenderCooldowns.Clear()
         _apProcessedConversations.Clear()
+        _apQueueNotifiedEntryIds.Clear()
+        _apQueueEnqueueTimes.Clear()
+        _apCategoryTimings.Clear()
+        _apCurrentProcessingStopwatch = Nothing
+        _apCurrentProcessingCategory = Nothing
+        _apHelpMeManualCache = Nothing
+        _apHelpMeManualCacheLoaded = False
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -287,6 +362,16 @@ Partial Public Class ThisAddIn
 
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
         Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
+
+        ' Start a periodic timer for queue holding notifications.
+        ' This runs independently of the processing pump so notifications
+        ' can fire even while a long tool execution blocks the pump.
+        _apNotificationTimer = New System.Threading.Timer(
+            AddressOf NotificationTimerCallback,
+            Nothing,
+            dueTime:=TimeSpan.FromSeconds(15),
+            period:=TimeSpan.FromSeconds(15))
+
     End Sub
 
     ''' <summary>Handles a dashboard stop request.</summary>
@@ -469,6 +554,7 @@ Partial Public Class ThisAddIn
             If selectedEntryIds IsNot Nothing AndAlso selectedEntryIds.Count > 0 Then
                 For Each entryId In selectedEntryIds
                     _apMailQueue.Enqueue(entryId)
+                    _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
                 Next
                 ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} missed mail(s) for processing.", "info")
             Else
@@ -544,8 +630,33 @@ Partial Public Class ThisAddIn
         If Not _apActive Then Return
         For Each id In EntryIDCollection.Split(","c)
             Dim trimmed = id.Trim()
-            If trimmed.Length > 0 Then _apMailQueue.Enqueue(trimmed)
+            If trimmed.Length > 0 Then
+                _apMailQueue.Enqueue(trimmed)
+                _apQueueEnqueueTimes.TryAdd(trimmed, DateTime.UtcNow)
+            End If
         Next
+    End Sub
+
+    ''' <summary>
+    ''' Timer callback that periodically checks for queued mails needing holding
+    ''' notifications. Uses Interlocked to prevent overlapping executions.
+    ''' </summary>
+    Private Async Sub NotificationTimerCallback(state As Object)
+        ' Guard: skip if AutoPilot is not active or already checking
+        If Not _apActive Then Return
+        If Interlocked.CompareExchange(_apNotificationCheckRunning, 1, 0) <> 0 Then Return
+
+        Try
+            Dim ct = _apCts?.Token
+            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
+            Await SendQueuePositionNotificationsAsync(ct.Value)
+        Catch ex As OperationCanceledException
+            ' Expected during shutdown
+        Catch ex As System.Exception
+            ApDashboardLog($"Notification timer error: {ex.Message}", "warn")
+        Finally
+            Interlocked.Exchange(_apNotificationCheckRunning, 0)
+        End Try
     End Sub
 
     ''' <summary>Processes queued messages until cancellation is requested.</summary>
@@ -554,11 +665,43 @@ Partial Public Class ThisAddIn
             While Not ct.IsCancellationRequested
                 Dim entryId As String = Nothing
                 If _apMailQueue.TryDequeue(entryId) Then
+                    ' Clean up enqueue time tracking for this mail
+                    Dim dummy As DateTime
+                    _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+
                     Dim pending = _apMailQueue.Count
                     If pending > 0 Then
                         ApDashboardLog($"⏳ {pending} mail(s) queued behind current processing", "step")
                     End If
-                    Await ProcessIncomingMailAsync(entryId, ct)
+
+                    ' Classify and time the current mail
+                    Try
+                        _apCurrentProcessingCategory = Await SwitchToUi(Function() As String
+                                                                            Try
+                                                                                Dim ns = Application.GetNamespace("MAPI")
+                                                                                Dim obj = ns.GetItemFromID(entryId)
+                                                                                If TypeOf obj Is MailItem Then
+                                                                                    Dim mi = DirectCast(obj, MailItem)
+                                                                                    Try : Return ClassifyMailCategory(mi)
+                                                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                                                End If
+                                                                            Catch : End Try
+                                                                            Return AP_Cat_TextOnly
+                                                                        End Function)
+                    Catch
+                        _apCurrentProcessingCategory = AP_Cat_TextOnly
+                    End Try
+
+                    _apCurrentProcessingStopwatch = Stopwatch.StartNew()
+                    Try
+                        Await ProcessIncomingMailAsync(entryId, ct)
+                    Finally
+                        _apCurrentProcessingStopwatch.Stop()
+                        UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
+                        ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
+                        _apCurrentProcessingStopwatch = Nothing
+                        _apCurrentProcessingCategory = Nothing
+                    End Try
                 Else
                     Await Task.Delay(1000, ct)
                 End If
@@ -610,8 +753,9 @@ Partial Public Class ThisAddIn
     ''' Checks whether the current user is permitted to run AutoPilot.
     ''' Requires BOTH:
     '''   1. A valid license (checked via IsAutoPilotLicenseValid) — mandatory.
-    '''   2. User whitelist (INI_AutoPilot) — if empty or "*", all licensed users are allowed;
+    '''   2. User whitelist (INI_AutoPilot) — "*" allows all licensed users;
     '''      otherwise %USERNAME% must appear in the comma-separated list.
+    '''      Empty/whitespace means no users are permitted.
     ''' </summary>
     ''' <returns>True if the current user is allowed; False otherwise.</returns>
     Public Shared Function IsAutoPilotPermitted() As Boolean
@@ -663,6 +807,278 @@ Partial Public Class ThisAddIn
 
         Debug.WriteLine("[AutoPilot] DENIED: no username match in whitelist")
         Return False
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  QUEUE POSITION NOTIFICATION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Mail weight categories used for internal time estimation.</summary>
+    Private Const AP_Cat_TextOnly As String = "text"
+    Private Const AP_Cat_Light As String = "light"
+    Private Const AP_Cat_HeavyDoc As String = "heavydoc"
+    Private Const AP_Cat_HeavyPdf As String = "heavypdf"
+
+    ''' <summary>
+    ''' Classifies a mail into a weight category based on its attachments.
+    ''' Called on the UI thread (needs COM access).
+    ''' </summary>
+    Private Function ClassifyMailCategory(mi As MailItem) As String
+        Try
+            If mi.Attachments.Count = 0 Then Return AP_Cat_TextOnly
+
+            Dim hasHeavyDoc As Boolean = False
+            Dim hasHeavyPdf As Boolean = False
+            Dim hasAnyProcessable As Boolean = False
+
+            For i As Integer = 1 To mi.Attachments.Count
+                Dim att = mi.Attachments(i)
+                Try
+                    If att.Type = OlAttachmentType.olEmbeddeditem Then Continue For
+                    Dim fileName = att.FileName
+                    If String.IsNullOrWhiteSpace(fileName) Then Continue For
+                    Dim ext = Path.GetExtension(fileName).ToLowerInvariant()
+                    Dim size As Long = att.Size
+
+                    For Each heavyExt In AP_HeavyDocExtensions
+                        If ext = heavyExt Then hasHeavyDoc = True : hasAnyProcessable = True : Exit For
+                    Next
+                    If ext = ".pdf" Then
+                        hasAnyProcessable = True
+                        If size >= AP_HeavyPdfThreshold Then hasHeavyPdf = True
+                    End If
+                    If Not hasAnyProcessable Then
+                        Dim lightExts = {".txt", ".csv", ".html", ".xml", ".json", ".md"}
+                        For Each le In lightExts
+                            If ext = le Then hasAnyProcessable = True : Exit For
+                        Next
+                    End If
+                Catch
+                End Try
+            Next
+
+            If hasHeavyPdf Then Return AP_Cat_HeavyPdf
+            If hasHeavyDoc Then Return AP_Cat_HeavyDoc
+            If hasAnyProcessable Then Return AP_Cat_Light
+        Catch
+        End Try
+        Return AP_Cat_TextOnly
+    End Function
+
+    ''' <summary>Returns the estimated seconds for a category, using learned data or seed defaults.</summary>
+    Private Function GetCategoryEstimate(category As String) As Double
+        Dim timing As (AvgSeconds As Double, SampleCount As Integer) = Nothing
+        If _apCategoryTimings.TryGetValue(category, timing) AndAlso timing.SampleCount > 0 Then
+            Return timing.AvgSeconds
+        End If
+        Select Case category
+            Case AP_Cat_HeavyPdf : Return AP_SeedSeconds_HeavyPdf
+            Case AP_Cat_HeavyDoc : Return AP_SeedSeconds_HeavyDoc
+            Case AP_Cat_Light : Return AP_SeedSeconds_LightAttachments
+            Case Else : Return AP_SeedSeconds_TextOnly
+        End Select
+    End Function
+
+    ''' <summary>Updates the rolling average for a category after processing completes.</summary>
+    Private Sub UpdateCategoryTiming(category As String, elapsedSeconds As Double)
+        _apCategoryTimings.AddOrUpdate(
+            category,
+            addValueFactory:=Function(k) (elapsedSeconds, 1),
+            updateValueFactory:=Function(k, existing)
+                                    Dim newCount = existing.SampleCount + 1
+                                    If newCount <= 2 Then
+                                        Return (((existing.AvgSeconds * existing.SampleCount) + elapsedSeconds) / newCount, newCount)
+                                    Else
+                                        Const alpha As Double = 0.3
+                                        Return (alpha * elapsedSeconds + (1.0 - alpha) * existing.AvgSeconds, newCount)
+                                    End If
+                                End Function)
+    End Sub
+
+    ''' <summary>
+    ''' Runs the full AutoPilot pre-filter pipeline against a mail item to determine
+    ''' whether it will actually be processed. This is the same set of checks performed
+    ''' at the top of ProcessIncomingMailAsync, extracted here so that queue notifications
+    ''' are only sent for mails that will genuinely be processed.
+    ''' Must be called via SwitchToUi for COM access.
+    ''' </summary>
+    ''' <returns>True if the mail would pass all filters and be processed.</returns>
+    Private Function WouldMailBeProcessed(mi As MailItem, Optional entryId As String = Nothing) As Boolean
+        Try
+            ' Mailbox filter
+            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Dim recipientAddress As String = ""
+                Try
+                    Dim acct = mi.SendUsingAccount
+                    If acct IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(acct.SmtpAddress) Then
+                        recipientAddress = acct.SmtpAddress
+                    Else
+                        For Each recip As Recipient In mi.Recipients
+                            If recip.Type = CInt(OlMailRecipientType.olTo) Then
+                                Dim addr = recip.Address
+                                If Not String.IsNullOrWhiteSpace(addr) Then recipientAddress = addr : Exit For
+                            End If
+                        Next
+                    End If
+                Catch
+                End Try
+                If Not _apConfig.MonitoredMailbox.Equals(recipientAddress, StringComparison.OrdinalIgnoreCase) Then Return False
+            End If
+
+            Dim mailInfo = ExtractMailInfo(mi)
+            If mailInfo Is Nothing Then Return False
+
+            ' Loop prevention
+            If mailInfo.HasAutoReplyHeader Then Return False
+
+            ' Auto-reply/OOF detection
+            If IsAutoReplyOrOof(mailInfo) Then Return False
+
+            ' Domain/sender filter rules (trust boundary)
+            If Not MatchesFilterRules(mailInfo) Then Return False
+            If MatchesNegativeFilters(mailInfo) Then Return False
+
+            ' Subject trigger word — allow bypass for existing conversations
+            Dim isExistingConversation As Boolean = False
+            Try : isExistingConversation = IsPartOfAutoPilotConversation(mi) : Catch : End Try
+
+            If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
+                If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    If Not isExistingConversation Then Return False
+                End If
+            End If
+
+            ' Cooldown — bypass if we already sent a holding notice for this specific mail
+            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
+                Dim alreadyNotified = (entryId IsNot Nothing AndAlso _apQueueNotifiedEntryIds.ContainsKey(entryId))
+                If Not alreadyNotified Then Return False
+            End If
+
+            ' Session limit
+            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then Return False
+
+            ' Thread depth
+            If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then Return False
+
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Checks all currently queued mails and sends a holding notification to any
+    ''' that have been waiting in the queue for at least AP_QueueNotifyThresholdSeconds
+    ''' of real wall-clock time. The message includes the queue position and a
+    ''' qualitative description of expected wait based on attachment classification.
+    ''' Only mails that pass the full filter pipeline receive a notification.
+    ''' Called by the periodic notification timer.
+    ''' </summary>
+    Private Async Function SendQueuePositionNotificationsAsync(ct As CancellationToken) As Task
+        Dim queueSnapshot = _apMailQueue.ToArray()
+        If queueSnapshot.Length = 0 Then Return
+
+        ' Classify every queued mail and build position/weight info
+        Dim queueEntries As New List(Of (EntryId As String, Position As Integer, Category As String))()
+        For i As Integer = 0 To queueSnapshot.Length - 1
+            Dim queuedId = queueSnapshot(i)
+            Dim qCat As String = AP_Cat_TextOnly
+            Try
+                qCat = Await SwitchToUi(Function() As String
+                                            Try
+                                                Dim ns = Application.GetNamespace("MAPI")
+                                                Dim obj = ns.GetItemFromID(queuedId)
+                                                If TypeOf obj Is MailItem Then
+                                                    Dim mi = DirectCast(obj, MailItem)
+                                                    Try : Return ClassifyMailCategory(mi)
+                                                    Finally : Marshal.ReleaseComObject(mi) : End Try
+                                                End If
+                                            Catch : End Try
+                                            Return AP_Cat_TextOnly
+                                        End Function)
+            Catch : End Try
+            queueEntries.Add((queuedId, i + 1, qCat))
+        Next
+
+        ' Include the currently-processing mail's category for "ahead" description
+        Dim currentIsHeavy As Boolean = (_apCurrentProcessingCategory = AP_Cat_HeavyDoc OrElse _apCurrentProcessingCategory = AP_Cat_HeavyPdf)
+
+        Dim now = DateTime.UtcNow
+
+        For Each entry In queueEntries
+            ' Only notify mails that have been waiting >= threshold seconds
+            Dim enqueueTime As DateTime = Nothing
+            If Not _apQueueEnqueueTimes.TryGetValue(entry.EntryId, enqueueTime) Then Continue For
+            Dim waitedSeconds = (now - enqueueTime).TotalSeconds
+            If waitedSeconds < AP_QueueNotifyThresholdSeconds Then Continue For
+
+            ' Don't notify the same mail twice
+            If Not _apQueueNotifiedEntryIds.TryAdd(entry.EntryId, True) Then Continue For
+
+            Try
+                Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
+                                                          Try
+                                                              Dim ns = Application.GetNamespace("MAPI")
+                                                              Dim obj = ns.GetItemFromID(entry.EntryId)
+                                                              If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                          Catch : End Try
+                                                          Return Nothing
+                                                      End Function)
+                If mi Is Nothing Then Continue For
+
+                Try
+                    ' Full filter pipeline check
+                    Dim wouldProcess = Await SwitchToUi(Function() WouldMailBeProcessed(mi, entry.EntryId))
+
+                    If Not wouldProcess Then
+                        ApDashboardLog($"Queue notification skipped (would not be processed): {entry.EntryId.Substring(0, Math.Min(20, entry.EntryId.Length))}...", "step")
+                        Continue For
+                    End If
+
+                    Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                    Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
+
+                    ' Count heavy jobs ahead of this mail (including current processing)
+                    Dim heavyAhead As Integer = If(currentIsHeavy, 1, 0)
+                    For Each other In queueEntries
+                        If other.Position >= entry.Position Then Exit For
+                        If other.Category = AP_Cat_HeavyDoc OrElse other.Category = AP_Cat_HeavyPdf Then heavyAhead += 1
+                    Next
+
+                    ' Build position text
+                    Dim positionText = If(entry.Position = 1,
+                        "Your request is next in line.",
+                        $"Your request is at position {entry.Position} in the queue.")
+
+                    ' Build qualitative wait description based on what's ahead
+                    Dim waitDescription As String = ""
+                    If heavyAhead > 0 Then
+                        If heavyAhead = 1 Then
+                            waitDescription = " There is a document processing request ahead of yours which may take a while to complete."
+                        Else
+                            waitDescription = $" There are {heavyAhead} document processing requests ahead of yours which may each take a while to complete."
+                        End If
+                    ElseIf entry.Position > 3 Then
+                        waitDescription = " There are several requests ahead of yours."
+                    End If
+
+                    Dim stallWarning As String =
+                        " Please also note that occasional delays may occur if the system requires operator attention."
+
+                    Dim holdingMessage As String =
+                        $"Thank you for your message. I'm currently processing other requests. " &
+                        $"{positionText}{waitDescription}{stallWarning} " &
+                        $"I will get back to you as soon as possible. — {AN6}"
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingMessage, Nothing, tagAsAutoReply:=True))
+                    ApDashboardLog($"📨 Queue notification sent to {senderLabel} (position {entry.Position}, waited {waitedSeconds:F0}s, {heavyAhead} heavy ahead)", "info")
+                Finally
+                    Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+                End Try
+            Catch ex As System.Exception
+                ApDashboardLog($"Queue notification error: {ex.Message}", "warn")
+            End Try
+        Next
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -753,15 +1169,27 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            If IsSenderOnCooldown(mailInfo.SenderEmail) Then : ApDashboardLog("SKIP (cooldown): " & mailInfo.SenderEmail, "step") : Return : End If
+            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
+                ' If we already sent a holding notice for this mail, we committed to processing it.
+                ' The cooldown may have been recorded by a previous mail from the same sender that
+                ' finished while this mail was waiting in the queue. Skipping it now would be
+                ' misleading since the sender already received "your request is in the queue".
+                If Not _apQueueNotifiedEntryIds.ContainsKey(entryId) Then
+                    ApDashboardLog("SKIP (cooldown): " & mailInfo.SenderEmail, "step")
+                    Return
+                Else
+                    ApDashboardLog("COOLDOWN BYPASS (holding notice already sent): " & mailInfo.SenderEmail, "step")
+                End If
+            End If
+
             If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached)", "warn") : Return : End If
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
             ' ── Reply-To mismatch: potential spoofing or reflection attack ──
-            ' If the mail has a Reply-To that differs from the sender, the From address
-            ' may be forged. Force approval regardless of whitelist status so the operator
-            ' can verify the legitimacy before any reply is sent.
-            Dim hasReplyToMismatch As Boolean = False
+            ' If the mail has a Reply-To that differs from the sender, log a warning
+            ' but do NOT force approval — that would block the entire processing queue.
+            ' The sender/domain filter rules are the trust boundary; Reply-To mismatches
+            ' are common with legitimate mailing lists, shared mailboxes, and CRM systems.
             Try
                 Dim replyToAddress = Await SwitchToUi(Function() As String
                                                           Try
@@ -774,20 +1202,19 @@ Partial Public Class ThisAddIn
                                                       End Function)
                 If Not String.IsNullOrWhiteSpace(replyToAddress) AndAlso
                    Not replyToAddress.Equals(mailInfo.SenderEmail, StringComparison.OrdinalIgnoreCase) Then
-                    hasReplyToMismatch = True
-                    ApDashboardLog($"⚠ SECURITY: Reply-To mismatch! From={mailInfo.SenderEmail}, Reply-To={replyToAddress}. Forcing approval.", "warn")
+                    ApDashboardLog($"⚠ Reply-To mismatch: From={mailInfo.SenderEmail}, Reply-To={replyToAddress} (processing continues)", "warn")
                 End If
             Catch
             End Try
 
             Dim isWhitelisted As Boolean = IsSenderWhitelisted(mailInfo.SenderEmail)
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
-            ' SECURITY: Force approval if Reply-To differs from sender (potential spoofing/reflection)
-            Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation) OrElse hasReplyToMismatch
+            Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
             ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
+
             ' Check for #model: command
             Dim modelOverrideConfig As ModelConfig = Nothing
             Dim modelOverrideName As String = Nothing
@@ -815,11 +1242,69 @@ Partial Public Class ThisAddIn
                     Next
                 End If
 
+                ' ── Early exit: ALL attachments over size limit ──
+                ' If the mail has attachments and every single one exceeds the size limit,
+                ' skip the LLM call entirely and send a static rejection message.
+                ' This prevents the LLM from generating unwanted advice (Red Ink features,
+                ' third-party tools) when the only issue is file size.
+                Dim oversizedAttachments = attachmentPaths.Where(Function(a) a.IsOverSizeLimit).ToList()
+                If attachmentPaths.Count > 0 AndAlso oversizedAttachments.Count = attachmentPaths.Count Then
+                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+                    Dim oversizedSb As New StringBuilder()
+                    oversizedSb.AppendLine($"I'm sorry, but I was unable to process your request because all attachments exceed the maximum permitted size of {limitMB:F0} MB:")
+                    oversizedSb.AppendLine()
+                    For Each att In oversizedAttachments
+                        oversizedSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
+                    Next
+                    oversizedSb.AppendLine()
+                    oversizedSb.AppendLine($"Please split large documents into smaller parts and resend, or use the {AN} add-in locally to process the file(s) directly on your computer.")
+                    oversizedSb.AppendLine()
+                    oversizedSb.Append($"— {AN6}")
+
+                    Dim oversizedMessage = oversizedSb.ToString()
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True))
+                    Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+                    Interlocked.Increment(_apSessionReplyCount)
+                    RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordLastProcessedTime()
+                    ApDashboardLog($"✉ Sent size-limit rejection to: {mailInfo.SenderEmail} (all {attachmentPaths.Count} attachment(s) over limit)", "info")
+                    Return
+                End If
+
+                ' ── Partial oversized: warn about skipped attachments in the prompt ──
+                ' When some attachments are processable but others exceed the limit,
+                ' build the prompt using only the processable ones. The oversized files
+                ' are mentioned as a brief note so the LLM can inform the sender, but
+                ' WITHOUT the [OVER SIZE LIMIT] tag that causes the LLM to generate
+                ' unwanted tool/service recommendations.
+                Dim processableAttachments = attachmentPaths.Where(Function(a) Not a.IsOverSizeLimit).ToList()
+                Dim oversizedNote As String = Nothing
+                If oversizedAttachments.Count > 0 AndAlso processableAttachments.Count > 0 Then
+                    Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+                    Dim noteSb As New StringBuilder()
+                    noteSb.AppendLine()
+                    noteSb.AppendLine("[NOTE TO ASSISTANT — include this information in your reply to the sender]")
+                    noteSb.AppendLine($"The following attachment(s) could NOT be processed because they exceed the {limitMB:F0} MB size limit:")
+                    For Each att In oversizedAttachments
+                        noteSb.AppendLine($"  - {att.OriginalFileName} ({att.SizeBytes / 1024.0 / 1024.0:F1} MB)")
+                    Next
+                    noteSb.AppendLine($"Tell the sender to split these files into smaller parts and resend them, or to use the {AN} add-in locally.")
+                    noteSb.AppendLine("Do NOT suggest any other tools, services, or workarounds for the oversized files.")
+                    noteSb.AppendLine("[/NOTE]")
+                    oversizedNote = noteSb.ToString()
+                    ApDashboardLog($"Mixed attachments: {processableAttachments.Count} processable, {oversizedAttachments.Count} over limit", "info")
+                End If
+
                 ' Initialize tool call log for this e-mail
                 _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
 
                 ' ── Build LLM prompt ──
-                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, attachmentPaths)
+                ' Use only processable attachments in the prompt so the LLM doesn't see
+                ' [OVER SIZE LIMIT] tags that trigger unwanted tool recommendations.
+                Dim userPrompt As String = BuildUserPromptFromMail(mailInfo, processableAttachments)
+                If oversizedNote IsNot Nothing Then
+                    userPrompt &= oversizedNote
+                End If
                 Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
 
                 ' ── Set AutoPilot tool context ──
@@ -903,11 +1388,12 @@ Partial Public Class ThisAddIn
 
                 If String.IsNullOrWhiteSpace(response) Then
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
-                    Dim errorMessage = $"I'm sorry, but {AN6} was unable to generate a response to your request. Please try again or rephrase your message."
+                    Dim errorMessage = Await GenerateHelpfulFailureResponseAsync(
+                        mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
                     Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True))
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail)
-                    ApDashboardLog("Sent error response to: " & mailInfo.SenderEmail, "warn")
+                    ApDashboardLog("Sent helpful error response to: " & mailInfo.SenderEmail, "warn")
                     Return
                 End If
 
@@ -1130,11 +1616,10 @@ Partial Public Class ThisAddIn
                 If info.SenderEmail.EndsWith(pattern, StringComparison.OrdinalIgnoreCase) Then Return True
             Case AutoPilotFilterRuleType.Sender
                 If WildcardMatch(info.SenderEmail, rule.Pattern) Then Return True
-                ' SECURITY: Do NOT match on SenderName for sender-type rules.
-                ' An attacker can set their display name to "john@trusted.com"
-                ' which would cause a false positive match against a sender filter.
-                ' Display names are unauthenticated and trivially spoofable.
-                ' If WildcardMatch(info.SenderName, rule.Pattern) Then Return True  ← REMOVED
+            ' SECURITY: Do NOT match on SenderName for sender-type rules.
+            ' An attacker can set their display name to "john@trusted.com"
+            ' which would cause a false positive match against a sender filter.
+            ' Display names are unauthenticated and trivially spoofable.
             Case AutoPilotFilterRuleType.Folder
                 If info.FolderPath.IndexOf(rule.Pattern, StringComparison.OrdinalIgnoreCase) >= 0 Then Return True
         End Select
@@ -1262,7 +1747,8 @@ Partial Public Class ThisAddIn
                     If att.TempFilePath IsNot Nothing Then originalPaths.Add(att.TempFilePath)
                 Next
             End If
-            For Each filePath In Directory.GetFiles(tempDir)
+            ' Scan all files recursively (tools may create output in subdirectories)
+            For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
                 If Not originalPaths.Contains(filePath) Then results.Add(filePath)
             Next
         End If
@@ -1293,7 +1779,8 @@ Partial Public Class ThisAddIn
             For i As Integer = 0 To attachments.Count - 1
                 Dim att = attachments(i)
                 Dim sizeStr = If(att.SizeBytes > 0, $" ({att.SizeBytes / 1024:F0} KB)", "")
-                Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT - cannot process]", "")
+                Dim statusStr = If(att.IsOverSizeLimit,
+                    $" [OVER SIZE LIMIT — max {AP_DefaultMaxAttachmentBytes / 1024 / 1024:F0} MB, cannot process]", "")
                 Dim dateStr As String = ""
                 If att.LastModifiedTime.HasValue Then
                     dateStr &= $", modified: {att.LastModifiedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
@@ -1480,6 +1967,8 @@ Partial Public Class ThisAddIn
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
     ''' already adds [HH:mm:ss.fff]. Instead we prepend the date-only portion
     ''' so the dashboard shows [HH:mm:ss.fff] [dd-MMM] message.
+    ''' When the Chat Agent is active, also routes to the tooling LogWindow
+    ''' so internal tool detail appears in the web agent dashboard.
     ''' </summary>
     Private Sub ApDashboardLog(message As String, level As String)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
@@ -1496,6 +1985,14 @@ Partial Public Class ThisAddIn
             End If
         Catch
         End Try
+
+        ' Route to the Chat Agent's tooling LogWindow (no date tag needed)
+        If _chatAgentActive AndAlso _activeToolingContext IsNot Nothing Then
+            Try
+                _activeToolingContext.Log(message, level)
+            Catch
+            End Try
+        End If
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>
@@ -1846,6 +2343,374 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  HELPFUL FAILURE RESPONSE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Generates a meaningful failure response when AutoPilot cannot fulfill a request.
+    ''' Includes: (1) attachment size limit info if relevant, (2) a brief Red Ink add-in
+    ''' suggestion based on the HelpMeInky manual, and (3) optionally an Internet-based
+    ''' alternative tool suggestion via the InternetResearch model.
+    ''' Falls back to a static message if all LLM calls fail.
+    ''' </summary>
+    Private Async Function GenerateHelpfulFailureResponseAsync(
+            mailInfo As AutoPilotMailInfo,
+            attachments As List(Of AutoPilotAttachmentInfo),
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        Dim sb As New StringBuilder()
+
+        ' ── Attachment size limit detail ──
+        Dim hasOversized = attachments IsNot Nothing AndAlso attachments.Any(Function(a) a.IsOverSizeLimit)
+        If hasOversized Then
+            Dim limitMB = _apConfig.MaxAttachmentBytes / 1024.0 / 1024.0
+            Dim oversizedNames = attachments.Where(Function(a) a.IsOverSizeLimit).
+                Select(Function(a) $"{a.OriginalFileName} ({a.SizeBytes / 1024.0 / 1024.0:F1} MB)").ToList()
+            sb.AppendLine($"I'm sorry, but I was unable to process your request because one or more attachments exceed the maximum permitted size of {limitMB:F0} MB:")
+            sb.AppendLine()
+            For Each name In oversizedNames
+                sb.AppendLine($"  - {name}")
+            Next
+            sb.AppendLine()
+            sb.AppendLine($"Please split large documents into smaller parts and resend, or use the {AN} add-in locally to process the file(s) directly on your computer.")
+            sb.AppendLine()
+            sb.Append($"— {AN6}")
+            Return sb.ToString()
+        End If
+
+        ' ── Static preamble ──
+        sb.AppendLine($"I'm sorry, but I was unable to fulfill your request.")
+        sb.AppendLine()
+
+        ' ── Red Ink add-in suggestion (via HelpMeInky manual) ──
+        Dim redInkSuggestion As String = Nothing
+        Try
+            redInkSuggestion = Await GetRedInkSuggestionAsync(mailInfo, failureReason, ct)
+        Catch ex As System.Exception
+            ApDashboardLog($"Fallback Red Ink suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(redInkSuggestion) Then
+            sb.AppendLine(redInkSuggestion.Trim())
+            sb.AppendLine()
+        End If
+
+        ' ── Internet alternative suggestion (optional, via InternetResearch model) ──
+        Dim internetSuggestion As String = Nothing
+        Try
+            internetSuggestion = Await GetInternetAlternativeSuggestionAsync(mailInfo, failureReason, ct)
+        Catch ex As System.Exception
+            ApDashboardLog($"Fallback internet suggestion failed: {ex.Message}", "warn")
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(internetSuggestion) Then
+            sb.AppendLine(internetSuggestion.Trim())
+            sb.AppendLine()
+            ' Append disclaimer directly — this path sends text to the sender without LLM rewriting
+            sb.AppendLine("_Please note: Third-party services and tools may only be used if permitted by your organization's policies. " &
+                          "Before using any external service or tool, ensure it meets your corporate security, confidentiality, and data protection requirements._")
+            sb.AppendLine()
+        End If
+
+        ' ── Closing ──
+        If String.IsNullOrWhiteSpace(redInkSuggestion) AndAlso String.IsNullOrWhiteSpace(internetSuggestion) Then
+            sb.AppendLine("Please try again, rephrase your request, or contact the operator for assistance.")
+        End If
+
+        sb.Append($"— {AN6}")
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Calls the LLM with the HelpMeInky manual to suggest how the user could
+    ''' accomplish the task using the Red Ink add-ins. Returns a brief suggestion
+    ''' or Nothing if no manual is available or the call fails.
+    ''' Uses the dedicated HelpMe model (if configured in the alternate model INI)
+    ''' exactly as HelpMeInky does, falling back to the base AutoPilot model only
+    ''' if no HelpMe model is available.
+    ''' </summary>
+    Private Async Function GetRedInkSuggestionAsync(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        ' Load the HelpMeInky manual (cached per session)
+        If Not _apHelpMeManualCacheLoaded Then
+            _apHelpMeManualCacheLoaded = True
+            Try
+                Dim manualPath = INI_HelpMeInkyPath
+                If Not String.IsNullOrWhiteSpace(manualPath) Then
+                    manualPath = ExpandEnvironmentVariables(manualPath)
+                    _apHelpMeManualCache = Await LoadManualTextAsync(manualPath, ct)
+                    ApDashboardLog($"Loaded HelpMe manual for fallback suggestions ({If(_apHelpMeManualCache IsNot Nothing, _apHelpMeManualCache.Length.ToString() & " chars", "not available")})", "step")
+                End If
+            Catch ex As System.Exception
+                ApDashboardLog($"Failed to load HelpMe manual: {ex.Message}", "warn")
+            End Try
+        End If
+
+        If String.IsNullOrWhiteSpace(_apHelpMeManualCache) Then Return Nothing
+
+        ' Use the SP_HelpMe system prompt (same as HelpMeInky) with an AutoPilot-specific addendum
+        Dim systemPrompt As String = _context.SP_HelpMe &
+            $" (This is an automated query from {AN6} AutoPilot, not an interactive chat. " &
+            $"A user sent an e-mail request that could not be fulfilled automatically. " &
+            $"Based on the manual, suggest in 4-10 SHORT sentences what {AN} feature could help, " &
+            $"how to use it, and tell the user to open 'Help me, {AN8}' inside the add-in for more guidance. " &
+            $"If no {AN} feature applies, reply with exactly one word: NONE)"
+
+        ' Build user prompt in the same structure as HelpMeInky.SendAsync
+        Dim userPrompt As New StringBuilder()
+        userPrompt.AppendLine("User question:")
+        userPrompt.AppendLine($"I tried to use {AN6} AutoPilot to: {mailInfo.Subject}")
+        userPrompt.AppendLine($"Details: {If(mailInfo.Body.Length > 500, mailInfo.Body.Substring(0, 500), mailInfo.Body)}")
+        userPrompt.AppendLine($"But it failed because: {failureReason}")
+        If mailInfo.AttachmentNames IsNot Nothing AndAlso mailInfo.AttachmentNames.Count > 0 Then
+            userPrompt.AppendLine($"The e-mail had these attachments: {String.Join(", ", mailInfo.AttachmentNames)}")
+        End If
+        userPrompt.AppendLine($"What {AN} feature could help the user accomplish this task directly?")
+        userPrompt.AppendLine()
+        userPrompt.AppendLine("Manual:")
+        userPrompt.AppendLine(_apHelpMeManualCache)
+
+        ' Try to use the dedicated HelpMe model (same as HelpMeInky.CallHelpMeLlmAsync)
+        Dim backupConfig = GetCurrentConfig(_context)
+        Dim useHelpMeModel As Boolean = False
+        Dim useSecondApi As Boolean = False
+        Dim timeout As Long = 0
+
+        Try
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                useHelpMeModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "HelpMe")
+            End If
+        Catch
+        End Try
+
+        If useHelpMeModel Then
+            useSecondApi = True
+            timeout = If(_context.INI_Timeout_2 > 0, _context.INI_Timeout_2, _context.INI_Timeout)
+            ApDashboardLog("Red Ink suggestion using dedicated HelpMe model", "step")
+        Else
+            ' Fallback: use the base AutoPilot model
+            ApplyModelConfig(_context, _apBaseModelConfig)
+            useSecondApi = _apUseSecondApi
+            timeout = _context.INI_Timeout
+            ApDashboardLog("Red Ink suggestion using base AutoPilot model (no HelpMe model configured)", "step")
+        End If
+
+        Try
+            Dim result = Await LLM(systemPrompt, userPrompt.ToString(),
+                                   UseSecondAPI:=useSecondApi, HideSplash:=True,
+                                   EnsureUI:=False, Timeout:=timeout,
+                                   cancellationToken:=ct)
+            result = If(result, "").Trim()
+            If result.Equals("NONE", StringComparison.OrdinalIgnoreCase) OrElse result.Length < 5 Then
+                ApDashboardLog($"Red Ink suggestion returned NONE or too short ({result.Length} chars)", "step")
+                Return Nothing
+            End If
+            ApDashboardLog($"Red Ink suggestion generated ({result.Length} chars)", "step")
+            Return result
+        Catch ex As System.Exception
+            ApDashboardLog($"Red Ink suggestion LLM call failed: {ex.GetType().Name}: {ex.Message}", "warn")
+            Return Nothing
+        Finally
+            RestoreDefaults(_context, backupConfig)
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Loads manual text from an HTTP(S) URL or a local file path.
+    ''' Mirrors the loading logic of HelpMeInky.GetManualTextFreshAsync, supporting
+    ''' plain text, PDF (with magic-byte detection for remote content), DOCX, and RTF.
+    ''' </summary>
+    Private Async Function LoadManualTextAsync(pathOrUrl As String, ct As CancellationToken) As Task(Of String)
+        If String.IsNullOrWhiteSpace(pathOrUrl) Then Return Nothing
+
+        Dim s = pathOrUrl.Trim()
+
+        ' ── Remote URL ──
+        If s.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+           s.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+            Try
+                ' Ensure modern TLS
+                Try
+                    System.Net.ServicePointManager.SecurityProtocol =
+                        System.Net.SecurityProtocolType.Tls12 Or CType(&HC00, System.Net.SecurityProtocolType)
+                Catch : End Try
+
+                Dim handler As New System.Net.Http.HttpClientHandler()
+                handler.AllowAutoRedirect = True
+                handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+
+                Using client As New System.Net.Http.HttpClient(handler)
+                    client.Timeout = TimeSpan.FromSeconds(30)
+                    Try
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", "RedInk/1.0 (+https://redink.ai)")
+                        client.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/pdf, text/*, */*")
+                    Catch : End Try
+
+                    Using resp = Await client.GetAsync(s, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(False)
+                        If Not resp.IsSuccessStatusCode Then
+                            ApDashboardLog($"Manual URL returned HTTP {CInt(resp.StatusCode)}: {s}", "warn")
+                            Return Nothing
+                        End If
+
+                        Dim data = Await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(False)
+
+                        ' Detect content type
+                        Dim mediaType = ""
+                        Try
+                            If resp.Content?.Headers?.ContentType?.MediaType IsNot Nothing Then
+                                mediaType = resp.Content.Headers.ContentType.MediaType.ToLowerInvariant()
+                            End If
+                        Catch : End Try
+
+                        ' PDF detection: content-type, URL, or magic bytes
+                        Dim isPdf = False
+                        If mediaType.Contains("pdf") Then isPdf = True
+                        If Not isPdf AndAlso s.IndexOf(".pdf", StringComparison.OrdinalIgnoreCase) >= 0 Then isPdf = True
+                        If Not isPdf AndAlso data IsNot Nothing AndAlso data.Length >= 4 Then
+                            Dim scanMax = Math.Min(data.Length - 4, 1024)
+                            For i = 0 To scanMax
+                                If data(i) = AscW("%"c) AndAlso data(i + 1) = AscW("P"c) AndAlso
+                                   data(i + 2) = AscW("D"c) AndAlso data(i + 3) = AscW("F"c) Then
+                                    isPdf = True : Exit For
+                                End If
+                            Next
+                        End If
+
+                        If isPdf Then
+                            Dim tmpPath = IO.Path.Combine(IO.Path.GetTempPath(), "ap_manual_" & Guid.NewGuid().ToString("N") & ".pdf")
+                            Try
+                                IO.File.WriteAllBytes(tmpPath, data)
+                                Return Await SharedMethods.ReadPdfAsText(tmpPath, True, False, False, _context).ConfigureAwait(False)
+                            Finally
+                                Try : IO.File.Delete(tmpPath) : Catch : End Try
+                            End Try
+                        End If
+
+                        ' Decode as text
+                        Dim enc As Encoding = Encoding.UTF8
+                        Try
+                            Dim charset = resp.Content?.Headers?.ContentType?.CharSet
+                            If Not String.IsNullOrEmpty(charset) Then enc = Encoding.GetEncoding(charset)
+                        Catch : End Try
+
+                        Dim text = enc.GetString(data)
+
+                        ' Strip HTML if detected
+                        If (mediaType.Contains("html") OrElse text.TrimStart().StartsWith("<", StringComparison.Ordinal)) AndAlso
+                           text.IndexOf("<html", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            Try
+                                Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+                                htmlDoc.LoadHtml(text)
+                                Return htmlDoc.DocumentNode.InnerText
+                            Catch
+                                Return text
+                            End Try
+                        End If
+
+                        Return text
+                    End Using
+                End Using
+            Catch ex As System.Exception
+                ApDashboardLog($"Manual URL load error: {ex.Message}", "warn")
+                Return Nothing
+            End Try
+        End If
+
+        ' ── Local file ──
+        Try
+            If Not IO.File.Exists(s) Then
+                ApDashboardLog($"Manual file not found: {s}", "warn")
+                Return Nothing
+            End If
+
+            Select Case IO.Path.GetExtension(s).ToLowerInvariant()
+                Case ".txt", ".md", ".log"
+                    Return IO.File.ReadAllText(s, Encoding.UTF8)
+                Case ".pdf"
+                    Return Await SharedMethods.ReadPdfAsText(s, True, False, False, _context).ConfigureAwait(False)
+                Case ".docx"
+                    Dim text As String = Nothing
+                    Dim label As String = Nothing
+                    If TryExtractOfficeText(s, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then
+                        Return text
+                    End If
+                    Return Nothing
+                Case ".rtf"
+                    Return SharedMethods.ReadRtfAsText(s)
+                Case Else
+                    ' Best effort: read as plain text
+                    Return IO.File.ReadAllText(s, Encoding.UTF8)
+            End Select
+        Catch ex As System.Exception
+            ApDashboardLog($"Manual file load error: {ex.Message}", "warn")
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Optionally uses the InternetResearch model (if configured) to suggest
+    ''' an alternative online tool the user could use. Returns a brief suggestion
+    ''' or Nothing if no InternetResearch model is available.
+    ''' Does NOT include the third-party disclaimer — callers are responsible
+    ''' for appending it in the appropriate form (verbatim LLM instruction for
+    ''' tool responses, direct text for static failure messages).
+    ''' </summary>
+    Private Async Function GetInternetAlternativeSuggestionAsync(
+            mailInfo As AutoPilotMailInfo,
+            failureReason As String,
+            ct As CancellationToken) As Task(Of String)
+
+        ' Check if an InternetResearch model is configured
+        If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return Nothing
+
+        Dim backupConfig = GetCurrentConfig(_context)
+        Dim hasInternetModel As Boolean = False
+
+        Try
+            hasInternetModel = GetSpecialTaskModel(_context, INI_AlternateModelPath, "InternetResearch")
+        Catch
+            ' GetSpecialTaskModel may have modified originalConfig even on failure — restore
+            Try : RestoreDefaults(_context, backupConfig) : Catch : End Try
+            Return Nothing
+        End Try
+
+        If Not hasInternetModel Then
+            ' GetSpecialTaskModel overwrites the static originalConfig/originalConfigLoaded
+            ' even when it returns False — always restore to avoid corrupting subsequent calls
+            Try : RestoreDefaults(_context, backupConfig) : Catch : End Try
+            Return Nothing
+        End If
+
+        Try
+            Dim systemPrompt =
+                $"You are a concise assistant. In 1-3 SHORT sentences, suggest other practical ways " &
+                $"(other than {AN}) that could help the user accomplish the task described below without the help of another person. Focus on the most popular/common approaches. " &
+                $"However, do not name specific tools, products, services or websites and stay very brief. If unsure, respond with exactly: NONE"
+
+            Dim userPrompt =
+                $"Task: {mailInfo.Subject}" & vbCrLf &
+                $"Details: {If(mailInfo.Body.Length > 300, mailInfo.Body.Substring(0, 300), mailInfo.Body)}" & vbCrLf &
+                $"Why it failed: {failureReason}"
+
+            Dim result = Await LLM(systemPrompt, userPrompt,
+                                   UseSecondAPI:=True, HideSplash:=True,
+                                   EnsureUI:=False, cancellationToken:=ct)
+            result = If(result, "").Trim()
+            If result.Equals("NONE", StringComparison.OrdinalIgnoreCase) OrElse result.Length < 5 Then Return Nothing
+            ApDashboardLog($"Internet alternative suggestion generated ({result.Length} chars)", "step")
+            Return "**Alternative:** " & result
+        Catch ex As System.Exception
+            ApDashboardLog($"InternetResearch suggestion error: {ex.Message}", "warn")
+            Return Nothing
+        Finally
+            RestoreDefaults(_context, backupConfig)
+        End Try
+    End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASSES

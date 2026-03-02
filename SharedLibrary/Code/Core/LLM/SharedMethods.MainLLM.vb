@@ -175,13 +175,13 @@ Namespace SharedLibrary
                 If UseSecondAPI Then
 
                     If context.INI_OAuth2_2 Then
-                        context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True)
+                        context.DecodedAPI_2 = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail_2, context.INI_OAuth2Scopes_2, context.INI_APIKey_2, context.INI_OAuth2Endpoint_2, context.INI_OAuth2ATExpiry_2, True, Hidesplash)
                         If context.DecodedAPI_2 = "" Then Exit Function
                     End If
 
                 Else
                     If context.INI_OAuth2 Then
-                        context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False)
+                        context.DecodedAPI = Await GetFreshAccessToken(context, context.INI_OAuth2ClientMail, context.INI_OAuth2Scopes, context.INI_APIKey, context.INI_OAuth2Endpoint, context.INI_OAuth2ATExpiry, False, Hidesplash)
                         If context.DecodedAPI = "" Then Exit Function
                     End If
                 End If
@@ -191,7 +191,7 @@ Namespace SharedLibrary
                     Dim ModelPlaceholder As String = context.INI_Model_2
 
                     If Not SharedMethods.ProcessParameterPlaceholders(ModelPlaceholder) Then
-                        ShowCustomMessageBox("Aborted by user.")
+                        If Not Hidesplash Then ShowCustomMessageBox("Aborted by user.") Else Return "Aborted by user."
                         Return ""
                     End If
 
@@ -211,7 +211,7 @@ Namespace SharedLibrary
                     Dim ModelPlaceholder As String = context.INI_Model
 
                     If Not SharedMethods.ProcessParameterPlaceholders(ModelPlaceholder) Then
-                        ShowCustomMessageBox("Aborted by user.")
+                        If Not Hidesplash Then ShowCustomMessageBox("Aborted by user.") Else Return "Aborted by user."
                         Return ""
                     End If
 
@@ -236,7 +236,7 @@ Namespace SharedLibrary
                 Dim timeoutSeconds = CInt(TimeoutValue \ 1000)
 
                 If Not SharedMethods.ProcessParameterPlaceholders(APICall) Then
-                    ShowCustomMessageBox("Aborted by user.")
+                    If Not Hidesplash Then ShowCustomMessageBox("Aborted by user.") Else Return "Aborted by user."
                     Return ""
                 End If
 
@@ -872,7 +872,7 @@ Namespace SharedLibrary
                                     Select Case root2.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim obj2 As Newtonsoft.Json.Linq.JObject = CType(root2, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall, binaryOutputDirectory)
+                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
                                             ' If template has a loop, process entire array at once
@@ -885,7 +885,7 @@ Namespace SharedLibrary
                                                 For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
                                                     If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
                                                         Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                        ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
+                                                        ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
                                                     End If
                                                 Next
                                             End If
@@ -899,7 +899,7 @@ Namespace SharedLibrary
                                     Select Case root.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
+                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
 
                                         Case Newtonsoft.Json.Linq.JTokenType.Array
                                             ' If template has a loop, process entire array at once
@@ -912,7 +912,7 @@ Namespace SharedLibrary
                                                 For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
                                                     If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
                                                         Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                            ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory)
+                                                            ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
                                                     End If
                                                 Next
                                             End If
@@ -1241,8 +1241,8 @@ Namespace SharedLibrary
 
             ' 7) if all attempts fail, show error dialog
             If Not written Then
-                ShowCustomMessageBox(
-            $"Error writing log file '{filePath}'.{Environment.NewLine}" &
+                Debug.WriteLine(
+            $"Error writing log file '{filePath}'. " &
             $"Entry was:{Environment.NewLine}{entryText}"
         )
             End If
@@ -1258,14 +1258,16 @@ Namespace SharedLibrary
         ''' <param name="DetectToolCall">Regex pattern for tool call detection.</param>
         ''' <param name="binaryOutputDirectory">Optional directory where binary outputs (images) are saved instead of the Desktop.</param>
         ''' <returns>Extracted response text; empty string on handled error.</returns>
-        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer, DetectToolCall As String, Optional binaryOutputDirectory As String = Nothing) As String
+        Private Shared Function HandleObject(jsonObject As Newtonsoft.Json.Linq.JObject, ResponseKey As String, ResponseText As String, RKMode As Integer, DetectToolCall As String, Optional binaryOutputDirectory As String = Nothing, Optional Hidesplash As Boolean = False) As String
 
             ' Extract the "error" segment
             Dim text As String = FindJsonProperty(jsonObject, "error")
 
             If Not String.IsNullOrEmpty(text) Then
                 text = FindJsonProperty(jsonObject, "message")
-                ShowCustomMessageBox($"The LLM API generated the following error message: {Environment.NewLine}{text}{Environment.NewLine}{ResponseText}")
+                If Not Hidesplash Then
+                    ShowCustomMessageBox($"The LLM API generated the following error message: {Environment.NewLine}{text}{Environment.NewLine}{ResponseText}")
+                End If
                 Return ""
             Else
 
@@ -1851,7 +1853,7 @@ Namespace SharedLibrary
         ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
         ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
         ''' <returns>Access token string; returns an empty string on errors.</returns>
-        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean) As Task(Of String)
+        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False) As Task(Of String)
             Try
 
                 Dim accessToken As String = String.Empty
@@ -1897,7 +1899,9 @@ Namespace SharedLibrary
 
             Catch ex As System.Exception
                 ' Handle exceptions explicitly with System.Exception
-                MessageBox.Show("Error while fetching an access token: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                If Not silent Then
+                    MessageBox.Show("Error while fetching an access token: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                End If
                 If SecondAPI Then
                     context.DecodedAPI_2 = String.Empty
                 Else

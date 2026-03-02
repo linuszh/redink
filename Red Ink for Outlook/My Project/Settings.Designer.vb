@@ -556,6 +556,42 @@ Namespace My
                 Me("InboxBoardLoadThreshold") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property InboxBoardStoreId() As String
+            Get
+                Return CType(Me("InboxBoardStoreId"),String)
+            End Get
+            Set
+                Me("InboxBoardStoreId") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property InboxBoardFolderPath() As String
+            Get
+                Return CType(Me("InboxBoardFolderPath"),String)
+            End Get
+            Set
+                Me("InboxBoardFolderPath") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property InboxBoardIncludeSubfolders() As Boolean
+            Get
+                Return CType(Me("InboxBoardIncludeSubfolders"),Boolean)
+            End Get
+            Set
+                Me("InboxBoardIncludeSubfolders") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
