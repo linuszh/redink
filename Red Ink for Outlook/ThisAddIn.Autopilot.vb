@@ -83,6 +83,11 @@ Partial Public Class ThisAddIn
     Private Const AP_LoopHeaderProperty As String =
         "http://schemas.microsoft.com/mapi/string/{00020386-0000-0000-C000-000000000046}/X-RedInk-AutoReply"
     Private Const AP_LoopHeaderValue As String = "true"
+
+    ''' <summary>Header value for holding-only notices (not substantive replies).
+    ''' The catch-up scan uses this to distinguish "already fully replied" from "only holding notice sent".</summary>
+    Private Const AP_LoopHeaderValueHolding As String = "holding"
+
     Private Const AP_CategoryName As String = "Inky AutoPilot"
     Private Const AP_SentSubfolder As String = "Inky Replies"
     Private Const AP_MaxThreadDepth As Integer = 20
@@ -98,7 +103,9 @@ Partial Public Class ThisAddIn
     Private Const AP_ModelCommandScanLines As Integer = 5
 
     Private Const SP_AutoPilot_HoldingResponse As String =
-        "Thank you for your message. I have received it and will respond once your request has been approved. " &
+        "Thank you for your message. This is an automated acknowledgement — your request has not yet been processed. " &
+        "I will respond with a substantive reply once your request has been handled. " &
+        "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
 
     Private Const AP_MaxToolIterations As Integer = 30
@@ -112,7 +119,13 @@ Partial Public Class ThisAddIn
         "1702",
         "1727",
         "1827",
-        "2040"
+        "2040",
+        "2058",
+        "2059",
+        "2060",
+        "2061",
+        "2062",
+        "2063"
     }
 
     '  1702 Pro Special
@@ -121,6 +134,7 @@ Partial Public Class ThisAddIn
     '  2040 Pro Support
     '  2150 Pro Special 2 -- NO
     '  1693 Pro -- NO
+    '  2058-2063 Special License for AutoPilot
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
@@ -159,6 +173,12 @@ Partial Public Class ThisAddIn
     ''' <summary>Minimum estimated queue wait (seconds) before a queue notification is sent.</summary>
     Private Const AP_QueueNotifyThresholdSeconds As Integer = 60
 
+    ''' <summary>Interval (seconds) between repeat holding notifications for the same queued mail.</summary>
+    Private Const AP_QueueNotifyRepeatIntervalSeconds As Integer = 45 * 60  ' 45 minutes
+
+    ''' <summary>Interval (seconds) between progress notifications for the currently-processing mail.</summary>
+    Private Const AP_ActiveJobNotifyIntervalSeconds As Integer = 30 * 60  ' 30 minutes
+
     ''' <summary>Extensions that indicate heavy document processing (doc processor, comment processor).</summary>
     Private Shared ReadOnly AP_HeavyDocExtensions As String() = {".docx", ".pptx", ".xlsx", ".xls", ".doc"}
 
@@ -177,8 +197,8 @@ Partial Public Class ThisAddIn
     ''' <summary>Tracks when each queued mail was first seen in the queue (EntryId → UTC enqueue time).</summary>
     Private ReadOnly _apQueueEnqueueTimes As New ConcurrentDictionary(Of String, DateTime)()
 
-    ''' <summary>Entry IDs that have already received a queue holding notification.</summary>
-    Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+    ''' <summary>Entry IDs that have received a queue holding notification, with the UTC time of the last notification.</summary>
+    Private ReadOnly _apQueueNotifiedEntryIds As New ConcurrentDictionary(Of String, DateTime)()
 
     ''' <summary>Rolling average processing time per mail category. Key = category tag, Value = (avg, count).</summary>
     Private ReadOnly _apCategoryTimings As New ConcurrentDictionary(Of String, (AvgSeconds As Double, SampleCount As Integer))(StringComparer.OrdinalIgnoreCase)
@@ -203,6 +223,19 @@ Partial Public Class ThisAddIn
     Private _apHelpMeManualCache As String = Nothing
     Private _apHelpMeManualCacheLoaded As Boolean = False
 
+    ''' <summary>Per-job CancellationTokenSource. Cancelling this aborts only the current job, not the entire AutoPilot session.</summary>
+    Private _apCurrentJobCts As CancellationTokenSource = Nothing
+
+    ''' <summary>Tracks entry IDs that have received only a holding notice (not a substantive reply).
+    ''' Used by the catch-up scan to re-process mails that were acknowledged but never fully handled.</summary>
+    Private ReadOnly _apHoldingOnlyEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
+    ''' <summary>Entry ID of the mail currently being processed (set by the pump, cleared on completion).</summary>
+    Private _apCurrentProcessingEntryId As String = Nothing
+
+    ''' <summary>UTC time of the last active-job progress notification sent for the current mail.</summary>
+    Private _apActiveJobLastNotifiedUtc As DateTime = DateTime.MinValue
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -215,13 +248,17 @@ Partial Public Class ThisAddIn
         Try
             If _apDashboard IsNot Nothing Then
                 RemoveHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
+                RemoveHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
             End If
         Catch : End Try
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
         Try : _apCts?.Cancel() : Catch : End Try
+        Try : _apCurrentJobCts?.Cancel() : Catch : End Try
         Try : _apCts?.Dispose() : Catch : End Try
+        Try : _apCurrentJobCts?.Dispose() : Catch : End Try
         _apCts = Nothing
+        _apCurrentJobCts = Nothing
         Dim dummy As String = Nothing
         While _apMailQueue.TryDequeue(dummy) : End While
         _apSenderCooldowns.Clear()
@@ -238,6 +275,9 @@ Partial Public Class ThisAddIn
         _apCurrentProcessingCategory = Nothing
         _apHelpMeManualCache = Nothing
         _apHelpMeManualCacheLoaded = False
+        _apHoldingOnlyEntryIds.Clear()
+        _apCurrentProcessingEntryId = Nothing
+        _apActiveJobLastNotifiedUtc = DateTime.MinValue
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -316,6 +356,8 @@ Partial Public Class ThisAddIn
         _apDashboard = New LogWindow()
         _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
         AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
+        AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+        _apDashboard.ShowAbortJobButton(True)
         _apDashboard.Show()
 
         Dim modelLabel As String
@@ -379,11 +421,23 @@ Partial Public Class ThisAddIn
         StopAutoPilot()
     End Sub
 
+    ''' <summary>Handles a dashboard abort-current-job request (does NOT stop AutoPilot).</summary>
+    Private Sub AutoPilot_DashboardAbortJobRequested(sender As Object, e As EventArgs)
+        Dim jobCts = _apCurrentJobCts
+        If jobCts IsNot Nothing AndAlso Not jobCts.IsCancellationRequested Then
+            ApDashboardLog("⛔ Operator requested abort of current job.", "warn")
+            Try : jobCts.Cancel() : Catch : End Try
+        Else
+            ApDashboardLog("No job currently processing to abort.", "step")
+        End If
+    End Sub
+
     ''' <summary>
     ''' Scans the Inbox (or monitored folder) for mails that arrived after the last
     ''' processed timestamp, applies the full filter/trigger logic, and shows a
     ''' preview dialog where the operator can check/uncheck individual mails.
     ''' Only mails that have NOT already been processed (no AP_CategoryName tag) are shown.
+    ''' Mails that have received only a holding notice (not a substantive reply) ARE shown.
     ''' </summary>
     Private Sub CatchUpMissedMails()
         Try
@@ -410,9 +464,14 @@ Partial Public Class ThisAddIn
                     lastProcessed = DateTime.SpecifyKind(lastProcessed, DateTimeKind.Utc)
                 End If
                 lastProcessedLocal = lastProcessed.ToLocalTime()
-            End If
 
-            lastProcessedLocal = DateTime.Now.AddHours(-24)
+                ' Cap: never look back more than 24 hours even if the saved timestamp is older
+                Dim maxLookback = DateTime.Now.AddHours(-24)
+                If lastProcessedLocal < maxLookback Then
+                    lastProcessedLocal = maxLookback
+                    ApDashboardLog("Saved timestamp is older than 24 hours — capping lookback to 24h.", "info")
+                End If
+            End If
 
             If isFirstRun Then
                 ApDashboardLog($"Scanning for mails received after: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local)", "info")
@@ -488,11 +547,12 @@ Partial Public Class ThisAddIn
                     Catch
                     End Try
 
-                    ' 3. Skip mails already replied to by AutoPilot — walk the conversation
-                    '    to find any reply with the X-RedInk-AutoReply header.
-                    '    This is the authoritative check and does not depend on the category tag.
+                    ' 3. Skip mails already replied to by AutoPilot with a SUBSTANTIVE reply —
+                    '    walk the conversation to find any reply with the X-RedInk-AutoReply header
+                    '    whose value is "true" (substantive). Mails that only received a holding
+                    '    notice (value "holding") are NOT skipped and will be re-processed.
                     Try
-                        If IsPartOfAutoPilotConversation(mi) Then
+                        If HasSubstantiveAutoPilotReply(mi) Then
                             skippedAlreadyProcessed += 1
                             Continue For
                         End If
@@ -548,8 +608,16 @@ Partial Public Class ThisAddIn
 
             ApDashboardLog($"Found {candidates.Count} unprocessed mail(s) matching filters.", "info")
 
-            ' Show preview dialog using MultiModelSelectorForm pattern
-            Dim selectedEntryIds = ShowCatchUpPreviewDialog(candidates, lastProcessed)
+            Dim selectedEntryIds As List(Of String) = Nothing
+
+            If _apConfig.IsUnattended Then
+                ' Unattended auto-start: skip the preview dialog, process all candidates
+                selectedEntryIds = candidates.Select(Function(c) c.EntryID).ToList()
+                ApDashboardLog($"Unattended mode — auto-selecting all {selectedEntryIds.Count} catch-up mail(s).", "info")
+            Else
+                ' Show preview dialog using MultiModelSelectorForm pattern
+                selectedEntryIds = ShowCatchUpPreviewDialog(candidates, lastProcessed)
+            End If
 
             If selectedEntryIds IsNot Nothing AndAlso selectedEntryIds.Count > 0 Then
                 For Each entryId In selectedEntryIds
@@ -566,6 +634,78 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"[AutoPilot] CatchUpMissedMails error: {ex}")
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Checks whether a mail already has a SUBSTANTIVE AutoPilot reply in its conversation.
+    ''' Returns True only if a reply with header value "true" is found (not "holding").
+    ''' This allows mails that received only a holding notice to be re-processed on catch-up.
+    ''' </summary>
+    Private Function HasSubstantiveAutoPilotReply(mi As MailItem) As Boolean
+        Try
+            ' Walk the conversation thread to find any mail with a substantive reply header.
+            Dim conversation As Outlook.Conversation = Nothing
+            Try
+                conversation = mi.GetConversation()
+            Catch
+            End Try
+
+            If conversation IsNot Nothing Then
+                Try
+                    Dim rootItems As SimpleItems = conversation.GetRootItems()
+                    If rootItems IsNot Nothing Then
+                        For Each rootItem As Object In rootItems
+                            If CheckConversationNodeForSubstantiveReply(conversation, rootItem, 0) Then
+                                Return True
+                            End If
+                        Next
+                    End If
+                Catch
+                End Try
+            End If
+        Catch
+        End Try
+        Return False
+    End Function
+
+    ''' <summary>Recursively checks conversation tree nodes for a substantive AutoPilot reply header (value = "true", not "holding").</summary>
+    Private Function CheckConversationNodeForSubstantiveReply(
+            conv As Outlook.Conversation,
+            item As Object,
+            depth As Integer) As Boolean
+
+        If depth > AP_MaxThreadDepth Then Return False
+
+        Try
+            Dim nodeMail = TryCast(item, MailItem)
+            If nodeMail IsNot Nothing Then
+                Try
+                    Dim prop As Object = Nothing
+                    Try
+                        prop = nodeMail.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
+                    Catch
+                        ' Property not set — normal for user mails
+                    End Try
+                    ' Only "true" counts as substantive; "holding" does not
+                    If prop IsNot Nothing AndAlso CStr(prop).Equals(AP_LoopHeaderValue, StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Catch
+                End Try
+            End If
+
+            Dim children As SimpleItems = conv.GetChildren(item)
+            If children IsNot Nothing Then
+                For Each child As Object In children
+                    If CheckConversationNodeForSubstantiveReply(conv, child, depth + 1) Then
+                        Return True
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        Return False
+    End Function
 
     ''' <summary>Data class for catch-up preview items.</summary>
     Private Class CatchUpCandidate
@@ -639,7 +779,8 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Timer callback that periodically checks for queued mails needing holding
-    ''' notifications. Uses Interlocked to prevent overlapping executions.
+    ''' notifications and sends progress updates for the actively-processing mail.
+    ''' Uses Interlocked to prevent overlapping executions.
     ''' </summary>
     Private Async Sub NotificationTimerCallback(state As Object)
         ' Guard: skip if AutoPilot is not active or already checking
@@ -650,6 +791,7 @@ Partial Public Class ThisAddIn
             Dim ct = _apCts?.Token
             If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
             Await SendQueuePositionNotificationsAsync(ct.Value)
+            Await SendActiveJobProgressNotificationAsync(ct.Value)
         Catch ex As OperationCanceledException
             ' Expected during shutdown
         Catch ex As System.Exception
@@ -665,9 +807,14 @@ Partial Public Class ThisAddIn
             While Not ct.IsCancellationRequested
                 Dim entryId As String = Nothing
                 If _apMailQueue.TryDequeue(entryId) Then
-                    ' Clean up enqueue time tracking for this mail
+                    ' Clean up enqueue time and notification tracking for this mail
                     Dim dummy As DateTime
                     _apQueueEnqueueTimes.TryRemove(entryId, dummy)
+                    _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+
+                    ' Track the active job for progress notifications
+                    _apCurrentProcessingEntryId = entryId
+                    _apActiveJobLastNotifiedUtc = DateTime.MinValue
 
                     Dim pending = _apMailQueue.Count
                     If pending > 0 Then
@@ -692,15 +839,26 @@ Partial Public Class ThisAddIn
                         _apCurrentProcessingCategory = AP_Cat_TextOnly
                     End Try
 
+                    ' Create a per-job CancellationTokenSource linked to the session CTS
+                    _apCurrentJobCts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+                    Dim jobCt = _apCurrentJobCts.Token
+
                     _apCurrentProcessingStopwatch = Stopwatch.StartNew()
                     Try
-                        Await ProcessIncomingMailAsync(entryId, ct)
+                        Await ProcessIncomingMailAsync(entryId, jobCt)
+                    Catch ex As OperationCanceledException When Not ct.IsCancellationRequested
+                        ' Job-level abort (not session-level) — log and continue to next mail
+                        ApDashboardLog($"⛔ Job aborted by operator for: {entryId.Substring(0, Math.Min(20, entryId.Length))}...", "warn")
                     Finally
                         _apCurrentProcessingStopwatch.Stop()
                         UpdateCategoryTiming(_apCurrentProcessingCategory, _apCurrentProcessingStopwatch.Elapsed.TotalSeconds)
                         ApDashboardLog($"⏱ Completed in {_apCurrentProcessingStopwatch.Elapsed.TotalSeconds:F1}s [{_apCurrentProcessingCategory}]", "step")
                         _apCurrentProcessingStopwatch = Nothing
                         _apCurrentProcessingCategory = Nothing
+                        _apCurrentProcessingEntryId = Nothing
+                        _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                        Try : _apCurrentJobCts?.Dispose() : Catch : End Try
+                        _apCurrentJobCts = Nothing
                     End Try
                 Else
                     Await Task.Delay(1000, ct)
@@ -1012,8 +1170,15 @@ Partial Public Class ThisAddIn
             Dim waitedSeconds = (now - enqueueTime).TotalSeconds
             If waitedSeconds < AP_QueueNotifyThresholdSeconds Then Continue For
 
-            ' Don't notify the same mail twice
-            If Not _apQueueNotifiedEntryIds.TryAdd(entry.EntryId, True) Then Continue For
+            ' Allow repeat notifications every AP_QueueNotifyRepeatIntervalSeconds
+            Dim lastNotifiedUtc As DateTime = DateTime.MinValue
+            If _apQueueNotifiedEntryIds.TryGetValue(entry.EntryId, lastNotifiedUtc) Then
+                Dim sinceLastNotify = (now - lastNotifiedUtc).TotalSeconds
+                If sinceLastNotify < AP_QueueNotifyRepeatIntervalSeconds Then Continue For
+            End If
+
+            ' Record / update notification time
+            _apQueueNotifiedEntryIds(entry.EntryId) = now
 
             Try
                 Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
@@ -1065,13 +1230,31 @@ Partial Public Class ThisAddIn
                     Dim stallWarning As String =
                         " Please also note that occasional delays may occur if the system requires operator attention."
 
-                    Dim holdingMessage As String =
-                        $"Thank you for your message. I'm currently processing other requests. " &
-                        $"{positionText}{waitDescription}{stallWarning} " &
-                        $"I will get back to you as soon as possible. — {AN6}"
+                    Dim localChatHint As String =
+                        $" If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly."
 
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingMessage, Nothing, tagAsAutoReply:=True))
-                    ApDashboardLog($"📨 Queue notification sent to {senderLabel} (position {entry.Position}, waited {waitedSeconds:F0}s, {heavyAhead} heavy ahead)", "info")
+                    Dim isRepeat = (lastNotifiedUtc <> DateTime.MinValue)
+
+                    Dim holdingMessage As String
+                    If isRepeat Then
+                        holdingMessage =
+                            $"Thank you for your continued patience. This is an automated queue status update — your request is still awaiting processing. " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
+                    Else
+                        holdingMessage =
+                            $"Thank you for your message. This is an automated queue status notification — your request has not yet been processed in substance. " &
+                            $"{positionText}{waitDescription}{stallWarning}{localChatHint} " &
+                            $"I will get back to you with a substantive reply as soon as possible. — {AN6}"
+                    End If
+
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, holdingMessage, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+
+                    ' Track that this mail has only received a holding notice
+                    _apHoldingOnlyEntryIds.TryAdd(entry.EntryId, True)
+
+                    Dim repeatTag = If(isRepeat, " [repeat]", "")
+                    ApDashboardLog($"📨 Queue notification{repeatTag} sent to {senderLabel} (position {entry.Position}, waited {waitedSeconds:F0}s, {heavyAhead} heavy ahead)", "info")
                 Finally
                     Try : Marshal.ReleaseComObject(mi) : Catch : End Try
                 End Try
@@ -1081,6 +1264,72 @@ Partial Public Class ThisAddIn
         Next
     End Function
 
+    ''' <summary>
+    ''' Sends a progress notification to the sender of the mail that is currently
+    ''' being processed, if it has been running for at least AP_ActiveJobNotifyIntervalSeconds
+    ''' since the last notification (or since processing started).
+    ''' This covers the case where a single job (e.g. heavy document processing) takes
+    ''' a very long time — the sender is informed that their request is still active.
+    ''' </summary>
+    Private Async Function SendActiveJobProgressNotificationAsync(ct As CancellationToken) As Task
+        Dim entryId = _apCurrentProcessingEntryId
+        If String.IsNullOrEmpty(entryId) Then Return
+
+        ' Check elapsed processing time
+        Dim sw = _apCurrentProcessingStopwatch
+        If sw Is Nothing OrElse Not sw.IsRunning Then Return
+        Dim elapsedSeconds = sw.Elapsed.TotalSeconds
+
+        ' Don't notify before the first interval has passed
+        If elapsedSeconds < AP_ActiveJobNotifyIntervalSeconds Then Return
+
+        ' Check if enough time has passed since the last notification for this job
+        Dim now = DateTime.UtcNow
+        If _apActiveJobLastNotifiedUtc <> DateTime.MinValue Then
+            Dim sinceLastNotify = (now - _apActiveJobLastNotifiedUtc).TotalSeconds
+            If sinceLastNotify < AP_ActiveJobNotifyIntervalSeconds Then Return
+        End If
+
+        ' Record notification time
+        _apActiveJobLastNotifiedUtc = now
+
+        Try
+            Dim mi As MailItem = Await SwitchToUi(Function() As MailItem
+                                                      Try
+                                                          Dim ns = Application.GetNamespace("MAPI")
+                                                          Dim obj = ns.GetItemFromID(entryId)
+                                                          If TypeOf obj Is MailItem Then Return DirectCast(obj, MailItem)
+                                                      Catch : End Try
+                                                      Return Nothing
+                                                  End Function)
+            If mi Is Nothing Then Return
+
+            Try
+                Dim mailInfo = Await SwitchToUi(Function() ExtractMailInfo(mi))
+                Dim senderLabel = If(mailInfo IsNot Nothing, mailInfo.SenderEmail, "unknown")
+
+                Dim elapsedMinutes = CInt(Math.Floor(elapsedSeconds / 60))
+                Dim progressMessage As String =
+                    $"Thank you for your continued patience. This is an automated progress update — your request is currently being processed and has been running for approximately {elapsedMinutes} minutes. " &
+                    $"Some requests, particularly those involving document processing, may take considerable time to complete. " &
+                    $"I will get back to you with the final result as soon as processing is finished. " &
+                    $"If you need immediate assistance, you can also use the {AN} add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. " &
+                    $"— {AN6}"
+
+                Await SwitchToUi(Sub() SendReplyToSender(mi, progressMessage, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+
+                ' Track that this mail has only received holding notices so far
+                _apHoldingOnlyEntryIds.TryAdd(entryId, True)
+
+                ApDashboardLog($"📨 Active job progress notification sent to {senderLabel} (processing for {elapsedMinutes}min)", "info")
+            Finally
+                Try : Marshal.ReleaseComObject(mi) : Catch : End Try
+            End Try
+        Catch ex As System.Exception
+            ApDashboardLog($"Active job notification error: {ex.Message}", "warn")
+        End Try
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  CORE PROCESSING
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -1088,6 +1337,10 @@ Partial Public Class ThisAddIn
     ''' <summary>Processes a single incoming mail item by entry ID.</summary>
     Private Async Function ProcessIncomingMailAsync(entryId As String, ct As CancellationToken) As Task
         Dim mi As MailItem = Nothing
+        Dim jobAborted As Boolean = False
+        Dim mailInfoForAbort As AutoPilotMailInfo = Nothing
+        Dim tempDirForAbort As String = Nothing
+        Dim attachmentPathsForAbort As List(Of AutoPilotAttachmentInfo) = Nothing
 
         Try
             mi = Await SwitchToUi(Function() As MailItem
@@ -1182,7 +1435,8 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached)", "warn") : Return : End If
+            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (global session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached — " & _apSessionReplyCount.ToString() & " replies sent across all senders): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "warn") : Return : End If
+
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
             ' ── Reply-To mismatch: potential spoofing or reflection attack ──
@@ -1230,8 +1484,13 @@ Partial Public Class ThisAddIn
             Directory.CreateDirectory(tempDir)
             Dim attachmentPaths As New List(Of AutoPilotAttachmentInfo)()
 
+            ' Store references for abort handler
+            mailInfoForAbort = mailInfo
+            tempDirForAbort = tempDir
+
             Try
                 attachmentPaths = Await SwitchToUi(Function() SaveAttachmentsToTemp(mi, tempDir))
+                attachmentPathsForAbort = attachmentPaths
 
                 If attachmentPaths.Count > 0 Then
                     ApDashboardLog($"Saved {attachmentPaths.Count} attachment(s) to temp:", "info")
@@ -1378,6 +1637,17 @@ Partial Public Class ThisAddIn
                                              cancellationToken:=ct,
                                              binaryOutputDirectory:=_apCurrentTempDir)
                     End If
+                Catch ex As OperationCanceledException
+                    ' Check if this is a job-level abort (not session-level)
+                    Dim sessionCt = _apCts?.Token
+                    If sessionCt.HasValue AndAlso Not sessionCt.Value.IsCancellationRequested Then
+                        ' Job-level abort — handle gracefully
+                        jobAborted = True
+                        response = Nothing
+                        ApDashboardLog("⛔ Job aborted during LLM/tooling execution.", "warn")
+                    Else
+                        Throw ' Session-level cancel — propagate
+                    End If
                 Finally
                     _apCurrentTempDir = Nothing
                     _apCurrentAttachments = Nothing
@@ -1385,6 +1655,59 @@ Partial Public Class ThisAddIn
                     MaxToolIterations = previousMaxToolIterations
                     ClearAttachmentCaches()
                 End Try
+
+                ' ── Detect swallowed cancellation ──
+                ' ExecuteToolingLoop catches OperationCanceledException internally and returns
+                ' a string like "Operation was canceled by the user." instead of re-throwing.
+                ' LLM() returns "" on cancellation. In both cases, if the job CTS was triggered
+                ' we must treat this as an abort, not as valid LLM output.
+                If Not jobAborted AndAlso ct.IsCancellationRequested Then
+                    jobAborted = True
+                    response = Nothing
+                    ApDashboardLog("⛔ Job abort detected (cancellation swallowed by LLM/tooling layer).", "warn")
+                End If
+
+                ' ── Handle job abort ──
+                If jobAborted Then
+                    Dim resultAttachmentsAbort = CollectResultAttachments(tempDir, attachmentPaths)
+                    Dim hasPartialOutput = (resultAttachmentsAbort IsNot Nothing AndAlso resultAttachmentsAbort.Count > 0)
+
+                    Dim abortChoice = Await SwitchToUi(Function() As Integer
+                                                           Dim msg = "The current job has been aborted."
+                                                           If hasPartialOutput Then
+                                                               msg &= $" There are {resultAttachmentsAbort.Count} output file(s) generated so far." & vbCrLf & vbCrLf &
+                                                                      "Would you like to send the partial output with an abort notice, or discard everything?"
+                                                           Else
+                                                               msg &= vbCrLf & vbCrLf & "Would you like to send an abort notice to the sender, or discard silently?"
+                                                           End If
+                                                           Return ShowCustomYesNoBox(msg,
+                                                               If(hasPartialOutput, "Send Partial Output", "Send Abort Notice"),
+                                                               "Discard",
+                                                               header:=$"{AN6} AutoPilot — Job Aborted")
+                                                       End Function)
+
+                    If abortChoice = 1 Then
+                        Dim abortMessage As String =
+                            $"I apologize, but the processing of your request was interrupted by the operator before it could be completed. " &
+                            If(hasPartialOutput,
+                                $"I was able to produce some partial output, which is attached for your reference. Please note that the results may be incomplete. ",
+                                "") &
+                            $"Please resend your request if you would like it to be fully processed. " &
+                            $"If you need immediate assistance, you can also use the {AN} add-in's Local Chat feature directly in Outlook or Word. " &
+                            $"— {AN6}"
+
+                        Dim attachmentsToSend = If(hasPartialOutput, resultAttachmentsAbort, Nothing)
+                        Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True))
+                        ' Do NOT tag as processed — allow catch-up to pick it up again
+                        Interlocked.Increment(_apSessionReplyCount)
+                        RecordSenderCooldown(mailInfo.SenderEmail)
+                        ApDashboardLog($"✉ Abort notice sent to: {mailInfo.SenderEmail}" & If(hasPartialOutput, $" (with {resultAttachmentsAbort.Count} partial attachment(s))", ""), "info")
+                    Else
+                        ' Do NOT tag as processed, do NOT record last processed time
+                        ApDashboardLog($"Job aborted and discarded for: {mailInfo.SenderEmail}", "step")
+                    End If
+                    Return
+                End If
 
                 If String.IsNullOrWhiteSpace(response) Then
                     ApDashboardLog("WARNING: LLM returned empty response for: " & mailInfo.Subject, "warn")
@@ -1412,8 +1735,9 @@ Partial Public Class ThisAddIn
                 Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
 
                 ' ── Approval or auto-send ──
-                If requiresApproval Then
-                    Await SwitchToUi(Sub() SendReplyToSender(mi, SP_AutoPilot_HoldingResponse, Nothing, tagAsAutoReply:=True))
+                If requiresApproval AndAlso Not _apConfig.IsUnattended Then
+                    Await SwitchToUi(Sub() SendReplyToSender(mi, SP_AutoPilot_HoldingResponse, Nothing, tagAsAutoReply:=True, isHoldingOnly:=True))
+                    _apHoldingOnlyEntryIds.TryAdd(entryId, True)
                     ApDashboardLog("Holding response sent to: " & mailInfo.SenderEmail, "step")
 
                     Dim approved As Boolean = Await SwitchToUi(Function() ShowApprovalDialog(mailInfo, response, resultAttachments))
@@ -1423,17 +1747,24 @@ Partial Public Class ThisAddIn
                         Interlocked.Increment(_apSessionReplyCount)
                         RecordSenderCooldown(mailInfo.SenderEmail)
                         RecordLastProcessedTime()
+                        Dim dummyBool As Boolean
+                        _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
                         ApDashboardLog("✓ APPROVED & SENT reply to: " & mailInfo.SenderEmail, "info")
                     Else
                         ApDashboardLog("REJECTED reply for: " & mailInfo.Subject, "step")
                     End If
                 Else
+                    If requiresApproval AndAlso _apConfig.IsUnattended Then
+                        ApDashboardLog($"⚡ Unattended mode — auto-approving reply for non-whitelisted sender: {mailInfo.SenderEmail}", "info")
+                    End If
                     Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                     Interlocked.Increment(_apSessionReplyCount)
                     RecordSenderCooldown(mailInfo.SenderEmail)
                     RecordLastProcessedTime()
                     TrackAutoPilotConversation(mi)
+                    Dim dummyBool As Boolean
+                    _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
                     ApDashboardLog($"✓ SENT reply to: {mailInfo.SenderEmail} (session total: {_apSessionReplyCount})", "info")
                 End If
             Finally
@@ -1518,7 +1849,7 @@ Partial Public Class ThisAddIn
             info.Body = If(mi.Body, "")
             Try
                 Dim propVal = mi.PropertyAccessor.GetProperty(AP_LoopHeaderProperty)
-                info.HasAutoReplyHeader = (propVal IsNot Nothing AndAlso propVal.ToString() = AP_LoopHeaderValue)
+                info.HasAutoReplyHeader = (propVal IsNot Nothing AndAlso (propVal.ToString() = AP_LoopHeaderValue OrElse propVal.ToString() = AP_LoopHeaderValueHolding))
             Catch
                 info.HasAutoReplyHeader = False
             End Try
@@ -1805,7 +2136,8 @@ Partial Public Class ThisAddIn
     Private Sub SendReplyToSender(originalMail As MailItem, responseText As String,
                                   resultAttachments As List(Of String),
                                   Optional tagAsAutoReply As Boolean = True,
-                                  Optional sourcesHtml As String = "")
+                                  Optional sourcesHtml As String = "",
+                                  Optional isHoldingOnly As Boolean = False)
         Dim reply As MailItem = Nothing
         Try
             reply = originalMail.Reply()
@@ -1871,7 +2203,12 @@ Partial Public Class ThisAddIn
             End If
 
             If tagAsAutoReply Then
-                Try : reply.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue) : Catch : End Try
+                Try
+                    ' Use "holding" value for holding-only notices so the catch-up scan
+                    ' can distinguish them from substantive replies (value "true").
+                    Dim headerValue = If(isHoldingOnly, AP_LoopHeaderValueHolding, AP_LoopHeaderValue)
+                    reply.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, headerValue)
+                Catch : End Try
             End If
             Try : reply.Categories = AP_CategoryName : Catch : End Try
 
@@ -2108,7 +2445,7 @@ Partial Public Class ThisAddIn
     ''' <returns>True if this mail is part of an AutoPilot-managed conversation.</returns>
     Private Function IsPartOfAutoPilotConversation(mi As MailItem) As Boolean
         Try
-            ' 1. Check the incoming mail itself for the header
+            ' 1. Check the incoming mail itself for the header (any value: "true" or "holding")
             If HasAutoReplyHeader(mi) Then Return True
 
             ' 2. Walk the conversation thread to find any mail with the AutoPilot header.
@@ -2152,7 +2489,7 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>Recursively checks conversation tree nodes for the AutoPilot reply header.</summary>
+    ''' <summary>Recursively checks conversation tree nodes for the AutoPilot reply header (any value).</summary>
     Private Function CheckConversationNodeForAutoReply(
             conv As Outlook.Conversation,
             item As Object,
@@ -2182,7 +2519,7 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>Checks whether a mail item has the X-RedInk-AutoReply MAPI property set.</summary>
+    ''' <summary>Checks whether a mail item has the X-RedInk-AutoReply MAPI property set (any value: "true" or "holding").</summary>
     Private Function HasAutoReplyHeader(mi As MailItem) As Boolean
         Try
             Dim prop As Object = Nothing
@@ -2193,8 +2530,12 @@ Partial Public Class ThisAddIn
                 ' Property not set — this is normal for user-sent mails
                 Return False
             End Try
-            If prop IsNot Nothing AndAlso CStr(prop).Equals(AP_LoopHeaderValue, StringComparison.OrdinalIgnoreCase) Then
-                Return True
+            If prop IsNot Nothing Then
+                Dim val = CStr(prop)
+                If val.Equals(AP_LoopHeaderValue, StringComparison.OrdinalIgnoreCase) OrElse
+                   val.Equals(AP_LoopHeaderValueHolding, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
             End If
         Catch
             ' Ignore errors

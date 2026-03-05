@@ -102,6 +102,27 @@ Partial Public Class ThisAddIn
     Private Const NoteRefMarker As String = "‖"
 
     ''' <summary>
+    ''' Represents a non-breaking space occurrence with surrounding word context for restoration.
+    ''' </summary>
+    Private Class NonBreakingSpaceInfo
+        ''' <summary>The non-breaking space character (U+00A0, U+202F, etc.).</summary>
+        Public Property SpaceChar As Char
+        ''' <summary>The word immediately before the non-breaking space (Nothing if at start).</summary>
+        Public Property WordBefore As String
+        ''' <summary>The word immediately after the non-breaking space (Nothing if at end).</summary>
+        Public Property WordAfter As String
+    End Class
+
+    ''' <summary>
+    ''' Characters treated as non-breaking spaces that must be preserved.
+    ''' U+00A0 = non-breaking space (geschütztes Leerzeichen)
+    ''' U+202F = narrow no-break space (schmales geschütztes Leerzeichen)
+    ''' U+2007 = figure space (ziffernbreites Leerzeichen)
+    ''' </summary>
+    Private Shared ReadOnly NonBreakingSpaceChars As Char() = {ChrW(&HA0), ChrW(&H202F), ChrW(&H2007)}
+
+
+    ''' <summary>
     ''' Represents a text run (w:t element) with its content and XML reference.
     ''' </summary>
     Private Class TranslateTextRunInfo
@@ -1268,6 +1289,17 @@ Partial Public Class ThisAddIn
         Dim processableParagraphs = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processableParagraphs.Count = 0 Then Return True
 
+        ' ─── Record non-breaking spaces for later restoration ───
+        ' The LLM will normalize U+00A0, U+202F, etc. to regular spaces.
+        ' We record context around each occurrence so we can restore them.
+        Dim nbspRecords As New Dictionary(Of Integer, List(Of NonBreakingSpaceInfo))()
+        For i As Integer = 0 To processableParagraphs.Count - 1
+            Dim recorded = RecordNonBreakingSpaces(processableParagraphs(i).FullText)
+            If recorded IsNot Nothing Then
+                nbspRecords(i) = recorded
+            End If
+        Next
+
         ' Select appropriate system prompt based on mode
         Dim systemPrompt As String
         If mode = DocumentProcessMode.Translate Then
@@ -1398,6 +1430,14 @@ Partial Public Class ThisAddIn
 
             ' Parse and store results
             ParseTranslateResponse(Response, processableParagraphs, batchStart, batchEnd)
+
+            ' ─── Restore non-breaking spaces in translated paragraphs ───
+            For j As Integer = batchStart To batchEnd
+                If processableParagraphs(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                    processableParagraphs(j).TranslatedText = RestoreNonBreakingSpaces(
+                        processableParagraphs(j).TranslatedText, nbspRecords(j))
+                End If
+            Next
 
             batchIndex = batchEnd + 1
 
@@ -1827,6 +1867,7 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+
     ''' <summary>
     ''' Finds the best split position in the translated text for a note-reference boundary
     ''' by anchoring on the last word(s) of the original segment text, or the first word(s)
@@ -2076,4 +2117,136 @@ Partial Public Class ThisAddIn
             End Try
         Next
     End Function
+
+
+    ''' <summary>
+    ''' Scans text for non-breaking space characters and records their surrounding
+    ''' word context so they can be restored after LLM processing.
+    ''' </summary>
+    ''' <param name="text">The original text to scan.</param>
+    ''' <returns>A list of non-breaking space occurrences with context, or Nothing if none found.</returns>
+    Private Shared Function RecordNonBreakingSpaces(text As String) As List(Of NonBreakingSpaceInfo)
+        If String.IsNullOrEmpty(text) Then Return Nothing
+
+        Dim hasNbsp As Boolean = False
+        For Each ch As Char In text
+            If NonBreakingSpaceChars.Contains(ch) Then
+                hasNbsp = True
+                Exit For
+            End If
+        Next
+        If Not hasNbsp Then Return Nothing
+
+        Dim results As New List(Of NonBreakingSpaceInfo)()
+
+        ' Tokenize: split on regular spaces and non-breaking spaces, keeping delimiters
+        ' We walk the string character by character to capture context around each nbsp
+        Dim i As Integer = 0
+        While i < text.Length
+            If NonBreakingSpaceChars.Contains(text(i)) Then
+                Dim info As New NonBreakingSpaceInfo() With {
+                    .SpaceChar = text(i)
+                }
+
+                ' Find word before: scan backward from i-1 to find the token
+                If i > 0 Then
+                    Dim wordEnd As Integer = i - 1
+                    ' Skip any regular whitespace between the word and the nbsp
+                    While wordEnd >= 0 AndAlso text(wordEnd) = " "c
+                        wordEnd -= 1
+                    End While
+                    If wordEnd >= 0 Then
+                        Dim wordStart As Integer = wordEnd
+                        While wordStart > 0 AndAlso text(wordStart - 1) <> " "c AndAlso Not NonBreakingSpaceChars.Contains(text(wordStart - 1))
+                            wordStart -= 1
+                        End While
+                        info.WordBefore = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                ' Find word after: scan forward from i+1 to find the token
+                If i < text.Length - 1 Then
+                    Dim wordStart As Integer = i + 1
+                    ' Skip any regular whitespace between the nbsp and the next word
+                    While wordStart < text.Length AndAlso text(wordStart) = " "c
+                        wordStart += 1
+                    End While
+                    If wordStart < text.Length Then
+                        Dim wordEnd As Integer = wordStart
+                        While wordEnd < text.Length - 1 AndAlso text(wordEnd + 1) <> " "c AndAlso Not NonBreakingSpaceChars.Contains(text(wordEnd + 1))
+                            wordEnd += 1
+                        End While
+                        info.WordAfter = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                results.Add(info)
+            End If
+            i += 1
+        End While
+
+        Return If(results.Count > 0, results, Nothing)
+    End Function
+
+    ''' <summary>
+    ''' Restores non-breaking spaces in text that has been processed by the LLM,
+    ''' using the recorded word context to find where they should be placed.
+    ''' Only restores a non-breaking space when both surrounding words match.
+    ''' </summary>
+    ''' <param name="text">The LLM-processed text (with regular spaces).</param>
+    ''' <param name="nbspInfos">The recorded non-breaking space positions from the original text.</param>
+    ''' <returns>The text with non-breaking spaces restored where context matches.</returns>
+    Private Shared Function RestoreNonBreakingSpaces(text As String, nbspInfos As List(Of NonBreakingSpaceInfo)) As String
+        If String.IsNullOrEmpty(text) OrElse nbspInfos Is Nothing OrElse nbspInfos.Count = 0 Then Return text
+
+        ' For each recorded non-breaking space, find the matching word pair in the text
+        ' and replace the regular space between them with the original non-breaking space character.
+        ' Process in reverse order of match position to keep indices stable.
+        Dim replacements As New SortedList(Of Integer, Char)()
+
+        For Each info In nbspInfos
+            ' Both words must be present for a safe match
+            If String.IsNullOrEmpty(info.WordBefore) OrElse String.IsNullOrEmpty(info.WordAfter) Then Continue For
+
+            ' Build a pattern: wordBefore + one or more regular spaces + wordAfter
+            ' Use Regex.Escape to handle special characters in the words
+            Dim pattern As String = Regex.Escape(info.WordBefore) & "( +)" & Regex.Escape(info.WordAfter)
+            Dim m As Match = Regex.Match(text, pattern, RegexOptions.None)
+
+            ' Find the first match that hasn't already been claimed by another replacement
+            While m.Success
+                Dim spaceGroupStart As Integer = m.Groups(1).Index
+                Dim spaceGroupLen As Integer = m.Groups(1).Length
+
+                ' Check if this space position is already claimed
+                Dim alreadyClaimed As Boolean = False
+                For spIdx As Integer = spaceGroupStart To spaceGroupStart + spaceGroupLen - 1
+                    If replacements.ContainsKey(spIdx) Then
+                        alreadyClaimed = True
+                        Exit For
+                    End If
+                Next
+
+                If Not alreadyClaimed Then
+                    ' Replace the first space character in the group with the non-breaking space
+                    replacements(spaceGroupStart) = info.SpaceChar
+                    Exit While
+                End If
+
+                m = m.NextMatch()
+            End While
+        Next
+
+        If replacements.Count = 0 Then Return text
+
+        ' Apply replacements (from end to start to preserve indices)
+        Dim sb As New StringBuilder(text)
+        For i As Integer = replacements.Count - 1 To 0 Step -1
+            Dim pos As Integer = replacements.Keys(i)
+            sb(pos) = replacements.Values(i)
+        Next
+
+        Return sb.ToString()
+    End Function
+
 End Class

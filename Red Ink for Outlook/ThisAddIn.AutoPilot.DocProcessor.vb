@@ -92,9 +92,29 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const AP_NoteRefMarker As String = "‖"
 
+    ''' <summary>
+    ''' Characters treated as non-breaking spaces that must be preserved.
+    ''' U+00A0 = non-breaking space (geschütztes Leerzeichen)
+    ''' U+202F = narrow no-break space (schmales geschütztes Leerzeichen)
+    ''' U+2007 = figure space (ziffernbreites Leerzeichen)
+    ''' </summary>
+    Private Shared ReadOnly AP_NonBreakingSpaceChars As Char() = {ChrW(&HA0), ChrW(&H202F), ChrW(&H2007)}
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASSES (local to AutoPilot, avoid collision with Word add-in)
     ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Represents a non-breaking space occurrence with surrounding word context for restoration.
+    ''' </summary>
+    Private Class APNonBreakingSpaceInfo
+        ''' <summary>The non-breaking space character (U+00A0, U+202F, etc.).</summary>
+        Public Property SpaceChar As Char
+        ''' <summary>The word immediately before the non-breaking space (Nothing if at start).</summary>
+        Public Property WordBefore As String
+        ''' <summary>The word immediately after the non-breaking space (Nothing if at end).</summary>
+        Public Property WordAfter As String
+    End Class
 
     ''' <summary>
     ''' Stores a text node and its original content for a single run.
@@ -427,6 +447,17 @@ Partial Public Class ThisAddIn
         Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processable.Count = 0 Then Return True
 
+        ' ─── Record non-breaking spaces for later restoration ───
+        ' The LLM will normalize U+00A0, U+202F, etc. to regular spaces.
+        ' We record context around each occurrence so we can restore them.
+        Dim nbspRecords As New Dictionary(Of Integer, List(Of APNonBreakingSpaceInfo))()
+        For i As Integer = 0 To processable.Count - 1
+            Dim recorded = APRecordNonBreakingSpaces(processable(i).FullText)
+            If recorded IsNot Nothing Then
+                nbspRecords(i) = recorded
+            End If
+        Next
+
         ' Check if any paragraphs use markers
         Dim hasMarkers = processable.Any(Function(p) p.MarkerText IsNot Nothing)
 
@@ -542,6 +573,14 @@ Partial Public Class ThisAddIn
 
             ' Parse response
             APParseResponse(llmResponse, processable, batchStart, batchEnd)
+
+            ' ─── Restore non-breaking spaces in processed paragraphs ───
+            For j As Integer = batchStart To batchEnd
+                If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                    processable(j).TranslatedText = APRestoreNonBreakingSpaces(
+                        processable(j).TranslatedText, nbspRecords(j))
+                End If
+            Next
 
             batchIndex = batchEnd + 1
         End While
@@ -2314,5 +2353,125 @@ Partial Public Class ThisAddIn
             Next
         End Using
     End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  NON-BREAKING SPACE PRESERVATION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Scans text for non-breaking space characters and records their surrounding
+    ''' word context so they can be restored after LLM processing.
+    ''' </summary>
+    ''' <param name="text">The original text to scan.</param>
+    ''' <returns>A list of non-breaking space occurrences with context, or Nothing if none found.</returns>
+    Private Shared Function APRecordNonBreakingSpaces(text As String) As List(Of APNonBreakingSpaceInfo)
+        If String.IsNullOrEmpty(text) Then Return Nothing
+
+        Dim hasNbsp As Boolean = False
+        For Each ch As Char In text
+            If AP_NonBreakingSpaceChars.Contains(ch) Then
+                hasNbsp = True
+                Exit For
+            End If
+        Next
+        If Not hasNbsp Then Return Nothing
+
+        Dim results As New List(Of APNonBreakingSpaceInfo)()
+
+        Dim i As Integer = 0
+        While i < text.Length
+            If AP_NonBreakingSpaceChars.Contains(text(i)) Then
+                Dim info As New APNonBreakingSpaceInfo() With {
+                    .SpaceChar = text(i)
+                }
+
+                ' Find word before: scan backward from i-1 to find the token
+                If i > 0 Then
+                    Dim wordEnd As Integer = i - 1
+                    While wordEnd >= 0 AndAlso text(wordEnd) = " "c
+                        wordEnd -= 1
+                    End While
+                    If wordEnd >= 0 Then
+                        Dim wordStart As Integer = wordEnd
+                        While wordStart > 0 AndAlso text(wordStart - 1) <> " "c AndAlso Not AP_NonBreakingSpaceChars.Contains(text(wordStart - 1))
+                            wordStart -= 1
+                        End While
+                        info.WordBefore = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                ' Find word after: scan forward from i+1 to find the token
+                If i < text.Length - 1 Then
+                    Dim wordStart As Integer = i + 1
+                    While wordStart < text.Length AndAlso text(wordStart) = " "c
+                        wordStart += 1
+                    End While
+                    If wordStart < text.Length Then
+                        Dim wordEnd As Integer = wordStart
+                        While wordEnd < text.Length - 1 AndAlso text(wordEnd + 1) <> " "c AndAlso Not AP_NonBreakingSpaceChars.Contains(text(wordEnd + 1))
+                            wordEnd += 1
+                        End While
+                        info.WordAfter = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                results.Add(info)
+            End If
+            i += 1
+        End While
+
+        Return If(results.Count > 0, results, Nothing)
+    End Function
+
+    ''' <summary>
+    ''' Restores non-breaking spaces in text that has been processed by the LLM,
+    ''' using the recorded word context to find where they should be placed.
+    ''' Only restores a non-breaking space when both surrounding words match.
+    ''' </summary>
+    ''' <param name="text">The LLM-processed text (with regular spaces).</param>
+    ''' <param name="nbspInfos">The recorded non-breaking space positions from the original text.</param>
+    ''' <returns>The text with non-breaking spaces restored where context matches.</returns>
+    Private Shared Function APRestoreNonBreakingSpaces(text As String, nbspInfos As List(Of APNonBreakingSpaceInfo)) As String
+        If String.IsNullOrEmpty(text) OrElse nbspInfos Is Nothing OrElse nbspInfos.Count = 0 Then Return text
+
+        Dim replacements As New SortedList(Of Integer, Char)()
+
+        For Each info In nbspInfos
+            If String.IsNullOrEmpty(info.WordBefore) OrElse String.IsNullOrEmpty(info.WordAfter) Then Continue For
+
+            Dim pattern As String = Regex.Escape(info.WordBefore) & "( +)" & Regex.Escape(info.WordAfter)
+            Dim m As Match = Regex.Match(text, pattern, RegexOptions.None)
+
+            While m.Success
+                Dim spaceGroupStart As Integer = m.Groups(1).Index
+                Dim spaceGroupLen As Integer = m.Groups(1).Length
+
+                Dim alreadyClaimed As Boolean = False
+                For spIdx As Integer = spaceGroupStart To spaceGroupStart + spaceGroupLen - 1
+                    If replacements.ContainsKey(spIdx) Then
+                        alreadyClaimed = True
+                        Exit For
+                    End If
+                Next
+
+                If Not alreadyClaimed Then
+                    replacements(spaceGroupStart) = info.SpaceChar
+                    Exit While
+                End If
+
+                m = m.NextMatch()
+            End While
+        Next
+
+        If replacements.Count = 0 Then Return text
+
+        Dim sb As New StringBuilder(text)
+        For i As Integer = replacements.Count - 1 To 0 Step -1
+            Dim pos As Integer = replacements.Keys(i)
+            sb(pos) = replacements.Values(i)
+        Next
+
+        Return sb.ToString()
+    End Function
 
 End Class

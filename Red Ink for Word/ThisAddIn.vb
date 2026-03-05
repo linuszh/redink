@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 2.3.2026
+' 5.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.020326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.050326" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -257,6 +257,33 @@ Partial Public Class ThisAddIn
         "Call this tool when you need the actual page content behind a link. " &
         "Provide either urls (array of strings) or url (single string). " &
         "Return value is plain text content for each URL (or an error per URL if retrieval fails)."
+
+    ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
+
+    Public Const InternalSearchToolName As String = "internet_search"
+
+    Public Const InternalSearchToolDefinition As String =
+        "{""name"":""internet_search""," &
+        """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about. PRIVACY: The query is sent to an external search engine. Never include personal data, confidential information, private names, case details, contract terms, internal identifiers, or any non-public information in the query. Only public figures, public institutions, published legislation, and other clearly public information may appear. If a useful query cannot be formed without non-public data, do not call this tool.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """query"":{""type"":""string"",""description"":""The search query. MUST NOT contain personal data, confidential details, or any non-public information. Use only generic, anonymized, or publicly known terms.""}," &
+        """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
+        """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
+
+    Public Const InternalSearchToolInstructionsPrompt As String =
+        "internet_search: Searches the internet and returns readable text from the top result pages. " &
+        "Call this tool when you need current or factual information you are not confident about. " &
+        "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
+        "Return value includes the search query used, the URLs visited, and the page content for each qualifying result. " &
+        "IMPORTANT PRIVACY CONSTRAINT: The search query is sent to an external search engine. " &
+        "You MUST NOT include any personal data, confidential information, private names, " &
+        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
+        "account numbers, or any other non-public information in the query. " &
+        "Only well-known public figures, public institutions, published legislation, " &
+        "publicly available case law references, and other clearly public information may appear in queries. " &
+        "If you cannot formulate a useful query without disclosing non-public information, " &
+        "do NOT call this tool — instead respond based on your existing knowledge and state your uncertainty."
+
 
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
 

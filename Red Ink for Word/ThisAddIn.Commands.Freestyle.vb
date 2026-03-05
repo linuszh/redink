@@ -1449,6 +1449,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
+                CompleteWordDocumentTables()
+                Return
+            End If
+
             If String.Equals(OtherPrompt.Trim(), "mcp", StringComparison.OrdinalIgnoreCase) Then
                 ImportMCPServer()
                 Return

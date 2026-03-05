@@ -1084,6 +1084,18 @@ Namespace My
                 Me("ChatShowToolingLog") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TableComplete_LastInstructions() As String
+            Get
+                Return CType(Me("TableComplete_LastInstructions"),String)
+            End Get
+            Set
+                Me("TableComplete_LastInstructions") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

@@ -549,6 +549,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_AutoPilotAutoStart As Boolean
+        Get
+            Return _context.INI_AutoPilotAutoStart
+        End Get
+        Set(value As Boolean)
+            _context.INI_AutoPilotAutoStart = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_UsageRestrictions As String
         Get
             Return _context.INI_UsageRestrictions

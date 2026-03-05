@@ -791,7 +791,7 @@ Namespace SharedLibrary
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
-        "APIDebug", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
+        "APIDebug", "AutoPilotAutoStart", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
@@ -988,6 +988,8 @@ Namespace SharedLibrary
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
+                Case "AutoPilotAutoStart"
+                    Return context.INI_AutoPilotAutoStart.ToString()
                 Case "ISearch"
                     Return context.INI_ISearch.ToString()
                 Case "ISearch_Approve"
@@ -1294,6 +1296,8 @@ Namespace SharedLibrary
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
+                Case "AutoPilotAutoStart"
+                    context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "ISearch"
                     context.INI_ISearch = Boolean.Parse(value)
                 Case "ISearch_Approve"
@@ -1607,6 +1611,7 @@ Namespace SharedLibrary
                     {"MarkupRegexCap", context.INI_MarkupRegexCap.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
+                    {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
                     {"APIKeyEncrypted", context.INI_APIEncrypted.ToString()},
                     {"SecondAPI", context.INI_SecondAPI.ToString()},
                     {"APIKey_2", context.INI_APIKeyBack_2},
@@ -2896,6 +2901,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2)
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
+            variableValues.Add("AutoPilotAutoStart", context.INI_AutoPilotAutoStart)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
             variableValues.Add("LogPath", context.INI_LogPath)
             variableValues.Add("Language1", context.INI_Language1)
@@ -3137,6 +3143,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2Endpoint_2") Then context.INI_OAuth2Endpoint_2 = CStr(updatedValues("OAuth2Endpoint_2"))
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
+                If updatedValues.ContainsKey("AutoPilotAutoStart") Then context.INI_AutoPilotAutoStart = CBool(updatedValues("AutoPilotAutoStart"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
                 If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
