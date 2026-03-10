@@ -464,6 +464,19 @@ Public Class frmAIChat
         .Height = 40
     }
 
+    ''' <summary>
+    ''' SplitContainer separating the chat history (Panel1) from the user input (Panel2).
+    ''' The splitter bar allows the user to resize the input area by dragging.
+    ''' </summary>
+    Private WithEvents splitChat As New SplitContainer() With {
+        .Dock = DockStyle.Fill,
+        .Orientation = Orientation.Horizontal,
+        .FixedPanel = FixedPanel.Panel2,
+        .SplitterWidth = 6,
+        .Panel2MinSize = 40,
+        .Panel1MinSize = 100
+    }
+
     ' =========================================================================
     ' Private Fields - Application State
     ' =========================================================================
@@ -493,8 +506,9 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' Initializes the chat form with shared context and constructs the UI layout.
-    ''' Creates a TableLayoutPanel with 5 rows: instructions label, chat history,
-    ''' user input, checkboxes panel, and buttons panel.
+    ''' Creates a TableLayoutPanel with 4 rows: instructions label, split chat/input area,
+    ''' checkboxes panel, and buttons panel. The chat history and user input are separated
+    ''' by a draggable splitter so the user can resize the input area.
     ''' </summary>
     ''' <param name="context">Shared context providing INI settings and LLM configuration</param>
     Public Sub New(context As ISharedContext)
@@ -506,11 +520,13 @@ Public Class frmAIChat
         ' Configure text controls for multiline input
         txtChatHistory.Multiline = True
         txtUserInput.Multiline = True
+        txtUserInput.ScrollBars = ScrollBars.Vertical
+        txtUserInput.WordWrap = True
 
-        ' Create main layout container (5 rows, 1 column)
+        ' Create main layout container (4 rows, 1 column)
         Dim mainLayout As New TableLayoutPanel() With {
             .ColumnCount = 1,
-            .RowCount = 5,
+            .RowCount = 4,
             .Dock = DockStyle.Fill,
             .AutoSize = False,
             .Padding = New Padding(10)
@@ -525,13 +541,11 @@ Public Class frmAIChat
 
         ' Define row sizing behavior:
         ' Row 0 (instructions): Auto-size to content
-        ' Row 1 (chat history): Fill remaining space (100%)
-        ' Row 2 (user input): Auto-size to content
-        ' Row 3 (checkboxes): Auto-size to content
-        ' Row 4 (buttons): Auto-size to content
+        ' Row 1 (split container with chat + input): Fill remaining space (100%)
+        ' Row 2 (checkboxes): Auto-size to content
+        ' Row 3 (buttons): Auto-size to content
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
-        mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
@@ -541,12 +555,17 @@ Public Class frmAIChat
         txtChatHistory.Dock = DockStyle.Fill
         txtUserInput.Dock = DockStyle.Fill
 
+        ' Configure the SplitContainer panels
+        ' Panel1 = chat history (top), Panel2 = user input (bottom, resizable via splitter)
+        splitChat.Panel1.Controls.Add(txtChatHistory)
+        splitChat.Panel2.Controls.Add(txtUserInput)
+        splitChat.SplitterDistance = 300 ' Default: generous space for chat history
+
         ' Add controls to layout (column 0, respective rows)
         mainLayout.Controls.Add(lblInstructions, 0, 0)
-        mainLayout.Controls.Add(txtChatHistory, 0, 1)
-        mainLayout.Controls.Add(txtUserInput, 0, 2)
-        mainLayout.Controls.Add(pnlCheckboxes, 0, 3)
-        mainLayout.Controls.Add(pnlButtons, 0, 4)
+        mainLayout.Controls.Add(splitChat, 0, 1)
+        mainLayout.Controls.Add(pnlCheckboxes, 0, 2)
+        mainLayout.Controls.Add(pnlButtons, 0, 3)
 
         ' Initialize HTML chat UI (WebBrowser control overlay)
         InitChatHtmlUI(mainLayout)
@@ -621,6 +640,17 @@ Public Class frmAIChat
         Else
             Me.StartPosition = FormStartPosition.CenterScreen
         End If
+
+        ' Set input panel to double the original designer height (63px × 2 = 126px)
+        Try
+            Dim desiredInputHeight As Integer = 126
+            Dim newDistance As Integer = splitChat.Height - desiredInputHeight - splitChat.SplitterWidth
+            If newDistance >= splitChat.Panel1MinSize Then
+                splitChat.SplitterDistance = newDistance
+            End If
+        Catch
+            ' Layout not ready yet; keep default SplitterDistance
+        End Try
 
         ' Attach input keydown handler (Enter to send, Shift+Enter for newline)
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
@@ -3966,19 +3996,19 @@ Partial Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Initializes WebBrowser control and adds to host TableLayoutPanel.
+    ''' Initializes WebBrowser control and adds to the SplitContainer's Panel1.
     ''' Called from constructor after txtChatHistory placement.
     ''' </summary>
-    ''' <param name="host">TableLayoutPanel containing chat controls</param>
+    ''' <param name="host">TableLayoutPanel containing chat controls (unused but kept for API compat)</param>
     ''' <remarks>
-    ''' Hides txtChatHistory (plain text fallback), adds wbChat to row 1,
+    ''' Hides txtChatHistory (plain text fallback), adds wbChat to Panel1 of splitChat,
     ''' sets up BrowserBridge for JavaScript interaction, and wires event handlers.
     ''' </remarks>
     Public Sub InitChatHtmlUI(host As TableLayoutPanel)
         If host Is Nothing Then Return
 
         txtChatHistory.Visible = False
-        host.Controls.Add(wbChat, 0, 1)
+        splitChat.Panel1.Controls.Add(wbChat)
         wbChat.BringToFront()
 
         ' Expose COM bridge for JavaScript interaction

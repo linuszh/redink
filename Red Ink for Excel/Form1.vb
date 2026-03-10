@@ -117,6 +117,19 @@ Public Class frmAIChat
         .Height = 40
     }
 
+    ''' <summary>
+    ''' SplitContainer separating the chat history (Panel1) from the user input (Panel2).
+    ''' The splitter bar allows the user to resize the input area by dragging.
+    ''' </summary>
+    Private WithEvents splitChat As New SplitContainer() With {
+        .Dock = DockStyle.Fill,
+        .Orientation = Orientation.Horizontal,
+        .FixedPanel = FixedPanel.Panel2,
+        .SplitterWidth = 6,
+        .Panel2MinSize = 40,
+        .Panel1MinSize = 100
+    }
+
     ''' <summary>Shared context providing configuration and prompts.</summary>
     Private _context As ISharedContext = New SharedContext()
 
@@ -138,14 +151,16 @@ Public Class frmAIChat
 
         txtChatHistory.Multiline = True
         txtUserInput.Multiline = True
+        txtUserInput.ScrollBars = System.Windows.Forms.ScrollBars.Vertical
+        txtUserInput.WordWrap = True
 
         ' 1) Create TableLayoutPanel
         Dim mainLayout As New TableLayoutPanel() With {
             .ColumnCount = 1,
-            .RowCount = 5,
+            .RowCount = 4,
             .Dock = DockStyle.Fill,
             .AutoSize = False,
-            .Padding = New Padding(10)   ' will be overridden
+            .Padding = New Padding(10)
         }
 
         ' 2) Set column width to 100%
@@ -155,10 +170,13 @@ Public Class frmAIChat
         ' 3) Right inner padding 20 px
         mainLayout.Padding = New Padding(left:=10, top:=10, right:=20, bottom:=10)
 
-        ' 4) Define rows
+        ' 4) Define rows:
+        ' Row 0 (instructions): Auto-size to content
+        ' Row 1 (split container with chat + input): Fill remaining space (100%)
+        ' Row 2 (checkboxes): Auto-size to content
+        ' Row 3 (buttons): Auto-size to content
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
-        mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
@@ -168,14 +186,19 @@ Public Class frmAIChat
         txtChatHistory.Dock = DockStyle.Fill
         txtUserInput.Dock = DockStyle.Fill
 
-        ' 6) Add controls to table
-        mainLayout.Controls.Add(lblInstructions, 0, 0)
-        mainLayout.Controls.Add(txtChatHistory, 0, 1)
-        mainLayout.Controls.Add(txtUserInput, 0, 2)
-        mainLayout.Controls.Add(pnlCheckboxes, 0, 3)
-        mainLayout.Controls.Add(pnlButtons, 0, 4)
+        ' 6) Configure the SplitContainer panels
+        ' Panel1 = chat history (top), Panel2 = user input (bottom, resizable via splitter)
+        splitChat.Panel1.Controls.Add(txtChatHistory)
+        splitChat.Panel2.Controls.Add(txtUserInput)
+        splitChat.SplitterDistance = 300 ' Default: generous space for chat history
 
-        ' 7) Refill form
+        ' 7) Add controls to table
+        mainLayout.Controls.Add(lblInstructions, 0, 0)
+        mainLayout.Controls.Add(splitChat, 0, 1)
+        mainLayout.Controls.Add(pnlCheckboxes, 0, 2)
+        mainLayout.Controls.Add(pnlButtons, 0, 3)
+
+        ' 8) Refill form
         Me.Controls.Clear()
         Me.Controls.Add(mainLayout)
 
@@ -214,6 +237,17 @@ Public Class frmAIChat
         Else
             Me.StartPosition = FormStartPosition.CenterScreen
         End If
+
+        ' Set input panel to double the original designer height (63px × 2 = 126px)
+        Try
+            Dim desiredInputHeight As Integer = 126
+            Dim newDistance As Integer = splitChat.Height - desiredInputHeight - splitChat.SplitterWidth
+            If newDistance >= splitChat.Panel1MinSize Then
+                splitChat.SplitterDistance = newDistance
+            End If
+        Catch
+            ' Layout not ready yet; keep default SplitterDistance
+        End Try
 
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
 

@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 5.3.2026
+' 10.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.050326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.100326" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -107,6 +107,7 @@ Partial Public Class ThisAddIn
     Private Const PushbackPrefix2 As String = "Pushback:"
     Private Const SlidesPrefix As String = "Slides:"
     Private Const ChartPrefix As String = "Chart:"
+    Private Const ChartPrefixApp As String = "Appchart:"
     Private Const BubbleCutText As String = " (" & ChrW(&H2702) & ")"
     Private Const SearchNextTrigger As String = "Next:"
     Private Const BoWTrigger As String = "(bow)"

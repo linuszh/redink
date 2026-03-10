@@ -44,6 +44,30 @@ Partial Public Class ThisAddIn
 
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
+        ' ── Mode selector: Standard DocCheck or Markup Review ──
+        Dim modeAnswer As System.Int32 = ShowCustomYesNoBox(
+            "Which type of document check would you like to run?" & vbCrLf & vbCrLf &
+            "• Check Requirements — Analyzes the document (or a selection) against a " &
+            "rule set of compliance criteria (from your DocCheck script files). " &
+            "Each rule is checked independently and findings are reported as " &
+            "Word comments or a summary report." & vbCrLf & vbCrLf &
+            "• Markup Review — Compares tracked changes in the document against " &
+            "acceptability constraints defined in a separate playbook (.docx with " &
+            "comments). Evaluates whether each revision is within acceptable bounds, " &
+            "suggests compromise redrafts where needed, and optionally checks " &
+            "whether other clauses undermine the constraints.",
+            "Check Requirements",
+            "Markup Review",
+            AN & " Document Check")
+
+        If modeAnswer = 0 Then
+            Return
+        ElseIf modeAnswer = 2 Then
+            Await RunMarkupReview()
+            Return
+        End If
+        ' modeAnswer = 1 → proceed with standard DocCheck below
+
         ' Expand and normalize the configured paths
         Dim DocCheckPath As System.String = ExpandEnvironmentVariables(INI_DocCheckPath)
         If Not System.String.IsNullOrEmpty(DocCheckPath) AndAlso Not DocCheckPath.EndsWith("\", System.StringComparison.Ordinal) Then
@@ -241,7 +265,7 @@ Partial Public Class ThisAddIn
             OtherPrompt = ""
             OutputLanguage = INI_Language1
 
-            Dim p0 As SLib.InputParameter = New SLib.InputParameter("Rule Set to use", defaultRuleSetDisplay)
+            Dim p0 As SLib.InputParameter = New SLib.InputParameter("Rule Set to use (playbook)", defaultRuleSetDisplay)
             p0.Options = New System.Collections.Generic.List(Of System.String)(displayOptions)
             Dim p1 As SLib.InputParameter = New SLib.InputParameter("Check as only one clause", checkOnlyOneClause)
             Dim p2 As SLib.InputParameter = New SLib.InputParameter("Add additional context", addAdditionalContext)

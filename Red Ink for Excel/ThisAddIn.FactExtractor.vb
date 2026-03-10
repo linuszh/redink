@@ -33,9 +33,15 @@ Imports Microsoft.Office.Interop.Excel
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
+Imports Newtonsoft.Json
 Imports SharedLibrary.FactExtractionService
 
 Partial Public Class ThisAddIn
+
+    ''' <summary>
+    ''' Sentinel display value inserted as the first dropdown option to trigger the interactive library builder.
+    ''' </summary>
+    Private Const BuilderSentinel As String = "✨ Build new library entry..."
 
     ''' <summary>
     ''' Main entry point for fact extraction. Collects user parameters, resolves instruction/schema,
@@ -123,6 +129,11 @@ Partial Public Class ThisAddIn
 
             For Each f In EnumerateInstructionFiles(localPath) : LoadFromFile(f, True) : Next
             For Each f In EnumerateInstructionFiles(globalPath) : LoadFromFile(f, False) : Next
+
+            ' Insert the builder sentinel as the first dropdown option when a local path is available
+            If Not String.IsNullOrWhiteSpace(localPath) Then
+                displayOptions.Insert(0, BuilderSentinel)
+            End If
 
             Dim defaultManual = ""
             Dim defaultManualSchema = ""
@@ -222,7 +233,7 @@ Partial Public Class ThisAddIn
                    New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p5, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, p11},
                    New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p5, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction})
 
-            ' Optional extra button: “Edit Local Library”
+            ' Optional extra button: "Edit Local Library"
             Dim extraText As String = Nothing
             Dim extraAction As System.Action = Nothing
             Dim closeAfterExtra As Boolean = False
@@ -279,11 +290,27 @@ Partial Public Class ThisAddIn
                         End Sub
             End If
 
+ShowBuilderLoop:
             If ShowCustomVariableInputForm("Please set the extraction parameters:", AN & " AI Data Extraction", params, extraButtonText:=extraText,
                                                                                                                             extraButtonAction:=extraAction,
                                                                                                                             CloseAfterExtra:=closeAfterExtra) = False Then Return
 
             Dim chosenPreparedDisplay = System.Convert.ToString(params(0).Value)
+
+            ' Intercept the builder sentinel: launch wizard, then re-show the main dialog
+            If String.Equals(chosenPreparedDisplay, BuilderSentinel, StringComparison.Ordinal) Then
+                Dim builderResult = Await RunLibraryEntryBuilderAsync(localPath)
+                If builderResult Then
+                    ' Reload the main dialog so the newly created entry appears in the dropdown.
+                    ' Recursive re-entry via restart of FactExtraction would be cleanest, but to
+                    ' avoid complexity we inform the user and return — the new entry will be available
+                    ' on the next invocation.
+                    ShowCustomMessageBox("The new library entry has been saved." & vbCrLf &
+                                         "Please re-open the Data Extraction to use it.")
+                End If
+                Return
+            End If
+
             manualInstruction = System.Convert.ToString(params(1).Value)
             manualSchemaText = System.Convert.ToString(params(2).Value)
             dateColumnsText = System.Convert.ToString(params(3).Value)
@@ -694,6 +721,202 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
+    ''' Runs the interactive Library Entry Builder wizard. Prompts the user for a plain-language
+    ''' description of the desired extraction, calls the LLM to generate a structured library entry
+    ''' (title, instruction, schema, merge settings), presents it for review/edit, and appends the
+    ''' confirmed entry to the local library file.
+    ''' </summary>
+    ''' <param name="localPath">Resolved path to the local library file.</param>
+    ''' <returns><c>True</c> if a new entry was saved; <c>False</c> if cancelled or failed.</returns>
+    Private Async Function RunLibraryEntryBuilderAsync(localPath As String) As System.Threading.Tasks.Task(Of Boolean)
+        Try
+            ' Step 1: Collect the user's natural-language description
+            Dim description = ShowCustomInputBox(
+                "Describe what you want to extract from your documents." & vbCrLf &
+                "For example: ""I need a timeline of all events with dates, parties involved, " &
+                "and a brief description"" or ""Extract invoice metadata: number, date, vendor, " &
+                "amounts""." & vbCrLf & vbCrLf &
+                "The AI will generate a complete library entry (title, instruction, schema, " &
+                "and merge settings) from your description.",
+                AN & " Library Entry Builder",
+                False,
+                "")
+
+            If String.IsNullOrWhiteSpace(description) OrElse description = "ESC" Then Return False
+
+            ' Step 2: Call LLM to generate the structured library entry
+            Dim systemPrompt =
+                "You are an expert at designing structured data extraction schemas for document analysis. " &
+                "Given the user's description of what they want to extract, generate a complete fact extraction library entry. " &
+                "Respond ONLY as compact JSON with these fields:" & vbCrLf &
+                "{""title"":""Short descriptive title""," & vbCrLf &
+                " ""instruction"":""Detailed extraction instruction for the LLM""," & vbCrLf &
+                " ""schema"":""Name1:type1; Name2:type2*; Name3:type3""," & vbCrLf &
+                " ""merge_enabled"":true/false," & vbCrLf &
+                " ""merge_column"":0," & vbCrLf &
+                " ""merge_instruction"":""Optional merge guidance""}" & vbCrLf & vbCrLf &
+                "Schema rules:" & vbCrLf &
+                "- Use semicolon-separated entries: Name[:type][*]" & vbCrLf &
+                "- Allowed types: text, number, integer, decimal, date, datetime, other" & vbCrLf &
+                "- Append * to the type of one column to mark it as the preferred sort column (typically a date column)" & vbCrLf &
+                "- merge_column is 1-based index referring to the schema column to group on (0 = no merge)" & vbCrLf &
+                "- Set merge_enabled=true only when rows are likely to share a grouping key (e.g., same date from multiple files)" & vbCrLf &
+                "- The instruction should be thorough and specific, telling the LLM exactly what to extract and how" & vbCrLf &
+                "- Keep the title short (2-5 words)" & vbCrLf &
+                "- No commentary, no markdown fences, ONLY the JSON object."
+
+            Dim userPrompt = description
+
+            ShowProgressBarInSeparateThread(AN & " Library Builder", "Generating library entry...")
+            ProgressBarModule.CancelOperation = False
+            GlobalProgressMax = 1
+            GlobalProgressValue = 0
+            GlobalProgressLabel = "AI is designing your extraction entry..."
+
+            Dim jsonResp As String
+            Try
+                jsonResp = Await LLM(systemPrompt, userPrompt, "", "", 0, False, True)
+            Catch ex As Exception
+                ProgressBarModule.CancelOperation = True
+                ShowCustomMessageBox("AI generation failed: " & ex.Message)
+                Return False
+            Finally
+                ProgressBarModule.CancelOperation = True
+            End Try
+
+            jsonResp = SharedLibrary.SharedLibrary.WebAgentInterpreter.SanitizeLlmResult(jsonResp)
+            If String.IsNullOrWhiteSpace(jsonResp) Then
+                ShowCustomMessageBox("AI did not return a result. Please try again with a more detailed description.")
+                Return False
+            End If
+
+            ' Step 3: Parse the LLM response
+            Dim genTitle As String = ""
+            Dim genInstruction As String = ""
+            Dim genSchema As String = ""
+            Dim genMergeEnabled As Boolean = False
+            Dim genMergeColumn As Integer = 0
+            Dim genMergeInstruction As String = ""
+
+            Try
+                Dim jt = Newtonsoft.Json.Linq.JToken.Parse(jsonResp)
+                genTitle = If(CStr(jt("title")), "").Trim()
+                genInstruction = If(CStr(jt("instruction")), "").Trim()
+                genSchema = If(CStr(jt("schema")), "").Trim()
+                Dim me_tok = jt("merge_enabled")
+                If me_tok IsNot Nothing Then
+                    genMergeEnabled = CBool(me_tok)
+                End If
+                Dim mc_tok = jt("merge_column")
+                If mc_tok IsNot Nothing Then
+                    Dim mc = CInt(mc_tok)
+                    If mc > 0 Then genMergeColumn = mc
+                End If
+                genMergeInstruction = If(CStr(jt("merge_instruction")), "").Trim()
+            Catch ex As Exception
+                ShowCustomMessageBox("Could not parse the AI response. Please try again." & vbCrLf &
+                                     "Raw response:" & vbCrLf & If(jsonResp.Length > 500, jsonResp.Substring(0, 500) & "...", jsonResp))
+                Return False
+            End Try
+
+            If String.IsNullOrWhiteSpace(genTitle) AndAlso String.IsNullOrWhiteSpace(genInstruction) Then
+                ShowCustomMessageBox("AI returned an empty entry. Please try again with a more detailed description.")
+                Return False
+            End If
+
+            ' Step 4: Present for review and editing
+            Dim pTitle As New SLib.InputParameter("Title", genTitle)
+            Dim pInstr As New SLib.InputParameter("Extraction instruction", genInstruction)
+            Dim pSchemaEdit As New SLib.InputParameter("Schema (Name:type; Name:type*; ...)", genSchema)
+            Dim pMerge As New SLib.InputParameter("Enable row merging", genMergeEnabled)
+            Dim pMergeCol As New SLib.InputParameter("Merge/group column (1-based, 0=none)", If(genMergeColumn > 0, genMergeColumn.ToString(), "0"))
+            Dim pMergeInstr As New SLib.InputParameter("Merge instruction (optional)", genMergeInstruction)
+
+            Dim reviewParams() As SLib.InputParameter = {pTitle, pInstr, pSchemaEdit, pMerge, pMergeCol, pMergeInstr}
+
+            If ShowCustomVariableInputForm(
+                "Review and edit the AI-generated library entry. Press OK to save to your local library.",
+                AN & " Library Entry Builder - Review",
+                reviewParams) = False Then Return False
+
+            ' Step 5: Collect final values
+            Dim finalTitle = System.Convert.ToString(reviewParams(0).Value).Trim()
+            Dim finalInstruction = System.Convert.ToString(reviewParams(1).Value).Trim()
+            Dim finalSchema = System.Convert.ToString(reviewParams(2).Value).Trim()
+            Dim finalMergeEnabled As Boolean = False
+            Try : finalMergeEnabled = System.Convert.ToBoolean(reviewParams(3).Value) : Catch : End Try
+            Dim finalMergeColumn As Integer = 0
+            Dim mergeColStr = System.Convert.ToString(reviewParams(4).Value).Trim()
+            Dim tmpCol As Integer
+            If Integer.TryParse(mergeColStr, tmpCol) AndAlso tmpCol > 0 Then finalMergeColumn = tmpCol
+            Dim finalMergeInstr = System.Convert.ToString(reviewParams(5).Value).Trim()
+
+            If String.IsNullOrWhiteSpace(finalTitle) Then
+                ShowCustomMessageBox("A title is required. Entry not saved.")
+                Return False
+            End If
+
+            ' Sanitize pipe characters from all fields to prevent corrupting the pipe-delimited format
+            finalTitle = finalTitle.Replace("|"c, "-"c)
+            finalInstruction = finalInstruction.Replace("|"c, "-"c)
+            finalSchema = finalSchema.Replace("|"c, "-"c)
+            finalMergeInstr = finalMergeInstr.Replace("|"c, "-"c)
+
+            ' Step 6: Build the library line and append to local library file
+            Dim libraryLine As String =
+                finalTitle & "|" &
+                finalInstruction & "|" &
+                finalSchema & "|" &
+                If(finalMergeEnabled, "True", "False") & "|" &
+                finalMergeColumn.ToString() & "|" &
+                finalMergeInstr
+
+            Try
+                ' Ensure local library file exists
+                Dim dir = Path.GetDirectoryName(localPath)
+                If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
+                    Directory.CreateDirectory(dir)
+                End If
+
+                Dim existingContent As String = ""
+                If File.Exists(localPath) Then
+                    Try : existingContent = File.ReadAllText(localPath, System.Text.Encoding.UTF8) : Catch : End Try
+                End If
+
+                ' If the file is empty or doesn't exist, add a header comment
+                Dim needsHeader = String.IsNullOrWhiteSpace(existingContent)
+                Dim sb As New System.Text.StringBuilder()
+                If needsHeader Then
+                    sb.AppendLine("; Red Ink Fact Extractor - Local Library")
+                    sb.AppendLine("; Format: Title | Instruction | SchemaSpec | MergeEnable | MergeDateCol | MergeInstruction")
+                    sb.AppendLine("; Lines starting with ; are comments")
+                    sb.AppendLine()
+                Else
+                    sb.Append(existingContent)
+                    ' Ensure we start on a new line
+                    If Not existingContent.EndsWith(vbCrLf) AndAlso Not existingContent.EndsWith(vbLf) Then
+                        sb.AppendLine()
+                    End If
+                End If
+
+                sb.AppendLine(libraryLine)
+                sb.AppendLine()
+
+                File.WriteAllText(localPath, sb.ToString(), System.Text.Encoding.UTF8)
+            Catch ex As Exception
+                ShowCustomMessageBox("Failed to save the library entry: " & ex.Message)
+                Return False
+            End Try
+
+            Return True
+
+        Catch ex As Exception
+            ShowCustomMessageBox("Library entry builder failed: " & ex.Message)
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
     ''' Inserts extracted fact data and summary information into the active worksheet with formatting,
     ''' optional date normalization and column width adjustments.
     ''' </summary>
@@ -1073,4 +1296,16 @@ End Class
 ' - Most parsing/formatting operations are fail-safe and fall back to defaults.
 ' - If AI schema generation returns nothing or is declined, the operation is cancelled.
 ' - Exceptions during insertion or file enumeration show a message and abort gracefully.
+'
+' -------------------------------------------------------------------------------------------------
+' LIBRARY ENTRY BUILDER
+' -------------------------------------------------------------------------------------------------
+' The "✨ Build new library entry..." option in the prepared instruction dropdown launches an
+' interactive wizard (RunLibraryEntryBuilderAsync) that:
+'   1. Prompts the user for a plain-language description of what to extract.
+'   2. Sends the description to the LLM with a structured system prompt requesting JSON output
+'      containing title, instruction, schema, and merge settings.
+'   3. Parses the LLM response and presents it in an editable review dialog.
+'   4. Sanitizes pipe characters and appends the confirmed entry to the local library file.
+'   5. The new entry becomes available the next time the Data Extraction feature is opened.
 ' =================================================================================================

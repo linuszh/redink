@@ -173,11 +173,26 @@ Public Class DiscussInky
         .WebBrowserShortcutsEnabled = True,
         .ScriptErrorsSuppressed = True
     }
+
+    ''' <summary>
+    ''' SplitContainer separating the chat transcript (Panel1) from the user input (Panel2).
+    ''' The splitter bar allows the user to resize the input area by dragging.
+    ''' </summary>
+    Private ReadOnly _splitChat As New SplitContainer() With {
+        .Dock = DockStyle.Fill,
+        .Orientation = Orientation.Horizontal,
+        .FixedPanel = FixedPanel.Panel2,
+        .SplitterWidth = 6,
+        .Panel2MinSize = 40,
+        .Panel1MinSize = 100
+    }
+
     Private ReadOnly _txtInput As TextBox = New TextBox() With {
         .Dock = DockStyle.Fill,
         .Multiline = True,
         .AcceptsReturn = True,
-        .WordWrap = True
+        .WordWrap = True,
+        .ScrollBars = ScrollBars.Vertical
     }
 
     Private ReadOnly _toolTip As ToolTip = New ToolTip() With {
@@ -298,18 +313,19 @@ Public Class DiscussInky
         Dim table As New TableLayoutPanel() With {
             .Dock = DockStyle.Fill,
             .ColumnCount = 1,
-            .RowCount = 3,
+            .RowCount = 2,
             .Padding = New Padding(10)
         }
         table.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
         table.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
         table.RowStyles.Add(New RowStyle(SizeType.AutoSize))
-        table.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
-        _txtInput.Margin = New Padding(0, 10, 0, 6)
-        Dim fiveLines = (_txtInput.Font.Height * 5) + 10
-        _txtInput.MinimumSize = New System.Drawing.Size(0, fiveLines)
-        _txtInput.Height = fiveLines
+        _txtInput.Margin = New Padding(0, 0, 0, 0)
+
+        ' Place chat and input into the SplitContainer
+        _splitChat.Panel1.Controls.Add(_chat)
+        _splitChat.Panel2.Controls.Add(_txtInput)
+        _splitChat.SplitterDistance = 300 ' Default: generous space for chat transcript
 
         Dim pnlButtons As New FlowLayoutPanel() With {
             .Dock = DockStyle.Fill,
@@ -342,9 +358,8 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_chkShowToolingLog)
 
 
-        table.Controls.Add(_chat, 0, 0)
-        table.Controls.Add(_txtInput, 0, 1)
-        table.Controls.Add(pnlButtons, 0, 2)
+        table.Controls.Add(_splitChat, 0, 0)
+        table.Controls.Add(pnlButtons, 0, 1)
         Me.Controls.Add(table)
 
         _mdPipeline = New MarkdownPipelineBuilder().
@@ -657,6 +672,17 @@ Public Class DiscussInky
                 Me.Size = New System.Drawing.Size(w, h)
             End If
         Catch
+        End Try
+
+        ' Set input panel to double the original designer height (63px × 2 = 126px)
+        Try
+            Dim desiredInputHeight As Integer = 126
+            Dim newDistance As Integer = _splitChat.Height - desiredInputHeight - _splitChat.SplitterWidth
+            If newDistance >= _splitChat.Panel1MinSize Then
+                _splitChat.SplitterDistance = newDistance
+            End If
+        Catch
+            ' Layout not ready yet; keep default SplitterDistance
         End Try
 
         ' Load persisted settings

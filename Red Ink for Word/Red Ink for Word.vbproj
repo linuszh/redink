@@ -48,7 +48,7 @@
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.2.3.700</ApplicationVersion>
+    <ApplicationVersion>1.3.2.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Develop%29</ProductName>
@@ -619,6 +619,8 @@
     <Compile Include="ThisAddIn.FindClause.vb" />
     <Compile Include="ThisAddIn.FindHiddenPrompt.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
+    <Compile Include="ThisAddIn.JustifyMarkup.vb" />
+    <Compile Include="ThisAddIn.MarkupReview.vb" />
     <Compile Include="ThisAddIn.MCPImporter.vb" />
     <Compile Include="ThisAddIn.Menu.vb" />
     <Compile Include="ThisAddIn.PaneAndMerge.vb" />
@@ -646,6 +648,7 @@
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
     <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
+    <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
     <None Include="Resources\Red_Ink_Logo_Large.png" />

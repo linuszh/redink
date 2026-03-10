@@ -178,6 +178,7 @@ Namespace SharedLibrary
             Property SP_InsertClipboard As String
             Property SP_Summarize As String
             Property SP_Markup As String
+            Property SP_JustifyMarkup As String
             Property SP_MailReply As String
             Property SP_MailSumup As String
             Property SP_MailSumup2 As String
@@ -213,6 +214,7 @@ Namespace SharedLibrary
             Property SP_Add_Batch As String
             Property SP_Add_Slides As String
             Property SP_Add_Chart As String
+            Property SP_Add_Chart_App As String
             Property SP_BubblesExcel As String
             Property SP_Add_Revisions As String
             Property SP_MarkupRegex As String
@@ -224,6 +226,10 @@ Namespace SharedLibrary
             Property SP_MailMover As String
             Property SP_InboxBoard As String
             Property SP_SplitPDF As String
+
+            Property SP_ExhibitNumber As String
+            Property SP_MarkupReview_Compliance As String
+            Property SP_MarkupReview_CrossClause As String
             Property SP_AutoPilot As String
             Property SP_AutoPilot_NoTools As String
 
@@ -307,6 +313,9 @@ Namespace SharedLibrary
             Property INI_UpdateIniSilentMode As Integer
             ' Log silent update actions to a file for audit purposes
             Property INI_UpdateIniSilentLog As Boolean
+
+            ' Clients permitted to use the Configuration Wizard for central INI editing
+            Property INI_CentralConfigClients As String
 
             Property INI_AutoPilot As String
 
@@ -471,7 +480,7 @@ Namespace SharedLibrary
         Public Property SP_InsertClipboard As String Implements ISharedContext.SP_InsertClipboard
         Public Property SP_Summarize As String Implements ISharedContext.SP_Summarize
         Public Property SP_Markup As String Implements ISharedContext.SP_Markup
-
+        Public Property SP_JustifyMarkup As String Implements ISharedContext.SP_JustifyMarkup
         Public Property SP_MailReply As String Implements ISharedContext.SP_MailReply
         Public Property SP_MailSumup As String Implements ISharedContext.SP_MailSumup
         Public Property SP_MailSumup2 As String Implements ISharedContext.SP_MailSumup2
@@ -508,6 +517,7 @@ Namespace SharedLibrary
         Public Property SP_Add_Batch As String Implements ISharedContext.SP_Add_Batch
         Public Property SP_Add_Slides As String Implements ISharedContext.SP_Add_Slides
         Public Property SP_Add_Chart As String Implements ISharedContext.SP_Add_Chart
+        Public Property SP_Add_Chart_App As String Implements ISharedContext.SP_Add_Chart_App
         Public Property SP_BubblesExcel As String Implements ISharedContext.SP_BubblesExcel
         Public Property SP_Add_Revisions As String Implements ISharedContext.SP_Add_Revisions
         Public Property SP_MarkupRegex As String Implements ISharedContext.SP_MarkupRegex
@@ -520,6 +530,9 @@ Namespace SharedLibrary
         Public Property SP_MailMover As String Implements ISharedContext.SP_MailMover
         Public Property SP_InboxBoard As String Implements ISharedContext.SP_InboxBoard
         Public Property SP_SplitPDF As String Implements ISharedContext.SP_SplitPDF
+        Public Property SP_ExhibitNumber As String Implements ISharedContext.SP_ExhibitNumber
+        Public Property SP_MarkupReview_Compliance As String Implements ISharedContext.SP_MarkupReview_Compliance
+        Public Property SP_MarkupReview_CrossClause As String Implements ISharedContext.SP_MarkupReview_CrossClause
         Public Property SP_AutoPilot As String Implements ISharedContext.SP_AutoPilot
         Public Property SP_AutoPilot_NoTools As String Implements ISharedContext.SP_AutoPilot_NoTools
         Public Property SP_Add_ChatWord_Commands As String Implements ISharedContext.SP_Add_ChatWord_Commands
@@ -593,6 +606,8 @@ Namespace SharedLibrary
         Public Property INI_UpdateIniIgnoreOverride As String Implements ISharedContext.INI_UpdateIniIgnoreOverride
         Public Property INI_UpdateIniSilentMode As Integer Implements ISharedContext.INI_UpdateIniSilentMode
         Public Property INI_UpdateIniSilentLog As Boolean Implements ISharedContext.INI_UpdateIniSilentLog
+
+        Public Property INI_CentralConfigClients As String Implements ISharedContext.INI_CentralConfigClients
         Public Property Ignore As String Implements ISharedContext.Ignore
         Public Property Location As String Implements ISharedContext.Location
 

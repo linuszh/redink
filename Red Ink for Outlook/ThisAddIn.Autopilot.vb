@@ -61,6 +61,7 @@ Option Strict Off
 Imports System.Collections.Concurrent
 Imports System.Diagnostics
 Imports System.IO
+Imports System.IO.Compression
 Imports System.Runtime.InteropServices
 Imports System.Text
 Imports System.Text.RegularExpressions
@@ -95,6 +96,19 @@ Partial Public Class ThisAddIn
     Private Const AP_DefaultMaxRepliesPerSession As Integer = 200
     Private Const AP_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
     Private Const AP_TempPrefix As String = AN2 & "_autopilot_"
+
+    ''' <summary>Maximum recursion depth for unpacking nested embedded mails.</summary>
+    Private Const AP_MaxEmbeddedMailDepth As Integer = 5
+
+    ''' <summary>Maximum number of files to extract from a single zip archive (zip bomb protection).</summary>
+    Private Const AP_MaxZipEntries As Integer = 100
+
+    ''' <summary>Maximum total uncompressed size from a single zip archive (zip bomb protection, 100 MB).</summary>
+    Private Const AP_MaxZipTotalBytes As Long = 100 * 1024 * 1024
+
+    ''' <summary>Maximum recursion depth for nested archives.</summary>
+    Private Const AP_MaxArchiveDepth As Integer = 3
+
 
     ''' <summary>Command prefix scanned in the first few lines of the latest e-mail body.</summary>
     Private Const AP_ModelCommandPrefix As String = "#model:"
@@ -2000,7 +2014,37 @@ Partial Public Class ThisAddIn
         For i As Integer = 1 To mi.Attachments.Count
             Dim att = mi.Attachments(i)
             Try
-                If att.Type = OlAttachmentType.olEmbeddeditem Then Continue For
+                ' ── Embedded mail items (.msg) ──
+                ' Outlook skips these with olEmbeddeditem; we save via SaveAsFile
+                ' and then recursively unpack the contained message.
+                If att.Type = OlAttachmentType.olEmbeddeditem Then
+                    Try
+                        Dim embeddedFileName As String = att.FileName
+                        If String.IsNullOrWhiteSpace(embeddedFileName) Then embeddedFileName = $"embedded_{i}.msg"
+                        If Not embeddedFileName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
+                            embeddedFileName = Path.GetFileNameWithoutExtension(embeddedFileName) & ".msg"
+                        End If
+
+                        Dim savePath = Path.Combine(tempDir, embeddedFileName)
+                        Dim counter = 1
+                        While File.Exists(savePath)
+                            savePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(embeddedFileName) & $"_{counter}.msg")
+                            counter += 1
+                        End While
+                        att.SaveAsFile(savePath)
+
+                        ' Unpack the .msg recursively into the temp directory
+                        Dim unpackedInfos = UnpackEmbeddedMailFile(savePath, tempDir, Path.GetFileNameWithoutExtension(savePath), 0)
+                        result.AddRange(unpackedInfos)
+                    Catch ex As System.Exception
+                        result.Add(New AutoPilotAttachmentInfo() With {
+                            .OriginalFileName = If(att.FileName, $"embedded_{i}"),
+                            .StatusMessage = $"Error unpacking embedded mail: {ex.Message}"
+                        })
+                    End Try
+                    Continue For
+                End If
+
                 Dim fileName As String = att.FileName
                 If String.IsNullOrWhiteSpace(fileName) Then Continue For
                 Dim size As Long = att.Size
@@ -2036,7 +2080,69 @@ Partial Public Class ThisAddIn
                     att.SaveAsFile(savePath)
                     info.TempFilePath = savePath
                     info.StatusMessage = "Saved"
+
+                    ' ── Extract PDF page metadata (page count, orientation, page size) ──
+                    If info.Extension = ".pdf" Then
+                        Try
+                            Using pdfDoc = UglyToad.PdfPig.PdfDocument.Open(savePath)
+                                info.PageCount = pdfDoc.NumberOfPages
+                                If pdfDoc.NumberOfPages > 0 Then
+                                    Dim firstPage = pdfDoc.GetPage(1)
+                                    Dim w = firstPage.Width
+                                    Dim h = firstPage.Height
+                                    info.PageOrientation = If(w > h, "landscape", "portrait")
+
+                                    ' Classify common page sizes (tolerance ±3 pt)
+                                    Dim pw = Math.Min(w, h) ' always compare as portrait
+                                    Dim ph = Math.Max(w, h)
+                                    If Math.Abs(pw - 595) < 3 AndAlso Math.Abs(ph - 842) < 3 Then
+                                        info.PageSize = "A4"
+                                    ElseIf Math.Abs(pw - 612) < 3 AndAlso Math.Abs(ph - 792) < 3 Then
+                                        info.PageSize = "Letter"
+                                    ElseIf Math.Abs(pw - 612) < 3 AndAlso Math.Abs(ph - 1008) < 3 Then
+                                        info.PageSize = "Legal"
+                                    ElseIf Math.Abs(pw - 420) < 3 AndAlso Math.Abs(ph - 595) < 3 Then
+                                        info.PageSize = "A5"
+                                    ElseIf Math.Abs(pw - 842) < 3 AndAlso Math.Abs(ph - 1191) < 3 Then
+                                        info.PageSize = "A3"
+                                    Else
+                                        info.PageSize = $"{w:F0} × {h:F0} pt"
+                                    End If
+                                End If
+                            End Using
+                        Catch
+                            ' Non-critical — leave defaults (0 / Nothing)
+                        End Try
+                    End If
                 End If
+
+                ' If the saved file is a .msg, .eml, or .zip, recursively unpack it
+                If Not info.IsOverSizeLimit AndAlso info.TempFilePath IsNot Nothing Then
+                    Dim ext = info.Extension
+                    If ext = ".msg" OrElse ext = ".eml" Then
+                        Try
+                            Dim unpackedInfos = UnpackEmbeddedMailFile(info.TempFilePath, tempDir,
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                            result.AddRange(unpackedInfos)
+                            ' Skip adding the raw .msg/.eml itself — the unpacked text + attachments replace it
+                            Continue For
+                        Catch ex As System.Exception
+                            ' Unpacking failed — fall through and add the raw file as-is
+                            info.StatusMessage = $"Saved (unpacking failed: {ex.Message})"
+                        End Try
+                    ElseIf ext = ".zip" Then
+                        Try
+                            Dim unpackedInfos = UnpackZipFile(info.TempFilePath, tempDir,
+                                Path.GetFileNameWithoutExtension(info.OriginalFileName), 0)
+                            result.AddRange(unpackedInfos)
+                            ' Skip adding the raw .zip itself — the unpacked files replace it
+                            Continue For
+                        Catch ex As System.Exception
+                            info.StatusMessage = $"Saved (zip unpacking failed: {ex.Message})"
+                        End Try
+                    End If
+                End If
+
                 result.Add(info)
             Catch ex As System.Exception
                 result.Add(New AutoPilotAttachmentInfo() With {.OriginalFileName = att.FileName, .StatusMessage = $"Error: {ex.Message}"})
@@ -2044,6 +2150,678 @@ Partial Public Class ThisAddIn
         Next
         Return result
     End Function
+
+
+    ''' <summary>
+    ''' Unpacks a .zip file into the temp directory. Each extracted file becomes a separate
+    ''' <see cref="AutoPilotAttachmentInfo"/> entry. Nested .zip/.msg/.eml files are unpacked
+    ''' recursively up to <see cref="AP_MaxArchiveDepth"/>. 
+    ''' 
+    ''' Security:
+    '''   - Zip-slip prevention: entry paths are validated to stay inside tempDir.
+    '''   - Zip bomb prevention: limits on entry count and total uncompressed size.
+    '''   - Per-file size limit: individual entries exceeding MaxAttachmentBytes are skipped.
+    '''   - Directory entries and hidden/system files are skipped.
+    ''' </summary>
+    ''' <param name="zipFilePath">Path to the .zip file.</param>
+    ''' <param name="tempDir">The per-mail temp directory for all outputs.</param>
+    ''' <param name="baseName">Base name prefix derived from the zip filename.</param>
+    ''' <param name="depth">Current archive nesting depth (0 = top level).</param>
+    ''' <returns>List of AutoPilotAttachmentInfo for each extracted file.</returns>
+    Private Function UnpackZipFile(
+            zipFilePath As String,
+            tempDir As String,
+            baseName As String,
+            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+
+        Dim results As New List(Of AutoPilotAttachmentInfo)()
+
+        If depth > AP_MaxArchiveDepth Then
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .TempFilePath = zipFilePath,
+                .Extension = ".zip",
+                .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
+                .StatusMessage = $"Max archive nesting depth ({AP_MaxArchiveDepth}) reached — not unpacked"
+            })
+            Return results
+        End If
+
+        Try
+            Using archive = ZipFile.OpenRead(zipFilePath)
+                ' ── Zip bomb check: entry count ──
+                If archive.Entries.Count > AP_MaxZipEntries Then
+                    ApDashboardLog($"  ⚠ Zip has {archive.Entries.Count} entries (limit {AP_MaxZipEntries}) — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    results.Add(New AutoPilotAttachmentInfo() With {
+                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .TempFilePath = zipFilePath,
+                        .Extension = ".zip",
+                        .SizeBytes = New FileInfo(zipFilePath).Length,
+                        .StatusMessage = $"Skipped (zip contains {archive.Entries.Count} entries, limit is {AP_MaxZipEntries})"
+                    })
+                    Return results
+                End If
+
+                ' ── Zip bomb check: total uncompressed size ──
+                Dim totalUncompressed As Long = 0
+                For Each entry In archive.Entries
+                    totalUncompressed += entry.Length
+                Next
+                If totalUncompressed > AP_MaxZipTotalBytes Then
+                    ApDashboardLog($"  ⚠ Zip uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit — not unpacked: {Path.GetFileName(zipFilePath)}", "warn")
+                    results.Add(New AutoPilotAttachmentInfo() With {
+                        .OriginalFileName = Path.GetFileName(zipFilePath),
+                        .TempFilePath = zipFilePath,
+                        .Extension = ".zip",
+                        .SizeBytes = New FileInfo(zipFilePath).Length,
+                        .StatusMessage = $"Skipped (uncompressed size {totalUncompressed / 1024 / 1024:F1} MB exceeds limit)"
+                    })
+                    Return results
+                End If
+
+                ApDashboardLog($"  📦 Unpacking zip: {Path.GetFileName(zipFilePath)} ({archive.Entries.Count} entries)", "info")
+
+                Dim tempDirFull = Path.GetFullPath(tempDir)
+
+                For Each entry In archive.Entries
+                    Try
+                        ' Skip directory entries
+                        If String.IsNullOrWhiteSpace(entry.Name) Then Continue For
+
+                        ' Use only the filename (strip any directory structure from the entry)
+                        Dim entryFileName = Path.GetFileName(entry.FullName)
+                        If String.IsNullOrWhiteSpace(entryFileName) Then Continue For
+
+                        ' Skip hidden/system files (e.g., __MACOSX, .DS_Store, Thumbs.db)
+                        If entryFileName.StartsWith(".", StringComparison.Ordinal) OrElse
+                           entryFileName.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase) OrElse
+                           entry.FullName.Contains("__MACOSX") Then
+                            Continue For
+                        End If
+
+                        ' Build safe output path and validate against zip-slip
+                        Dim outputPath = Path.Combine(tempDir, entryFileName)
+                        Dim outputPathFull = Path.GetFullPath(outputPath)
+                        If Not outputPathFull.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
+                            ' Zip-slip attempt — skip this entry
+                            Continue For
+                        End If
+
+                        ' Prevent filename collision
+                        Dim counter = 1
+                        While File.Exists(outputPath)
+                            outputPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(entryFileName) &
+                                $"_{counter}" & Path.GetExtension(entryFileName))
+                            counter += 1
+                        End While
+
+                        Dim entryExt = Path.GetExtension(entryFileName).ToLowerInvariant()
+                        Dim entrySize = entry.Length
+
+                        ' Per-file size check
+                        If entrySize > _apConfig.MaxAttachmentBytes Then
+                            results.Add(New AutoPilotAttachmentInfo() With {
+                                .OriginalFileName = entryFileName,
+                                .Extension = entryExt,
+                                .SizeBytes = entrySize,
+                                .IsOverSizeLimit = True,
+                                .TempFilePath = Nothing,
+                                .StatusMessage = $"Skipped (from zip, size {entrySize / 1024 / 1024:F1} MB exceeds limit)"
+                            })
+                            Continue For
+                        End If
+
+                        ' Extract the entry
+                        entry.ExtractToFile(outputPath, True)
+
+                        Dim info As New AutoPilotAttachmentInfo() With {
+                            .OriginalFileName = Path.GetFileName(outputPath),
+                            .TempFilePath = outputPath,
+                            .Extension = entryExt,
+                            .SizeBytes = New FileInfo(outputPath).Length,
+                            .IsOverSizeLimit = False,
+                            .StatusMessage = $"Extracted from zip: {Path.GetFileName(zipFilePath)}"
+                        }
+
+                        ' Recursively unpack nested containers
+                        If entryExt = ".msg" OrElse entryExt = ".eml" Then
+                            Try
+                                Dim subResults = UnpackEmbeddedMailFile(outputPath, tempDir,
+                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                results.AddRange(subResults)
+                                Continue For
+                            Catch
+                                ' Fall through and add the raw file
+                            End Try
+                        ElseIf entryExt = ".zip" Then
+                            Try
+                                Dim subResults = UnpackZipFile(outputPath, tempDir,
+                                    Path.GetFileNameWithoutExtension(entryFileName), depth + 1)
+                                results.AddRange(subResults)
+                                Continue For
+                            Catch
+                                ' Fall through and add the raw file
+                            End Try
+                        End If
+
+                        results.Add(info)
+                    Catch ex As System.Exception
+                        results.Add(New AutoPilotAttachmentInfo() With {
+                            .OriginalFileName = Path.GetFileName(entry.FullName),
+                            .StatusMessage = $"Error extracting from zip: {ex.Message}"
+                        })
+                    End Try
+                Next
+            End Using
+
+            ApDashboardLog($"  ✓ Zip unpacked: {Path.GetFileName(zipFilePath)} → {results.Count} file(s)", "info")
+
+        Catch ex As System.Exception
+            ApDashboardLog($"  ⚠ Failed to unpack zip: {ex.Message}", "warn")
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(zipFilePath),
+                .TempFilePath = zipFilePath,
+                .Extension = ".zip",
+                .SizeBytes = If(File.Exists(zipFilePath), New FileInfo(zipFilePath).Length, 0),
+                .StatusMessage = $"Saved (zip unpack failed: {ex.Message})"
+            })
+        End Try
+
+        Return results
+    End Function
+
+    ''' <summary>
+    ''' Recursively unpacks a .msg or .eml file into the temp directory.
+    ''' Produces:
+    '''   (1) A .txt file containing the mail metadata (From, To, Subject, Date) and body text.
+    '''   (2) AutoPilotAttachmentInfo entries for each attachment found inside the embedded mail.
+    '''   (3) Nested .msg/.eml attachments are unpacked recursively up to AP_MaxEmbeddedMailDepth.
+    ''' 
+    ''' Security: All output files are constrained to tempDir (path prefix check).
+    ''' </summary>
+    ''' <param name="mailFilePath">Path to the .msg or .eml file.</param>
+    ''' <param name="tempDir">The per-mail temp directory for all outputs.</param>
+    ''' <param name="baseName">Base name prefix for generated files (e.g. "forwarded_mail").</param>
+    ''' <param name="depth">Current recursion depth (0 = top level).</param>
+    ''' <returns>List of AutoPilotAttachmentInfo for the text conversion and any extracted attachments.</returns>
+    Private Function UnpackEmbeddedMailFile(
+            mailFilePath As String,
+            tempDir As String,
+            baseName As String,
+            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+
+        Dim results As New List(Of AutoPilotAttachmentInfo)()
+        If depth > AP_MaxEmbeddedMailDepth Then
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .TempFilePath = mailFilePath,
+                .Extension = Path.GetExtension(mailFilePath).ToLowerInvariant(),
+                .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
+                .StatusMessage = $"Max nesting depth ({AP_MaxEmbeddedMailDepth}) reached — not unpacked"
+            })
+            Return results
+        End If
+
+        Dim ext = Path.GetExtension(mailFilePath).ToLowerInvariant()
+
+        If ext = ".msg" Then
+            Return UnpackMsgFile(mailFilePath, tempDir, baseName, depth)
+        ElseIf ext = ".eml" Then
+            Return UnpackEmlFile(mailFilePath, tempDir, baseName, depth)
+        Else
+            ' Unknown extension — return as-is
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(mailFilePath),
+                .TempFilePath = mailFilePath,
+                .Extension = ext,
+                .SizeBytes = If(File.Exists(mailFilePath), New FileInfo(mailFilePath).Length, 0),
+                .StatusMessage = "Saved"
+            })
+            Return results
+        End If
+    End Function
+
+    ''' <summary>
+    ''' Unpacks a .msg file using Outlook's OpenSharedItem API.
+    ''' Extracts the mail body as a .txt file and recursively processes nested attachments.
+    ''' Must be called on the UI thread (COM access required).
+    ''' </summary>
+    Private Function UnpackMsgFile(
+            msgFilePath As String,
+            tempDir As String,
+            baseName As String,
+            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+
+        Dim results As New List(Of AutoPilotAttachmentInfo)()
+        Dim msgItem As MailItem = Nothing
+
+        Try
+            ' Open the .msg file via Outlook
+            Dim ns = Application.GetNamespace("MAPI")
+            Dim sharedItem = ns.OpenSharedItem(msgFilePath)
+            msgItem = TryCast(sharedItem, MailItem)
+
+            If msgItem Is Nothing Then
+                ' Not a MailItem (could be a meeting request, etc.) — return the raw file
+                results.Add(New AutoPilotAttachmentInfo() With {
+                    .OriginalFileName = Path.GetFileName(msgFilePath),
+                    .TempFilePath = msgFilePath,
+                    .Extension = ".msg",
+                    .SizeBytes = New FileInfo(msgFilePath).Length,
+                    .StatusMessage = "Saved (not a standard mail message)"
+                })
+                If sharedItem IsNot Nothing Then Try : Marshal.ReleaseComObject(sharedItem) : Catch : End Try
+                Return results
+            End If
+
+            ' Extract metadata + body as text
+            Dim textContent = BuildEmbeddedMailText(msgItem)
+            Dim textFileName = baseName & "_content.txt"
+            Dim textFilePath = Path.Combine(tempDir, textFileName)
+            Dim counter = 1
+            While File.Exists(textFilePath)
+                textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
+                textFileName = Path.GetFileName(textFilePath)
+                counter += 1
+            End While
+            File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
+
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = textFileName,
+                .TempFilePath = textFilePath,
+                .Extension = ".txt",
+                .SizeBytes = New FileInfo(textFilePath).Length,
+                .IsOverSizeLimit = False,
+                .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(msgFilePath)}"
+            })
+
+            ApDashboardLog($"  📧 Unpacked embedded mail: {Path.GetFileName(msgFilePath)} → {textFileName}" &
+                           If(msgItem.Attachments.Count > 0, $" + {msgItem.Attachments.Count} attachment(s)", ""), "info")
+
+            ' Extract nested attachments
+            For j As Integer = 1 To msgItem.Attachments.Count
+                Dim nestedAtt = msgItem.Attachments(j)
+                Try
+                    If nestedAtt.Type = OlAttachmentType.olEmbeddeditem Then
+                        ' Nested embedded mail — save as .msg and recurse
+                        Try
+                            Dim nestedName = If(nestedAtt.FileName, $"nested_{depth}_{j}.msg")
+                            If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
+                                nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
+                            End If
+                            Dim nestedPath = Path.Combine(tempDir, nestedName)
+                            Dim nc = 1
+                            While File.Exists(nestedPath)
+                                nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
+                                nc += 1
+                            End While
+                            nestedAtt.SaveAsFile(nestedPath)
+                            results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
+                                Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                        Catch ex As System.Exception
+                            results.Add(New AutoPilotAttachmentInfo() With {
+                                .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
+                                .StatusMessage = $"Error unpacking nested embedded mail: {ex.Message}"
+                            })
+                        End Try
+                    Else
+                        ' Regular attachment inside the embedded mail
+                        Dim nestedFileName = nestedAtt.FileName
+                        If String.IsNullOrWhiteSpace(nestedFileName) Then Continue For
+                        Dim nestedSize As Long = nestedAtt.Size
+                        Dim nestedInfo As New AutoPilotAttachmentInfo() With {
+                            .OriginalFileName = nestedFileName,
+                            .Extension = Path.GetExtension(nestedFileName).ToLowerInvariant(),
+                            .SizeBytes = nestedSize,
+                            .IsOverSizeLimit = (nestedSize > _apConfig.MaxAttachmentBytes)
+                        }
+                        If nestedInfo.IsOverSizeLimit Then
+                            nestedInfo.TempFilePath = Nothing
+                            nestedInfo.StatusMessage = $"Skipped (from embedded mail, size {nestedSize / 1024 / 1024:F1} MB exceeds limit)"
+                        Else
+                            Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
+                            Dim nc = 1
+                            While File.Exists(nestedSavePath)
+                                nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
+                                nc += 1
+                            End While
+                            nestedAtt.SaveAsFile(nestedSavePath)
+                            nestedInfo.TempFilePath = nestedSavePath
+                            nestedInfo.StatusMessage = $"Saved (from embedded mail: {Path.GetFileName(msgFilePath)})"
+
+                            ' If this nested attachment is itself a .msg, .eml, or .zip, recurse
+                            If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
+                                Try
+                                    Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
+                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                    results.AddRange(subResults)
+                                    Continue For ' Don't add the raw file — the unpacked results replace it
+                                Catch
+                                    ' Fall through and add the raw file
+                                End Try
+                            ElseIf nestedInfo.Extension = ".zip" Then
+                                Try
+                                    Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
+                                        Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                    results.AddRange(subResults)
+                                    Continue For
+                                Catch
+                                End Try
+                            End If
+                        End If
+                        results.Add(nestedInfo)
+                    End If
+                Catch ex As System.Exception
+                    results.Add(New AutoPilotAttachmentInfo() With {
+                        .OriginalFileName = If(nestedAtt.FileName, $"attachment_{j}"),
+                        .StatusMessage = $"Error: {ex.Message}"
+                    })
+                End Try
+            Next
+
+        Catch ex As System.Exception
+            ' OpenSharedItem failed — return the raw .msg as a fallback
+            ApDashboardLog($"  ⚠ Failed to unpack .msg: {ex.Message}", "warn")
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(msgFilePath),
+                .TempFilePath = msgFilePath,
+                .Extension = ".msg",
+                .SizeBytes = If(File.Exists(msgFilePath), New FileInfo(msgFilePath).Length, 0),
+                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+            })
+        Finally
+            If msgItem IsNot Nothing Then Try : Marshal.ReleaseComObject(msgItem) : Catch : End Try
+        End Try
+
+        Return results
+    End Function
+
+    ''' <summary>
+    ''' Unpacks a .eml file by parsing it as plain text (RFC 2822 format).
+    ''' Extracts headers and body as a .txt file. Embedded attachments in .eml
+    ''' are extracted via simple MIME boundary parsing when possible.
+    ''' </summary>
+    Private Function UnpackEmlFile(
+            emlFilePath As String,
+            tempDir As String,
+            baseName As String,
+            depth As Integer) As List(Of AutoPilotAttachmentInfo)
+
+        Dim results As New List(Of AutoPilotAttachmentInfo)()
+
+        Try
+            ' First try: open via Outlook's OpenSharedItem (supports .eml on most Outlook versions)
+            Try
+                Dim ns = Application.GetNamespace("MAPI")
+                Dim sharedItem = ns.OpenSharedItem(emlFilePath)
+                Dim emlMail = TryCast(sharedItem, MailItem)
+
+                If emlMail IsNot Nothing Then
+                    ' Successfully opened as MailItem — use the same logic as .msg
+                    Dim textContent = BuildEmbeddedMailText(emlMail)
+                    Dim textFileName = baseName & "_content.txt"
+                    Dim textFilePath = Path.Combine(tempDir, textFileName)
+                    Dim counter = 1
+                    While File.Exists(textFilePath)
+                        textFilePath = Path.Combine(tempDir, baseName & $"_content_{counter}.txt")
+                        textFileName = Path.GetFileName(textFilePath)
+                        counter += 1
+                    End While
+                    File.WriteAllText(textFilePath, textContent, Encoding.UTF8)
+
+                    results.Add(New AutoPilotAttachmentInfo() With {
+                        .OriginalFileName = textFileName,
+                        .TempFilePath = textFilePath,
+                        .Extension = ".txt",
+                        .SizeBytes = New FileInfo(textFilePath).Length,
+                        .IsOverSizeLimit = False,
+                        .StatusMessage = $"Extracted from embedded mail: {Path.GetFileName(emlFilePath)}"
+                    })
+
+                    ApDashboardLog($"  📧 Unpacked .eml via Outlook: {Path.GetFileName(emlFilePath)} → {textFileName}" &
+                                   If(emlMail.Attachments.Count > 0, $" + {emlMail.Attachments.Count} attachment(s)", ""), "info")
+
+                    ' Extract nested attachments (same logic as .msg)
+                    For j As Integer = 1 To emlMail.Attachments.Count
+                        Dim nestedAtt = emlMail.Attachments(j)
+                        Try
+                            If nestedAtt.Type = OlAttachmentType.olEmbeddeditem Then
+                                Try
+                                    Dim nestedName = If(nestedAtt.FileName, $"nested_{depth}_{j}.msg")
+                                    If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
+                                        nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
+                                    End If
+                                    Dim nestedPath = Path.Combine(tempDir, nestedName)
+                                    Dim nc = 1
+                                    While File.Exists(nestedPath)
+                                        nestedPath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedName) & $"_{nc}.msg")
+                                        nc += 1
+                                    End While
+                                    nestedAtt.SaveAsFile(nestedPath)
+                                    results.AddRange(UnpackEmbeddedMailFile(nestedPath, tempDir,
+                                        Path.GetFileNameWithoutExtension(nestedPath), depth + 1))
+                                Catch ex As System.Exception
+                                    results.Add(New AutoPilotAttachmentInfo() With {
+                                        .OriginalFileName = If(nestedAtt.FileName, $"nested_{depth}_{j}"),
+                                        .StatusMessage = $"Error unpacking nested embedded mail: {ex.Message}"
+                                    })
+                                End Try
+                            Else
+                                Dim nestedFileName = nestedAtt.FileName
+                                If String.IsNullOrWhiteSpace(nestedFileName) Then Continue For
+                                Dim nestedSize As Long = nestedAtt.Size
+                                Dim nestedInfo As New AutoPilotAttachmentInfo() With {
+                                    .OriginalFileName = nestedFileName,
+                                    .Extension = Path.GetExtension(nestedFileName).ToLowerInvariant(),
+                                    .SizeBytes = nestedSize,
+                                    .IsOverSizeLimit = (nestedSize > _apConfig.MaxAttachmentBytes)
+                                }
+                                If Not nestedInfo.IsOverSizeLimit Then
+                                    Dim nestedSavePath = Path.Combine(tempDir, nestedFileName)
+                                    Dim nc = 1
+                                    While File.Exists(nestedSavePath)
+                                        nestedSavePath = Path.Combine(tempDir, Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" & Path.GetExtension(nestedFileName))
+                                        nc += 1
+                                    End While
+                                    nestedAtt.SaveAsFile(nestedSavePath)
+                                    nestedInfo.TempFilePath = nestedSavePath
+                                    nestedInfo.StatusMessage = $"Saved (from embedded .eml: {Path.GetFileName(emlFilePath)})"
+
+                                    If nestedInfo.Extension = ".msg" OrElse nestedInfo.Extension = ".eml" Then
+                                        Try
+                                            Dim subResults = UnpackEmbeddedMailFile(nestedSavePath, tempDir,
+                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                            results.AddRange(subResults)
+                                            Continue For
+                                        Catch
+                                        End Try
+                                    ElseIf nestedInfo.Extension = ".zip" Then
+                                        Try
+                                            Dim subResults = UnpackZipFile(nestedSavePath, tempDir,
+                                                Path.GetFileNameWithoutExtension(nestedFileName), depth + 1)
+                                            results.AddRange(subResults)
+                                            Continue For
+                                        Catch
+                                        End Try
+                                    End If
+                                Else
+                                    nestedInfo.TempFilePath = Nothing
+                                    nestedInfo.StatusMessage = $"Skipped (from embedded .eml, size exceeds limit)"
+                                End If
+                                results.Add(nestedInfo)
+                            End If
+                        Catch ex As System.Exception
+                            results.Add(New AutoPilotAttachmentInfo() With {
+                                .OriginalFileName = If(nestedAtt.FileName, $"attachment_{j}"),
+                                .StatusMessage = $"Error: {ex.Message}"
+                            })
+                        End Try
+                    Next
+
+                    Try : Marshal.ReleaseComObject(emlMail) : Catch : End Try
+                    Return results
+                End If
+
+                If sharedItem IsNot Nothing Then Try : Marshal.ReleaseComObject(sharedItem) : Catch : End Try
+            Catch
+                ' OpenSharedItem may not support .eml on all Outlook versions — fall through to text parsing
+            End Try
+
+            ' Fallback: parse .eml as plain text (RFC 2822)
+            ApDashboardLog($"  📧 Parsing .eml as text: {Path.GetFileName(emlFilePath)}", "step")
+            Dim emlContent = File.ReadAllText(emlFilePath, Encoding.UTF8)
+            Dim textResult = ParseEmlAsText(emlContent, Path.GetFileName(emlFilePath))
+
+            Dim fallbackTextFileName = baseName & "_content.txt"
+            Dim fallbackTextFilePath = Path.Combine(tempDir, fallbackTextFileName)
+            Dim fallbackCounter = 1
+            While File.Exists(fallbackTextFilePath)
+                fallbackTextFilePath = Path.Combine(tempDir, baseName & $"_content_{fallbackCounter}.txt")
+                fallbackTextFileName = Path.GetFileName(fallbackTextFilePath)
+                fallbackCounter += 1
+            End While
+            File.WriteAllText(fallbackTextFilePath, textResult, Encoding.UTF8)
+
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = fallbackTextFileName,
+                .TempFilePath = fallbackTextFilePath,
+                .Extension = ".txt",
+                .SizeBytes = New FileInfo(fallbackTextFilePath).Length,
+                .IsOverSizeLimit = False,
+                .StatusMessage = $"Extracted from .eml (text parse): {Path.GetFileName(emlFilePath)}"
+            })
+
+        Catch ex As System.Exception
+            ApDashboardLog($"  ⚠ Failed to unpack .eml: {ex.Message}", "warn")
+            results.Add(New AutoPilotAttachmentInfo() With {
+                .OriginalFileName = Path.GetFileName(emlFilePath),
+                .TempFilePath = emlFilePath,
+                .Extension = ".eml",
+                .SizeBytes = If(File.Exists(emlFilePath), New FileInfo(emlFilePath).Length, 0),
+                .StatusMessage = $"Saved (unpack failed: {ex.Message})"
+            })
+        End Try
+
+        Return results
+    End Function
+
+    ''' <summary>
+    ''' Builds a structured text representation of an embedded mail item,
+    ''' including headers (From, To, CC, Subject, Date) and the plain-text body.
+    ''' </summary>
+    Private Shared Function BuildEmbeddedMailText(mi As MailItem) As String
+        Dim sb As New StringBuilder()
+        sb.AppendLine("═══════════════════════════════════════════════════")
+        sb.AppendLine("EMBEDDED EMAIL MESSAGE")
+        sb.AppendLine("═══════════════════════════════════════════════════")
+        sb.AppendLine()
+
+        Try : sb.AppendLine($"From: {If(mi.SenderName, "")} <{If(mi.SenderEmailAddress, "")}>") : Catch : End Try
+        Try : sb.AppendLine($"To: {If(CStr(mi.To), "")}") : Catch : End Try
+
+        Try : If Not String.IsNullOrWhiteSpace(CStr(mi.CC)) Then sb.AppendLine($"CC: {mi.CC}")
+        Catch : End Try
+
+        Try : sb.AppendLine($"Subject: {If(mi.Subject, "")}") : Catch : End Try
+        Try : sb.AppendLine($"Date: {mi.ReceivedTime:yyyy-MM-dd HH:mm:ss}") : Catch : End Try
+
+        Try
+            If mi.Attachments.Count > 0 Then
+                sb.AppendLine($"Attachments: {mi.Attachments.Count}")
+                For j As Integer = 1 To mi.Attachments.Count
+                    Try
+                        sb.AppendLine($"  - {mi.Attachments(j).FileName} ({mi.Attachments(j).Size / 1024:F0} KB)")
+                    Catch
+                    End Try
+                Next
+            End If
+        Catch : End Try
+
+        sb.AppendLine()
+        sb.AppendLine("───────────────────────────────────────────────────")
+        sb.AppendLine()
+
+        Try
+            Dim body = If(mi.Body, "")
+            If body.Length > 50000 Then body = body.Substring(0, 50000) & vbCrLf & "[... body truncated at 50,000 characters ...]"
+            sb.Append(body)
+        Catch : End Try
+
+        Return sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' Simple text-based parser for .eml (RFC 2822) files.
+    ''' Extracts common headers and the text body portion.
+    ''' Does not decode MIME attachments (those require Outlook's OpenSharedItem).
+    ''' </summary>
+    Private Shared Function ParseEmlAsText(emlContent As String, sourceFileName As String) As String
+        Dim sb As New StringBuilder()
+        sb.AppendLine("═══════════════════════════════════════════════════")
+        sb.AppendLine($"EMBEDDED EMAIL MESSAGE (parsed from {sourceFileName})")
+        sb.AppendLine("═══════════════════════════════════════════════════")
+        sb.AppendLine()
+
+        ' Split into headers and body at the first blank line
+        Dim headerEnd = emlContent.IndexOf(vbCrLf & vbCrLf)
+        If headerEnd < 0 Then headerEnd = emlContent.IndexOf(vbLf & vbLf)
+
+        Dim headerSection As String
+        Dim bodySection As String
+
+        If headerEnd >= 0 Then
+            headerSection = emlContent.Substring(0, headerEnd)
+            bodySection = emlContent.Substring(headerEnd).TrimStart({CChar(vbCr), CChar(vbLf)})
+        Else
+            headerSection = emlContent
+            bodySection = ""
+        End If
+
+        ' Unfold continuation lines (RFC 2822: lines starting with whitespace are continuations)
+        headerSection = Regex.Replace(headerSection, "(\r?\n)[ \t]+", " ")
+
+        ' Extract key headers
+        Dim headerLines = headerSection.Split({vbCrLf, vbLf}, StringSplitOptions.None)
+        Dim importantHeaders = {"From:", "To:", "Cc:", "Subject:", "Date:", "Content-Type:"}
+        For Each line In headerLines
+            For Each hdr In importantHeaders
+                If line.StartsWith(hdr, StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine(line.Trim())
+                    Exit For
+                End If
+            Next
+        Next
+
+        sb.AppendLine()
+        sb.AppendLine("───────────────────────────────────────────────────")
+        sb.AppendLine()
+
+        ' For the body, strip MIME boundaries and encoding artifacts as best we can
+        ' Remove common MIME boundary lines
+        Dim cleanBody = Regex.Replace(bodySection, "^--[a-zA-Z0-9_\-\.=]+\r?\n", "", RegexOptions.Multiline)
+        ' Remove Content-Type / Content-Transfer-Encoding header blocks within body parts
+        cleanBody = Regex.Replace(cleanBody, "^Content-[A-Za-z\-]+:.*\r?\n", "", RegexOptions.Multiline)
+
+        ' Strip HTML tags if the body appears to be HTML
+        If cleanBody.IndexOf("<html", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+           cleanBody.IndexOf("<body", StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Try
+                Dim htmlDoc As New HtmlAgilityPack.HtmlDocument()
+                htmlDoc.LoadHtml(cleanBody)
+                cleanBody = htmlDoc.DocumentNode.InnerText
+            Catch
+                ' Fallback: crude tag stripping
+                cleanBody = Regex.Replace(cleanBody, "<[^>]+>", "")
+            End Try
+        End If
+
+        If cleanBody.Length > 50000 Then cleanBody = cleanBody.Substring(0, 50000) & vbCrLf & "[... body truncated at 50,000 characters ...]"
+        sb.Append(cleanBody.Trim())
+
+        Return sb.ToString()
+    End Function
+
+
 
     ''' <summary>
     ''' Collects output files produced by tools. Uses the OutputFiles lists on each
@@ -2101,7 +2879,7 @@ Partial Public Class ThisAddIn
         sb.AppendLine()
         sb.AppendLine("[EMAIL BODY]")
         Dim body = info.Body
-        If body.Length > 15000 Then body = body.Substring(0, 15000) & vbCrLf & "[... truncated ...]"
+        If body.Length > 25000 Then body = body.Substring(0, 25000) & vbCrLf & "[... truncated ...]"
         sb.AppendLine(body)
         sb.AppendLine("[/EMAIL BODY]")
         If attachments IsNot Nothing AndAlso attachments.Count > 0 Then
@@ -2119,7 +2897,17 @@ Partial Public Class ThisAddIn
                 If att.CreatedTime.HasValue Then
                     dateStr &= $", created: {att.CreatedTime.Value:yyyy-MM-dd HH:mm:ss} UTC"
                 End If
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{dateStr}{statusStr}")
+                Dim pdfStr As String = ""
+                If att.PageCount > 0 Then
+                    pdfStr = $", {att.PageCount} page(s)"
+                    If Not String.IsNullOrWhiteSpace(att.PageOrientation) Then
+                        pdfStr &= $", {att.PageOrientation}"
+                    End If
+                    If Not String.IsNullOrWhiteSpace(att.PageSize) Then
+                        pdfStr &= $", {att.PageSize}"
+                    End If
+                End If
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName}{sizeStr}{pdfStr}{dateStr}{statusStr}")
             Next
             sb.AppendLine("[/ATTACHMENTS]")
             sb.AppendLine()
@@ -3088,6 +3876,15 @@ Partial Public Class ThisAddIn
         Property CachedText As String
         Property CachedDocxHint As String
         Public Property IsToolOutput As Boolean = False
+
+        ''' <summary>Number of pages (PDF only, 0 if unknown).</summary>
+        Public Property PageCount As Integer = 0
+
+        ''' <summary>Orientation of the first page: "portrait", "landscape", or Nothing if unknown.</summary>
+        Public Property PageOrientation As String = Nothing
+
+        ''' <summary>Page size description of the first page (e.g. "A4", "Letter", "595 × 842 pt"), or Nothing if unknown.</summary>
+        Public Property PageSize As String = Nothing
     End Class
 
     ''' <summary>Defines supported filter rule types.</summary>

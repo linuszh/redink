@@ -961,6 +961,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_JustifyMarkup As String
+        Get
+            Return _context.SP_JustifyMarkup
+        End Get
+        Set(value As String)
+            _context.SP_JustifyMarkup = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_MailReply As String
         Get
             Return _context.SP_MailReply
@@ -1280,6 +1290,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_Chart_App As String
+        Get
+            Return _context.SP_Add_Chart_App
+        End Get
+        Set(value As String)
+            _context.SP_Add_Chart_App = value
+        End Set
+    End Property
+
 
     Public Shared Property SP_BubblesExcel As String
         Get
@@ -1375,6 +1394,34 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_SplitPDF = value
+        End Set
+    End Property
+
+    Public Shared Property SP_ExhibitNumber As String
+        Get
+            Return _context.SP_ExhibitNumber
+        End Get
+        Set(value As String)
+            _context.SP_ExhibitNumber = value
+        End Set
+    End Property
+
+
+    Public Shared Property SP_MarkupReview_Compliance As String
+        Get
+            Return _context.SP_MarkupReview_Compliance
+        End Get
+        Set(value As String)
+            _context.SP_MarkupReview_Compliance = value
+        End Set
+    End Property
+
+    Public Shared Property SP_MarkupReview_CrossClause As String
+        Get
+            Return _context.SP_MarkupReview_CrossClause
+        End Get
+        Set(value As String)
+            _context.SP_MarkupReview_CrossClause = value
         End Set
     End Property
 

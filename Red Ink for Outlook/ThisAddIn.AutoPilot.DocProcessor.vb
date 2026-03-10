@@ -497,96 +497,121 @@ Partial Public Class ThisAddIn
 
         ApDashboardLog($"DocProcessor: {processable.Count} paragraphs to process (~{totalBatches} batches)", "step")
 
-        While batchIndex < processable.Count
-            ct.ThrowIfCancellationRequested()
+        ' ── If not already using SecondAPI, try OfflineDocs alternate model ──
+        Dim offlineDocsBackup As ModelConfig = Nothing
+        Dim offlineDocsApplied As Boolean = False
 
-            currentBatch += 1
-
-            Dim batchStart = batchIndex
-            Dim batchEnd = Math.Min(batchIndex + AP_ParagraphsPerBatch - 1, processable.Count - 1)
-
-            ' Adjust for character limit
-            Dim batchChars As Integer = 0
-            For j = batchStart To batchEnd
-                batchChars += processable(j).FullText.Length
-                If batchChars > AP_MaxCharsPerBatch AndAlso j > batchStart Then
-                    batchEnd = j - 1
-                    Exit For
+        If Not _apUseSecondApi AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            Try
+                If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
+                    offlineDocsBackup = GetCurrentConfig(_context)
+                    offlineDocsApplied = True
+                    _apUseSecondApi = True
                 End If
-            Next
+            Catch
+            End Try
+        End If
 
-            ApDashboardLog($"DocProcessor: batch {currentBatch}/{totalBatches} (paragraphs {batchStart + 1}-{batchEnd + 1})", "step")
+        Try
+            While batchIndex < processable.Count
+                ct.ThrowIfCancellationRequested()
 
-            ' Build prompt
-            Dim promptBuilder As New StringBuilder()
+                currentBatch += 1
 
-            ' Context Before
-            Dim contextBeforeStart = Math.Max(0, batchStart - AP_ContextBefore)
-            If contextBeforeStart < batchStart Then
-                promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
-                For j = contextBeforeStart To batchStart - 1
-                    Dim contextText = If(processable(j).TranslatedText, processable(j).FullText)
-                    ' Strip markers from context to avoid LLM echoing them into non-marker paragraphs
-                    If contextText IsNot Nothing Then
-                        contextText = contextText.Replace(AP_RunBoundaryMarker, "")
-                        contextText = contextText.Replace(AP_NoteRefMarker, "")
+                Dim batchStart = batchIndex
+                Dim batchEnd = Math.Min(batchIndex + AP_ParagraphsPerBatch - 1, processable.Count - 1)
+
+                ' Adjust for character limit
+                Dim batchChars As Integer = 0
+                For j = batchStart To batchEnd
+                    batchChars += processable(j).FullText.Length
+                    If batchChars > AP_MaxCharsPerBatch AndAlso j > batchStart Then
+                        batchEnd = j - 1
+                        Exit For
                     End If
-                    promptBuilder.AppendLine(contextText)
                 Next
+
+                ApDashboardLog($"DocProcessor: batch {currentBatch}/{totalBatches} (paragraphs {batchStart + 1}-{batchEnd + 1})", "step")
+
+                ' Build prompt
+                Dim promptBuilder As New StringBuilder()
+
+                ' Context Before
+                Dim contextBeforeStart = Math.Max(0, batchStart - AP_ContextBefore)
+                If contextBeforeStart < batchStart Then
+                    promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
+                    For j = contextBeforeStart To batchStart - 1
+                        Dim contextText = If(processable(j).TranslatedText, processable(j).FullText)
+                        ' Strip markers from context to avoid LLM echoing them into non-marker paragraphs
+                        If contextText IsNot Nothing Then
+                            contextText = contextText.Replace(AP_RunBoundaryMarker, "")
+                            contextText = contextText.Replace(AP_NoteRefMarker, "")
+                        End If
+                        promptBuilder.AppendLine(contextText)
+                    Next
+                    promptBuilder.AppendLine()
+                End If
+
+                ' Paragraphs to process — use marker text when available
+                promptBuilder.AppendLine("[TEXTTOPROCESS]")
+                Dim batchNumber = 1
+                For j = batchStart To batchEnd
+                    Dim paraText = If(processable(j).MarkerText, processable(j).FullText)
+                    promptBuilder.AppendLine("[" & batchNumber.ToString() & "] " & paraText)
+                    batchNumber += 1
+                Next
+                promptBuilder.AppendLine("[/TEXTTOPROCESS]")
                 promptBuilder.AppendLine()
-            End If
 
-            ' Paragraphs to process — use marker text when available
-            promptBuilder.AppendLine("[TEXTTOPROCESS]")
-            Dim batchNumber = 1
-            For j = batchStart To batchEnd
-                Dim paraText = If(processable(j).MarkerText, processable(j).FullText)
-                promptBuilder.AppendLine("[" & batchNumber.ToString() & "] " & paraText)
-                batchNumber += 1
-            Next
-            promptBuilder.AppendLine("[/TEXTTOPROCESS]")
-            promptBuilder.AppendLine()
-
-            ' Context After
-            Dim contextAfterEnd = Math.Min(processable.Count - 1, batchEnd + AP_ContextAfter)
-            If contextAfterEnd > batchEnd Then
-                promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
-                For j = batchEnd + 1 To contextAfterEnd
-                    Dim ctxAfterText As String = processable(j).FullText
-                    If ctxAfterText IsNot Nothing Then
-                        ctxAfterText = ctxAfterText.Replace(AP_NoteRefMarker, "")
-                    End If
-                    promptBuilder.AppendLine(ctxAfterText)
-                Next
-            End If
-
-            ' Call LLM
-            Dim llmResponse = Await LLM(systemPrompt, promptBuilder.ToString(),
-                                         UseSecondAPI:=_apUseSecondApi,
-                                         HideSplash:=True, EnsureUI:=False,
-                                         cancellationToken:=ct)
-
-            If String.IsNullOrWhiteSpace(llmResponse) Then
-                ApDashboardLog($"DocProcessor: batch {currentBatch} returned empty response", "warn")
-                Return False
-            End If
-
-            ' Parse response
-            APParseResponse(llmResponse, processable, batchStart, batchEnd)
-
-            ' ─── Restore non-breaking spaces in processed paragraphs ───
-            For j As Integer = batchStart To batchEnd
-                If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
-                    processable(j).TranslatedText = APRestoreNonBreakingSpaces(
-                        processable(j).TranslatedText, nbspRecords(j))
+                ' Context After
+                Dim contextAfterEnd = Math.Min(processable.Count - 1, batchEnd + AP_ContextAfter)
+                If contextAfterEnd > batchEnd Then
+                    promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
+                    For j = batchEnd + 1 To contextAfterEnd
+                        Dim ctxAfterText As String = processable(j).FullText
+                        If ctxAfterText IsNot Nothing Then
+                            ctxAfterText = ctxAfterText.Replace(AP_NoteRefMarker, "")
+                        End If
+                        promptBuilder.AppendLine(ctxAfterText)
+                    Next
                 End If
-            Next
 
-            batchIndex = batchEnd + 1
-        End While
+                ' Call LLM
+                Dim llmResponse = Await LLM(systemPrompt, promptBuilder.ToString(),
+                                             UseSecondAPI:=_apUseSecondApi,
+                                             HideSplash:=True, EnsureUI:=False,
+                                             cancellationToken:=ct)
 
-        ApDashboardLog($"DocProcessor: all {currentBatch} batches completed", "success")
-        Return True
+                If String.IsNullOrWhiteSpace(llmResponse) Then
+                    ApDashboardLog($"DocProcessor: batch {currentBatch} returned empty response", "warn")
+                    Return False
+                End If
+
+                ' Parse response
+                APParseResponse(llmResponse, processable, batchStart, batchEnd)
+
+                ' ─── Restore non-breaking spaces in processed paragraphs ───
+                For j As Integer = batchStart To batchEnd
+                    If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                        processable(j).TranslatedText = APRestoreNonBreakingSpaces(
+                            processable(j).TranslatedText, nbspRecords(j))
+                    End If
+                Next
+
+                batchIndex = batchEnd + 1
+            End While
+
+            ApDashboardLog($"DocProcessor: all {currentBatch} batches completed", "success")
+            Return True
+
+        Finally
+            If offlineDocsApplied Then
+                _apUseSecondApi = False
+                If offlineDocsBackup IsNot Nothing Then
+                    RestoreDefaults(_context, offlineDocsBackup)
+                End If
+            End If
+        End Try
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════

@@ -1333,119 +1333,145 @@ Partial Public Class ThisAddIn
         ProgressBarModule.GlobalProgressMax = totalBatches
         ProgressBarModule.GlobalProgressValue = 0
 
-        While batchIndex < processableParagraphs.Count
-            If ProgressBarModule.CancelOperation Then Return False
+        ' ── If not already using SecondAPI, try OfflineDocs alternate model ──
+        Dim offlineDocsBackup As ModelConfig = Nothing
+        Dim offlineDocsApplied As Boolean = False
 
-            ' Determine batch boundaries
-            Dim batchStart As Integer = batchIndex
-            Dim batchEnd As Integer = Math.Min(batchIndex + TranslateParagraphsPerBatch - 1, processableParagraphs.Count - 1)
-
-            ' Adjust for character limit
-            Dim batchChars As Integer = 0
-            For j As Integer = batchStart To batchEnd
-                batchChars += processableParagraphs(j).FullText.Length
-                If batchChars > TranslateMaxCharsPerBatch AndAlso j > batchStart Then
-                    batchEnd = j - 1
-                    Exit For
+        If Not _useSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            Try
+                If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
+                    offlineDocsBackup = GetCurrentConfig(_context)
+                    offlineDocsApplied = True
+                    _useSecondAPI = True
                 End If
-            Next
+            Catch
+            End Try
+        End If
 
-            ' Build prompt with ONLY plain text - no formatting codes
-            Dim promptBuilder As New StringBuilder()
+        Try
+            While batchIndex < processableParagraphs.Count
+                If ProgressBarModule.CancelOperation Then Return False
 
-            ' Context Before (already processed - plain text only, no markers)
-            Dim contextBeforeStart As Integer = Math.Max(0, batchStart - TranslateContextBefore)
-            If contextBeforeStart < batchStart Then
-                promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
-                For j As Integer = contextBeforeStart To batchStart - 1
-                    Dim p = processableParagraphs(j)
-                    ' Context uses plain translated text (no markers) for readability
-                    Dim contextText As String = If(p.TranslatedText, p.FullText)
-                    ' Strip any markers from translated text for clean context
-                    If _useFormattingMarkers AndAlso contextText IsNot Nothing Then
-                        contextText = contextText.Replace(RunBoundaryMarker, "")
+                ' Determine batch boundaries
+                Dim batchStart As Integer = batchIndex
+                Dim batchEnd As Integer = Math.Min(batchIndex + TranslateParagraphsPerBatch - 1, processableParagraphs.Count - 1)
+
+                ' Adjust for character limit
+                Dim batchChars As Integer = 0
+                For j As Integer = batchStart To batchEnd
+                    batchChars += processableParagraphs(j).FullText.Length
+                    If batchChars > TranslateMaxCharsPerBatch AndAlso j > batchStart Then
+                        batchEnd = j - 1
+                        Exit For
                     End If
-                    If contextText IsNot Nothing Then
-                        contextText = contextText.Replace(NoteRefMarker, "")
-                    End If
-                    promptBuilder.AppendLine(contextText)
                 Next
+
+                ' Build prompt with ONLY plain text - no formatting codes
+                Dim promptBuilder As New StringBuilder()
+
+                ' Context Before (already processed - plain text only, no markers)
+                Dim contextBeforeStart As Integer = Math.Max(0, batchStart - TranslateContextBefore)
+                If contextBeforeStart < batchStart Then
+                    promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
+                    For j As Integer = contextBeforeStart To batchStart - 1
+                        Dim p = processableParagraphs(j)
+                        ' Context uses plain translated text (no markers) for readability
+                        Dim contextText As String = If(p.TranslatedText, p.FullText)
+                        ' Strip any markers from translated text for clean context
+                        If _useFormattingMarkers AndAlso contextText IsNot Nothing Then
+                            contextText = contextText.Replace(RunBoundaryMarker, "")
+                        End If
+                        If contextText IsNot Nothing Then
+                            contextText = contextText.Replace(NoteRefMarker, "")
+                        End If
+                        promptBuilder.AppendLine(contextText)
+                    Next
+                    promptBuilder.AppendLine()
+                End If
+
+                ' Paragraphs to process (plain text, or marker-annotated if enabled)
+                promptBuilder.AppendLine("[TEXTTOPROCESS]")
+                Dim batchNumber As Integer = 1
+                For j As Integer = batchStart To batchEnd
+                    ' Use marker-annotated text when available, otherwise plain text
+                    Dim textToSend As String = If(_useFormattingMarkers AndAlso processableParagraphs(j).MarkerText IsNot Nothing,
+                                                   processableParagraphs(j).MarkerText,
+                                                   processableParagraphs(j).FullText)
+                    promptBuilder.AppendLine($"[{batchNumber}] {textToSend}")
+                    batchNumber += 1
+                Next
+                promptBuilder.AppendLine("[/TEXTTOPROCESS]")
                 promptBuilder.AppendLine()
-            End If
 
-            ' Paragraphs to process (plain text, or marker-annotated if enabled)
-            promptBuilder.AppendLine("[TEXTTOPROCESS]")
-            Dim batchNumber As Integer = 1
-            For j As Integer = batchStart To batchEnd
-                ' Use marker-annotated text when available, otherwise plain text
-                Dim textToSend As String = If(_useFormattingMarkers AndAlso processableParagraphs(j).MarkerText IsNot Nothing,
-                                              processableParagraphs(j).MarkerText,
-                                              processableParagraphs(j).FullText)
-                promptBuilder.AppendLine($"[{batchNumber}] {textToSend}")
-                batchNumber += 1
-            Next
-            promptBuilder.AppendLine("[/TEXTTOPROCESS]")
-            promptBuilder.AppendLine()
-
-            ' Context After (upcoming - plain text only, no markers)
-            Dim contextAfterEnd As Integer = Math.Min(processableParagraphs.Count - 1, batchEnd + TranslateContextAfter)
-            If contextAfterEnd > batchEnd Then
-                promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
-                For j As Integer = batchEnd + 1 To contextAfterEnd
-                    Dim ctxAfterText As String = processableParagraphs(j).FullText
-                    If ctxAfterText IsNot Nothing Then
-                        ctxAfterText = ctxAfterText.Replace(NoteRefMarker, "")
-                    End If
-                    promptBuilder.AppendLine(ctxAfterText)
-                Next
-            End If
-
-            ' Update progress - include file context if provided
-            Dim currentBatch As Integer = CInt(Math.Floor(batchIndex / TranslateParagraphsPerBatch)) + 1
-            If Not String.IsNullOrEmpty(fileContext) Then
-                ProgressBarModule.GlobalProgressLabel = $"{fileContext} - batch {currentBatch}/{totalBatches}"
-            Else
-                ProgressBarModule.GlobalProgressLabel = $"{modeVerbGerund} batch {currentBatch}/{totalBatches}"
-            End If
-
-            ' Call LLM with pure text only
-
-            Dim Response As String
-            If _isFreestyle Then
-                Response = Await SharedMethods.LLM(
-                _context, systemPrompt, promptBuilder.ToString(),
-                "", "", 0, _useSecondAPI, True, AddUserPrompt:=OtherPromptUnfilled)
-            Else
-                Response = Await SharedMethods.LLM(
-                _context, systemPrompt, promptBuilder.ToString(),
-                "", "", 0, _useSecondAPI, True)
-            End If
-            _isFreestyle = False
-
-            If String.IsNullOrWhiteSpace(Response) Then
-                Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", "Correction")
-                ShowCustomMessageBox($"LLM returned empty response. {modeNoun} incomplete.")
-                Return False
-            End If
-
-            ' Parse and store results
-            ParseTranslateResponse(Response, processableParagraphs, batchStart, batchEnd)
-
-            ' ─── Restore non-breaking spaces in translated paragraphs ───
-            For j As Integer = batchStart To batchEnd
-                If processableParagraphs(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
-                    processableParagraphs(j).TranslatedText = RestoreNonBreakingSpaces(
-                        processableParagraphs(j).TranslatedText, nbspRecords(j))
+                ' Context After (upcoming - plain text only, no markers)
+                Dim contextAfterEnd As Integer = Math.Min(processableParagraphs.Count - 1, batchEnd + TranslateContextAfter)
+                If contextAfterEnd > batchEnd Then
+                    promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
+                    For j As Integer = batchEnd + 1 To contextAfterEnd
+                        Dim ctxAfterText As String = processableParagraphs(j).FullText
+                        If ctxAfterText IsNot Nothing Then
+                            ctxAfterText = ctxAfterText.Replace(NoteRefMarker, "")
+                        End If
+                        promptBuilder.AppendLine(ctxAfterText)
+                    Next
                 End If
-            Next
 
-            batchIndex = batchEnd + 1
+                ' Update progress - include file context if provided
+                Dim currentBatch As Integer = CInt(Math.Floor(batchIndex / TranslateParagraphsPerBatch)) + 1
+                If Not String.IsNullOrEmpty(fileContext) Then
+                    ProgressBarModule.GlobalProgressLabel = $"{fileContext} - batch {currentBatch}/{totalBatches}"
+                Else
+                    ProgressBarModule.GlobalProgressLabel = $"{modeVerbGerund} batch {currentBatch}/{totalBatches}"
+                End If
 
-            ' Advance progress bar after each batch completes
-            ProgressBarModule.GlobalProgressValue = currentBatch
-        End While
+                ' Call LLM with pure text only
 
-        Return True
+                Dim Response As String
+                If _isFreestyle Then
+                    Response = Await SharedMethods.LLM(
+                    _context, systemPrompt, promptBuilder.ToString(),
+                    "", "", 0, _useSecondAPI, True, AddUserPrompt:=OtherPromptUnfilled)
+                Else
+                    Response = Await SharedMethods.LLM(
+                    _context, systemPrompt, promptBuilder.ToString(),
+                    "", "", 0, _useSecondAPI, True)
+                End If
+                _isFreestyle = False
+
+                If String.IsNullOrWhiteSpace(Response) Then
+                    Dim modeNoun As String = If(mode = DocumentProcessMode.Translate, "Translation", "Correction")
+                    ShowCustomMessageBox($"LLM returned empty response. {modeNoun} incomplete.")
+                    Return False
+                End If
+
+                ' Parse and store results
+                ParseTranslateResponse(Response, processableParagraphs, batchStart, batchEnd)
+
+                ' ─── Restore non-breaking spaces in translated paragraphs ───
+                For j As Integer = batchStart To batchEnd
+                    If processableParagraphs(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                        processableParagraphs(j).TranslatedText = RestoreNonBreakingSpaces(
+                            processableParagraphs(j).TranslatedText, nbspRecords(j))
+                    End If
+                Next
+
+                batchIndex = batchEnd + 1
+
+                ' Advance progress bar after each batch completes
+                ProgressBarModule.GlobalProgressValue = currentBatch
+            End While
+
+            Return True
+
+        Finally
+            ' Restore OfflineDocs model if we applied it
+            If offlineDocsApplied Then
+                _useSecondAPI = False
+                If offlineDocsBackup IsNot Nothing Then
+                    RestoreDefaults(_context, offlineDocsBackup)
+                End If
+            End If
+        End Try
     End Function
 
     ''' <summary>
