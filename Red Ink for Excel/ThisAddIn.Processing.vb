@@ -534,11 +534,11 @@ Partial Public Class ThisAddIn
     ''' <param name="TargetWorksheet">Optional worksheet to use if CellRange is Nothing.</param>
     ''' <returns>Formatted string containing cell values, formulas, comments, validation options, and optional colors.</returns>
     Public Function ConvertRangeToString(
-    ByVal CellRange As Excel.Range,
-    ByVal IncludeFormulas As Boolean,
-    Optional ByVal DoColor As Boolean = False,
-     Optional ByVal TargetWorksheet As Microsoft.Office.Interop.Excel.Worksheet = Nothing
-) As String
+                    ByVal CellRange As Excel.Range,
+                    ByVal IncludeFormulas As Boolean,
+                    Optional ByVal DoColor As Boolean = False,
+                     Optional ByVal TargetWorksheet As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+                    ) As String
 
         Dim splash As New SplashScreen("Gathering the content from your worksheet...")
         splash.Show()
@@ -562,6 +562,11 @@ Partial Public Class ThisAddIn
         If CellRange Is Nothing AndAlso TargetWorksheet IsNot Nothing Then
             CellRange = TargetWorksheet.UsedRange
         End If
+
+        ' Determine the worksheet being read and lift protection if a Liftlock trigger exists
+        Dim readSheet As Microsoft.Office.Interop.Excel.Worksheet =
+            If(TargetWorksheet, CellRange.Worksheet)
+        Dim lockInfo As LiftlockInfo = TryLiftProtection(readSheet)
 
         Dim sb As New System.Text.StringBuilder()
         If TargetWorksheet IsNot Nothing Then
@@ -761,12 +766,6 @@ Partial Public Class ThisAddIn
                                                                 ' Check if it was actually parsed as a formula
                                                                 If CBool(cell.HasFormula) Then
                                                                     Dim addressResult As Object = cell.Value2
-
-                                                                    'Debug.WriteLine($"Cell: {cell.Address(False, False)}")
-                                                                    'Debug.WriteLine($"HasFormula: {cell.HasFormula}")
-                                                                    'Debug.WriteLine($"Inner formula: {innerFormula}")
-                                                                    'Debug.WriteLine($"addressResult type: {If(addressResult Is Nothing, "Nothing", addressResult.GetType().ToString())}")
-                                                                    'Debug.WriteLine($"addressResult value: {If(addressResult Is Nothing, "Nothing", addressResult.ToString())}")
 
                                                                     If addressResult IsNot Nothing AndAlso Not IsError(addressResult) Then
                                                                         Dim rangeAddrStr As String = addressResult.ToString().Trim()
@@ -1025,6 +1024,9 @@ Partial Public Class ThisAddIn
                 .Calculation = Excel.XlCalculation.xlCalculationAutomatic
             End With
 
+            ' Re-protect worksheet if it was lifted for data gathering
+            ReprotectWorksheet(readSheet, lockInfo)
+
             If origWb IsNot Nothing Then origWb.Activate()
             If origWs IsNot Nothing Then origWs.Activate()
 
@@ -1033,5 +1035,6 @@ Partial Public Class ThisAddIn
 
         Return sb.ToString()
     End Function
+
 
 End Class

@@ -81,6 +81,93 @@ Public Class Ribbon1
         Return True
     End Function
 
+
+    ' =========================================================================
+    ' Model Selection
+    ' =========================================================================
+
+    Public Sub UpdateModelsMenu()
+        Try
+            Dim available = PrimaryModelManager.GetAvailableModels()
+            Dim current = PrimaryModelManager.GetCurrentModelNumber()
+
+            ' Hide the entire model menu if there are fewer than 2 models
+            Menu4.Visible = (available.Count > 1)
+
+            For i = 1 To 10
+                Dim btn = GetModelButton(i)
+                If btn Is Nothing Then Continue For
+
+                If available.Contains(i) Then
+                    btn.Visible = True
+                    Dim label = PrimaryModelManager.GetModelDisplayName(i)
+                    btn.Label = If(i = current, $"{label} (active)", label)
+                Else
+                    btn.Visible = False
+                End If
+            Next
+        Catch
+            ' non-critical
+        End Try
+    End Sub
+
+    Private Function GetModelButton(i As Integer) As RibbonButton
+        Select Case i
+            Case 1 : Return RI_Model1
+            Case 2 : Return RI_Model2
+            Case 3 : Return RI_Model3
+            Case 4 : Return RI_Model4
+            Case 5 : Return RI_Model5
+            Case 6 : Return RI_Model6
+            Case 7 : Return RI_Model7
+            Case 8 : Return RI_Model8
+            Case 9 : Return RI_Model9
+            Case 10 : Return RI_Model10
+        End Select
+        Return Nothing
+    End Function
+
+    Private Sub RI_Model1_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model1.Click
+        ThisAddIn.SelectModel(1)
+    End Sub
+
+    Private Sub RI_Model2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model2.Click
+        ThisAddIn.SelectModel(2)
+    End Sub
+
+    Private Sub RI_Model3_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model3.Click
+        ThisAddIn.SelectModel(3)
+    End Sub
+
+    Private Sub RI_Model4_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model4.Click
+        ThisAddIn.SelectModel(4)
+    End Sub
+
+    Private Sub RI_Model5_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model5.Click
+        ThisAddIn.SelectModel(5)
+    End Sub
+
+    Private Sub RI_Model6_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model6.Click
+        ThisAddIn.SelectModel(6)
+    End Sub
+
+    Private Sub RI_Model7_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model7.Click
+        ThisAddIn.SelectModel(7)
+    End Sub
+
+    Private Sub RI_Model8_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model8.Click
+        ThisAddIn.SelectModel(8)
+    End Sub
+
+    Private Sub RI_Model9_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model9.Click
+        ThisAddIn.SelectModel(9)
+    End Sub
+
+    Private Sub RI_Model10_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model10.Click
+        ThisAddIn.SelectModel(10)
+    End Sub
+
+
     Public Async Function RI_Correct_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Correct.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Correct_Click invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.Correct()

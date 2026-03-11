@@ -167,6 +167,7 @@ Namespace SharedLibrary
                 context.SP_InsertClipboard = If(configDict.ContainsKey("SP_InsertClipboard"), configDict("SP_InsertClipboard"), Default_SP_InsertClipboard)
                 context.SP_Summarize = If(configDict.ContainsKey("SP_Summarize"), configDict("SP_Summarize"), Default_SP_Summarize)
                 context.SP_Markup = If(configDict.ContainsKey("SP_Markup"), configDict("SP_Markup"), Default_SP_Markup)
+                context.SP_JustifyMarkup = If(configDict.ContainsKey("SP_JustifyMarkup"), configDict("SP_JustifyMarkup"), Default_SP_JustifyMarkup)
                 context.SP_FreestyleText = If(configDict.ContainsKey("SP_FreestyleText"), configDict("SP_FreestyleText"), Default_SP_FreestyleText)
                 context.SP_FreestyleNoText = If(configDict.ContainsKey("SP_FreestyleNoText"), configDict("SP_FreestyleNoText"), Default_SP_FreestyleNoText)
                 context.SP_Freestyle_Document = If(configDict.ContainsKey("SP_Freestyle_Document"), configDict("SP_Freestyle_Document"), Default_SP_Freestyle_Document)
@@ -192,6 +193,7 @@ Namespace SharedLibrary
                 context.SP_Add_KeepFormulasIntact = If(configDict.ContainsKey("SP_Add_KeepFormulasIntact"), configDict("SP_Add_KeepFormulasIntact"), Default_SP_Add_KeepFormulasIntact)
                 context.SP_Add_KeepHTMLIntact = If(configDict.ContainsKey("SP_Add_KeepHTMLIntact"), configDict("SP_Add_KeepHTMLIntact"), Default_SP_Add_KeepHTMLIntact)
                 context.SP_Add_KeepInlineIntact = If(configDict.ContainsKey("SP_Add_KeepInlineIntact"), configDict("SP_Add_KeepInlineIntact"), Default_SP_Add_KeepInlineIntact)
+                context.SP_Add_NoMarkdown = If(configDict.ContainsKey("SP_Add_NoMarkdown"), configDict("SP_Add_NoMarkdown"), Default_SP_Add_NoMarkdown)
                 context.SP_Add_Tooling = If(configDict.ContainsKey("SP_Add_Tooling"), configDict("SP_Add_Tooling"), Default_SP_Add_Tooling)
                 context.SP_Add_Markers = If(configDict.ContainsKey("SP_Add_Markers"), configDict("SP_Add_Markers"), Default_SP_Add_Markers)
                 context.SP_Add_Bubbles = If(configDict.ContainsKey("SP_Add_Bubbles"), configDict("SP_Add_Bubbles"), Default_SP_Add_Bubbles)
@@ -201,6 +203,7 @@ Namespace SharedLibrary
                 context.SP_Add_Batch = If(configDict.ContainsKey("SP_Add_Batch"), configDict("SP_Add_Batch"), Default_SP_Add_Batch)
                 context.SP_Add_Slides = If(configDict.ContainsKey("SP_Add_Slides"), configDict("SP_Add_Slides"), Default_SP_Add_Slides)
                 context.SP_Add_Chart = If(configDict.ContainsKey("SP_Add_Chart"), configDict("SP_Add_Chart"), Default_SP_Add_Chart)
+                context.SP_Add_Chart_App = If(configDict.ContainsKey("SP_Add_Chart_App"), configDict("SP_Add_Chart_App"), Default_SP_Add_Chart_App)
                 context.SP_BubblesExcel = If(configDict.ContainsKey("SP_BubblesExcel"), configDict("SP_BubblesExcel"), Default_SP_BubblesExcel)
                 context.SP_Add_Revisions = If(configDict.ContainsKey("SP_Add_Revisions"), configDict("SP_Add_Revisions"), Default_SP_Add_Revisions)
                 context.SP_MarkupRegex = If(configDict.ContainsKey("SP_MarkupRegex"), configDict("SP_MarkupRegex"), Default_SP_MarkupRegex)
@@ -211,6 +214,9 @@ Namespace SharedLibrary
                 context.SP_MailMover = If(configDict.ContainsKey("SP_MailMover"), configDict("SP_MailMover"), Default_SP_MailMover)
                 context.SP_InboxBoard = If(configDict.ContainsKey("SP_InboxBoard"), configDict("SP_InboxBoard"), Default_SP_InboxBoard)
                 context.SP_SplitPDF = If(configDict.ContainsKey("SP_SplitPDF"), configDict("SP_SplitPDF"), Default_SP_SplitPDF)
+                context.SP_ExhibitNumber = If(configDict.ContainsKey("SP_ExhibitNumber"), configDict("SP_ExhibitNumber"), Default_SP_ExhibitNumber)
+                context.SP_MarkupReview_Compliance = If(configDict.ContainsKey("SP_MarkupReview_Compliance"), configDict("SP_MarkupReview_Compliance"), Default_SP_MarkupReview_Compliance)
+                context.SP_MarkupReview_CrossClause = If(configDict.ContainsKey("SP_MarkupReview_CrossClause"), configDict("SP_MarkupReview_CrossClause"), Default_SP_MarkupReview_CrossClause)
                 context.SP_AutoPilot = If(configDict.ContainsKey("SP_AutoPilot"), configDict("SP_AutoPilot"), Default_SP_AutoPilot)
                 context.SP_AutoPilot_NoTools = If(configDict.ContainsKey("SP_AutoPilot_NoTools"), configDict("SP_AutoPilot_NoTools"), Default_SP_AutoPilot_NoTools)
                 context.SP_Chat = If(configDict.ContainsKey("SP_Chat"), configDict("SP_Chat"), Default_SP_Chat)
@@ -265,6 +271,7 @@ Namespace SharedLibrary
                 context.INI_DoMarkupWord = ParseBoolean(configDict, "DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD)
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
+                context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
                 context.INI_APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")
                 context.INI_ShortcutsWordExcel = If(configDict.ContainsKey("ShortcutsWordExcel"), configDict("ShortcutsWordExcel"), "")
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
@@ -290,6 +297,7 @@ Namespace SharedLibrary
                 context.INI_UpdateSource = If(configDict.ContainsKey("UpdateSource"), configDict("UpdateSource"), "")
 
                 context.INI_UpdateIniClients = If(configDict.ContainsKey("UpdateIniClients"), configDict("UpdateIniClients"), "")
+                context.INI_CentralConfigClients = If(configDict.ContainsKey("CentralConfigClients"), configDict("CentralConfigClients"), "")
 
                 context.INI_UpdateIniIgnoreOverride = If(configDict.ContainsKey("UpdateIniIgnoreOverride"), configDict("UpdateIniIgnoreOverride"), "")
                 context.INI_UpdateIniSilentMode = If(configDict.ContainsKey("UpdateIniSilentMode"), CInt(configDict("UpdateIniSilentMode")), DEFAULT_UPDATE_INI_SILENT_MODE)
@@ -340,6 +348,9 @@ Namespace SharedLibrary
                 SharedMethods.INI_LogoPath_Cached = context.INI_LogoPath
                 SharedMethods.INI_LogoPathMedium_Cached = context.INI_LogoPathMedium
                 SharedMethods.INI_LogoPathLarge_Cached = context.INI_LogoPathLarge
+
+                ' Apply administrator-configured registry fixes (e.g., resiliency hardening).
+                ApplyRegistryFixes(configDict, context)
 
                 ' Process Internet search if enabled.
                 context.INI_ISearch = ParseBoolean(configDict, "ISearch", DEFAULT_BOOL_ISEARCH_ENABLED)
@@ -419,7 +430,6 @@ Namespace SharedLibrary
                 If context.INI_Ignore Then context.Ignore = context.SP_Ignore Else context.Ignore = ""
                 context.Location = context.INI_Location.Trim()
 
-
                 ' Resolve Codebasis (used to decode encrypted API keys) if required.
                 If context.INI_APIEncrypted OrElse context.INI_APIEncrypted_2 Then
                     If IsEmptyOrBlank(Int_CodeBasis) Then
@@ -485,6 +495,18 @@ Namespace SharedLibrary
                             MessageBox.Show("Internal error: Could not determine API key for second API (likely a decryption error).", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
                             Return
                         End If
+                    End If
+                End If
+
+                ' Detect multi-model configurations from INI keys (MultiModel_<Key>_<N>).
+                PrimaryModelManager.DetectAndStoreModels(configDict)
+
+                ' Re-apply the previously selected model so a config reload does not
+                ' silently revert the user's selection to the base INI values.
+                If PrimaryModelManager.GetAvailableModels().Count > 1 Then
+                    Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                    If Not PrimaryModelManager.SelectModel(context, saved) Then
+                        PrimaryModelManager.SelectModel(context, PrimaryModelManager.GetAvailableModels()(0))
                     End If
                 End If
 

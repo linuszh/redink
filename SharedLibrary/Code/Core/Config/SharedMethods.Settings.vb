@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink" (SharedLibrary)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: SharedMethods.Settings.vb
@@ -12,13 +11,20 @@
 '       `ShowSettingsWindow` builds a modal settings dialog dynamically from two dictionaries:
 '         - `Settings`:     settingKey -> label template (may contain "{model}" and "{model2}")
 '         - `SettingsTips`: settingKey -> tooltip text
-'       The UI creates a control per key (TextBox or CheckBox) based on `IsBooleanSetting`.
+'       The UI creates a control per key (TextBox or CheckBox) based on `IsBooleanSetting`,
+'       supports model switching, and integrates update and helper install/remove actions.
+'
+'   - Import / download actions:
+'       Supports loading provider settings, other settings, and sample files via `IniImportManager`
+'       and refreshes UI/context on reload.
 '
 '   - Expert configuration UI (arbitrary variables):
 '       `ShowExpertConfiguration` materializes a variable name/value dictionary from the current `ISharedContext`,
 '       shows it via `ShowVariableConfigurationWindow`, then maps edited values back into `ISharedContext`.
-'       `ShowVariableConfigurationWindow` displays an editable two-column grid (variable/value) and can open
-'       selected `.ini` files via `ShowTextFileEditor`.
+'       `ShowVariableConfigurationWindow` displays an editable two-column grid and provides:
+'         - Configuration Wizard access (`ConfigWizardEngine`)
+'         - Editing of `.ini` and library files (`ShowTextFileEditor`)
+'         - Import-from-source flow for INI updates
 '
 '   - In-memory configuration access:
 '       `GetSettingValue` and `SetSettingValue` provide string-based mapping between UI setting keys and
@@ -791,7 +797,7 @@ Namespace SharedLibrary
             Dim booleanSettings As New List(Of String) From {
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
-        "APIDebug", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
+        "APIDebug", "AutoPilotAutoStart", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
@@ -988,6 +994,8 @@ Namespace SharedLibrary
                     Return context.INI_LogoPathLarge
                 Case "APIDebug"
                     Return context.INI_APIDebug.ToString()
+                Case "AutoPilotAutoStart"
+                    Return context.INI_AutoPilotAutoStart.ToString()
                 Case "ISearch"
                     Return context.INI_ISearch.ToString()
                 Case "ISearch_Approve"
@@ -1294,6 +1302,8 @@ Namespace SharedLibrary
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
+                Case "AutoPilotAutoStart"
+                    context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "ISearch"
                     context.INI_ISearch = Boolean.Parse(value)
                 Case "ISearch_Approve"
@@ -1607,6 +1617,7 @@ Namespace SharedLibrary
                     {"MarkupRegexCap", context.INI_MarkupRegexCap.ToString()},
                     {"ChatCap", context.INI_ChatCap.ToString()},
                     {"APIDebug", context.INI_APIDebug.ToString()},
+                    {"AutoPilotAutoStart", context.INI_AutoPilotAutoStart.ToString()},
                     {"APIKeyEncrypted", context.INI_APIEncrypted.ToString()},
                     {"SecondAPI", context.INI_SecondAPI.ToString()},
                     {"APIKey_2", context.INI_APIKeyBack_2},
@@ -1728,6 +1739,7 @@ Namespace SharedLibrary
                     {"SP_InsertClipboard", context.SP_InsertClipboard},
                     {"SP_Summarize", context.SP_Summarize},
                     {"SP_Markup", context.SP_Markup},
+                    {"SP_JustifyMarkup", context.SP_JustifyMarkup},
                     {"SP_MailReply", context.SP_MailReply},
                     {"SP_MailSumup", context.SP_MailSumup},
                     {"SP_MailSumup2", context.SP_MailSumup2},
@@ -1754,6 +1766,7 @@ Namespace SharedLibrary
                     {"SP_Add_KeepFormulasIntact", context.SP_Add_KeepFormulasIntact},
                     {"SP_Add_KeepHTMLIntact", context.SP_Add_KeepHTMLIntact},
                     {"SP_Add_KeepInlineIntact", context.SP_Add_KeepInlineIntact},
+                    {"SP_Add_NoMarkdown", context.SP_Add_NoMarkdown},
                     {"SP_Add_Bubbles", context.SP_Add_Bubbles},
                     {"SP_Add_BubblesReply", context.SP_Add_BubblesReply},
                     {"SP_Add_BubblesExtract", context.SP_Add_BubblesExtract},
@@ -1763,6 +1776,7 @@ Namespace SharedLibrary
                     {"SP_Add_Markers", context.SP_Add_Markers},
                     {"SP_Add_Slides", context.SP_Add_Slides},
                     {"SP_Add_Chart", context.SP_Add_Chart},
+                    {"SP_Add_Chart_App", context.SP_Add_Chart_App},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
@@ -1773,6 +1787,9 @@ Namespace SharedLibrary
                     {"SP_MailMover", context.SP_MailMover},
                     {"SP_InboxBoard", context.SP_InboxBoard},
                     {"SP_SplitPDF", context.SP_SplitPDF},
+                    {"SP_ExhibitNumber", context.SP_ExhibitNumber},
+                    {"SP_MarkupReview_Compliance", context.SP_MarkupReview_Compliance},
+                    {"SP_MarkupReview_CrossClause", context.SP_MarkupReview_CrossClause},
                     {"SP_AutoPilot", context.SP_AutoPilot},
                     {"SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools},
                     {"SP_Chat", context.SP_Chat},
@@ -1799,133 +1816,7 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
                 }
 
-                Dim KeysToSkipWhenDefault As New Dictionary(Of String, Object) From {
-                    {"ISearch_SearchTerm_SP", Default_INI_ISearch_SearchTerm_SP},
-                    {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
-                    {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
-                    {"SP_Translate", Default_SP_Translate},
-                    {"SP_Translate_Multi", Default_SP_Translate_Multi},
-                    {"SP_Translate_Multi_Source", Default_SP_Translate_Multi_Source},
-                    {"SP_Translate_Document", Default_SP_Translate_Document},
-                    {"SP_Correct", Default_SP_Correct},
-                    {"SP_Correct_Document", Default_SP_Correct_Document},
-                    {"SP_Improve", Default_SP_Improve},
-                    {"SP_Explain", Default_SP_Explain},
-                    {"SP_FindClause", Default_SP_FindClause},
-                    {"SP_FindClause_Clean", Default_SP_FindClause_Clean},
-                    {"SP_ApplyDocStyle", Default_SP_ApplyDocStyle},
-                    {"SP_ApplyDocStyle_NumberingHint", Default_SP_ApplyDocStyle_NumberingHint},
-                    {"SP_DocCheck_Clause", Default_SP_DocCheck_Clause},
-                    {"SP_DocCheck_MultiClause", Default_SP_DocCheck_MultiClause},
-                    {"SP_DocCheck_MultiClauseSum", Default_SP_DocCheck_MulticlauseSum},
-                    {"SP_DocCheck_MultiClauseSum_Bubbles", Default_SP_DocCheck_MultiClauseSum_Bubbles},
-                    {"SP_SuggestTitles", Default_SP_SuggestTitles},
-                    {"SP_Friendly", Default_SP_Friendly},
-                    {"SP_Convincing", Default_SP_Convincing},
-                    {"SP_NoFillers", Default_SP_NoFillers},
-                    {"SP_Podcast", Default_SP_Podcast},
-                    {"SP_MyStyle_Word", Default_SP_MyStyle_Word},
-                    {"SP_MyStyle_Outlook", Default_SP_MyStyle_Outlook},
-                    {"SP_MyStyle_Apply", Default_SP_MyStyle_Apply},
-                    {"SP_Shorten", Default_SP_Shorten},
-                    {"SP_Filibuster", Default_SP_Filibuster},
-                    {"SP_ArgueAgainst", Default_SP_ArgueAgainst},
-                    {"SP_InsertClipboard", Default_SP_InsertClipboard},
-                    {"SP_Summarize", Default_SP_Summarize},
-                    {"SP_Markup", Default_SP_Markup},
-                    {"SP_MailReply", Default_SP_MailReply},
-                    {"SP_MailSumup", Default_SP_MailSumup},
-                    {"SP_MailSumup2", Default_SP_MailSumup2},
-                    {"SP_FreestyleText", Default_SP_FreestyleText},
-                    {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
-                    {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
-                    {"SP_SwitchParty", Default_SP_SwitchParty},
-                    {"SP_Anonymize", Default_SP_Anonymize},
-                    {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
-                    {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
-                    {"SP_Rename", Default_SP_Rename},
-                    {"SP_RemoveClutter", Default_SP_RemoveClutter},
-                    {"SP_Redact", Default_SP_Redact},
-                    {"SP_CheckforII", Default_SP_CheckforII},
-                    {"SP_Extract", Default_SP_Extract},
-                    {"SP_ExtractSchema", Default_SP_ExtractSchema},
-                    {"SP_MergeDateRows", Default_SP_MergeDateRows},
-                    {"SP_ContextSearch", Default_SP_ContextSearch},
-                    {"SP_ContextSearchMulti", Default_SP_ContextSearchMulti},
-                    {"SP_RangeOfCells", Default_SP_RangeOfCells},
-                    {"SP_ParseFile", Default_SP_ParseFile},
-                    {"SP_Ignore", Default_SP_Ignore},
-                    {"SP_WriteNeatly", Default_SP_WriteNeatly},
-                    {"SP_Add_KeepFormulasIntact", Default_SP_Add_KeepFormulasIntact},
-                    {"SP_Add_KeepHTMLIntact", Default_SP_Add_KeepHTMLIntact},
-                    {"SP_Add_KeepInlineIntact", Default_SP_Add_KeepInlineIntact},
-                    {"SP_Add_Bubbles", Default_SP_Add_Bubbles},
-                    {"SP_Add_BubblesReply", Default_SP_Add_BubblesReply},
-                    {"SP_Add_BubblesExtract", Default_SP_Add_BubblesExtract},
-                    {"SP_Add_Bubbles_Format", Default_SP_Add_Bubbles_Format},
-                    {"SP_Add_Batch", Default_SP_Add_Batch},
-                    {"SP_Add_Tooling", Default_SP_Add_Tooling},
-                    {"SP_Add_Markers", Default_SP_Add_Markers},
-                    {"SP_Add_Slides", Default_SP_Add_Slides},
-                    {"SP_Add_Chart", Default_SP_Add_Chart},
-                    {"SP_BubblesExcel", Default_SP_BubblesExcel},
-                    {"SP_Add_Revisions", Default_SP_Add_Revisions},
-                    {"SP_MarkupRegex", Default_SP_MarkupRegex},
-                    {"SP_ChatWord", Default_SP_ChatWord},
-                    {"SP_HelpMe", Default_SP_HelpMe},
-                    {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
-                    {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
-                    {"SP_MailMover", Default_SP_MailMover},
-                    {"SP_InboxBoard", Default_SP_InboxBoard},
-                    {"SP_SplitPDF", Default_SP_SplitPDF},
-                    {"SP_AutoPilot", Default_SP_AutoPilot},
-                    {"SP_AutoPilot_NoTools", Default_SP_AutoPilot_NoTools},
-                    {"SP_Chat", Default_SP_Chat},
-                    {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
-                    {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
-                    {"SP_ChatExcel", Default_SP_ChatExcel},
-                    {"SP_Add_ChatExcel_Commands", Default_SP_Add_ChatExcel_Commands},
-                    {"SP_FindPrompts", Default_SP_FindPrompts},
-                    {"SP_Add_MergePrompt", Default_SP_Add_MergePrompt},
-                    {"SP_MergePrompt", Default_SP_MergePrompt},
-                    {"SP_MergePrompt2", Default_SP_MergePrompt2},
-                    {"Temperature", DEFAULT_TEMPERATURE},
-                    {"Timeout", DEFAULT_TIMEOUT_LONG},
-                    {"Temperature_2", DEFAULT_TEMPERATURE},
-                    {"Timeout_2", DEFAULT_TIMEOUT_LONG},
-                    {"Language1", DEFAULT_LANGUAGE_1},
-                    {"Language2", DEFAULT_LANGUAGE_2},
-                    {"KeepFormatCap", DEFAULT_KEEPFORMAT_CAP},
-                    {"MarkupMethodHelper", DEFAULT_MARKUP_METHOD_HELPER},
-                    {"MarkupMethodWord", DEFAULT_MARKUP_METHOD_WORD},
-                    {"MarkupMethodOutlook", DEFAULT_MARKUP_METHOD_OUTLOOK},
-                    {"MarkupDiffCap", DEFAULT_MARKUP_DIFF_CAP},
-                    {"MarkupRegexCap", DEFAULT_MARKUP_REGEX_CAP},
-                    {"ChatCap", DEFAULT_CHAT_CAP},
-                    {"Lib_Timeout", DEFAULT_TIMEOUT_LIB},
-                    {"UpdateIniSilentMode", DEFAULT_UPDATE_INI_SILENT_MODE},
-                    {"ReplaceText1", DEFAULT_BOOL_REPLACETEXT1},
-                    {"MarkdownConvert", DEFAULT_BOOL_MARKDOWNCONVERT},
-                    {"ReplaceText2", DEFAULT_BOOL_REPLACETEXT2},
-                    {"DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK},
-                    {"DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD},
-                    {"ContextMenu", DEFAULT_BOOL_CONTEXTMENU},
-                    {"ISearch", DEFAULT_BOOL_ISEARCH_ENABLED},
-                    {"ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW},
-                    {"ToolingMaximumIterations", DEFAULT_TOOLING_MAXIMUMITERATIONS},
-                    {"UpdateIni", DEFAULT_BOOL_UPDATEINI},
-                    {"UpdateIniAllowRemote", DEFAULT_BOOL_UPDATEINI_ALLOWREMOTE},
-                    {"UpdateIniSilentLog", DEFAULT_BOOL_UPDATEINISILENTLOG},
-                    {"ISearch_URL", DEFAULT_ISEARCH_URL},
-                    {"ISearch_ResponseMask1", DEFAULT_ISEARCH_RESPONSE_MASK_1},
-                    {"ISearch_ResponseMask2", DEFAULT_ISEARCH_RESPONSE_MASK_2},
-                    {"ISearch_Name", DEFAULT_ISEARCH_NAME},
-                    {"ISearch_Tries", ISearch_DefTries},
-                    {"ISearch_Results", ISearch_DefResults},
-                    {"ISearch_MaxDepth", ISearch_DefMaxDepth},
-                    {"ISearch_Timeout", ISearch_DefSearchTimeout},
-                    {"UpdateCheckInterval", DefaultUpdateIntervalDays}
-                }
+                Dim KeysToSkipWhenDefault As Dictionary(Of String, Object) = GetKeysToSkipWhenDefault()
 
                 Dim SaveToMySettings As New Dictionary(Of String, String) From {
                     {"DefaultPrefix", "DefaultPrefix"},
@@ -2052,6 +1943,147 @@ Namespace SharedLibrary
 
 
         ''' <summary>
+        ''' Returns the canonical dictionary of INI keys that should be skipped when their value
+        ''' matches the built-in default. Used by <see cref="UpdateAppConfig"/> and
+        ''' <see cref="ConfigWizardEngine.WriteIniValues"/> to avoid writing default values to disk.
+        ''' </summary>
+        Friend Shared Function GetKeysToSkipWhenDefault() As Dictionary(Of String, Object)
+            Return New Dictionary(Of String, Object) From {
+                {"ISearch_SearchTerm_SP", Default_INI_ISearch_SearchTerm_SP},
+                {"ISearch_Apply_SP", Default_INI_ISearch_Apply_SP},
+                {"ISearch_Apply_SP_Markup", Default_INI_ISearch_Apply_SP_Markup},
+                {"SP_Translate", Default_SP_Translate},
+                {"SP_Translate_Multi", Default_SP_Translate_Multi},
+                {"SP_Translate_Multi_Source", Default_SP_Translate_Multi_Source},
+                {"SP_Translate_Document", Default_SP_Translate_Document},
+                {"SP_Correct", Default_SP_Correct},
+                {"SP_Correct_Document", Default_SP_Correct_Document},
+                {"SP_Improve", Default_SP_Improve},
+                {"SP_Explain", Default_SP_Explain},
+                {"SP_FindClause", Default_SP_FindClause},
+                {"SP_FindClause_Clean", Default_SP_FindClause_Clean},
+                {"SP_ApplyDocStyle", Default_SP_ApplyDocStyle},
+                {"SP_ApplyDocStyle_NumberingHint", Default_SP_ApplyDocStyle_NumberingHint},
+                {"SP_DocCheck_Clause", Default_SP_DocCheck_Clause},
+                {"SP_DocCheck_MultiClause", Default_SP_DocCheck_MultiClause},
+                {"SP_DocCheck_MultiClauseSum", Default_SP_DocCheck_MulticlauseSum},
+                {"SP_DocCheck_MultiClauseSum_Bubbles", Default_SP_DocCheck_MultiClauseSum_Bubbles},
+                {"SP_SuggestTitles", Default_SP_SuggestTitles},
+                {"SP_Friendly", Default_SP_Friendly},
+                {"SP_Convincing", Default_SP_Convincing},
+                {"SP_NoFillers", Default_SP_NoFillers},
+                {"SP_Podcast", Default_SP_Podcast},
+                {"SP_MyStyle_Word", Default_SP_MyStyle_Word},
+                {"SP_MyStyle_Outlook", Default_SP_MyStyle_Outlook},
+                {"SP_MyStyle_Apply", Default_SP_MyStyle_Apply},
+                {"SP_Shorten", Default_SP_Shorten},
+                {"SP_Filibuster", Default_SP_Filibuster},
+                {"SP_ArgueAgainst", Default_SP_ArgueAgainst},
+                {"SP_InsertClipboard", Default_SP_InsertClipboard},
+                {"SP_Summarize", Default_SP_Summarize},
+                {"SP_Markup", Default_SP_Markup},
+                {"SP_JustifyMarkup", Default_SP_JustifyMarkup},
+                {"SP_MailReply", Default_SP_MailReply},
+                {"SP_MailSumup", Default_SP_MailSumup},
+                {"SP_MailSumup2", Default_SP_MailSumup2},
+                {"SP_FreestyleText", Default_SP_FreestyleText},
+                {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
+                {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
+                {"SP_SwitchParty", Default_SP_SwitchParty},
+                {"SP_Anonymize", Default_SP_Anonymize},
+                {"SP_SwitchParty_Document", Default_SP_SwitchParty_Document},
+                {"SP_Anonymize_Document", Default_SP_Anonymize_Document},
+                {"SP_Rename", Default_SP_Rename},
+                {"SP_RemoveClutter", Default_SP_RemoveClutter},
+                {"SP_Redact", Default_SP_Redact},
+                {"SP_CheckforII", Default_SP_CheckforII},
+                {"SP_Extract", Default_SP_Extract},
+                {"SP_ExtractSchema", Default_SP_ExtractSchema},
+                {"SP_MergeDateRows", Default_SP_MergeDateRows},
+                {"SP_ContextSearch", Default_SP_ContextSearch},
+                {"SP_ContextSearchMulti", Default_SP_ContextSearchMulti},
+                {"SP_RangeOfCells", Default_SP_RangeOfCells},
+                {"SP_ParseFile", Default_SP_ParseFile},
+                {"SP_Ignore", Default_SP_Ignore},
+                {"SP_WriteNeatly", Default_SP_WriteNeatly},
+                {"SP_Add_KeepFormulasIntact", Default_SP_Add_KeepFormulasIntact},
+                {"SP_Add_KeepHTMLIntact", Default_SP_Add_KeepHTMLIntact},
+                {"SP_Add_KeepInlineIntact", Default_SP_Add_KeepInlineIntact},
+                {"SP_Add_NoMarkdown", Default_SP_Add_NoMarkdown},
+                {"SP_Add_Bubbles", Default_SP_Add_Bubbles},
+                {"SP_Add_BubblesReply", Default_SP_Add_BubblesReply},
+                {"SP_Add_BubblesExtract", Default_SP_Add_BubblesExtract},
+                {"SP_Add_Bubbles_Format", Default_SP_Add_Bubbles_Format},
+                {"SP_Add_Batch", Default_SP_Add_Batch},
+                {"SP_Add_Tooling", Default_SP_Add_Tooling},
+                {"SP_Add_Markers", Default_SP_Add_Markers},
+                {"SP_Add_Slides", Default_SP_Add_Slides},
+                {"SP_Add_Chart", Default_SP_Add_Chart},
+                {"SP_Add_Chart_App", Default_SP_Add_Chart_App},
+                {"SP_BubblesExcel", Default_SP_BubblesExcel},
+                {"SP_Add_Revisions", Default_SP_Add_Revisions},
+                {"SP_MarkupRegex", Default_SP_MarkupRegex},
+                {"SP_ChatWord", Default_SP_ChatWord},
+                {"SP_HelpMe", Default_SP_HelpMe},
+                {"SP_DiscussThis_SortOut", Default_SP_DiscussThis_SortOut},
+                {"SP_DiscussThis_SumUp", Default_SP_DiscussThis_Sumup},
+                {"SP_MailMover", Default_SP_MailMover},
+                {"SP_InboxBoard", Default_SP_InboxBoard},
+                {"SP_SplitPDF", Default_SP_SplitPDF},
+                {"SP_ExhibitNumber", Default_SP_ExhibitNumber},
+                {"SP_MarkupReview_Compliance", Default_SP_MarkupReview_Compliance},
+                {"SP_MarkupReview_CrossClause", Default_SP_MarkupReview_CrossClause},
+                {"SP_AutoPilot", Default_SP_AutoPilot},
+                {"SP_AutoPilot_NoTools", Default_SP_AutoPilot_NoTools},
+                {"SP_Chat", Default_SP_Chat},
+                {"SP_Add_ChatWord_Commands", Default_SP_Add_ChatWord_Commands},
+                {"SP_Add_Chat_NoCommands", Default_SP_Add_Chat_NoCommands},
+                {"SP_ChatExcel", Default_SP_ChatExcel},
+                {"SP_Add_ChatExcel_Commands", Default_SP_Add_ChatExcel_Commands},
+                {"SP_FindPrompts", Default_SP_FindPrompts},
+                {"SP_Add_MergePrompt", Default_SP_Add_MergePrompt},
+                {"SP_MergePrompt", Default_SP_MergePrompt},
+                {"SP_MergePrompt2", Default_SP_MergePrompt2},
+                {"Temperature", DEFAULT_TEMPERATURE},
+                {"Timeout", DEFAULT_TIMEOUT_LONG},
+                {"Temperature_2", DEFAULT_TEMPERATURE},
+                {"Timeout_2", DEFAULT_TIMEOUT_LONG},
+                {"Language1", DEFAULT_LANGUAGE_1},
+                {"Language2", DEFAULT_LANGUAGE_2},
+                {"KeepFormatCap", DEFAULT_KEEPFORMAT_CAP},
+                {"MarkupMethodHelper", DEFAULT_MARKUP_METHOD_HELPER},
+                {"MarkupMethodWord", DEFAULT_MARKUP_METHOD_WORD},
+                {"MarkupMethodOutlook", DEFAULT_MARKUP_METHOD_OUTLOOK},
+                {"MarkupDiffCap", DEFAULT_MARKUP_DIFF_CAP},
+                {"MarkupRegexCap", DEFAULT_MARKUP_REGEX_CAP},
+                {"ChatCap", DEFAULT_CHAT_CAP},
+                {"Lib_Timeout", DEFAULT_TIMEOUT_LIB},
+                {"UpdateIniSilentMode", DEFAULT_UPDATE_INI_SILENT_MODE},
+                {"ReplaceText1", DEFAULT_BOOL_REPLACETEXT1},
+                {"MarkdownConvert", DEFAULT_BOOL_MARKDOWNCONVERT},
+                {"ReplaceText2", DEFAULT_BOOL_REPLACETEXT2},
+                {"DoMarkupOutlook", DEFAULT_BOOL_DOMARKUPOUTLOOK},
+                {"DoMarkupWord", DEFAULT_BOOL_DOMARKUPWORD},
+                {"ContextMenu", DEFAULT_BOOL_CONTEXTMENU},
+                {"ISearch", DEFAULT_BOOL_ISEARCH_ENABLED},
+                {"ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW},
+                {"ToolingMaximumIterations", DEFAULT_TOOLING_MAXIMUMITERATIONS},
+                {"UpdateIni", DEFAULT_BOOL_UPDATEINI},
+                {"UpdateIniAllowRemote", DEFAULT_BOOL_UPDATEINI_ALLOWREMOTE},
+                {"UpdateIniSilentLog", DEFAULT_BOOL_UPDATEINISILENTLOG},
+                {"ISearch_URL", DEFAULT_ISEARCH_URL},
+                {"ISearch_ResponseMask1", DEFAULT_ISEARCH_RESPONSE_MASK_1},
+                {"ISearch_ResponseMask2", DEFAULT_ISEARCH_RESPONSE_MASK_2},
+                {"ISearch_Name", DEFAULT_ISEARCH_NAME},
+                {"ISearch_Tries", ISearch_DefTries},
+                {"ISearch_Results", ISearch_DefResults},
+                {"ISearch_MaxDepth", ISearch_DefMaxDepth},
+                {"ISearch_Timeout", ISearch_DefSearchTimeout},
+                {"UpdateCheckInterval", DefaultUpdateIntervalDays}
+            }
+        End Function
+
+        ''' <summary>
         ''' Determines whether the specified INI key/value pair represents its defined default value
         ''' and therefore should be skipped when writing the configuration file.
         ''' </summary>
@@ -2068,7 +2100,7 @@ Namespace SharedLibrary
         ''' <c>True</c> if the current value matches the default value for the specified key;
         ''' otherwise, <c>False</c>.
         ''' </returns>
-        Private Shared Function IsDefaultValue(
+        Friend Shared Function IsDefaultValue(
     ByVal key As String,
     ByVal currentValue As String,
     ByVal defaults As Dictionary(Of String, Object)
@@ -2098,7 +2130,7 @@ Namespace SharedLibrary
         ''' <returns>
         ''' A normalized string representation of the value.
         ''' </returns>
-        Private Shared Function NormalizeIniValue(ByVal value As Object) As String
+        Friend Shared Function NormalizeIniValue(ByVal value As Object) As String
             If value Is Nothing Then
                 Return String.Empty
             End If
@@ -2136,7 +2168,7 @@ Namespace SharedLibrary
         ''' <returns>
         ''' <c>True</c> if the value should be written; otherwise, <c>False</c>.
         ''' </returns>
-        Private Shared Function ShouldWriteKey(ByVal key As String, ByVal value As String, ByVal defaults As Dictionary(Of String, Object)) As Boolean
+        Friend Shared Function ShouldWriteKey(ByVal key As String, ByVal value As String, ByVal defaults As Dictionary(Of String, Object)) As Boolean
             ' Skip empty or whitespace-only values
             If String.IsNullOrWhiteSpace(value) Then
                 Return False
@@ -2151,7 +2183,6 @@ Namespace SharedLibrary
 
             Return True
         End Function
-
 
 
         ''' <summary>
@@ -2380,11 +2411,28 @@ Namespace SharedLibrary
             Dim abortAndReload As Boolean = False
             Dim gridTouched As Boolean = False
 
+            Dim standardFormFont As New System.Drawing.Font("Segoe UI", 9.0F)
+
+            ' --- Pre-measure all button texts to compute the minimum width ---
+            Dim allButtonTexts As String() = {
+                "Configuration Wizard", "Edit .ini Files", "Edit Lib Files",
+                "Load Settings From A Source", "Save && Close", "Cancel"
+            }
+            Dim totalButtonsWidth As Integer = 0
+            For Each btnText In allButtonTexts
+                totalButtonsWidth += TextRenderer.MeasureText(btnText, standardFormFont).Width + 20 + 10 ' +20 padding, +10 margin
+            Next
+            totalButtonsWidth += 30 + 30 ' FlowLayoutPanel padding (15 each side) x2
+
+            Dim minFormWidth As Integer = Math.Max(900, totalButtonsWidth)
+            Dim workAreaEC = Screen.FromPoint(Cursor.Position).WorkingArea
+            minFormWidth = Math.Min(minFormWidth, CInt(workAreaEC.Width * 0.9))
+
             Dim form As New Form() With {
                         .Text = "Expert Configuration",
                         .StartPosition = FormStartPosition.CenterScreen,
-                        .ClientSize = New Size(900, 520),
-                        .Font = New System.Drawing.Font("Segoe UI", 9.0F)
+                        .ClientSize = New Size(minFormWidth, 520),
+                        .Font = standardFormFont
                     }
 
             ' Icon / logo
@@ -2445,7 +2493,7 @@ Namespace SharedLibrary
             Dim pnlGridHost As New System.Windows.Forms.Panel() With {
             .Dock = System.Windows.Forms.DockStyle.Fill,
             .Padding = New System.Windows.Forms.Padding(15, 15, 15, 15)
-        }
+                          }
 
 
             Dim pnlButtons As New FlowLayoutPanel() With {
@@ -2455,10 +2503,74 @@ Namespace SharedLibrary
                     .Padding = New Padding(15, 15, 15, 15),
                     .WrapContents = False
                 }
-            pnlButtons.Controls.AddRange({btnCancel, btnSaveClose, btnEditIni, btnEditLibFiles, btnImportIni})
+
+
+            ' --- Configuration Wizard Button ---
+            Dim btnWizard As New System.Windows.Forms.Button() With {
+                .Text = "Configuration Wizard",
+                .AutoSize = True,
+                .Margin = New Padding(10),
+                .Enabled = ConfigWizardEngine.IsClientAllowedToUseWizard(context)
+            }
+            Dim wizardToolTip As New System.Windows.Forms.ToolTip()
+            wizardToolTip.SetToolTip(btnWizard, "Opens a guided wizard to configure groups of settings (licensing, models, paths, etc.) with descriptions and validation.")
+
+            AddHandler btnWizard.Click,
+                Sub()
+                    Dim wasTopMost As Boolean = form.TopMost
+                    form.TopMost = False
+                    form.Enabled = False
+                    Application.DoEvents()
+
+                    Try
+                        ' Load wizard definition
+                        Dim wizDef = ConfigWizardEngine.LoadWizardDefinition()
+
+                        ' Ask user which INI to edit when multiple exist (central vs local)
+                        Dim iniPath As String = ConfigWizardEngine.ResolveWizardTargetPath(context, form)
+                        If String.IsNullOrWhiteSpace(iniPath) Then
+                            ' User cancelled the selection
+                            Return
+                        End If
+
+                        ' Read current values from the selected file
+                        Dim iniValues = ConfigWizardEngine.ReadIniValues(iniPath)
+
+                        ' Show wizard form
+                        Using wizForm As New ConfigWizardForm(context, wizDef, iniPath, iniValues)
+                            Dim result = wizForm.ShowDialog(form)
+
+                            If result = DialogResult.OK Then
+                                ' Wizard saved changes to disk — close Expert Config and force reload
+                                ' to avoid stale values in the grid conflicting with the file on disk
+                                abortAndReload = True
+                                form.DialogResult = DialogResult.OK
+                                form.Close()
+                            End If
+                        End Using
+
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Configuration Wizard error: {ex.Message}")
+                    Finally
+                        If Not abortAndReload Then
+                            form.Enabled = True
+                            form.TopMost = wasTopMost
+                            form.Activate()
+                        End If
+                    End Try
+                End Sub
 
             pnlGridHost.Controls.Add(dgv)
             form.Controls.Add(pnlGridHost)
+
+            ' Add buttons to the panel (RightToLeft flow, so add in reverse visual order)
+            pnlButtons.Controls.Add(btnCancel)
+            pnlButtons.Controls.Add(btnSaveClose)
+            pnlButtons.Controls.Add(btnImportIni)
+            pnlButtons.Controls.Add(btnEditLibFiles)
+            pnlButtons.Controls.Add(btnEditIni)
+            pnlButtons.Controls.Add(btnWizard)
+
             form.Controls.Add(pnlButtons)
 
             ' Enable / disable Import Settings button using same eligibility rules
@@ -2896,6 +3008,7 @@ Namespace SharedLibrary
             variableValues.Add("OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2)
             variableValues.Add("OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2)
             variableValues.Add("APIDebug", context.INI_APIDebug)
+            variableValues.Add("AutoPilotAutoStart", context.INI_AutoPilotAutoStart)
             variableValues.Add("UsageRestrictions", context.INI_UsageRestrictions)
             variableValues.Add("LogPath", context.INI_LogPath)
             variableValues.Add("Language1", context.INI_Language1)
@@ -3003,6 +3116,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_InsertClipboard", context.SP_InsertClipboard)
             variableValues.Add("SP_Summarize", context.SP_Summarize)
             variableValues.Add("SP_Markup", context.SP_Markup)
+            variableValues.Add("SP_JustifyMarkup", context.SP_JustifyMarkup)
             variableValues.Add("SP_MailReply", context.SP_MailReply)
             variableValues.Add("SP_MailSumup", context.SP_MailSumup)
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
@@ -3029,6 +3143,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_KeepFormulasIntact", context.SP_Add_KeepFormulasIntact)
             variableValues.Add("SP_Add_KeepHTMLIntact", context.SP_Add_KeepHTMLIntact)
             variableValues.Add("SP_Add_KeepInlineIntact", context.SP_Add_KeepInlineIntact)
+            variableValues.Add("SP_Add_NoMarkdown", context.SP_Add_NoMarkdown)
             variableValues.Add("SP_Add_Bubbles", context.SP_Add_Bubbles)
             variableValues.Add("SP_Add_BubblesReply", context.SP_Add_BubblesReply)
             variableValues.Add("SP_Add_BubblesExtract", context.SP_Add_BubblesExtract)
@@ -3038,6 +3153,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Markers", context.SP_Add_Markers)
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
             variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
+            variableValues.Add("SP_Add_Chart_App", context.SP_Add_Chart_App)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
             variableValues.Add("SP_Add_Revisions", context.SP_Add_Revisions)
             variableValues.Add("SP_MarkupRegex", context.SP_MarkupRegex)
@@ -3048,6 +3164,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailMover", context.SP_MailMover)
             variableValues.Add("SP_InboxBoard", context.SP_InboxBoard)
             variableValues.Add("SP_SplitPDF", context.SP_SplitPDF)
+            variableValues.Add("SP_ExhibitNumber", context.SP_ExhibitNumber)
+            variableValues.Add("SP_MarkupReview_Compliance", context.SP_MarkupReview_Compliance)
+            variableValues.Add("SP_MarkupReview_CrossClause", context.SP_MarkupReview_CrossClause)
             variableValues.Add("SP_AutoPilot", context.SP_AutoPilot)
             variableValues.Add("SP_AutoPilot_NoTools", context.SP_AutoPilot_NoTools)
             variableValues.Add("SP_Chat", context.SP_Chat)
@@ -3137,6 +3256,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("OAuth2Endpoint_2") Then context.INI_OAuth2Endpoint_2 = CStr(updatedValues("OAuth2Endpoint_2"))
                 If updatedValues.ContainsKey("OAuth2ATExpiry_2") Then context.INI_OAuth2ATExpiry_2 = CLng(updatedValues("OAuth2ATExpiry_2"))
                 If updatedValues.ContainsKey("APIDebug") Then context.INI_APIDebug = CBool(updatedValues("APIDebug"))
+                If updatedValues.ContainsKey("AutoPilotAutoStart") Then context.INI_AutoPilotAutoStart = CBool(updatedValues("AutoPilotAutoStart"))
                 If updatedValues.ContainsKey("UsageRestrictions") Then context.INI_UsageRestrictions = CStr(updatedValues("UsageRestrictions"))
                 If updatedValues.ContainsKey("LogPath") Then context.INI_LogPath = CStr(updatedValues("LogPath"))
                 If updatedValues.ContainsKey("Language1") Then context.INI_Language1 = CStr(updatedValues("Language1"))
@@ -3181,6 +3301,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_InsertClipboard") Then context.SP_InsertClipboard = CStr(updatedValues("SP_InsertClipboard"))
                 If updatedValues.ContainsKey("SP_Summarize") Then context.SP_Summarize = CStr(updatedValues("SP_Summarize"))
                 If updatedValues.ContainsKey("SP_Markup") Then context.SP_Markup = CStr(updatedValues("SP_Markup"))
+                If updatedValues.ContainsKey("SP_JustifyMarkup") Then context.SP_JustifyMarkup = CStr(updatedValues("SP_JustifyMarkup"))
                 If updatedValues.ContainsKey("SP_MailReply") Then context.SP_MailReply = CStr(updatedValues("SP_MailReply"))
                 If updatedValues.ContainsKey("SP_MailSumup") Then context.SP_MailSumup = CStr(updatedValues("SP_MailSumup"))
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
@@ -3207,6 +3328,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_KeepFormulasIntact") Then context.SP_Add_KeepFormulasIntact = CStr(updatedValues("SP_Add_KeepFormulasIntact"))
                 If updatedValues.ContainsKey("SP_Add_KeepHTMLIntact") Then context.SP_Add_KeepHTMLIntact = CStr(updatedValues("SP_Add_KeepHTMLIntact"))
                 If updatedValues.ContainsKey("SP_Add_KeepInlineIntact") Then context.SP_Add_KeepInlineIntact = CStr(updatedValues("SP_Add_KeepInlineIntact"))
+                If updatedValues.ContainsKey("SP_Add_NoMarkdown") Then context.SP_Add_NoMarkdown = CStr(updatedValues("SP_Add_NoMarkdown"))
                 If updatedValues.ContainsKey("SP_Add_Bubbles") Then context.SP_Add_Bubbles = CStr(updatedValues("SP_Add_Bubbles"))
                 If updatedValues.ContainsKey("SP_Add_BubblesReply") Then context.SP_Add_BubblesReply = CStr(updatedValues("SP_Add_BubblesReply"))
                 If updatedValues.ContainsKey("SP_Add_BubblesExtract") Then context.SP_Add_BubblesExtract = CStr(updatedValues("SP_Add_BubblesExtract"))
@@ -3216,6 +3338,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Markers") Then context.SP_Add_Markers = CStr(updatedValues("SP_Add_Markers"))
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
                 If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
+                If updatedValues.ContainsKey("SP_Add_Chart_App") Then context.SP_Add_Chart_App = CStr(updatedValues("SP_Add_Chart_App"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
                 If updatedValues.ContainsKey("SP_Add_Revisions") Then context.SP_Add_Revisions = CStr(updatedValues("SP_Add_Revisions"))
                 If updatedValues.ContainsKey("SP_MarkupRegex") Then context.SP_MarkupRegex = CStr(updatedValues("SP_MarkupRegex"))
@@ -3226,6 +3349,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailMover") Then context.SP_MailMover = CStr(updatedValues("SP_MailMover"))
                 If updatedValues.ContainsKey("SP_InboxBoard") Then context.SP_InboxBoard = CStr(updatedValues("SP_InboxBoard"))
                 If updatedValues.ContainsKey("SP_SplitPDF") Then context.SP_SplitPDF = CStr(updatedValues("SP_SplitPDF"))
+                If updatedValues.ContainsKey("SP_ExhibitNumber") Then context.SP_ExhibitNumber = CStr(updatedValues("SP_ExhibitNumber"))
+                If updatedValues.ContainsKey("SP_MarkupReview_Compliance") Then context.SP_MarkupReview_Compliance = CStr(updatedValues("SP_MarkupReview_Compliance"))
+                If updatedValues.ContainsKey("SP_MarkupReview_CrossClause") Then context.SP_MarkupReview_CrossClause = CStr(updatedValues("SP_MarkupReview_CrossClause"))
                 If updatedValues.ContainsKey("SP_AutoPilot") Then context.SP_AutoPilot = CStr(updatedValues("SP_AutoPilot"))
                 If updatedValues.ContainsKey("SP_AutoPilot_NoTools") Then context.SP_AutoPilot_NoTools = CStr(updatedValues("SP_AutoPilot_NoTools"))
                 If updatedValues.ContainsKey("SP_Chat") Then context.SP_Chat = CStr(updatedValues("SP_Chat"))

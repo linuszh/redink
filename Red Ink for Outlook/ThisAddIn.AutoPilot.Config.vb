@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Config.vb
@@ -17,6 +16,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Text.RegularExpressions
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
@@ -66,6 +66,13 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Custom footer text appended to every AutoPilot reply.</summary>
         Public Property FooterText As String = ""
+
+        ''' <summary>
+        ''' When True, the session was auto-started (timer expired) without explicit user interaction.
+        ''' Unattended mode skips the catch-up preview dialog (auto-selects all) and auto-approves
+        ''' replies for non-whitelisted senders instead of blocking with an approval dialog.
+        ''' </summary>
+        Public Property IsUnattended As Boolean = False
     End Class
 
     ''' <summary>
@@ -413,6 +420,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_RequireApproval = config.RequireApprovalForNonWhitelisted
         My.Settings.AP_MonitoredMailbox = If(config.MonitoredMailbox, "")
         My.Settings.AP_SelectedModelKey = If(config.SelectedModelKey, "")
+        My.Settings.AP_UseSecondApi = config.UseSecondApi
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -439,6 +447,7 @@ Partial Public Class ThisAddIn
         config.RequireApprovalForNonWhitelisted = My.Settings.AP_RequireApproval
         config.MonitoredMailbox = If(My.Settings.AP_MonitoredMailbox, "")
         config.SelectedModelKey = If(My.Settings.AP_SelectedModelKey, "")
+        config.UseSecondApi = My.Settings.AP_UseSecondApi
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -451,7 +460,141 @@ Partial Public Class ThisAddIn
                 Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
         End If
 
+        ' Restore external tools by matching persisted names against currently available tools
+        If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
+            Dim savedToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
+                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
+            If savedToolNames.Count > 0 Then
+                Try
+                    Dim availableTools = GetAvailableTools()
+                    If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
+                        Dim matched = availableTools.Where(
+                            Function(t) savedToolNames.Any(Function(n)
+                                                               Return String.Equals(n, t.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+                                                                      String.Equals(n, t.ModelDescription, StringComparison.OrdinalIgnoreCase) OrElse
+                                                                      String.Equals(n, t.Model, StringComparison.OrdinalIgnoreCase)
+                                                           End Function)).ToList()
+                        If matched.Count > 0 Then config.SelectedExternalTools = matched
+                    End If
+                Catch
+                End Try
+            End If
+        End If
+
         Return config
     End Function
+
+    ''' <summary>
+    ''' Returns True if there is a previously saved AutoPilot configuration with at least
+    ''' a filter rule or monitored mailbox — i.e., the user has run AutoPilot before.
+    ''' </summary>
+    Private Function HasSavedAutoPilotConfig() As Boolean
+        ' We consider a config "saved" if at least the filter rules or monitored mailbox
+        ' were persisted, indicating a prior completed config dialog run.
+        Return Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) OrElse
+               Not String.IsNullOrWhiteSpace(My.Settings.AP_MonitoredMailbox) OrElse
+               Not String.IsNullOrWhiteSpace(My.Settings.AP_WhitelistedSenders)
+    End Function
+
+    ''' <summary>
+    ''' Attempts to auto-start AutoPilot using the last saved configuration.
+    ''' Shows a 30-second countdown dialog allowing the user to cancel or configure manually.
+    ''' Called from <see cref="DelayedStartupTasks"/> when <c>INI_AutoPilotAutoStart</c> is True.
+    ''' </summary>
+    Public Sub TryAutoStartAutoPilot()
+        Try
+            ' Gate: INI flag must be enabled and user must be licensed/permitted
+            If Not INI_AutoPilotAutoStart Then Return
+            If Not IsAutoPilotLicenseValid() Then Return
+            If Not IsAutoPilotPermitted() Then Return
+            If _apActive Then Return
+            If Not HasSavedAutoPilotConfig() Then Return
+
+            ' Load the last saved configuration
+            Dim config = LoadAutoPilotConfigDefaults()
+
+            ' Build a human-readable summary for the countdown dialog
+            Dim modelLabel As String
+            If Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
+                modelLabel = config.SelectedModelKey
+            ElseIf config.UseSecondApi Then
+                modelLabel = INI_Model_2
+            Else
+                modelLabel = INI_Model
+            End If
+
+            Dim summary As New System.Text.StringBuilder()
+            summary.AppendLine($"{AN6} AutoPilot will start automatically with the last used settings:")
+            summary.AppendLine()
+            summary.AppendLine($"Model: {modelLabel}")
+            summary.AppendLine($"Filters: {config.FilterRules.Count} rule(s)")
+            summary.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
+            summary.AppendLine($"Cooldown: {config.CooldownSeconds}s | Max replies: {config.MaxRepliesPerSession}")
+            If Not String.IsNullOrWhiteSpace(config.MonitoredMailbox) Then
+                summary.AppendLine($"Mailbox: {config.MonitoredMailbox}")
+            End If
+            summary.AppendLine()
+            summary.AppendLine("Press 'Configure' to open the full setup dialog instead.")
+
+            ' Show a 30-second auto-close dialog (returns 1=Start, 2=Configure, 3=auto-close)
+            Dim choice = ShowCustomYesNoBox(
+                summary.ToString().TrimEnd(),
+                $"Start {AN6} AutoPilot", "Configure",
+                header:=$"{AN6} AutoPilot — Auto Start",
+                autoCloseSeconds:=30,
+                Defaulttext:=$"AutoPilot will start automatically")
+
+            If choice = 2 Then
+                ' User chose to configure manually — fall through to the normal dialog
+                StartAutoPilot()
+                Return
+            End If
+
+            If choice = 0 Then
+                ' Dialog was closed/cancelled — do not start
+                Return
+            End If
+
+            ' choice = 1 (user clicked Start) → attended; choice = 3 (timer expired) → unattended
+            Dim unattended As Boolean = (choice = 3)
+            config.IsUnattended = unattended
+
+            ' Apply the saved model configuration to the context before starting.
+            ' This replicates what ShowModelSelection does interactively.
+            If config.UseSecondApi AndAlso Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
+                ' Alternate model: find and apply it from the INI file
+                If INI_SecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                    Try
+                        Dim models = LoadAlternativeModels(INI_AlternateModelPath, _context)
+                        If models IsNot Nothing Then
+                            Dim match = models.FirstOrDefault(
+                                Function(m) String.Equals(
+                                    If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model),
+                                    config.SelectedModelKey, StringComparison.OrdinalIgnoreCase))
+                            If match IsNot Nothing Then
+                                originalConfig = GetCurrentConfig(_context)
+                                originalConfigLoaded = True
+                                ApplyModelConfig(_context, match)
+                                LastAlternateModel = config.SelectedModelKey
+                            End If
+                        End If
+                    Catch
+                        ' If model application fails, proceed with default — StartAutoPilotWithConfig
+                        ' will capture whatever config is active at that point
+                    End Try
+                End If
+            ElseIf config.UseSecondApi Then
+                ' Secondary API without alternate model path — just ensure SecondAPI is active
+                ' (the context should already have the secondary config from INI)
+            End If
+
+            SaveAutoPilotConfigToSettings(config)
+            StartAutoPilotWithConfig(config)
+
+        Catch ex As System.Exception
+            ' Auto-start is best-effort; do not block Outlook startup on failure
+            Debug.WriteLine($"AutoPilot auto-start failed: {ex.Message}")
+        End Try
+    End Sub
 
 End Class

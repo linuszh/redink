@@ -220,10 +220,11 @@ Partial Public Class ThisAddIn
                 New SelectionItem("Diff", 2),
                 New SelectionItem("Diff Window", 3),
                 New SelectionItem("Regex", 4),
-                New SelectionItem("None", 5)
+                New SelectionItem("Diff Classic", 5),
+                New SelectionItem("None", 6)
                 }
 
-            Dim DefaultItem As Integer = 5
+            Dim DefaultItem As Integer = 6
             If INI_DoMarkupWord Then DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
             Dim picked As Integer = SelectValue(items, DefaultItem, "Choose markup method ...")
 
@@ -234,7 +235,7 @@ Partial Public Class ThisAddIn
             OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
             newtext & "</INSERT> ",
             True, INI_KeepFormat2, INI_KeepParaFormatInline,
-            Override(INI_ReplaceText2, INI_ReplaceText2Override), If(picked < 5, True, False), If(picked < 5, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
+            Override(INI_ReplaceText2, INI_ReplaceText2Override), If(picked < 6, True, False), If(picked < 6, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
             False, False, True, False, INI_KeepFormatCap)
 
         Catch ex As System.Exception
