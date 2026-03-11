@@ -571,8 +571,8 @@ Partial Public Class ThisAddIn
 
                 ' Only act if we're NOT already in the main text story
                 If currentStory <> Word.WdStoryType.wdMainTextStory Then
-                    ' Force view back to print view to get out of special editing modes
-                    application.ActiveWindow.View.Type = Microsoft.Office.Interop.Word.WdViewType.wdPrintView
+                    ' Force view back to print view to get out of special editing modes                    
+                    currentdoc.ActiveWindow.View.Type = Microsoft.Office.Interop.Word.WdViewType.wdPrintView
 
                     ' Move to start of main document story without selecting anything
                     Dim mainStoryRange As Word.Range = currentdoc.StoryRanges(Word.WdStoryType.wdMainTextStory)
@@ -965,7 +965,7 @@ Partial Public Class ThisAddIn
                                             ' view — the function will find the same footnotes/
                                             ' fields at their (now correct) visible-text offsets.
 
-                                            Dim viewObj = application.ActiveWindow.View
+                                            Dim viewObj = currentdoc.ActiveWindow.View
                                             Dim savedRevView = viewObj.RevisionsView
                                             Dim savedShowRevs = viewObj.ShowRevisionsAndComments
                                             Dim savedSelStart = selection.Start
@@ -1079,6 +1079,9 @@ Partial Public Class ThisAddIn
 
                 Dim LLMResult As String = ""
 
+                Dim MarkdownInstruction As String = ""
+                If MarkupMethod = 2 Then MarkdownInstruction = " " & SP_Add_NoMarkdown
+
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
                     LLMResult = Await ExecuteToolingLoop(
@@ -1104,7 +1107,7 @@ Partial Public Class ThisAddIn
 
                     If SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 OrElse DoMarkup OrElse PutInBubbles OrElse DoPushback OrElse SlideInsert <> "" OrElse DoChart > 0 Then
 
-                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
+                        LLMResult = Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, "") & If(DoChart > 0, " " & SP_Add_Chart & If(DoChart = 2, " " & SP_Add_Chart_App, ""), ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject)
 
                     Else
 
@@ -1112,7 +1115,7 @@ Partial Public Class ThisAddIn
                             Dim err As Boolean = False
                             ApplyModelConfig(_context, mc, err)
 
-                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
+                            LLMResult += mc.ModelDescription & ":" & vbCrLf & vbCrLf & Await LLM(SysCommand & If(String.IsNullOrWhiteSpace(BubblesText), "", " " & SP_Add_BubblesExtract) & If(DoTPMarkup, " " & SP_Add_Revisions, "") & " " & If(SlideDeck = "", If(NoFormatting, "", If(KeepFormat, " " & SP_Add_KeepHTMLIntact, " " & SP_Add_KeepInlineIntact & MarkdownInstruction)), " " & SP_Add_Slides) & If(DoMyStyle, " " & MyStyleInsert, ""), If(NoSelectedText, If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert, "<TEXTTOPROCESS>" & SelectedText & "</TEXTTOPROCESS>" & If(AddDocs, " " & InsertDocs & " ", "") & SlideInsert & " " & BubblesText), "", "", 0, UseSecondAPI, False, OtherPromptUnfilled, FileObject) & vbCrLf
 
                         Next
 
@@ -1494,7 +1497,7 @@ Partial Public Class ThisAddIn
 
                         If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
-                        ' ── Revision fix: use visible text for markup comparison ──
+                        ' ── use visible text for markup comparison ──
                         Dim revCountLate As Integer = 0
                         Try : revCountLate = rng.Revisions.Count : Catch : End Try
                         If revCountLate > 0 Then
@@ -1544,7 +1547,7 @@ Partial Public Class ThisAddIn
 
                         wordApp.ScreenUpdating = False
 
-                        ' ── Revision fix: use visible text for markup comparison ──
+                        ' ── use visible text for markup comparison ──
                         Dim revCountLate As Integer = 0
                         Try : revCountLate = rng.Revisions.Count : Catch : End Try
                         If revCountLate > 0 Then
@@ -1959,6 +1962,13 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="src">Word range to extract visible text from.</param>
     ''' <returns>Text with deletions omitted and insertions kept.</returns>
+    ''' Returns the "accepted" view of a range's text by temporarily selecting it,
+    ''' switching to Final view, and reading Selection.Text 
+    ''' Restores the original view and selection afterwards.
+    ''' Falls back to raw Range.Text when there are no revisions or on error.
+    ''' </summary>
+    ''' <param name="src">Word range to extract visible text from.</param>
+    ''' <returns>Text with deletions omitted and insertions kept.</returns>
     Public Function GetVisibleText(ByVal src As Range) As String
         Try
             ' 1) Catch null/empty range
@@ -1985,7 +1995,14 @@ Partial Public Class ThisAddIn
             '    object returns wrong text. The live Selection is re-evaluated by Word.            
             Try
                 Dim app As Microsoft.Office.Interop.Word.Application = src.Application
-                Dim view As Microsoft.Office.Interop.Word.View = app.ActiveWindow.View
+
+                ' ── FIX: Use the window that belongs to the range's own document,
+                '    NOT app.ActiveWindow. When multiple documents are open,
+                '    ActiveWindow may point to a different document, causing the
+                '    view switch and Select() call to operate on the wrong window.
+                Dim srcDoc As Microsoft.Office.Interop.Word.Document = src.Document
+                Dim docWindow As Microsoft.Office.Interop.Word.Window = srcDoc.ActiveWindow
+                Dim view As Microsoft.Office.Interop.Word.View = docWindow.View
 
                 ' Save current view state
                 Dim origRevView As WdRevisionsView = view.RevisionsView
@@ -1995,7 +2012,15 @@ Partial Public Class ThisAddIn
                 Dim origSelStart As Integer = app.Selection.Start
                 Dim origSelEnd As Integer = app.Selection.End
 
+                ' Remember which window was active so we can restore it
+                Dim origActiveWindow As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
+
                 Try
+                    ' Activate the range's document window before selecting
+                    If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
+                        docWindow.Activate()
+                    End If
+
                     ' Select the target range so Word treats it as the live Selection
                     src.Select()
 
@@ -2014,6 +2039,14 @@ Partial Public Class ThisAddIn
                     ' Restore the original selection
                     Try
                         app.Selection.SetRange(origSelStart, origSelEnd)
+                    Catch
+                    End Try
+
+                    ' Restore the previously active window if we switched away
+                    Try
+                        If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
+                            origActiveWindow.Activate()
+                        End If
                     Catch
                     End Try
                 End Try
@@ -3341,7 +3374,8 @@ Partial Public Class ThisAddIn
             ' ======================================================================
             ' STEP 9: Final cleanup — remove double spaces in final view
             ' ======================================================================
-            With wordApp.ActiveWindow.View
+            ' ── FIX: Use doc.ActiveWindow (the target document's window), not wordApp.ActiveWindow
+            With doc.ActiveWindow.View
                 .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = False
             End With
@@ -3361,7 +3395,7 @@ Partial Public Class ThisAddIn
             Do
             Loop While cleanupRange.Find.Execute(Replace:=WdReplace.wdReplaceAll)
 
-            With wordApp.ActiveWindow.View
+            With doc.ActiveWindow.View
                 .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = True
             End With
@@ -3384,7 +3418,7 @@ Partial Public Class ThisAddIn
     ''' <param name="targetRange">Destination Word range.</param>
     Public Sub InsertMarkupText(ByVal inputText As String, ByVal targetRange As Microsoft.Office.Interop.Word.Range)
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
-        Dim doc As Microsoft.Office.Interop.Word.Document = wordApp.ActiveDocument
+        Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
@@ -3534,8 +3568,8 @@ Partial Public Class ThisAddIn
 
             ' Final-view replace test (space cleanup)
 
-            ' 2) Activate final view
-            With wordApp.ActiveWindow.View
+            ' 2) Activate final view            
+            With doc.ActiveWindow.View
                 .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = False
             End With
@@ -3564,7 +3598,7 @@ Partial Public Class ThisAddIn
                 ' Execute returns True if something was replaced
             Loop While insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 
-            With wordApp.ActiveWindow.View
+            With doc.ActiveWindow.View
                 .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = True
             End With

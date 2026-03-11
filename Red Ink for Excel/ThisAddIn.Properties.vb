@@ -1179,6 +1179,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_NoMarkdown As String
+        Get
+            Return _context.SP_Add_NoMarkdown
+        End Get
+        Set(value As String)
+            _context.SP_Add_NoMarkdown = value
+        End Set
+    End Property
+
     Public Shared Property SP_BubblesExcel As String
         Get
             Return _context.SP_BubblesExcel

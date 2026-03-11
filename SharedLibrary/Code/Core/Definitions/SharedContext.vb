@@ -207,6 +207,7 @@ Namespace SharedLibrary
             Property SP_Add_KeepFormulasIntact As String
             Property SP_Add_KeepHTMLIntact As String
             Property SP_Add_KeepInlineIntact As String
+            Property SP_Add_NoMarkdown As String
             Property SP_Add_Bubbles As String
             Property SP_Add_BubblesExtract As String
             Property SP_Add_BubblesReply As String
@@ -510,6 +511,7 @@ Namespace SharedLibrary
         Public Property SP_Add_KeepFormulasIntact As String Implements ISharedContext.SP_Add_KeepFormulasIntact
         Public Property SP_Add_KeepHTMLIntact As String Implements ISharedContext.SP_Add_KeepHTMLIntact
         Public Property SP_Add_KeepInlineIntact As String Implements ISharedContext.SP_Add_KeepInlineIntact
+        Public Property SP_Add_NoMarkdown As String Implements ISharedContext.SP_Add_NoMarkdown
         Public Property SP_Add_Bubbles As String Implements ISharedContext.SP_Add_Bubbles
         Public Property SP_Add_BubblesExtract As String Implements ISharedContext.SP_Add_BubblesExtract
         Public Property SP_Add_BubblesReply As String Implements ISharedContext.SP_Add_BubblesReply

@@ -1766,6 +1766,7 @@ Namespace SharedLibrary
                     {"SP_Add_KeepFormulasIntact", context.SP_Add_KeepFormulasIntact},
                     {"SP_Add_KeepHTMLIntact", context.SP_Add_KeepHTMLIntact},
                     {"SP_Add_KeepInlineIntact", context.SP_Add_KeepInlineIntact},
+                    {"SP_Add_NoMarkdown", context.SP_Add_NoMarkdown},
                     {"SP_Add_Bubbles", context.SP_Add_Bubbles},
                     {"SP_Add_BubblesReply", context.SP_Add_BubblesReply},
                     {"SP_Add_BubblesExtract", context.SP_Add_BubblesExtract},
@@ -2008,6 +2009,7 @@ Namespace SharedLibrary
                 {"SP_Add_KeepFormulasIntact", Default_SP_Add_KeepFormulasIntact},
                 {"SP_Add_KeepHTMLIntact", Default_SP_Add_KeepHTMLIntact},
                 {"SP_Add_KeepInlineIntact", Default_SP_Add_KeepInlineIntact},
+                {"SP_Add_NoMarkdown", Default_SP_Add_NoMarkdown},
                 {"SP_Add_Bubbles", Default_SP_Add_Bubbles},
                 {"SP_Add_BubblesReply", Default_SP_Add_BubblesReply},
                 {"SP_Add_BubblesExtract", Default_SP_Add_BubblesExtract},
@@ -3141,6 +3143,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_KeepFormulasIntact", context.SP_Add_KeepFormulasIntact)
             variableValues.Add("SP_Add_KeepHTMLIntact", context.SP_Add_KeepHTMLIntact)
             variableValues.Add("SP_Add_KeepInlineIntact", context.SP_Add_KeepInlineIntact)
+            variableValues.Add("SP_Add_NoMarkdown", context.SP_Add_NoMarkdown)
             variableValues.Add("SP_Add_Bubbles", context.SP_Add_Bubbles)
             variableValues.Add("SP_Add_BubblesReply", context.SP_Add_BubblesReply)
             variableValues.Add("SP_Add_BubblesExtract", context.SP_Add_BubblesExtract)
@@ -3325,6 +3328,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_KeepFormulasIntact") Then context.SP_Add_KeepFormulasIntact = CStr(updatedValues("SP_Add_KeepFormulasIntact"))
                 If updatedValues.ContainsKey("SP_Add_KeepHTMLIntact") Then context.SP_Add_KeepHTMLIntact = CStr(updatedValues("SP_Add_KeepHTMLIntact"))
                 If updatedValues.ContainsKey("SP_Add_KeepInlineIntact") Then context.SP_Add_KeepInlineIntact = CStr(updatedValues("SP_Add_KeepInlineIntact"))
+                If updatedValues.ContainsKey("SP_Add_NoMarkdown") Then context.SP_Add_NoMarkdown = CStr(updatedValues("SP_Add_NoMarkdown"))
                 If updatedValues.ContainsKey("SP_Add_Bubbles") Then context.SP_Add_Bubbles = CStr(updatedValues("SP_Add_Bubbles"))
                 If updatedValues.ContainsKey("SP_Add_BubblesReply") Then context.SP_Add_BubblesReply = CStr(updatedValues("SP_Add_BubblesReply"))
                 If updatedValues.ContainsKey("SP_Add_BubblesExtract") Then context.SP_Add_BubblesExtract = CStr(updatedValues("SP_Add_BubblesExtract"))

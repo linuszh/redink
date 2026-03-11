@@ -583,6 +583,7 @@ Partial Public Class ThisAddIn
     ' -------------------------------------------------------------------------
 
     ''' <summary>
+    ''' <summary>
     ''' Result of scanning the worksheet for a Liftlock trigger cell.
     ''' </summary>
     Private Structure LiftlockInfo
@@ -592,6 +593,36 @@ Partial Public Class ThisAddIn
         Public Password As String
         ''' <summary>True if the sheet was actually unprotected by <see cref="TryLiftProtection"/>.</summary>
         Public WasUnprotected As Boolean
+
+        ' --- Captured protection settings (read BEFORE unprotecting) ---
+        ''' <summary>Whether drawing objects were protected.</summary>
+        Public DrawingObjects As Boolean
+        ''' <summary>Whether contents (cells) were protected.</summary>
+        Public Contents As Boolean
+        ''' <summary>Whether scenarios were protected.</summary>
+        Public Scenarios As Boolean
+        ''' <summary>Whether formatting cells was allowed.</summary>
+        Public AllowFormattingCells As Boolean
+        ''' <summary>Whether formatting columns was allowed.</summary>
+        Public AllowFormattingColumns As Boolean
+        ''' <summary>Whether formatting rows was allowed.</summary>
+        Public AllowFormattingRows As Boolean
+        ''' <summary>Whether inserting columns was allowed.</summary>
+        Public AllowInsertingColumns As Boolean
+        ''' <summary>Whether inserting rows was allowed.</summary>
+        Public AllowInsertingRows As Boolean
+        ''' <summary>Whether inserting hyperlinks was allowed.</summary>
+        Public AllowInsertingHyperlinks As Boolean
+        ''' <summary>Whether deleting columns was allowed.</summary>
+        Public AllowDeletingColumns As Boolean
+        ''' <summary>Whether deleting rows was allowed.</summary>
+        Public AllowDeletingRows As Boolean
+        ''' <summary>Whether sorting was allowed.</summary>
+        Public AllowSorting As Boolean
+        ''' <summary>Whether auto-filtering was allowed.</summary>
+        Public AllowFiltering As Boolean
+        ''' <summary>Whether using pivot tables was allowed.</summary>
+        Public AllowUsingPivotTables As Boolean
     End Structure
 
     ''' <summary>
@@ -610,6 +641,27 @@ Partial Public Class ThisAddIn
 
         If ws Is Nothing Then Return info
         If Not ws.ProtectContents Then Return info  ' Nothing to lift
+
+        ' Capture current protection settings BEFORE unprotecting
+        Try
+            Dim prot As Excel.Protection = ws.Protection
+            info.DrawingObjects = ws.ProtectDrawingObjects
+            info.Contents = ws.ProtectContents
+            info.Scenarios = ws.ProtectScenarios
+            info.AllowFormattingCells = prot.AllowFormattingCells
+            info.AllowFormattingColumns = prot.AllowFormattingColumns
+            info.AllowFormattingRows = prot.AllowFormattingRows
+            info.AllowInsertingColumns = prot.AllowInsertingColumns
+            info.AllowInsertingRows = prot.AllowInsertingRows
+            info.AllowInsertingHyperlinks = prot.AllowInsertingHyperlinks
+            info.AllowDeletingColumns = prot.AllowDeletingColumns
+            info.AllowDeletingRows = prot.AllowDeletingRows
+            info.AllowSorting = prot.AllowSorting
+            info.AllowFiltering = prot.AllowFiltering
+            info.AllowUsingPivotTables = prot.AllowUsingPivotTables
+        Catch
+            ' If we cannot read the settings, defaults (False) will apply
+        End Try
 
         Dim used As Excel.Range = Nothing
         Try
@@ -681,11 +733,22 @@ Partial Public Class ThisAddIn
     Private Sub ReprotectWorksheet(ws As Microsoft.Office.Interop.Excel.Worksheet, info As LiftlockInfo)
         If ws Is Nothing OrElse Not info.WasUnprotected Then Return
         Try
-            If String.IsNullOrEmpty(info.Password) Then
-                ws.Protect()
-            Else
-                ws.Protect(info.Password)
-            End If
+            ws.Protect(
+                Password:=If(String.IsNullOrEmpty(info.Password), Type.Missing, info.Password),
+                DrawingObjects:=info.DrawingObjects,
+                Contents:=info.Contents,
+                Scenarios:=info.Scenarios,
+                AllowFormattingCells:=info.AllowFormattingCells,
+                AllowFormattingColumns:=info.AllowFormattingColumns,
+                AllowFormattingRows:=info.AllowFormattingRows,
+                AllowInsertingColumns:=info.AllowInsertingColumns,
+                AllowInsertingRows:=info.AllowInsertingRows,
+                AllowInsertingHyperlinks:=info.AllowInsertingHyperlinks,
+                AllowDeletingColumns:=info.AllowDeletingColumns,
+                AllowDeletingRows:=info.AllowDeletingRows,
+                AllowSorting:=info.AllowSorting,
+                AllowFiltering:=info.AllowFiltering,
+                AllowUsingPivotTables:=info.AllowUsingPivotTables)
         Catch
             ' Best-effort; avoid surfacing errors for re-protection
         End Try

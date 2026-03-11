@@ -78,7 +78,7 @@ Partial Public Class ThisAddIn
 
             ' ── 2) Collect parameters via single form ──
             ' Conversion note: 1 cm ≈ 28.35 pts, 1 inch = 72 pts. Append "cm" or "in" to auto-convert.
-            Dim p00 As SLib.InputParameter = New SLib.InputParameter("Stamp image file path (or leave empty to pick via drag & drop)", defaultImagePath)
+            Dim p00 As SLib.InputParameter = New SLib.InputParameter("Stamp image file path (or leave empty to pick via drag && drop)", defaultImagePath)
             Dim p01 As SLib.InputParameter = New SLib.InputParameter("Image distance from top (pts; append 'cm'/'in' to convert)", CInt(defaultTopOffset))
             Dim p02 As SLib.InputParameter = New SLib.InputParameter("Image distance from right (pts; append 'cm'/'in' to convert)", CInt(defaultRightOffset))
             Dim p03 As SLib.InputParameter = New SLib.InputParameter("Image width (pts; append 'cm'/'in' to convert, keeps proportions)", CInt(defaultStampWidth))
