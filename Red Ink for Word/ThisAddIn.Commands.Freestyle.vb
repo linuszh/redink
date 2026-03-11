@@ -836,7 +836,7 @@ Partial Public Class ThisAddIn
             Dim ChunkSize As Integer = 1
             Dim NoFormatAndFieldSaving As Boolean = False
             Dim DoSlides As Boolean = False
-            Dim DoChart As Boolean = False
+            Dim DoChart As Integer = 0
             Dim DoMyStyle As Boolean = False
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
@@ -850,7 +850,7 @@ Partial Public Class ThisAddIn
             Dim BubblesInstruct As String = $"with '{BubblesPrefix}' for having your text commented"
             Dim PushbackInstruct As String = $"with '{PushbackPrefix}' for responding to comments only"
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
-            Dim ChartInstruct As String = $"with '{ChartPrefix}' for creating a chart"
+            Dim ChartInstruct As String = $"with '{ChartPrefix}'/'{ChartPrefix}' for creating a chart (normal or for webapps)"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, {ExtUrlTrigger} for URL content, or '{AddDocTrigger}' for an open Word doc"
@@ -948,7 +948,8 @@ Partial Public Class ThisAddIn
                     Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix),
-                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
+                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff),
+                            System.Tuple.Create("OK, use bubbles", $"Use this to automatically insert '{BubblesPrefix}' as a prefix.", BubblesPrefix)
                         }
 
 
@@ -1064,6 +1065,7 @@ Partial Public Class ThisAddIn
                 AddItem("findclause", "Search for a clause in the clause library/database.")
                 AddItem("addclause", "Add a clause to the clause library/database.")
                 AddItem("splitpdf", "Split a PDF into separate exhibits based on its content.")
+                AddItem("stamper", "Apply an exhibit stamp to a PDF based on its filename.")
 
                 ' WEB AGENT
                 AddItem("webagentcreator", "Create/modify web agent scripts.")
@@ -1449,6 +1451,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
+                CompleteWordDocumentTables()
+                Return
+            End If
+
             If String.Equals(OtherPrompt.Trim(), "mcp", StringComparison.OrdinalIgnoreCase) Then
                 ImportMCPServer()
                 Return
@@ -1456,6 +1463,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "splitpdf", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.SplitPdfByExhibits()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "stamper", StringComparison.OrdinalIgnoreCase) Then
+                Globals.ThisAddIn.StampExhibitPDF()
                 Return
             End If
 
@@ -1829,7 +1841,12 @@ Partial Public Class ThisAddIn
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(ChartPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(ChartPrefix.Length).Trim()
-                DoChart = True
+                DoChart = 1
+                DoClipboard = True
+                DoChunks = False
+            ElseIf OtherPrompt.StartsWith(ChartPrefixApp, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(ChartPrefixApp.Length).Trim()
+                DoChart = 2
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
@@ -1920,7 +1937,7 @@ Partial Public Class ThisAddIn
             ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
             If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
-                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso Not DoChart Then
+                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso DoChart = 0 Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
                     End If

@@ -1711,10 +1711,6 @@ Partial Public Class ThisAddIn
     End Sub
 
 
-    ''' <summary>
-    ''' Inserts clipboard-derived object/content using SP_InsertClipboard; handles Inspector vs Explorer context,
-    ''' robust clipboard setting, optional RTF conversion, and fallback paths with temp file persistence.
-    ''' </summary>
     Private Async Function InsertClipboard() As System.Threading.Tasks.Task
         Try
             If System.String.IsNullOrWhiteSpace(INI_APICall_Object) Then
@@ -1722,7 +1718,9 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Acquire result off the UI thread
+            ' Acquire result — do NOT use ConfigureAwait(False) here,
+            ' because all subsequent COM calls (Inspector, WordEditor, Selection)
+            ' MUST run on the original Outlook UI/STA thread.
             Dim result As String = Await LLM(
                 InterpolateAtRuntime(SP_InsertClipboard),
                 "", "", "", 0,
@@ -1732,7 +1730,7 @@ Partial Public Class ThisAddIn
                 FileObject:="clipboard",
                 cancellationToken:=Nothing,
                 EnsureUI:=False
-            ).ConfigureAwait(False)
+            )
 
             If String.IsNullOrWhiteSpace(result) Then Return
 
@@ -1769,6 +1767,8 @@ Partial Public Class ThisAddIn
                 dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, result)
                 dataObj.SetData(System.Windows.Forms.DataFormats.Text, result)
 
+                ' Explorer path: ConfigureAwait(False) is OK here because we
+                ' marshal back explicitly via SwitchToUi below.
                 Dim clipOk = Await SetClipboardRobustAsync(dataObj).ConfigureAwait(False)
 
                 Await SwitchToUi(
@@ -1805,46 +1805,43 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Inspector context: insert at cursor
+            ' Inspector context: insert at cursor — we are on the UI/STA thread here
             Dim wordEditor As Microsoft.Office.Interop.Word.Document =
                 ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
 
             If wordEditor Is Nothing Then
-                ' Fallback to clipboard path
+                ' Fallback to clipboard path — stay on UI thread for COM safety
                 Dim txtObj As New DataObject()
                 txtObj.SetData(DataFormats.UnicodeText, result)
                 txtObj.SetData(DataFormats.Text, result)
-                Dim clipOk = Await SetClipboardRobustAsync(txtObj).ConfigureAwait(False)
+                Dim clipOk = Await SetClipboardRobustAsync(txtObj)
 
-                Await SwitchToUi(
-                    Sub()
-                        If clipOk Then
-                            SLib.ShowCustomMessageBox("Could not access the mail editor; result copied to clipboard instead.")
-                        Else
-                            Dim edited As String = SLib.ShowCustomWindow(
-                                "Could not access the mail editor; clipboard is busy. Copy manually or edit and press OK:",
-                                result,
-                                "If copying still fails, the text will be saved to a temporary file.",
-                                AN, False)
+                If clipOk Then
+                    SLib.ShowCustomMessageBox("Could not access the mail editor; result copied to clipboard instead.")
+                Else
+                    Dim edited As String = SLib.ShowCustomWindow(
+                        "Could not access the mail editor; clipboard is busy. Copy manually or edit and press OK:",
+                        result,
+                        "If copying still fails, the text will be saved to a temporary file.",
+                        AN, False)
 
-                            If Not String.IsNullOrWhiteSpace(edited) Then
-                                Dim editedObj As New DataObject()
-                                editedObj.SetData(DataFormats.UnicodeText, edited)
-                                editedObj.SetData(DataFormats.Text, edited)
-                                Dim editedOk = SetClipboardRobustAsync(editedObj).GetAwaiter().GetResult()
-                                If Not editedOk Then
-                                    Dim tmp = SaveTextToTempFile(edited)
-                                    If Not String.IsNullOrWhiteSpace(tmp) Then
-                                        SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                                    Else
-                                        SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                                    End If
-                                Else
-                                    SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                                End If
+                    If Not String.IsNullOrWhiteSpace(edited) Then
+                        Dim editedObj As New DataObject()
+                        editedObj.SetData(DataFormats.UnicodeText, edited)
+                        editedObj.SetData(DataFormats.Text, edited)
+                        Dim editedOk = Await SetClipboardRobustAsync(editedObj)
+                        If Not editedOk Then
+                            Dim tmp = SaveTextToTempFile(edited)
+                            If Not String.IsNullOrWhiteSpace(tmp) Then
+                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
+                            Else
+                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
                             End If
+                        Else
+                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
                         End If
-                    End Sub).ConfigureAwait(False)
+                    End If
+                End If
                 Return
             End If
 

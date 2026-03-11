@@ -8,9 +8,10 @@
 '   to display real-time progress and allow user cancellation.
 '
 ' KEY ARCHITECTURE
-'   • UI: RichTextBox log + button strip (Cancel/Close, Keep Open, Copy, Clear)
+'   • UI: RichTextBox log + button strip (Cancel/Close, Keep Open, Copy, Clear, Abort Job)
 '   • Threading: Safe cross-thread updates via InvokeRequired/BeginInvoke
 '   • Lifecycle: CancelRequested event; MarkComplete switches Cancel → Close
+'   • AbortJobRequested: Aborts only the current job without stopping the session
 '   • Auto-close: Optional countdown timer with "Keep Open" override
 ' =============================================================================
 
@@ -28,7 +29,8 @@ Imports SharedLibrary.SharedLibrary
 ''' This window is designed to be called from background tooling tasks:
 ''' <list type="bullet">
 '''   <item><description><see cref="AppendLog"/> is thread-safe (marshals to the UI thread).</description></item>
-'''   <item><description><see cref="CancelRequested"/> is raised when the user clicks Cancel.</description></item>
+'''   <item><description><see cref="CancelRequested"/> is raised when the user clicks Cancel (stops the entire session).</description></item>
+'''   <item><description><see cref="AbortJobRequested"/> is raised when the user clicks Abort Job (aborts only the current job).</description></item>
 '''   <item><description><see cref="MarkComplete"/> switches the Cancel button to Close and optionally starts an auto-close countdown.</description></item>
 ''' </list>
 ''' </remarks>
@@ -55,6 +57,12 @@ Public Class LogWindow
     ''' </summary>
     Private ReadOnly btnKeepOpen As Button
 
+    ''' <summary>
+    ''' Aborts only the currently processing job without stopping the entire session.
+    ''' Hidden by default; shown via <see cref="ShowAbortJobButton"/>.
+    ''' </summary>
+    Private ReadOnly btnAbortJob As Button
+
     ''' <summary>Tracks whether the initial bottom-right placement was already applied.</summary>
     Private _initialPositionSet As Boolean = False
 
@@ -76,6 +84,15 @@ Public Class LogWindow
     ''' The tooling loop should subscribe to this event and abort as soon as possible.
     ''' </remarks>
     Public Event CancelRequested As EventHandler
+
+    ''' <summary>
+    ''' Raised when the user requests abortion of only the current job.
+    ''' </summary>
+    ''' <remarks>
+    ''' AutoPilot subscribes to this event to cancel the per-job CancellationTokenSource
+    ''' without stopping the entire session. The processing pump continues with the next mail.
+    ''' </remarks>
+    Public Event AbortJobRequested As EventHandler
 
     ''' <summary>
     ''' Starts (or restarts) the auto-close countdown and updates the primary button text.
@@ -199,6 +216,9 @@ Public Class LogWindow
         btnKeepOpen = New Button() With {.Text = "Keep Open", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5), .Visible = False}
         AddHandler btnKeepOpen.Click, AddressOf OnKeepOpenClick
 
+        btnAbortJob = New Button() With {.Text = "Abort Job", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5), .Visible = False}
+        AddHandler btnAbortJob.Click, AddressOf OnAbortJobClick
+
         btnCopy = New Button() With {.Text = "Copy Log", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)}
         AddHandler btnCopy.Click, AddressOf OnCopyClick
 
@@ -207,6 +227,7 @@ Public Class LogWindow
 
         buttonPanel.Controls.Add(btnCancel)
         buttonPanel.Controls.Add(btnKeepOpen)
+        buttonPanel.Controls.Add(btnAbortJob)
         buttonPanel.Controls.Add(btnCopy)
         buttonPanel.Controls.Add(btnClear)
         mainPanel.Controls.Add(buttonPanel, 0, 1)
@@ -321,6 +342,53 @@ Public Class LogWindow
     End Sub
 
     ''' <summary>
+    ''' Handles the Abort Job button click and raises <see cref="AbortJobRequested"/>.
+    ''' </summary>
+    ''' <param name="sender">Event sender.</param>
+    ''' <param name="e">Event arguments.</param>
+    ''' <remarks>
+    ''' Temporarily disables the button for 3 seconds to prevent rapid repeated clicks,
+    ''' then re-enables it for the next job. Unlike Cancel, this does not permanently
+    ''' disable the button because new jobs will follow.
+    ''' </remarks>
+    Private Sub OnAbortJobClick(sender As Object, e As EventArgs)
+        btnAbortJob.Enabled = False
+        btnAbortJob.Text = "Aborting..."
+        RaiseEvent AbortJobRequested(Me, EventArgs.Empty)
+
+        ' Re-enable after a short delay so the button is ready for the next job
+        Dim reEnableTimer As New Timer() With {.Interval = 3000}
+        AddHandler reEnableTimer.Tick, Sub(s As Object, ev As EventArgs)
+                                           reEnableTimer.Stop()
+                                           reEnableTimer.Dispose()
+                                           If Not btnAbortJob.IsDisposed Then
+                                               btnAbortJob.Enabled = True
+                                               btnAbortJob.Text = "Abort Job"
+                                           End If
+                                       End Sub
+        reEnableTimer.Start()
+    End Sub
+
+    ''' <summary>
+    ''' Shows or hides the Abort Job button.
+    ''' </summary>
+    ''' <param name="visible">True to show, False to hide.</param>
+    ''' <remarks>
+    ''' Thread-safe: marshals to the UI thread if called from a background thread.
+    ''' Used by AutoPilot to expose per-job abort functionality on the dashboard.
+    ''' </remarks>
+    Public Sub ShowAbortJobButton(visible As Boolean)
+        If Me.IsDisposed Then Return
+
+        If Me.InvokeRequired Then
+            If Me.IsHandleCreated Then Me.BeginInvoke(Sub() ShowAbortJobButton(visible))
+            Return
+        End If
+
+        btnAbortJob.Visible = visible
+    End Sub
+
+    ''' <summary>
     ''' Copies the current log contents to the clipboard.
     ''' </summary>
     ''' <param name="sender">Event sender.</param>
@@ -360,7 +428,7 @@ Public Class LogWindow
     ''' </summary>
     ''' <remarks>
     ''' Stops any current countdown, rewires the Cancel button to Close the form, updates the window title,
-    ''' and starts the default auto-close countdown.
+    ''' hides the Abort Job button, and starts the default auto-close countdown.
     ''' </remarks>
     Private Sub MarkCompleteInternal()
         If btnCancel.IsDisposed Then Return
@@ -375,6 +443,11 @@ Public Class LogWindow
                                         StopAutoCloseCountdown()
                                         Me.Close()
                                     End Sub
+
+        ' Hide abort job button — session is complete
+        If Not btnAbortJob.IsDisposed Then
+            btnAbortJob.Visible = False
+        End If
 
         Me.Text = $"{ThisAddIn.AN} Tooling Log (Complete)"
 

@@ -331,17 +331,17 @@ Public Class Ribbon1
         Globals.ThisAddIn.HelpMeInky()
     End Sub
 
-    Private Sub Button1_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_PrepareRedactions.Click
+    Private Sub RI_PrepareRedactions_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_PrepareRedactions.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_PrepareRedactions_Click invoked")
         Globals.ThisAddIn.PrepareRedactedPDF()
     End Sub
 
-    Private Sub Button2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_FinalizeRedactions.Click
+    Private Sub RI_FinalizeRedactions_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_FinalizeRedactions.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FinalizeRedactions_Click invoked")
         Globals.ThisAddIn.FlattenRedactedPDF()
     End Sub
 
-    Private Sub Button3_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CheckDocumentsII.Click
+    Private Sub RI_CheckDocumentsII_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CheckDocumentsII.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_CheckDocumentsII_Click invoked")
         Globals.ThisAddIn.CheckDocumentII()
     End Sub
@@ -419,5 +419,30 @@ Public Class Ribbon1
     Private Sub RI_SplitPDF_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_SplitPDF.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_SplitPDF_Click invoked")
         Globals.ThisAddIn.SplitPdfByExhibits()
+    End Sub
+
+    Private Sub RI_StoreOriginalClause_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_StoreOriginalClause.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_StoreOriginalClause_Click invoked")
+        Globals.ThisAddIn.StoreOriginalClause()
+    End Sub
+
+    Private Sub RI_JustifyMarkup_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_JustifyMarkup.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_JustifyMarkup_Click invoked")
+        Globals.ThisAddIn.JustifyMarkup()
+    End Sub
+
+    Private Sub RI_BalloonMergePartJustify_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_BalloonMergePartJustify.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_BalloonMergePartJustify_Click invoked")
+        Globals.ThisAddIn.BalloonMergeWithJustification(False, True)
+    End Sub
+
+    Private Sub RI_BalloonMergeFullJustify_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_BalloonMergeFullJustify.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_BalloonMergeFullJustify_Click invoked")
+        Globals.ThisAddIn.BalloonMergeWithJustification(True, True)
+    End Sub
+
+    Private Sub RI_Stamper_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Stamper.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Stamper_Click invoked")
+        Globals.ThisAddIn.StampExhibitPDF()
     End Sub
 End Class

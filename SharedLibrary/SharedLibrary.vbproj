@@ -336,6 +336,13 @@
     <Compile Include="Code\Core\Clipboard\SharedMethods.ClipboardSnapshot.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.PutInClipboard.vb" />
     <Compile Include="Code\Core\Clipboard\SharedMethods.StoreAndRestoreClipboard.vb" />
+    <Compile Include="Code\Core\Config\ConfigWizardEngine.vb" />
+    <Compile Include="Code\Core\Config\ConfigWizardForm.Designer.vb">
+      <DependentUpon>ConfigWizardForm.vb</DependentUpon>
+    </Compile>
+    <Compile Include="Code\Core\Config\ConfigWizardForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Code\Core\Config\IniImportManager.vb" />
     <Compile Include="Code\CommonFeatures\QuickTranslateWidget.vb">
       <SubType>Form</SubType>
@@ -345,6 +352,7 @@
     <Compile Include="Code\Core\Config\SharedMethods.License.Pro.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.RegistryBackup.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.Testing.vb" />
+    <Compile Include="Code\Core\Config\SharedMethods.RegistryFix.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.UpdateIni.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.License.vb" />
     <Compile Include="Code\Core\Config\SharedMethods.LoadConfig.vb" />
@@ -355,6 +363,7 @@
     <Compile Include="Code\Core\Definitions\SharedMethods.Constants.OwnBuild.Security.vb" />
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.AlternateModels.Tooling.vb" />
     <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.AlternateModels.vb" />
+    <Compile Include="Code\Core\LLM\ModelSelection\SharedMethods.PrimaryModelManager.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.GoogleOAuthHelper.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MainLLM.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
@@ -427,6 +436,9 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="app.config" />
+    <EmbeddedResource Include="Code\Core\Config\ConfigWizard.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </EmbeddedResource>
     <None Include="My Project\Application.myapp">
       <Generator>MyApplicationCodeGenerator</Generator>
       <LastGenOutput>Application.Designer.vb</LastGenOutput>

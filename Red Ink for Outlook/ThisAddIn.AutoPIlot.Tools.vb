@@ -73,6 +73,8 @@
 '  - create_excel_spreadsheet
 '  - create_powerpoint
 '  - create_code_file
+'  - extract_data_from_attachments
+'  - redact_pdf
 '  - report_inability
 '
 ' Notes:
@@ -140,7 +142,11 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
     Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
+    Private Const AP_Tool_ExtractDataFromAttachments As String = "extract_data_from_attachments"
+    Private Const AP_Tool_RedactPdf As String = "redact_pdf"
+    Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
     Private Const AP_Tool_ReportInability As String = "report_inability"
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
@@ -232,12 +238,16 @@ Partial Public Class ThisAddIn
             .ToolInstructionsPrompt =
                 AP_Tool_ReadAttachment & ": Reads and returns the text content of one or more supported attachments " &
                 "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX). " &
+                "Embedded mail files (.msg, .eml) are automatically unpacked — their body text and nested attachments " &
+                "are extracted recursively and appear as separate attachments that you can reference by name. " &
                 "Use attachment_name for a single file or attachment_names for batch reading.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadAttachment & """," &
                 """description"":""Reads and returns the text content of one or more attachment files. " &
                 "Supports Word documents (.docx), PDFs (.pdf), Excel spreadsheets (.xlsx, .xls), " &
                 "PowerPoint presentations (.pptx), and text-based files (.txt, .csv, .html, .xml, .json, .md, .log). " &
+                "Embedded mail files (.msg, .eml) are automatically unpacked at intake — their text content " &
+                "and nested attachments appear as separate files in the attachment list. " &
                 "For Word documents, also reports if comments or tracked changes are present.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of a single attachment to read""}," &
@@ -698,7 +708,137 @@ Partial Public Class ThisAddIn
                 "},""required"":[""instruction""]}}"
         })
 
+
+        ' ── extract_data_from_attachments ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromAttachments,
+            .ModelDescription = "Extract structured data from attachments into a table (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_ExtractDataFromAttachments & ": Extracts structured/tabular data from one or more attachments " &
+                "(PDF, Word, Excel, text files, or files from a .zip archive) using AI-driven fact extraction. " &
+                "You MUST provide an 'instruction' describing WHAT to extract (e.g. 'Extract invoice number, date, vendor name, and total amount'). " &
+                "You SHOULD provide a 'schema' defining the output columns using the format 'ColumnName:type;ColumnName:type' " &
+                "where type is one of: text, date, datetime, number, other. Example: 'Invoice Number:text;Date:date;Vendor:text;Amount:number'. " &
+                "If no schema is provided, the AI will infer one automatically. " &
+                "The tool processes each file individually with the AI, then merges and returns the combined result as a JSON table. " &
+                "After receiving the result, YOU decide the best output format based on the user's request: " &
+                "- Use create_excel_spreadsheet to produce a formatted .xlsx file " &
+                "- Use create_word_document to produce a formatted .docx report " &
+                "- Include the data directly in your reply as a formatted text table " &
+                "- Or any other appropriate presentation. " &
+                "This tool ONLY extracts and returns the structured data — it does NOT create any files.",
+                .ToolDefinition =
+                "{""name"":""" & AP_Tool_ExtractDataFromAttachments & """," &
+                """description"":""Extracts structured/tabular data from one or more attachments using AI-driven fact extraction. " &
+                "Returns a JSON object with 'schema' (column definitions) and 'rows' (extracted data). " &
+                "Supports PDF, Word, Excel, text files, and files unpacked from .zip archives. " &
+                "You MUST then decide how to present the result (create_excel_spreadsheet, create_word_document, or inline table).""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """instruction"":{""type"":""string"",""description"":""Natural-language instruction describing what data to extract. " &
+                "Be specific about the fields/facts to capture. Example: 'Extract party names, contract date, governing law, and termination clauses from each document.'""}," &
+                """schema"":{""type"":""string"",""description"":""Optional but recommended: column definitions in 'Name:type;Name:type' format. " &
+                "Types: text, date, datetime, number, other. Append * to mark the sort column. " &
+                "Example: 'Invoice No:text;Date:date*;Vendor:text;Amount:number;Notes:text'. " &
+                "If omitted, the AI infers the schema automatically.""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of attachments to extract data from. " &
+                "If empty or omitted, processes all readable attachments (PDF, DOCX, XLSX, TXT, CSV, etc.).""}," &
+                """output_language"":{""type"":""string"",""description"":""Language for extracted column names and textual values (e.g. 'English', 'German', 'French'). " &
+                "Use the language the user expects the output in. If omitted, uses the language of the user's email.""}," &
+                """sort_column"":{""type"":""integer"",""description"":""Optional: 1-based column index to sort by. Use 0 or omit for no sorting.""}," &
+                """sort_direction"":{""type"":""string"",""enum"":[""ASC"",""DESC""],""description"":""Sort direction (default: ASC)""}," &
+                """date_columns"":{""type"":""string"",""description"":""Optional: comma-separated 1-based column indices that contain dates, for normalization. Example: '2,5'""}" &
+                "},""required"":[""instruction""]}}"
+        })
+
+        ' ── redact_pdf ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_RedactPdf,
+            .ModelDescription = "Redact PDF Document (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_RedactPdf & ": Redacts a PDF document by identifying text that matches the given instruction " &
+                "and placing redaction boxes over it. Uses AI to analyze the PDF text and determine what should be redacted. " &
+                "Operates in three modes controlled by the 'mode' parameter: " &
+                "(1) 'prepare' (default): Creates removable red annotation boxes over identified text. " &
+                "The user can review and adjust these in a PDF viewer before finalizing. " &
+                "(2) 'finalize': Takes a previously prepared PDF (with redaction annotation boxes) and burns " &
+                "them into permanent black rectangles by rasterizing each page. No AI analysis is performed. " &
+                "(3) 'prepare_and_finalize': Performs both steps in one call — identifies text, places boxes, " &
+                "and immediately burns them in as permanent black redactions. " &
+                "IMPORTANT: When mode is 'prepare' or 'prepare_and_finalize', an 'instruction' is REQUIRED " &
+                "describing what to redact (e.g. 'Redact all personal names and addresses', " &
+                "'Redact financial information', 'Redact everything except party names and dates'). " &
+                "When mode is 'finalize', no instruction is needed — it just burns in existing annotations. " &
+                "The 'include_reason_codes' parameter adds brief labels (e.g. 'name', 'address') to each " &
+                "redaction box, which are visible as white text inside the black box after finalization.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_RedactPdf & """," &
+                """description"":""Redacts a PDF by identifying text with AI and placing redaction boxes, " &
+                "or finalizes existing redaction boxes into permanent black rectangles. " &
+                "Modes: 'prepare' (removable red boxes), 'finalize' (burn in existing boxes), " &
+                "'prepare_and_finalize' (identify + burn in one step). " &
+                "Requires 'instruction' for prepare modes (e.g. 'Redact all personal data').""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to redact""}," &
+                """instruction"":{""type"":""string"",""description"":""What to redact — required for 'prepare' and 'prepare_and_finalize' modes. " &
+                "Examples: 'Redact all personal names, addresses, and phone numbers', " &
+                "'Redact financial data including account numbers and amounts', " &
+                "'Redact everything except the contract parties and effective dates'""}," &
+                """mode"":{""type"":""string"",""enum"":[""prepare"",""finalize"",""prepare_and_finalize""]," &
+                """description"":""Operation mode. 'prepare' = AI-driven removable boxes (default). " &
+                "'finalize' = burn in existing annotation boxes. " &
+                "'prepare_and_finalize' = AI-driven + immediate burn-in.""}," &
+                """include_reason_codes"":{""type"":""boolean"",""description"":""Include brief reason labels (e.g. 'name', 'address') in each redaction box. Default: false.""}," &
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output PDF (default: derived from input with '_redacted' or '_final' suffix)""}" &
+                "},""required"":[""attachment_name""]}}"
+        })
+
+        ' ── overlay_pdf ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_OverlayPdf,
+            .ModelDescription = "Overlay text and images on PDF pages (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_OverlayPdf & ": Places text labels and/or images at precise positions on PDF pages. " &
+                "Use this when the user wants to add a logo, stamp, header, footer, badge, label, signature image, " &
+                "or any positioned content onto a PDF. Supports per-element page targeting (single page, page range, or all pages), " &
+                "font family/size/style/color, rotation, opacity, and image scaling. " &
+                "Coordinates use PDF points (1 pt = 1/72 inch). A4 page = 595 × 842 pt. Letter = 612 × 792 pt. " &
+                "Origin (0,0) is the TOP-LEFT corner of the page. " &
+                "For images, reference an existing attachment by name via 'image_attachment_name'. " &
+                "Text elements and image elements can be freely mixed in the same call. " &
+                "The tool draws elements in array order (later elements overlay earlier ones).",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_OverlayPdf & """," &
+                """description"":""Places text labels and/or images at precise positions on PDF pages. " &
+                "Coordinates are in PDF points (1/72 inch). Origin (0,0) = top-left. A4 = 595×842 pt, Letter = 612×792 pt. " &
+                "Elements are drawn in array order. Use for logos, stamps, headers, footers, labels, signatures, badges, etc.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to overlay onto""}," &
+                """elements"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """type"":{""type"":""string"",""enum"":[""text"",""image""],""description"":""Element type: 'text' for a text label, 'image' for an image file""}," &
+                """pages"":{""type"":""string"",""description"":""Target pages: 'all' for every page, '1' for page 1 only, '1,3,5' for specific pages, '2-5' for a range. Default: 'all'""}," &
+                """x"":{""type"":""number"",""description"":""X position in points from the left edge of the page""}," &
+                """y"":{""type"":""number"",""description"":""Y position in points from the top edge of the page""}," &
+                """text"":{""type"":""string"",""description"":""(text only) The text string to render. Supports \\n for line breaks.""}," &
+                """font_family"":{""type"":""string"",""description"":""(text only) Font family name, e.g. 'Arial', 'Times New Roman', 'Calibri'. Default: 'Arial'""}," &
+                """font_size"":{""type"":""number"",""description"":""(text only) Font size in points. Default: 12""}," &
+                """bold"":{""type"":""boolean"",""description"":""(text only) Bold text. Default: false""}," &
+                """italic"":{""type"":""boolean"",""description"":""(text only) Italic text. Default: false""}," &
+                """font_color"":{""type"":""string"",""description"":""(text only) Hex RGB color, e.g. '#FF0000' for red, '#000000' for black. Default: '#000000'""}," &
+                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""(text only) Horizontal alignment relative to x position. 'left' = x is left edge, 'center' = x is center point, 'right' = x is right edge. Default: 'left'""}," &
+                """max_width"":{""type"":""number"",""description"":""(text only) Maximum width in points for text bounding box. Text is clipped or wrapped beyond this. Default: no limit""}," &
+                """image_attachment_name"":{""type"":""string"",""description"":""(image only) Filename of the image attachment to place (PNG, JPG, BMP, GIF, TIFF, WEBP)""}," &
+                """width"":{""type"":""number"",""description"":""(image only) Width in points to scale the image to""}," &
+                """height"":{""type"":""number"",""description"":""(image only) Height in points to scale the image to""}," &
+                """rotation"":{""type"":""number"",""description"":""Rotation angle in degrees (clockwise). Default: 0""}," &
+                """opacity"":{""type"":""number"",""description"":""Opacity from 0.0 (fully transparent) to 1.0 (fully opaque). Default: 1.0""}" &
+                "}}," &
+                """description"":""Array of overlay elements (text and/or image) to place on the PDF""}," &
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output PDF (default: '<original>_overlay.pdf')""}" &
+                "},""required"":[""attachment_name"",""elements""]}}"
+        })
+
         ' ── report_inability ──
+
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReportInability,
             .ToolPriority = 9999,
@@ -789,6 +929,12 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateCodeFile
                 Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ExtractDataFromAttachments
+                Return Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+            Case AP_Tool_RedactPdf
+                Return Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+            Case AP_Tool_OverlayPdf
+                Return Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -3269,7 +3415,17 @@ Partial Public Class ThisAddIn
                 Dim sizeStr = If(att.SizeBytes > 0, $"{att.SizeBytes / 1024:F0} KB", "unknown size")
                 Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT]",
                                If(att.TempFilePath IsNot Nothing, " [available for processing]", " [not available]"))
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}){statusStr}")
+                Dim pdfStr As String = ""
+                If att.PageCount > 0 Then
+                    pdfStr = $", {att.PageCount} page(s)"
+                    If Not String.IsNullOrWhiteSpace(att.PageOrientation) Then
+                        pdfStr &= $", {att.PageOrientation}"
+                    End If
+                    If Not String.IsNullOrWhiteSpace(att.PageSize) Then
+                        pdfStr &= $", {att.PageSize}"
+                    End If
+                End If
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}{pdfStr}){statusStr}")
             Next
 
             ' List output files produced by earlier tool calls
@@ -4514,6 +4670,142 @@ Partial Public Class ThisAddIn
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: redact_pdf
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteRedactPdfTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim fileName = GetArgString(toolCall.Arguments, "attachment_name")
+            If String.IsNullOrWhiteSpace(fileName) Then
+                response.Success = False
+                response.Response = "Missing required parameter: attachment_name"
+                Return response
+            End If
+
+            Dim att = FindAttachment(fileName)
+            If att Is Nothing Then
+                response.Success = False
+                response.Response = $"Attachment '{fileName}' not found."
+                Return response
+            End If
+
+            If Not att.TempFilePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = $"'{fileName}' is not a PDF file."
+                Return response
+            End If
+
+            Dim instruction = GetArgString(toolCall.Arguments, "instruction")
+            Dim mode = If(GetArgString(toolCall.Arguments, "mode"), "prepare").Trim().ToLowerInvariant()
+            Dim includeReasonCodes = GetArgBool(toolCall.Arguments, "include_reason_codes", False)
+            Dim outputName = GetArgString(toolCall.Arguments, "output_filename")
+
+            ' Validate mode
+            If mode <> "prepare" AndAlso mode <> "finalize" AndAlso mode <> "prepare_and_finalize" Then
+                mode = "prepare"
+            End If
+
+            ' Instruction required for prepare modes
+            If (mode = "prepare" OrElse mode = "prepare_and_finalize") AndAlso String.IsNullOrWhiteSpace(instruction) Then
+                response.Success = False
+                response.Response = "Missing required parameter: 'instruction' is required for prepare and prepare_and_finalize modes."
+                Return response
+            End If
+
+            ' Determine output filename
+            Dim baseName = Path.GetFileNameWithoutExtension(att.OriginalFileName)
+            Dim suffix = If(mode = "finalize", "_final",
+                         If(mode = "prepare_and_finalize", "_redacted_final", "_redacted"))
+
+            If String.IsNullOrWhiteSpace(outputName) Then
+                outputName = baseName & suffix & ".pdf"
+            End If
+            If Not outputName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                outputName &= ".pdf"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                outputName = baseName & suffix & $"_{counter}.pdf"
+                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                counter += 1
+            End While
+
+            context.Log($"PDF redaction ({mode}): {fileName}" &
+                        If(Not String.IsNullOrWhiteSpace(instruction), $" — {instruction}", ""))
+            ApDashboardLog($"🔒 PDF redaction ({mode}): {fileName}", "step")
+
+            EnsureApPdfSharpFontResolver()
+
+            If mode = "finalize" Then
+                ' Finalize-only: burn in existing annotations
+                Await Task.Run(Sub() APRedactFinalizeOnly(att.TempFilePath, outputPath, includeReasonCodes, 300))
+
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                response.Response = $"PDF finalized (annotations burned in): {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
+                    "All redaction boxes are now permanent black rectangles."
+                ApDashboardLog($"✓ PDF finalized: {outputName}", "info")
+
+            Else
+                ' Prepare (with optional finalize)
+                Dim finalize As Boolean = (mode = "prepare_and_finalize")
+                Dim result = Await APRedactPdf(att.TempFilePath, outputPath, instruction,
+                                                finalize, includeReasonCodes, ct)
+
+                If result Is Nothing Then
+                    response.Success = False
+                    response.Response = $"Redaction failed for '{fileName}'. The PDF may contain no extractable text " &
+                        "(run OCR first), the AI may have returned an empty/unparseable response, or no matching " &
+                        "text was found for the identified redactions. You may want to retry."
+                    ApDashboardLog($"⚠ Redaction failed for: {fileName}", "warn")
+                    Return response
+                End If
+
+                If result = "no_redactions" Then
+                    response.Success = True
+                    response.Response = $"The AI found nothing to redact in '{fileName}' based on the instruction: '{instruction}'."
+                    ApDashboardLog($"ℹ No redactions found in: {fileName}", "info")
+                    Return response
+                End If
+
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                Dim sizeKb = If(File.Exists(outputPath), $" ({New FileInfo(outputPath).Length / 1024:F0} KB)", "")
+                response.Response = $"PDF redacted: {result} Output: {outputName}{sizeKb}."
+                If Not finalize Then
+                    response.Response &= " Note: redaction boxes are currently removable annotations. " &
+                        "Call this tool again with mode='finalize' on the output file to make them permanent."
+                End If
+                ApDashboardLog($"✓ PDF redacted: {outputName}", "info")
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during PDF redaction: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  HELPER: Ensure PdfSharp font resolver is configured
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4683,6 +4975,274 @@ Partial Public Class ThisAddIn
     End Class
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: extract_data_from_attachments
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Extracts structured/tabular data from one or more attachments using the
+    ''' <see cref="SharedLibrary.FactExtractionService.RunFactExtractionAsync"/> pipeline.
+    ''' Returns schema + rows as JSON for downstream tool-chaining (create_excel, create_word, etc.).
+    ''' </summary>
+    Private Async Function ExecuteExtractDataFromAttachmentsTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim instruction = GetArgString(toolCall.Arguments, "instruction")
+            If String.IsNullOrWhiteSpace(instruction) Then
+                response.Success = False
+                response.Response = "Missing required parameter: instruction"
+                Return response
+            End If
+
+            Dim schemaSpec = GetArgString(toolCall.Arguments, "schema")
+            Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim sortColumn = GetArgInt(toolCall.Arguments, "sort_column", 0)
+            Dim sortDirection = If(GetArgString(toolCall.Arguments, "sort_direction"), "ASC").Trim().ToUpperInvariant()
+            If sortDirection <> "ASC" AndAlso sortDirection <> "DESC" Then sortDirection = "ASC"
+            Dim dateColumnsText = If(GetArgString(toolCall.Arguments, "date_columns"), "")
+
+            ' ── Resolve attachments to process ──
+            Dim toProcess As List(Of AutoPilotAttachmentInfo)
+            If targetNames.Count > 0 Then
+                toProcess = New List(Of AutoPilotAttachmentInfo)()
+                For Each name In targetNames
+                    Dim att = FindAttachment(name)
+                    If att IsNot Nothing AndAlso Not att.IsOverSizeLimit AndAlso att.TempFilePath IsNot Nothing Then
+                        toProcess.Add(att)
+                    End If
+                Next
+            Else
+                ' Process all readable non-binary attachments
+                toProcess = _apCurrentAttachments?.Where(
+                    Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
+                                Not AP_BinaryExtensions.Contains(a.Extension)).ToList()
+            End If
+
+            If toProcess Is Nothing OrElse toProcess.Count = 0 Then
+                response.Success = False
+                response.Response = "No processable attachments found for data extraction."
+                Return response
+            End If
+
+            context.Log($"Extracting structured data from {toProcess.Count} file(s): {instruction}")
+            ApDashboardLog($"📊 Fact extraction: {toProcess.Count} file(s)", "step")
+
+            ' ── Parse optional fixed schema ──
+            Dim fixedSchema As System.Collections.Generic.List(Of FactExtractionService.ExtractionSchemaColumn) = Nothing
+            If Not String.IsNullOrWhiteSpace(schemaSpec) Then
+                fixedSchema = FactExtractionService.ParseUserSchemaSpec(schemaSpec)
+                ' Detect sort column from * marker if not explicitly set
+                If (fixedSchema IsNot Nothing AndAlso fixedSchema.Count > 0) AndAlso sortColumn = 0 Then
+                    sortColumn = FactExtractionService.DetectSortColumnFromSpec(schemaSpec)
+                End If
+            End If
+
+            ' ── Parse date columns ──
+            Dim dateCols As New System.Collections.Generic.List(Of Integer)
+            For Each part In dateColumnsText.Split(New Char() {","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim n As Integer
+                If Integer.TryParse(part.Trim(), n) AndAlso n > 0 Then dateCols.Add(n)
+            Next
+
+            ' ── Build file path list from resolved attachments ──
+            Dim filePaths As New List(Of String)()
+            For Each att In toProcess
+                filePaths.Add(att.TempFilePath)
+            Next
+
+            ' ── Set up the extraction instruction for InterpolateAtRuntime ──
+            ' ── Set up the extraction instruction for InterpolateAtRuntime ──
+            Dim savedOtherPrompt = OtherPrompt
+            Dim savedOutputLanguage = OutputLanguage
+            Try
+                OtherPrompt = instruction
+
+                ' Let the LLM decide the output language; fall back to the user's primary language
+                Dim requestedLanguage = GetArgString(toolCall.Arguments, "output_language")
+                OutputLanguage = If(Not String.IsNullOrWhiteSpace(requestedLanguage), requestedLanguage.Trim(), INI_Language1)
+
+                Dim useSecondApi As Boolean = (_apConfig IsNot Nothing AndAlso _apConfig.UseSecondApi)
+                Dim cancelled As Boolean = False
+
+                ' ── Adapt GetFileContent for the service ──
+                ' RunFactExtractionAsync expects Func(Of String, Boolean, Boolean, Boolean, Task(Of String))
+                ' Parameters: (path, silent, doOcr, askUser)
+                ' We bridge to the Outlook text extraction pipeline (ReadSingleAttachmentText cache + fallbacks)
+                Dim getFileContentFunc As Func(Of String, Boolean, Boolean, Boolean, Task(Of String)) =
+                    Async Function(filePath As String, silent As Boolean, doOcr As Boolean, askUser As Boolean) As Task(Of String)
+                        ' First, try to find the file in the current attachments by path and reuse cached text
+                        Dim matchedAtt = toProcess.FirstOrDefault(
+                            Function(a) a.TempFilePath IsNot Nothing AndAlso
+                                        a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase))
+                        If matchedAtt IsNot Nothing Then
+                            Dim cachedText = Await ReadSingleAttachmentText(matchedAtt, context)
+                            If Not String.IsNullOrWhiteSpace(cachedText) Then Return cachedText
+                        End If
+
+                        ' Fallback: try extraction methods directly on path
+                        Dim text As String = Nothing
+                        Dim label As String = Nothing
+                        Try
+                            If TryExtractOfficeText(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                        Catch : End Try
+                        Try
+                            Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
+                            If ext = ".xlsx" OrElse ext = ".xls" Then
+                                text = ExtractExcelText(filePath)
+                                If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
+                            ElseIf ext = ".pptx" Then
+                                text = ExtractPowerPointText(filePath)
+                                If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
+                            End If
+                        Catch : End Try
+                        Try
+                            If TryExtractTextLike(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                        Catch : End Try
+                        If Path.GetExtension(filePath).ToLowerInvariant() = ".pdf" Then
+                            Try
+                                text = Await SharedMethods.ReadPdfAsText(filePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=doOcr, AskUser:=False)
+                                If Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Catch : End Try
+                        End If
+                        Return ""
+                    End Function
+
+                ' ── Adapt LLM function for the service ──
+                ' RunFactExtractionAsync expects Func(Of String, String, String, String, Integer, Boolean, Boolean, Task(Of String))
+                Dim llmFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, Task(Of String)) =
+                    Async Function(sysPrompt As String, userText As String, model As String, temp As String,
+                                   timeout As Integer, useSecond As Boolean, hideSplash As Boolean) As Task(Of String)
+                        Return Await ThisAddIn.LLM(sysPrompt, userText, model, temp, timeout, useSecond, True, cancellationToken:=ct)
+                    End Function
+
+                ' ── Run the extraction ──
+                Dim result = Await FactExtractionService.RunFactExtractionAsync(
+                    filePaths,
+                    instruction,
+                    dateCols,
+                    sortColumn,
+                    sortDirection,
+                    False,          ' doOcr — we already extracted text above
+                    useSecondApi,
+                    _apCurrentTempDir,
+                    AddressOf InterpolateAtRuntime,
+                    llmFunc,
+                    getFileContentFunc,
+                    _context,
+                    fixedSchema,
+                    Nothing,        ' clampFrom
+                    Nothing,        ' clampTo
+                    Sub(cur, total, label)
+                        ApDashboardLog($"  📊 [{cur}/{total}] {label}", "step")
+                    End Sub,
+                    0,              ' mergeDateColumn
+                    False,          ' mergeRowsViaLlm
+                    Nothing,        ' mergeInstruction
+                    Function() cancelled OrElse ct.IsCancellationRequested)
+
+                If result Is Nothing OrElse result.Rows.Count = 0 Then
+                    Dim errMsg = "No data could be extracted from the provided file(s)."
+                    If result IsNot Nothing AndAlso result.Errors.Count > 0 Then
+                        errMsg &= " Errors: " & String.Join("; ", result.Errors.Take(5))
+                    End If
+                    If result IsNot Nothing AndAlso result.FailedFileNames.Count > 0 Then
+                        errMsg &= " Failed files: " & String.Join(", ", result.FailedFileNames)
+                    End If
+                    response.Success = False
+                    response.Response = errMsg
+                    ApDashboardLog($"⚠ Fact extraction returned no data", "warn")
+                    Return response
+                End If
+
+                ' ── Format result as JSON for the LLM ──
+                Dim jResult As New JObject()
+
+                ' Schema array
+                Dim jSchema As New JArray()
+                For Each col In result.Schema
+                    jSchema.Add(New JObject From {
+                        {"name", col.Name},
+                        {"type", col.Type}
+                    })
+                Next
+                jResult("schema") = jSchema
+
+                ' Rows as array of arrays
+                Dim jRows As New JArray()
+                For Each row In result.Rows
+                    Dim jRow As New JArray()
+                    For Each cellVal In row.Values
+                        jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
+                    Next
+                    jRows.Add(jRow)
+                Next
+                jResult("rows") = jRows
+
+                ' Metadata
+                jResult("total_rows") = result.Rows.Count
+                jResult("total_columns") = result.Schema.Count
+                jResult("files_processed") = result.ProcessedFiles
+                jResult("files_failed") = result.FailedFiles
+                If result.FailedFileNames.Count > 0 Then
+                    jResult("failed_files") = New JArray(result.FailedFileNames.ToArray())
+                End If
+                If result.Errors.Count > 0 Then
+                    jResult("errors") = New JArray(result.Errors.Take(10).ToArray())
+                End If
+
+                Dim jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
+
+                ' Truncate if extremely large to stay within LLM context limits
+                If jsonString.Length > 200000 Then
+                    ' Rebuild with fewer rows
+                    Dim maxRows = Math.Max(1, CInt(result.Rows.Count * (200000.0 / jsonString.Length)))
+                    Dim jRowsTruncated As New JArray()
+                    For i = 0 To Math.Min(maxRows - 1, result.Rows.Count - 1)
+                        Dim jRow As New JArray()
+                        For Each cellVal In result.Rows(i).Values
+                            jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
+                        Next
+                        jRowsTruncated.Add(jRow)
+                    Next
+                    jResult("rows") = jRowsTruncated
+                    jResult("total_rows") = result.Rows.Count
+                    jResult("rows_returned") = jRowsTruncated.Count
+                    jResult("truncated") = True
+                    jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
+                End If
+
+                response.Success = True
+                response.Response = jsonString
+
+                Dim schemaNames = String.Join(", ", result.Schema.Select(Function(c) c.Name))
+                ApDashboardLog($"✓ Fact extraction: {result.Rows.Count} rows, {result.Schema.Count} columns ({schemaNames}), {result.ProcessedFiles} file(s)", "info")
+
+            Finally
+                OtherPrompt = savedOtherPrompt
+                OutputLanguage = savedOutputLanguage
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error extracting data from attachments: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: report_inability
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4773,6 +5333,353 @@ Partial Public Class ThisAddIn
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: overlay_pdf
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteOverlayPdfTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim fileName = GetArgString(toolCall.Arguments, "attachment_name")
+            If String.IsNullOrWhiteSpace(fileName) Then
+                response.Success = False
+                response.Response = "Missing required parameter: attachment_name"
+                Return response
+            End If
+
+            Dim att = FindAttachment(fileName)
+            If att Is Nothing Then
+                response.Success = False
+                response.Response = $"Attachment '{fileName}' not found."
+                Return response
+            End If
+
+            If Not att.TempFilePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = $"'{fileName}' is not a PDF file."
+                Return response
+            End If
+
+            ' Parse elements array
+            Dim elementsArray As JArray = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("elements") Then
+                Dim elemObj = toolCall.Arguments("elements")
+                If TypeOf elemObj Is JArray Then elementsArray = DirectCast(elemObj, JArray)
+            End If
+
+            If elementsArray Is Nothing OrElse elementsArray.Count = 0 Then
+                response.Success = False
+                response.Response = "Missing required parameter: elements (must be a non-empty array)"
+                Return response
+            End If
+
+            ' Determine output filename
+            Dim outputName = GetArgString(toolCall.Arguments, "output_filename")
+            If String.IsNullOrWhiteSpace(outputName) Then
+                outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_overlay.pdf"
+            End If
+            If Not outputName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                outputName &= ".pdf"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_overlay_{counter}.pdf"
+                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                counter += 1
+            End While
+
+            context.Log($"Overlaying {elementsArray.Count} element(s) on: {fileName}")
+            ApDashboardLog($"🖌 Overlaying {elementsArray.Count} element(s) on: {fileName}", "step")
+
+            EnsureApPdfSharpFontResolver()
+
+            ' Pre-resolve all image attachments to avoid repeated lookups
+            Dim imageCache As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            For Each elemObj As JObject In elementsArray
+                Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
+                If elemType = "image" Then
+                    Dim imgName = elemObj.Value(Of String)("image_attachment_name")
+                    If Not String.IsNullOrWhiteSpace(imgName) AndAlso Not imageCache.ContainsKey(imgName) Then
+                        Dim imgAtt = FindAttachment(imgName)
+                        If imgAtt IsNot Nothing AndAlso imgAtt.TempFilePath IsNot Nothing AndAlso File.Exists(imgAtt.TempFilePath) Then
+                            imageCache(imgName) = imgAtt.TempFilePath
+                        End If
+                    End If
+                End If
+            Next
+
+            ' Work on a temp copy to avoid source file lock issues
+            Dim tempWorkPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+            Dim textCount = 0
+            Dim imageCount = 0
+
+            Try
+                File.Copy(att.TempFilePath, tempWorkPath, True)
+
+                Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempWorkPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                    Dim totalPages = doc.PageCount
+
+                    For Each elemObj As JObject In elementsArray
+                        Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
+                        Dim pagesSpec = If(elemObj.Value(Of String)("pages"), "all").Trim().ToLowerInvariant()
+                        Dim x As Double = GetJDouble(elemObj, "x", 0)
+                        Dim y As Double = GetJDouble(elemObj, "y", 0)
+                        Dim rotation As Double = GetJDouble(elemObj, "rotation", 0)
+                        Dim opacity As Double = GetJDouble(elemObj, "opacity", 1.0)
+
+                        ' Resolve target page indices (0-based)
+                        Dim pageIndices = ResolvePageIndices(pagesSpec, totalPages)
+                        If pageIndices.Count = 0 Then Continue For
+
+                        For Each pageIdx In pageIndices
+                            If pageIdx < 0 OrElse pageIdx >= totalPages Then Continue For
+                            Dim page = doc.Pages(pageIdx)
+
+                            Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                                If elemType = "text" Then
+                                    ' ── TEXT ELEMENT ──
+                                    Dim text = If(elemObj.Value(Of String)("text"), "")
+                                    If String.IsNullOrEmpty(text) Then Continue For
+
+                                    ' Handle \n escape sequences for multi-line text
+                                    text = text.Replace("\\n", vbLf).Replace("\n", vbLf)
+
+                                    Dim fontFamily = If(elemObj.Value(Of String)("font_family"), "Arial")
+                                    Dim fontSize As Double = GetJDouble(elemObj, "font_size", 12)
+                                    Dim isBold = GetJBool(elemObj, "bold")
+                                    Dim isItalic = GetJBool(elemObj, "italic")
+                                    Dim hAlign = If(elemObj.Value(Of String)("h_align"), "left").ToLowerInvariant()
+                                    Dim maxWidth As Double = GetJDouble(elemObj, "max_width", 0)
+                                    Dim fontColorHex = If(elemObj.Value(Of String)("font_color"), "#000000")
+
+                                    ' Build font style
+                                    Dim fontStyle As PdfSharp.Drawing.XFontStyleEx = PdfSharp.Drawing.XFontStyleEx.Regular
+                                    If isBold AndAlso isItalic Then
+                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.BoldItalic
+                                    ElseIf isBold Then
+                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.Bold
+                                    ElseIf isItalic Then
+                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.Italic
+                                    End If
+
+                                    Dim font = New PdfSharp.Drawing.XFont(fontFamily, fontSize, fontStyle)
+
+                                    ' Parse color
+                                    Dim brush As PdfSharp.Drawing.XBrush = PdfSharp.Drawing.XBrushes.Black
+                                    Try
+                                        Dim colorHex = fontColorHex.TrimStart("#"c)
+                                        If colorHex.Length = 6 Then
+                                            Dim r = System.Convert.ToInt32(colorHex.Substring(0, 2), 16)
+                                            Dim g = System.Convert.ToInt32(colorHex.Substring(2, 2), 16)
+                                            Dim b = System.Convert.ToInt32(colorHex.Substring(4, 2), 16)
+                                            Dim alphaInt = CInt(Math.Round(Math.Max(0, Math.Min(1, opacity)) * 255))
+                                            brush = New PdfSharp.Drawing.XSolidBrush(
+                                                PdfSharp.Drawing.XColor.FromArgb(alphaInt, r, g, b))
+                                        End If
+                                    Catch
+                                    End Try
+
+                                    ' Determine string format for alignment
+                                    Dim xFormat As New PdfSharp.Drawing.XStringFormat()
+                                    xFormat.LineAlignment = PdfSharp.Drawing.XLineAlignment.Near
+                                    Select Case hAlign
+                                        Case "center" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Center
+                                        Case "right" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Far
+                                        Case Else : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Near
+                                    End Select
+
+                                    ' Apply rotation if specified
+                                    Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                                    If rotation <> 0 Then
+                                        state = gfx.Save()
+                                        gfx.TranslateTransform(x, y)
+                                        gfx.RotateTransform(rotation)
+                                        gfx.TranslateTransform(-x, -y)
+                                    End If
+
+                                    ' Handle multi-line text
+                                    Dim lines = text.Split({vbLf}, StringSplitOptions.None)
+                                    Dim lineHeight = fontSize * 1.25
+                                    Dim currentY = y
+
+                                    For Each line In lines
+                                        If maxWidth > 0 Then
+                                            Dim rect As New PdfSharp.Drawing.XRect(x, currentY, maxWidth, lineHeight)
+                                            gfx.DrawString(line, font, brush, rect, xFormat)
+                                        Else
+                                            Dim drawPoint As New PdfSharp.Drawing.XPoint(x, currentY)
+                                            gfx.DrawString(line, font, brush, drawPoint, xFormat)
+                                        End If
+                                        currentY += lineHeight
+                                    Next
+
+                                    If state IsNot Nothing Then gfx.Restore(state)
+                                    textCount += 1
+
+                                ElseIf elemType = "image" Then
+                                    ' ── IMAGE ELEMENT ──
+                                    Dim imgName = elemObj.Value(Of String)("image_attachment_name")
+                                    If String.IsNullOrWhiteSpace(imgName) Then Continue For
+
+                                    Dim imgPath As String = Nothing
+                                    If Not imageCache.TryGetValue(imgName, imgPath) OrElse
+                                       String.IsNullOrEmpty(imgPath) OrElse Not File.Exists(imgPath) Then
+                                        context.Log($"Image attachment not found: {imgName}")
+                                        Continue For
+                                    End If
+
+                                    Dim imgWidth As Double = GetJDouble(elemObj, "width", 0)
+                                    Dim imgHeight As Double = GetJDouble(elemObj, "height", 0)
+
+                                    ' Load image via stream to support all formats
+                                    Using imgStream As New FileStream(imgPath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                                        Using xImg = PdfSharp.Drawing.XImage.FromStream(imgStream)
+                                            ' Default to native size if not specified
+                                            If imgWidth <= 0 AndAlso imgHeight <= 0 Then
+                                                imgWidth = xImg.PointWidth
+                                                imgHeight = xImg.PointHeight
+                                            ElseIf imgWidth > 0 AndAlso imgHeight <= 0 Then
+                                                ' Scale proportionally
+                                                imgHeight = xImg.PointHeight * (imgWidth / xImg.PointWidth)
+                                            ElseIf imgHeight > 0 AndAlso imgWidth <= 0 Then
+                                                imgWidth = xImg.PointWidth * (imgHeight / xImg.PointHeight)
+                                            End If
+
+                                            ' Apply rotation if specified
+                                            Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                                            If rotation <> 0 Then
+                                                state = gfx.Save()
+                                                Dim cx = x + imgWidth / 2
+                                                Dim cy = y + imgHeight / 2
+                                                gfx.TranslateTransform(cx, cy)
+                                                gfx.RotateTransform(rotation)
+                                                gfx.TranslateTransform(-cx, -cy)
+                                            End If
+
+                                            ' Apply opacity for images by drawing on a separate layer
+                                            ' PdfSharp does not directly support image opacity, but we can
+                                            ' use a workaround with XGraphics state if needed.
+                                            ' For now, draw directly (opacity < 1 is best-effort).
+                                            gfx.DrawImage(xImg, x, y, imgWidth, imgHeight)
+
+                                            If state IsNot Nothing Then gfx.Restore(state)
+                                            imageCount += 1
+                                        End Using
+                                    End Using
+                                End If
+                            End Using
+                        Next
+                    Next
+
+                    doc.Save(tempWorkPath)
+                End Using
+
+                ' Move temp to final
+                If File.Exists(outputPath) Then File.Delete(outputPath)
+                File.Move(tempWorkPath, outputPath)
+
+            Finally
+                Try : If File.Exists(tempWorkPath) Then File.Delete(tempWorkPath)
+                Catch : End Try
+            End Try
+
+            If File.Exists(outputPath) Then
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                response.Response = $"PDF overlay complete: {textCount} text element(s) and {imageCount} image element(s) placed. " &
+                    $"Output: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ PDF overlay: {outputName} ({textCount} text, {imageCount} image)", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create overlaid PDF."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error overlaying PDF: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  OVERLAY PDF HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Parses a page specification string into a list of 0-based page indices.
+    ''' Supports: "all", "1", "1,3,5", "2-5", "1,3-5,8".
+    ''' </summary>
+    Private Shared Function ResolvePageIndices(pagesSpec As String, totalPages As Integer) As List(Of Integer)
+        Dim result As New List(Of Integer)()
+        If String.IsNullOrWhiteSpace(pagesSpec) OrElse pagesSpec = "all" Then
+            For i = 0 To totalPages - 1
+                result.Add(i)
+            Next
+            Return result
+        End If
+
+        ' Split on commas, then handle each token
+        For Each token In pagesSpec.Split(","c)
+            Dim trimmed = token.Trim()
+            If String.IsNullOrEmpty(trimmed) Then Continue For
+
+            Dim dashIdx = trimmed.IndexOf("-"c)
+            If dashIdx > 0 Then
+                ' Range: "2-5"
+                Dim startStr = trimmed.Substring(0, dashIdx).Trim()
+                Dim endStr = trimmed.Substring(dashIdx + 1).Trim()
+                Dim startPage As Integer
+                Dim endPage As Integer
+                If Integer.TryParse(startStr, startPage) AndAlso Integer.TryParse(endStr, endPage) Then
+                    startPage = Math.Max(1, startPage)
+                    endPage = Math.Min(totalPages, endPage)
+                    For i = startPage To endPage
+                        If Not result.Contains(i - 1) Then result.Add(i - 1)
+                    Next
+                End If
+            Else
+                ' Single page: "3"
+                Dim pageNum As Integer
+                If Integer.TryParse(trimmed, pageNum) AndAlso pageNum >= 1 AndAlso pageNum <= totalPages Then
+                    If Not result.Contains(pageNum - 1) Then result.Add(pageNum - 1)
+                End If
+            End If
+        Next
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Reads a Double value from a JObject token with a fallback default.
+    ''' </summary>
+    Private Shared Function GetJDouble(obj As JObject, key As String, defaultVal As Double) As Double
+        Dim token = obj(key)
+        If token Is Nothing Then Return defaultVal
+        Dim result As Double
+        If Double.TryParse(token.ToString(), Globalization.NumberStyles.Any,
+                          Globalization.CultureInfo.InvariantCulture, result) Then
+            Return result
+        End If
+        Return defaultVal
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL IDENTIFICATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4800,6 +5707,9 @@ Partial Public Class ThisAddIn
                  AP_Tool_CreatePowerPoint,
                  AP_Tool_CreateCodeFile,
                  AP_Tool_CommentPdf,
+                 AP_Tool_ExtractDataFromAttachments,
+                 AP_Tool_RedactPdf,
+                 AP_Tool_OverlayPdf,
                  AP_Tool_ReportInability
                 Return True
             Case Else

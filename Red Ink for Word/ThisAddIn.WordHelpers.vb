@@ -2710,17 +2710,24 @@ Partial Public Class ThisAddIn
     Public Sub CalculateUserMarkupTimeSpan()
 
         Try
-            Dim userName As String
-            Dim docRevisions As Word.Revisions
-            Dim rev As Word.Revision
-            Dim comment As Word.Comment
+            Dim app As Microsoft.Office.Interop.Word.Application = Nothing
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                app = Globals.ThisAddIn.Application
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If app Is Nothing OrElse doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
             Dim firstTimestamp As Date
             Dim lastTimestamp As Date
             Dim found As Boolean
-            Dim userInput As String
-            Dim userNames As New Microsoft.VisualBasic.Collection
-            Dim selRange As Word.Range
-            Dim outputUserNames As String
+            Dim userNames As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
             Dim docRef As String = "in the selected text"
 
             ' Initialize
@@ -2729,21 +2736,36 @@ Partial Public Class ThisAddIn
             lastTimestamp = #1/1/1900#
 
             ' Prompt for user name
-            userName = Globals.ThisAddIn.Application.UserName
-            userInput = ShowCustomInputBox("Please enter the name of the user (leave empty for all users):", "Markup Time Span", True, userName)
+            Dim userName As String = String.Empty
+            Try
+                userName = app.UserName
+            Catch
+            End Try
+
+            Dim userInput As String = ShowCustomInputBox("Please enter the name of the user (leave empty for all users):", "Markup Time Span", True, userName)
+
+            ' ShowCustomInputBox returns "" on Cancel in SimpleInput mode — treat as abort
+            If userInput Is Nothing Then
+                Exit Sub
+            End If
+
             userInput = userInput.Trim()
 
             ' Prompt for earliest date
-            Dim userDateInput As String
             Dim earliestDate As System.DateTime = System.DateTime.MinValue
             Dim earliestDateFiltered As Boolean = False
 
-            userDateInput = ShowCustomInputBox(
+            Dim userDateInput As String = ShowCustomInputBox(
                     "Please enter the earliest date (and time, if you wish) to consider (leave empty for no filter):",
                     "Markup Time Span",
                     True,
                     System.DateTime.Now.AddDays(-2).ToString(System.Globalization.CultureInfo.CurrentCulture)
                 )
+
+            If userDateInput Is Nothing Then
+                Exit Sub
+            End If
+
             userDateInput = userDateInput.Trim()
 
             Dim parsed As System.DateTime
@@ -2763,85 +2785,144 @@ Partial Public Class ThisAddIn
             End If
 
             ' Check selection
-            If Globals.ThisAddIn.Application.Selection Is Nothing OrElse String.IsNullOrWhiteSpace(Globals.ThisAddIn.Application.Selection.Range.Text) Then
-                Globals.ThisAddIn.Application.ActiveDocument.Content.Select()
+            Dim selRange As Word.Range = Nothing
+            Try
+                Dim sel As Word.Selection = app.Selection
+                If sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End Then
+                    selRange = sel.Range
+                End If
+            Catch
+            End Try
+
+            If selRange Is Nothing Then
+                Try
+                    doc.Content.Select()
+                    selRange = app.Selection.Range
+                Catch
+                End Try
                 docRef = "in the document"
             End If
-            selRange = Globals.ThisAddIn.Application.Selection.Range
-            docRevisions = selRange.Revisions
+
+            If selRange Is Nothing Then
+                ShowCustomMessageBox("Unable to access the document content.", AN)
+                Exit Sub
+            End If
 
             ' Process revisions
-            For Each rev In docRevisions
-                If (String.IsNullOrEmpty(userInput) OrElse rev.Author.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
-                       AndAlso (Not earliestDateFiltered OrElse rev.Date >= earliestDate) Then
-                    ' Update timestamps
-                    If Not found Then
-                        firstTimestamp = rev.Date
-                        lastTimestamp = rev.Date
-                        found = True
-                    Else
-                        If rev.Date < firstTimestamp Then firstTimestamp = rev.Date
-                        If rev.Date > lastTimestamp Then lastTimestamp = rev.Date
-                    End If
-                    ' Collect user names if processing all
-                    Try
-                        userNames.Add(rev.Author, rev.Author.ToLower())
-                    Catch ex As Exception
-                        ' Ignore duplicates
-                    End Try
+            Try
+                Dim docRevisions As Word.Revisions = selRange.Revisions
+                If docRevisions IsNot Nothing Then
+                    For Each rev As Word.Revision In docRevisions
+                        Try
+                            Dim revAuthor As String = Nothing
+                            Dim revDate As Date
+
+                            Try
+                                revAuthor = rev.Author
+                                revDate = rev.Date
+                            Catch
+                                Continue For
+                            End Try
+
+                            If String.IsNullOrEmpty(revAuthor) Then revAuthor = "(unknown)"
+
+                            If (String.IsNullOrEmpty(userInput) OrElse revAuthor.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
+                                   AndAlso (Not earliestDateFiltered OrElse revDate >= earliestDate) Then
+                                ' Update timestamps
+                                If Not found Then
+                                    firstTimestamp = revDate
+                                    lastTimestamp = revDate
+                                    found = True
+                                Else
+                                    If revDate < firstTimestamp Then firstTimestamp = revDate
+                                    If revDate > lastTimestamp Then lastTimestamp = revDate
+                                End If
+                                ' Collect user names if processing all
+                                If Not userNames.ContainsKey(revAuthor) Then
+                                    userNames(revAuthor) = revAuthor
+                                End If
+                            End If
+                        Catch
+                            ' Skip problematic revision
+                        End Try
+                    Next
                 End If
-            Next
+            Catch
+                ' Revisions collection inaccessible (e.g., protected document)
+            End Try
 
             ' Process comments
-            For Each comment In selRange.Comments
-                If (String.IsNullOrEmpty(userInput) OrElse comment.Author.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
-                       AndAlso (Not earliestDateFiltered OrElse comment.Date >= earliestDate) Then
+            Try
+                Dim comments As Word.Comments = selRange.Comments
+                If comments IsNot Nothing Then
+                    For Each comment As Word.Comment In comments
+                        Try
+                            Dim cmtAuthor As String = Nothing
+                            Dim cmtDate As Date
 
-                    ' Update timestamps
-                    If Not found Then
-                        firstTimestamp = comment.Date
-                        lastTimestamp = comment.Date
-                        found = True
-                    Else
-                        If comment.Date < firstTimestamp Then firstTimestamp = comment.Date
-                        If comment.Date > lastTimestamp Then lastTimestamp = comment.Date
-                    End If
-                    ' Collect user names if processing all
-                    Try
-                        userNames.Add(comment.Author, comment.Author.ToLower())
-                    Catch ex As Exception
-                        ' Ignore duplicates
-                    End Try
+                            Try
+                                cmtAuthor = comment.Author
+                                cmtDate = comment.Date
+                            Catch
+                                Continue For
+                            End Try
+
+                            If String.IsNullOrEmpty(cmtAuthor) Then cmtAuthor = "(unknown)"
+
+                            If (String.IsNullOrEmpty(userInput) OrElse cmtAuthor.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
+                                   AndAlso (Not earliestDateFiltered OrElse cmtDate >= earliestDate) Then
+
+                                ' Update timestamps
+                                If Not found Then
+                                    firstTimestamp = cmtDate
+                                    lastTimestamp = cmtDate
+                                    found = True
+                                Else
+                                    If cmtDate < firstTimestamp Then firstTimestamp = cmtDate
+                                    If cmtDate > lastTimestamp Then lastTimestamp = cmtDate
+                                End If
+                                ' Collect user names if processing all
+                                If Not userNames.ContainsKey(cmtAuthor) Then
+                                    userNames(cmtAuthor) = cmtAuthor
+                                End If
+                            End If
+                        Catch
+                            ' Skip problematic comment
+                        End Try
+                    Next
                 End If
-            Next
+            Catch
+                ' Comments collection inaccessible
+            End Try
 
             ' Display results
             If found Then
-                Dim timeSpan As String
-                Dim timeDiff As Double
-                timeDiff = DateDiff(DateInterval.Minute, firstTimestamp, lastTimestamp)
-                timeSpan = System.Math.Floor(timeDiff / 1440).ToString() & " days, " &
+                Dim timeDiff As Double = DateDiff(DateInterval.Minute, firstTimestamp, lastTimestamp)
+                If timeDiff < 0 Then timeDiff = System.Math.Abs(timeDiff)
+
+                Dim timeSpan As String = System.Math.Floor(timeDiff / 1440).ToString() & " days, " &
                        ((timeDiff Mod 1440) \ 60).ToString("00") & " hours, " &
                        (timeDiff Mod 60).ToString("00") & " minutes"
 
                 ' Format timestamps without seconds
-                Dim formattedFirstTimestamp As String
-                Dim formattedLastTimestamp As String
-                formattedFirstTimestamp = firstTimestamp.ToString("dd/MM/yyyy HH:mm")
-                formattedLastTimestamp = lastTimestamp.ToString("dd/MM/yyyy HH:mm")
+                Dim formattedFirstTimestamp As String = firstTimestamp.ToString("dd/MM/yyyy HH:mm")
+                Dim formattedLastTimestamp As String = lastTimestamp.ToString("dd/MM/yyyy HH:mm")
+
+                Dim outputUserNames As String
                 If String.IsNullOrEmpty(userInput) Then
                     ' Display all users
-                    Dim user As Object
                     outputUserNames = "Users involved:" & vbCrLf
-                    For Each user In userNames
-                        outputUserNames &= "- " & user.ToString() & vbCrLf
+                    For Each kvp In userNames
+                        outputUserNames &= "- " & kvp.Value & vbCrLf
                     Next
                 Else
                     outputUserNames = "User: " & userInput
                 End If
-                ShowCustomMessageBox(outputUserNames & vbCrLf & If(earliestDateFiltered, "Earliest considered: " & earliestDate.ToString("dd/MM/yyyy HH:mm") & vbCrLf, "") & "First markup/comment: " & formattedFirstTimestamp & vbCrLf &
-    "Last markup/comment: " & formattedLastTimestamp & vbCrLf &
-    "Time span: " & timeSpan)
+                ShowCustomMessageBox(outputUserNames & vbCrLf &
+                    If(earliestDateFiltered, "Earliest considered: " & earliestDate.ToString("dd/MM/yyyy HH:mm") & vbCrLf, "") &
+                    "First markup/comment: " & formattedFirstTimestamp & vbCrLf &
+                    "Last markup/comment: " & formattedLastTimestamp & vbCrLf &
+                    "Time span: " & timeSpan)
             Else
                 If String.IsNullOrEmpty(userInput) Then
                     ShowCustomMessageBox($"No markups or comments found {docRef}.")
@@ -2851,7 +2932,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in CalculateUserMarkupTimeSpan: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            ShowCustomMessageBox("Error in CalculateUserMarkupTimeSpan: " & ex.Message, AN)
         End Try
     End Sub
 
@@ -2911,10 +2992,12 @@ Partial Public Class ThisAddIn
         Dim text1 As String = Left(firstRange.Text, Len(firstRange.Text) - 1)
         Dim text2 As String = Left(secondRange.Text, Len(secondRange.Text) - 1)
 
-        If INI_MarkupMethodHelper <> 1 Then
-            CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
-        Else
+        If INI_MarkupMethodHelper = 1 Then
             CompareAndInsertComparedoc(text1, text2, secondRange)
+        ElseIf INI_MarkupMethodHelper = 2 Then
+            CompareAndInsertSurgical(text1, text2, secondRange)
+        Else
+            CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
         End If
     End Sub
 

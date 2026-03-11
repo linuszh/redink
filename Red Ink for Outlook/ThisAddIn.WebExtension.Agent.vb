@@ -45,9 +45,6 @@ Partial Public Class ThisAddIn
     ''' <summary>Prefix for chat agent temp directories.</summary>
     Private Const CA_TempPrefix As String = AN2 & "_chatagent_"
 
-    ''' <summary>Maximum file size for chat agent uploads (same as AutoPilot default).</summary>
-    Private Const CA_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
-
     ' ═══════════════════════════════════════════════════════════════════════════
     '  FILE MANAGEMENT
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -102,8 +99,8 @@ Partial Public Class ThisAddIn
             .TempFilePath = destPath,
             .Extension = fi.Extension.ToLowerInvariant(),
             .SizeBytes = fi.Length,
-            .IsOverSizeLimit = (fi.Length > CA_DefaultMaxAttachmentBytes),
-            .StatusMessage = If(fi.Length > CA_DefaultMaxAttachmentBytes, "Over size limit", "OK"),
+            .IsOverSizeLimit = False,
+            .StatusMessage = "OK",
             .CreatedTime = fi.CreationTimeUtc,
             .LastModifiedTime = fi.LastWriteTimeUtc,
             .OutputFiles = New List(Of String)(),

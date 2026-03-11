@@ -44,6 +44,7 @@ Option Strict Off
 
 Imports System.Diagnostics
 Imports System.IO
+Imports System.Net
 Imports System.Net.Http
 Imports System.Reflection
 Imports System.Runtime.InteropServices
@@ -823,6 +824,9 @@ Partial Public Class ThisAddIn
                             If tc.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                                 toolConfig = GetInternalWebTool()
                                 ToolingFileLogger.LogStep("Using internal web tool.")
+                            ElseIf tc.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
+                                toolConfig = GetInternalSearchTool()
+                                ToolingFileLogger.LogStep("Using internal search tool.")
                             Else
                                 context.LogError(
                                     $"Unknown tool: {tc.ToolName}",
@@ -1400,6 +1404,7 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
+
     ''' <summary>
     ''' Creates a built-in internal web retrieval tool configuration as a <see cref="ModelConfig"/>.
     ''' </summary>
@@ -1417,7 +1422,25 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Executes a single tool call using either the internal tool implementation or an external tool configuration.
+    ''' Creates a built-in internal internet search tool configuration as a <see cref="ModelConfig"/>.
+    ''' Only meaningful when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured.
+    ''' </summary>
+    ''' <returns>Internal search tool configuration.</returns>
+    Public Function GetInternalSearchTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalSearchToolName,
+            .ToolInstructionsPrompt = InternalSearchToolInstructionsPrompt,
+            .ToolDefinition = InternalSearchToolDefinition,
+            .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 998,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
+    ''' <summary>
+    ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
+    ''' Internal tools: <c>web_content_retriever</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
     ''' <param name="toolCall">Tool call extracted from the LLM response.</param>
     ''' <param name="toolConfig">Tool configuration selected for this call.</param>
@@ -1434,25 +1457,29 @@ Partial Public Class ThisAddIn
         context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
 
         Try
-
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
-                    response = Await ExecuteInternalWebTool(toolCall, context)
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
-                Else
-                    response = Await ExecuteExternalTool(toolCall, toolConfig, context)
-                    ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
-                End If
+                response = Await ExecuteInternalWebTool(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
-                ' Log completion with excerpt
-                If response.Success Then
-                    Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
-                    context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
-                Else
-                    context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
-                End If
+            ElseIf toolCall.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = Await ExecuteInternalSearchTool(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
-            Catch ex As Exception
-                response.Success = False
+            Else
+                response = Await ExecuteExternalTool(toolCall, toolConfig, context)
+                ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
+            End If
+
+            ' Log completion with excerpt
+            If response.Success Then
+                Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
+                context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
+            Else
+                context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
+            End If
+
+        Catch ex As Exception
+            response.Success = False
             response.ErrorMessage = ex.Message
             context.Log($"Tool {toolCall.ToolName} error: {ex.Message}")
             ToolingFileLogger.LogError($"Tool {toolCall.ToolName} execution error.", ex:=ex)
@@ -1632,6 +1659,226 @@ Partial Public Class ThisAddIn
             response.Success = False
             response.ErrorMessage = ex.Message
             ToolingFileLogger.LogError("Internal web tool error.", ex:=ex)
+        End Try
+
+        Return response
+    End Function
+
+    ''' <summary>
+    ''' Executes the internal internet search tool by querying the configured search engine,
+    ''' extracting result URLs via response masks, fetching qualifying page content, and returning
+    ''' tagged result blocks including the search query and all visited URLs for transparency.
+    ''' </summary>
+    ''' <param name="toolCall">Tool call payload containing <c>query</c> and optional <c>max_results</c>/<c>max_depth</c>.</param>
+    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
+    ''' <returns>Tool response containing search results or an error.</returns>
+    Private Async Function ExecuteInternalSearchTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName
+        }
+
+        Try
+            ' ── Validate search configuration ────────────────────────────
+            If Not INI_ISearch OrElse String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
+                response.Success = False
+                response.ErrorMessage = "Internet search is not configured or not enabled."
+                ToolingFileLogger.LogWarn("Internal search tool: search not enabled/configured.",
+                    details:=$"INI_ISearch={INI_ISearch}; INI_ISearch_URL='{INI_ISearch_URL}'")
+                Return response
+            End If
+
+            ' ── Extract and validate parameters ──────────────────────────
+            Dim query As String = ""
+            If toolCall.Arguments.ContainsKey("query") Then
+                query = If(toolCall.Arguments("query")?.ToString(), "").Trim()
+            End If
+
+            If String.IsNullOrWhiteSpace(query) Then
+                response.Success = False
+                response.ErrorMessage = "No search query provided."
+                ToolingFileLogger.LogWarn("Internal search tool: empty query.",
+                    details:=$"CallId={toolCall.CallId}; Args={JsonConvert.SerializeObject(toolCall.Arguments)}")
+                Return response
+            End If
+
+            ' ── PII / confidential data safety net ───────────────────────
+            ' Block queries that contain obvious personal data patterns.
+            ' This is a last-resort filter; the model is instructed not to include such data,
+            ' but defense-in-depth requires a code-level check before the query leaves the system.
+            Dim piiPatterns As String() = {
+                "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+                "\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
+                "\b\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}[-.\s]?\d{0,4}\b",
+                "\b\d{3}-\d{2}-\d{4}\b",
+                "\b\d{2}[\./]\d{2}[\./]\d{2,4}\b(?=.*\d{2}[\./]\d{2}[\./]\d{2,4})",
+                "\b[A-Z]{2}\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{0,2}\b",
+                "\b(?:4\d{3}|5[1-5]\d{2}|6011|3[47]\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
+                "\bAHV[\s-]?\d{3}[\.\s]?\d{4}[\.\s]?\d{4}[\.\s]?\d{2}\b"
+            }
+
+            For Each piiPattern In piiPatterns
+                If Regex.IsMatch(query, piiPattern, RegexOptions.IgnoreCase) Then
+                    response.Success = False
+                    response.ErrorMessage = "Search query blocked: appears to contain personal or confidential data."
+                    ToolingFileLogger.LogWarn("Internal search tool: query blocked by PII filter.",
+                        details:=$"CallId={toolCall.CallId}; Pattern='{piiPattern}'")
+                    context.Log("  ⚠ Search query blocked — contains data that appears personal or confidential.", "warn")
+                    Return response
+                End If
+            Next
+
+            ' Clamp max_results to server limit (INI_ISearch_Tries)
+            Dim maxResults As Integer = INI_ISearch_Results
+            If toolCall.Arguments.ContainsKey("max_results") Then
+                Dim requested As Integer
+                If Integer.TryParse(toolCall.Arguments("max_results")?.ToString(), requested) AndAlso requested > 0 Then
+                    maxResults = Math.Min(requested, INI_ISearch_Tries)
+                End If
+            End If
+
+            ' Clamp max_depth to server limit (INI_ISearch_MaxDepth)
+            Dim maxDepth As Integer = 0
+            If toolCall.Arguments.ContainsKey("max_depth") Then
+                Dim requested As Integer
+                If Integer.TryParse(toolCall.Arguments("max_depth")?.ToString(), requested) AndAlso requested >= 0 Then
+                    maxDepth = Math.Min(requested, INI_ISearch_MaxDepth)
+                End If
+            End If
+
+            context.Log($"Internet search: query='{query}', max_results={maxResults}, max_depth={maxDepth}")
+            ToolingFileLogger.LogStep($"Search query: '{query}'; max_results={maxResults}; max_depth={maxDepth}; engine={INI_ISearch_Name}")
+
+            ' ── Perform the HTTP search request ──────────────────────────
+            Dim searchUrl As String = INI_ISearch_URL & Uri.EscapeDataString(query)
+            context.Log($"  Search URL: {searchUrl}")
+
+            Dim searchResponse As String = ""
+            Using httpClient As New HttpClient()
+                httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+                httpClient.Timeout = TimeSpan.FromSeconds(30)
+
+                searchResponse = Await httpClient.GetStringAsync(searchUrl)
+            End Using
+
+            If String.IsNullOrWhiteSpace(searchResponse) Then
+                response.Success = False
+                response.ErrorMessage = "Search engine returned an empty response."
+                ToolingFileLogger.LogWarn("Internal search tool: empty search response.",
+                    details:=$"searchUrl={searchUrl}")
+                Return response
+            End If
+
+            ' ── Extract unique URLs using response masks ─────────────────
+            Dim urlPattern As String = Regex.Escape(INI_ISearch_ResponseMask1) & "(.*?)" & Regex.Escape(INI_ISearch_ResponseMask2)
+            Dim matches As MatchCollection = Regex.Matches(searchResponse, urlPattern)
+
+            Dim extractedUrls As New List(Of String)()
+            For Each m As Match In matches
+                Dim rawUrl As String = m.Groups(1).Value
+                Dim decodedUrl As String = WebUtility.UrlDecode(rawUrl.Replace(INI_ISearch_ResponseMask1, ""))
+
+                If Not extractedUrls.Contains(decodedUrl) AndAlso IsSafeWebUrl(decodedUrl) Then
+                    extractedUrls.Add(decodedUrl)
+                End If
+
+                If extractedUrls.Count >= INI_ISearch_Tries Then Exit For
+            Next
+
+            context.Log($"  Extracted {extractedUrls.Count} unique URL(s) from search results")
+            ToolingFileLogger.LogStep($"Extracted URLs: {extractedUrls.Count}")
+
+            If extractedUrls.Count = 0 Then
+                response.Success = False
+                response.ErrorMessage = "No result URLs could be extracted from the search engine response."
+                ToolingFileLogger.LogWarn("Internal search tool: no URLs extracted.",
+                    details:=$"searchUrl={searchUrl}; ResponseMask1='{INI_ISearch_ResponseMask1}'; ResponseMask2='{INI_ISearch_ResponseMask2}'")
+                Return response
+            End If
+
+            ' ── Fetch content from each result URL ───────────────────────
+            Dim results As New StringBuilder()
+            Dim visitedUrls As New List(Of String)()
+            Dim resultIndex As Integer = 0
+
+            ' Header: report the search query and engine
+            results.AppendLine($"<SEARCH_QUERY>{query}</SEARCH_QUERY>")
+            results.AppendLine($"<SEARCH_ENGINE>{If(INI_ISearch_Name, "Search")}</SEARCH_ENGINE>")
+            results.AppendLine()
+
+            For Each url In extractedUrls
+                If resultIndex >= maxResults Then Exit For
+
+                Try
+                    context.Log($"  Fetching result: {url}")
+                    visitedUrls.Add(url)
+
+                    Dim content As String = ""
+
+                    If UseWebView2 Then
+                        content = Await RetrieveWebsiteContent_WebView2(url, ISearch_MaxChars)
+                    Else
+                        Using httpClient As New HttpClient()
+                            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                            httpClient.Timeout = TimeSpan.FromSeconds(30)
+                            content = Await RetrieveWebsiteContent(url, maxDepth, httpClient)
+                        End Using
+                    End If
+
+                    ' Apply character cap (ISearch_MaxChars) for WebView2 results that exceed it
+                    If Not String.IsNullOrWhiteSpace(content) AndAlso ISearch_MaxChars > 0 AndAlso content.Length > ISearch_MaxChars Then
+                        content = content.Substring(0, ISearch_MaxChars)
+                    End If
+
+                    ' Discard noise (pages shorter than ISearch_MinChars)
+                    If Not String.IsNullOrWhiteSpace(content) AndAlso content.Length >= ISearch_MinChars Then
+                        resultIndex += 1
+                        results.AppendLine($"<SEARCHRESULT_{resultIndex}_URL>{url}</SEARCHRESULT_{resultIndex}_URL>")
+                        results.AppendLine($"<SEARCHRESULT_{resultIndex}>")
+                        results.AppendLine(content)
+                        results.AppendLine($"</SEARCHRESULT_{resultIndex}>")
+                        results.AppendLine()
+                        context.Log($"  Result #{resultIndex}: {content.Length} chars from {url}")
+                    Else
+                        Dim charCount = If(content Is Nothing, 0, content.Length)
+                        context.Log($"  Skipped (too short: {charCount} chars, min {ISearch_MinChars}): {url}")
+                        ToolingFileLogger.LogStep($"Search result skipped (too short: {charCount} < {ISearch_MinChars}): {url}")
+                    End If
+
+                Catch ex As Exception
+                    context.Log($"  Error fetching {url}: {ex.Message}")
+                    ToolingFileLogger.LogError("Internal search tool fetch error.", details:=$"url={url}", ex:=ex)
+                End Try
+            Next
+
+            ' Footer: report all visited URLs for transparency
+            results.AppendLine("<URLS_VISITED>")
+            For Each vUrl In visitedUrls
+                results.AppendLine($"  {vUrl}")
+            Next
+            results.AppendLine("</URLS_VISITED>")
+
+            context.Log($"Search complete: {resultIndex} qualifying result(s) from {visitedUrls.Count} URL(s) visited")
+
+            response.Response = results.ToString()
+            response.Success = True
+
+        Catch ex As HttpRequestException
+            response.Success = False
+            response.ErrorMessage = $"Search HTTP error: {ex.Message}"
+            ToolingFileLogger.LogError("Internal search tool HTTP error.", ex:=ex)
+
+        Catch ex As TaskCanceledException
+            response.Success = False
+            response.ErrorMessage = $"Search request timed out: {ex.Message}"
+            ToolingFileLogger.LogError("Internal search tool timeout.", ex:=ex)
+
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            ToolingFileLogger.LogError("Internal search tool error.", ex:=ex)
         End Try
 
         Return response
@@ -1918,7 +2165,9 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Returns all available tools by loading external tools from <c>INI_SpecialServicePath</c> and adding the internal web tool.
+    ''' Returns all available tools by loading external tools from <c>INI_SpecialServicePath</c>,
+    ''' adding the internal web tool, and conditionally adding the internal search tool
+    ''' (only when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured).
     ''' </summary>
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools() As List(Of ModelConfig)
@@ -1930,6 +2179,12 @@ Partial Public Class ThisAddIn
         End If
 
         tools.Add(GetInternalWebTool())
+
+        ' Add internet search tool only when search grounding is enabled and configured
+        If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
+            tools.Add(GetInternalSearchTool())
+        End If
+
         Return tools
     End Function
 
