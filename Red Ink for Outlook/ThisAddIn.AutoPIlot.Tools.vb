@@ -492,12 +492,20 @@ Partial Public Class ThisAddIn
                 "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
                 "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
                 "fall back to extract_pdf_text (which supports OCR) to obtain the text, and use create_word_document " &
-                "to produce a .docx from that text.",
+                "to produce a .docx from that text. " &
+                "ALTERNATIVE APPROACH — USER-REQUESTED OCR PIPELINE: If the user explicitly asks to OCR the PDF first, " &
+                "or asks to 'rasterize and OCR' the PDF before converting to Word, use this pipeline instead: " &
+                "(1) Call extract_pdf_text on the PDF — this will rasterize each page and run OCR via the LLM to extract text. " &
+                "(2) Call create_word_document with the OCR-extracted text to produce a .docx. " &
+                "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
+                "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
+                "clean text-based document. The standard Word-based conversion (this tool) remains the default.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
                 """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
                 "Use this as the PRIMARY method for PDF-to-Word conversion. Works well for text-based PDFs with layout preservation. " &
-                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document.""," &
+                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document. " &
+                "ALTERNATIVE: If the user explicitly requests OCR-based conversion, use extract_pdf_text (rasterize+OCR) followed by create_word_document instead.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
                 """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}" &
@@ -1528,9 +1536,11 @@ Partial Public Class ThisAddIn
 
                                                            ' Set speaker notes
                                                            If Not String.IsNullOrWhiteSpace(notes) Then
+                                                               Dim notesPage As Object = Nothing
+                                                               Dim notesShapes As Object = Nothing
                                                                Try
-                                                                   Dim notesPage As Object = sld.NotesPage
-                                                                   Dim notesShapes As Object = notesPage.Shapes
+                                                                   notesPage = sld.NotesPage
+                                                                   notesShapes = notesPage.Shapes
                                                                    Dim nCount As Integer = System.Convert.ToInt32(notesShapes.Count,
                                                                        Globalization.CultureInfo.InvariantCulture)
                                                                    ' Find the body placeholder in notes (type 2 = ppPlaceholderBody)
@@ -1551,6 +1561,15 @@ Partial Public Class ThisAddIn
                                                                        End Try
                                                                    Next
                                                                Catch
+                                                               Finally
+                                                                   If notesShapes IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(notesShapes)
+                                                                       Catch : End Try
+                                                                   End If
+                                                                   If notesPage IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(notesPage)
+                                                                       Catch : End Try
+                                                                   End If
                                                                End Try
                                                            End If
                                                        Finally
@@ -1752,68 +1771,109 @@ Partial Public Class ThisAddIn
                                                    ' ── Create worksheets ──
                                                    ' Excel starts with 1 sheet by default; add more as needed
                                                    While wb.Sheets.Count < sheetDefs.Count
-                                                       wb.Sheets.Add(After:=wb.Sheets(wb.Sheets.Count))
+                                                       Dim lastSheet As Object = wb.Sheets(wb.Sheets.Count)
+                                                       wb.Sheets.Add(After:=lastSheet)
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lastSheet) : Catch : End Try
                                                    End While
 
                                                    ' Remove extra default sheets
                                                    While wb.Sheets.Count > sheetDefs.Count
-                                                       CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet).Delete()
+                                                       Dim delSheet As Microsoft.Office.Interop.Excel.Worksheet =
+                                                           CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet)
+                                                       delSheet.Delete()
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(delSheet) : Catch : End Try
                                                    End While
 
                                                    For sheetIdx = 0 To sheetDefs.Count - 1
-                                                       Dim ws = CType(wb.Sheets(sheetIdx + 1), Microsoft.Office.Interop.Excel.Worksheet)
-                                                       Dim sheetDef = sheetDefs(sheetIdx)
-                                                       ws.Name = sheetDef.SheetName
+                                                       Dim ws As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+                                                       Try
+                                                           ws = CType(wb.Sheets(sheetIdx + 1), Microsoft.Office.Interop.Excel.Worksheet)
+                                                           Dim sheetDef = sheetDefs(sheetIdx)
+                                                           ws.Name = sheetDef.SheetName
 
-                                                       ' ── Apply cells ──
-                                                       ApplyExcelCells(ws, sheetDef.Cells)
+                                                           ' ── Apply cells ──
+                                                           ApplyExcelCells(ws, sheetDef.Cells)
 
-                                                       ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
-                                                       If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
-                                                           ApplyColumnWidths(ws, columnWidths)
-                                                       End If
+                                                           ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
+                                                           If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
+                                                               ApplyColumnWidths(ws, columnWidths)
+                                                           End If
 
-                                                       ' ── Row heights ──
-                                                       If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
-                                                           ApplyRowHeights(ws, rowHeights)
-                                                       End If
+                                                           ' ── Row heights ──
+                                                           If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
+                                                               ApplyRowHeights(ws, rowHeights)
+                                                           End If
 
-                                                       ' ── Merge ranges ──
-                                                       If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
-                                                           For Each mr In mergeRanges
-                                                               Try : ws.Range(mr).Merge() : Catch : End Try
-                                                           Next
-                                                       End If
+                                                           ' ── Merge ranges ──
+                                                           If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
+                                                               For Each mr In mergeRanges
+                                                                   Dim mrRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                                   Try
+                                                                       mrRange = ws.Range(mr)
+                                                                       mrRange.Merge()
+                                                                   Catch
+                                                                   Finally
+                                                                       If mrRange IsNot Nothing Then
+                                                                           Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(mrRange) : Catch : End Try
+                                                                       End If
+                                                                   End Try
+                                                               Next
+                                                           End If
 
-                                                       ' ── Freeze pane ──
-                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
-                                                           Try
-                                                               ws.Activate()
-                                                               ws.Range(freezePane).Select()
-                                                               excelApp.ActiveWindow.FreezePanes = True
-                                                           Catch
-                                                           End Try
-                                                       End If
+                                                           ' ── Freeze pane ──
+                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
+                                                               Dim fpRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                               Dim activeWin As Microsoft.Office.Interop.Excel.Window = Nothing
+                                                               Try
+                                                                   ws.Activate()
+                                                                   fpRange = ws.Range(freezePane)
+                                                                   fpRange.Select()
+                                                                   activeWin = excelApp.ActiveWindow
+                                                                   activeWin.FreezePanes = True
+                                                               Catch
+                                                               Finally
+                                                                   If activeWin IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(activeWin) : Catch : End Try
+                                                                   End If
+                                                                   If fpRange IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(fpRange) : Catch : End Try
+                                                                   End If
+                                                               End Try
+                                                           End If
 
-                                                       ' ── Auto-filter ──
-                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
-                                                           Try : ws.Range(autoFilter).AutoFilter() : Catch : End Try
-                                                       End If
+                                                           ' ── Auto-filter ──
+                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
+                                                               Dim afRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                               Try
+                                                                   afRange = ws.Range(autoFilter)
+                                                                   afRange.AutoFilter()
+                                                               Catch
+                                                               Finally
+                                                                   If afRange IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(afRange) : Catch : End Try
+                                                                   End If
+                                                               End Try
+                                                           End If
 
-                                                       ' ── Data validations ──
-                                                       If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
-                                                           ApplyDataValidations(ws, dataValidations)
-                                                       End If
+                                                           ' ── Data validations ──
+                                                           If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
+                                                               ApplyDataValidations(ws, dataValidations)
+                                                           End If
 
-                                                       ' ── Conditional formatting ──
-                                                       If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
-                                                           ApplyConditionalFormats(ws, conditionalFormats)
-                                                       End If
+                                                           ' ── Conditional formatting ──
+                                                           If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
+                                                               ApplyConditionalFormats(ws, conditionalFormats)
+                                                           End If
 
-                                                       ' ── Print setup ──
-                                                       If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
-                                                           ApplyPrintSetup(ws, printSetup)
-                                                       End If
+                                                           ' ── Print setup ──
+                                                           If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
+                                                               ApplyPrintSetup(ws, printSetup)
+                                                           End If
+                                                       Finally
+                                                           If ws IsNot Nothing Then
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(ws) : Catch : End Try
+                                                           End If
+                                                       End Try
                                                    Next
 
                                                    ' ── Charts (can target any sheet) ──
@@ -1976,102 +2036,108 @@ Partial Public Class ThisAddIn
                 Continue For
             End Try
 
-            ' ── Number format (apply before value so formatting takes effect) ──
-            Dim numFmt = cellObj.Value(Of String)("number_format")
-            If Not String.IsNullOrWhiteSpace(numFmt) Then
-                Try : cell.NumberFormat = numFmt : Catch : End Try
-            End If
+            Try
+                ' ── Number format (apply before value so formatting takes effect) ──
+                Dim numFmt = cellObj.Value(Of String)("number_format")
+                If Not String.IsNullOrWhiteSpace(numFmt) Then
+                    Try : cell.NumberFormat = numFmt : Catch : End Try
+                End If
 
-            ' ── Formula or value ──
-            Dim formula = cellObj.Value(Of String)("formula")
-            If Not String.IsNullOrWhiteSpace(formula) Then
-                Try
-                    cell.Formula2 = formula
-                Catch
-                    Try : cell.Formula = formula
-                    Catch ex2 As Exception
-                        Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                ' ── Formula or value ──
+                Dim formula = cellObj.Value(Of String)("formula")
+                If Not String.IsNullOrWhiteSpace(formula) Then
+                    Try
+                        cell.Formula2 = formula
+                    Catch
+                        Try : cell.Formula = formula
+                        Catch ex2 As Exception
+                            Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                        End Try
                     End Try
-                End Try
-            Else
-                Dim valToken = cellObj("value")
-                If valToken IsNot Nothing Then
-                    Dim valStr = valToken.ToString()
-                    Dim numVal As Double
-                    If Double.TryParse(valStr, Globalization.NumberStyles.Any,
-                                      Globalization.CultureInfo.InvariantCulture, numVal) Then
-                        cell.Value2 = numVal
-                    Else
-                        cell.Value2 = valStr
+                Else
+                    Dim valToken = cellObj("value")
+                    If valToken IsNot Nothing Then
+                        Dim valStr = valToken.ToString()
+                        Dim numVal As Double
+                        If Double.TryParse(valStr, Globalization.NumberStyles.Any,
+                                          Globalization.CultureInfo.InvariantCulture, numVal) Then
+                            cell.Value2 = numVal
+                        Else
+                            cell.Value2 = valStr
+                        End If
                     End If
                 End If
-            End If
 
-            ' ── Font styles ──
-            If GetJBool(cellObj, "bold") Then Try : cell.Font.Bold = True : Catch : End Try
-            If GetJBool(cellObj, "italic") Then Try : cell.Font.Italic = True : Catch : End Try
-            If GetJBool(cellObj, "underline") Then Try : cell.Font.Underline = Microsoft.Office.Interop.Excel.XlUnderlineStyle.xlUnderlineStyleSingle : Catch : End Try
-            If GetJBool(cellObj, "strikethrough") Then Try : cell.Font.Strikethrough = True : Catch : End Try
+                ' ── Font styles ──
+                If GetJBool(cellObj, "bold") Then Try : cell.Font.Bold = True : Catch : End Try
+                If GetJBool(cellObj, "italic") Then Try : cell.Font.Italic = True : Catch : End Try
+                If GetJBool(cellObj, "underline") Then Try : cell.Font.Underline = Microsoft.Office.Interop.Excel.XlUnderlineStyle.xlUnderlineStyleSingle : Catch : End Try
+                If GetJBool(cellObj, "strikethrough") Then Try : cell.Font.Strikethrough = True : Catch : End Try
 
-            Dim fontName = cellObj.Value(Of String)("font_name")
-            If Not String.IsNullOrWhiteSpace(fontName) Then Try : cell.Font.Name = fontName : Catch : End Try
+                Dim fontName = cellObj.Value(Of String)("font_name")
+                If Not String.IsNullOrWhiteSpace(fontName) Then Try : cell.Font.Name = fontName : Catch : End Try
 
-            Dim fontSizeToken = cellObj("font_size")
-            If fontSizeToken IsNot Nothing Then
-                Dim fs As Double
-                If Double.TryParse(fontSizeToken.ToString(), Globalization.NumberStyles.Any,
-                                  Globalization.CultureInfo.InvariantCulture, fs) AndAlso fs > 0 Then
-                    Try : cell.Font.Size = fs : Catch : End Try
+                Dim fontSizeToken = cellObj("font_size")
+                If fontSizeToken IsNot Nothing Then
+                    Dim fs As Double
+                    If Double.TryParse(fontSizeToken.ToString(), Globalization.NumberStyles.Any,
+                                      Globalization.CultureInfo.InvariantCulture, fs) AndAlso fs > 0 Then
+                        Try : cell.Font.Size = fs : Catch : End Try
+                    End If
                 End If
-            End If
 
-            ' ── Font color ──
-            Dim fontColor = ParseHexColor(cellObj.Value(Of String)("font_color"))
-            If fontColor.HasValue Then Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                ' ── Font color ──
+                Dim fontColor = ParseHexColor(cellObj.Value(Of String)("font_color"))
+                If fontColor.HasValue Then Try : cell.Font.Color = fontColor.Value : Catch : End Try
 
-            ' ── Background color ──
-            Dim bgColor = ParseHexColor(cellObj.Value(Of String)("bg_color"))
-            If bgColor.HasValue Then
-                Try
-                    cell.Interior.Color = bgColor.Value
-                    cell.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
-                Catch
-                End Try
-            End If
+                ' ── Background color ──
+                Dim bgColor = ParseHexColor(cellObj.Value(Of String)("bg_color"))
+                If bgColor.HasValue Then
+                    Try
+                        cell.Interior.Color = bgColor.Value
+                        cell.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
+                    Catch
+                    End Try
+                End If
 
-            ' ── Alignment ──
-            Dim hAlign = cellObj.Value(Of String)("h_align")
-            If Not String.IsNullOrWhiteSpace(hAlign) Then
-                Try
-                    Select Case hAlign.ToLowerInvariant()
-                        Case "left" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignLeft
-                        Case "center" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignCenter
-                        Case "right" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignRight
-                    End Select
-                Catch
-                End Try
-            End If
+                ' ── Alignment ──
+                Dim hAlign = cellObj.Value(Of String)("h_align")
+                If Not String.IsNullOrWhiteSpace(hAlign) Then
+                    Try
+                        Select Case hAlign.ToLowerInvariant()
+                            Case "left" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignLeft
+                            Case "center" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignCenter
+                            Case "right" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignRight
+                        End Select
+                    Catch
+                    End Try
+                End If
 
-            Dim vAlign = cellObj.Value(Of String)("v_align")
-            If Not String.IsNullOrWhiteSpace(vAlign) Then
-                Try
-                    Select Case vAlign.ToLowerInvariant()
-                        Case "top" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignTop
-                        Case "center" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignCenter
-                        Case "bottom" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignBottom
-                    End Select
-                Catch
-                End Try
-            End If
+                Dim vAlign = cellObj.Value(Of String)("v_align")
+                If Not String.IsNullOrWhiteSpace(vAlign) Then
+                    Try
+                        Select Case vAlign.ToLowerInvariant()
+                            Case "top" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignTop
+                            Case "center" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignCenter
+                            Case "bottom" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignBottom
+                        End Select
+                    Catch
+                    End Try
+                End If
 
-            If GetJBool(cellObj, "wrap_text") Then Try : cell.WrapText = True : Catch : End Try
+                If GetJBool(cellObj, "wrap_text") Then Try : cell.WrapText = True : Catch : End Try
 
-            ' ── Borders ──
-            Dim borderStyle = cellObj.Value(Of String)("border")
-            If Not String.IsNullOrWhiteSpace(borderStyle) Then
-                Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
-                ApplyBorderStyle(cell, borderStyle, borderColor)
-            End If
+                ' ── Borders ──
+                Dim borderStyle = cellObj.Value(Of String)("border")
+                If Not String.IsNullOrWhiteSpace(borderStyle) Then
+                    Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
+                    ApplyBorderStyle(cell, borderStyle, borderColor)
+                End If
+            Finally
+                If cell IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cell) : Catch : End Try
+                End If
+            End Try
         Next
     End Sub
 
@@ -2146,10 +2212,15 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyColumnWidths(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                           widths As Dictionary(Of String, Double))
         For Each kv In widths
+            Dim colRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
-                Dim colRange = ws.Columns(kv.Key & ":" & kv.Key)
+                colRange = ws.Columns(kv.Key & ":" & kv.Key)
                 colRange.ColumnWidth = kv.Value
             Catch
+            Finally
+                If colRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(colRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2160,9 +2231,15 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyRowHeights(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                         heights As Dictionary(Of Integer, Double))
         For Each kv In heights
+            Dim rowRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
-                ws.Rows(kv.Key).RowHeight = kv.Value
+                rowRange = ws.Rows(kv.Key)
+                rowRange.RowHeight = kv.Value
             Catch
+            Finally
+                If rowRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(rowRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2173,11 +2250,12 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyDataValidations(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                               validations As List(Of JObject))
         For Each dvObj In validations
+            Dim dvRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim rangeName = dvObj.Value(Of String)("range")
                 If String.IsNullOrWhiteSpace(rangeName) Then Continue For
 
-                Dim dvRange = ws.Range(rangeName)
+                dvRange = ws.Range(rangeName)
                 dvRange.Validation.Delete() ' Clear existing validation
 
                 Dim dvType = If(dvObj.Value(Of String)("type"), "list").ToLowerInvariant()
@@ -2211,13 +2289,8 @@ Partial Public Class ThisAddIn
                 End Select
 
                 If dvType = "list" Then
-                    ' For list validation, formula1 is the comma-separated list.
-                    ' LLMs sometimes wrap individual items in quotes (e.g., "Yes","No","Maybe")
-                    ' which causes the first dropdown item to start with " and the last to end with ".
-                    ' Strip any such quoting to get clean values for Excel.
                     Dim cleanedFormula1 = formula1
                     If Not String.IsNullOrWhiteSpace(cleanedFormula1) Then
-                        ' Remove quotes wrapping individual items: "Yes","No" → Yes,No
                         Dim parts = cleanedFormula1.Split(","c)
                         For i = 0 To parts.Length - 1
                             parts(i) = parts(i).Trim().Trim(""""c).Trim("'"c)
@@ -2262,6 +2335,10 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Data validation error: {ex.Message}")
+            Finally
+                If dvRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(dvRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2272,11 +2349,12 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyConditionalFormats(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                                 formats As List(Of JObject))
         For Each cfObj In formats
+            Dim cfRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim rangeName = cfObj.Value(Of String)("range")
                 If String.IsNullOrWhiteSpace(rangeName) Then Continue For
 
-                Dim cfRange = ws.Range(rangeName)
+                cfRange = ws.Range(rangeName)
                 Dim cfType = If(cfObj.Value(Of String)("type"), "cell_value").ToLowerInvariant()
                 Dim operatorStr = If(cfObj.Value(Of String)("operator"), "greater_than").ToLowerInvariant()
                 Dim formula1 = cfObj.Value(Of String)("formula1")
@@ -2322,7 +2400,6 @@ Partial Public Class ThisAddIn
                         fc = CType(cfRange.FormatConditions.AddUniqueValues(),
                             Microsoft.Office.Interop.Excel.UniqueValues)
                         CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).DupeUnique = Microsoft.Office.Interop.Excel.XlDupeUnique.xlDuplicate
-                        ' UniqueValues doesn't have the same format interface; apply formatting directly
                         Dim fmtBgColor = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
                         If fmtBgColor.HasValue Then
                             Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Interior.Color = fmtBgColor.Value : Catch : End Try
@@ -2331,7 +2408,7 @@ Partial Public Class ThisAddIn
                         If fmtFontColor.HasValue Then
                             Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Font.Color = fmtFontColor.Value : Catch : End Try
                         End If
-                        Continue For ' Skip standard formatting below
+                        Continue For
 
                     Case "unique"
                         fc = CType(cfRange.FormatConditions.AddUniqueValues(),
@@ -2344,7 +2421,7 @@ Partial Public Class ThisAddIn
                         Continue For
 
                     Case "color_scale"
-                        cfRange.FormatConditions.AddColorScale(ColorScaleType:=3) ' 3-color scale
+                        cfRange.FormatConditions.AddColorScale(ColorScaleType:=3)
                         Continue For
 
                     Case "data_bar"
@@ -2392,6 +2469,10 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Conditional format error: {ex.Message}")
+            Finally
+                If cfRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cfRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2403,6 +2484,12 @@ Partial Public Class ThisAddIn
                                     charts As List(Of JObject),
                                     sheetDefs As List(Of (SheetName As String, Cells As JArray)))
         For Each chartObj In charts
+            Dim targetWs As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+            Dim posCell As Microsoft.Office.Interop.Excel.Range = Nothing
+            Dim chartObjects As Microsoft.Office.Interop.Excel.ChartObjects = Nothing
+            Dim chartObject As Microsoft.Office.Interop.Excel.ChartObject = Nothing
+            Dim chart As Microsoft.Office.Interop.Excel.Chart = Nothing
+            Dim dataRangeObj As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim chartType = If(chartObj.Value(Of String)("type"), "column").ToLowerInvariant()
                 Dim dataRange = chartObj.Value(Of String)("data_range")
@@ -2413,7 +2500,6 @@ Partial Public Class ThisAddIn
                 If String.IsNullOrWhiteSpace(dataRange) Then Continue For
 
                 ' Determine target worksheet
-                Dim targetWs As Microsoft.Office.Interop.Excel.Worksheet
                 If Not String.IsNullOrWhiteSpace(chartSheetName) Then
                     Try
                         targetWs = CType(wb.Sheets(chartSheetName), Microsoft.Office.Interop.Excel.Worksheet)
@@ -2433,7 +2519,7 @@ Partial Public Class ThisAddIn
                 If hToken IsNot Nothing Then Double.TryParse(hToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartHeight)
 
                 ' Get position from cell
-                Dim posCell = targetWs.Range(position)
+                posCell = targetWs.Range(position)
                 Dim posLeft As Double = CDbl(posCell.Left)
                 Dim posTop As Double = CDbl(posCell.Top)
 
@@ -2451,11 +2537,12 @@ Partial Public Class ThisAddIn
                 End Select
 
                 ' Add chart as embedded ChartObject
-                Dim chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
-                Dim chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
-                Dim chart = chartObject.Chart
+                chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
+                chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
+                chart = chartObject.Chart
 
-                chart.SetSourceData(targetWs.Range(dataRange))
+                dataRangeObj = targetWs.Range(dataRange)
+                chart.SetSourceData(dataRangeObj)
                 chart.ChartType = xlChartType
 
                 If Not String.IsNullOrWhiteSpace(chartTitle) Then
@@ -2465,6 +2552,25 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Chart creation error: {ex.Message}")
+            Finally
+                If dataRangeObj IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(dataRangeObj) : Catch : End Try
+                End If
+                If chart IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chart) : Catch : End Try
+                End If
+                If chartObject IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartObject) : Catch : End Try
+                End If
+                If chartObjects IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartObjects) : Catch : End Try
+                End If
+                If posCell IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(posCell) : Catch : End Try
+                End If
+                If targetWs IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(targetWs) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2613,12 +2719,17 @@ Partial Public Class ThisAddIn
                                                    Debug.WriteLine($"CreateWordDoc error: {ex.Message}")
                                                    Return False
                                                Finally
-                                                   Try : If doc IsNot Nothing Then doc.Close(False)
-                                                   Catch : End Try
+                                                   If doc IsNot Nothing Then
+                                                       Try : doc.Close(False) : Catch : End Try
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                   End If
                                                    Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
                                                    Catch : End Try
                                                    If weCreated AndAlso wordApp IsNot Nothing Then
                                                        Try : wordApp.Quit(False) : Catch : End Try
+                                                   End If
+                                                   If wordApp IsNot Nothing Then
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                    End If
                                                End Try
                                            End Function)
@@ -2856,10 +2967,15 @@ Partial Public Class ThisAddIn
                                                            End If
                                                            Return sb.ToString()
                                                        Finally
-                                                           Try : If doc IsNot Nothing Then doc.Close(False)
-                                                           Catch : End Try
-                                                           If weCreated AndAlso wordApp IsNot Nothing Then
-                                                               Try : wordApp.Quit(False) : Catch : End Try
+                                                           If doc IsNot Nothing Then
+                                                               Try : doc.Close(False) : Catch : End Try
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                           End If
+                                                           If wordApp IsNot Nothing Then
+                                                               If weCreated Then
+                                                                   Try : wordApp.Quit(False) : Catch : End Try
+                                                               End If
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                            End If
                                                        End Try
                                                    End Function)
@@ -3060,10 +3176,13 @@ Partial Public Class ThisAddIn
 
             compareDoc.SaveAs2(comparePath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
             compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             compareDoc = Nothing
             processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(processedDoc) : Catch : End Try
             processedDoc = Nothing
             originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             originalDoc = Nothing
             wordApp.ScreenUpdating = wasScreenUpdating
             Return True
@@ -3072,14 +3191,27 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"CreateWordCompareDocumentForAutoPilot error: {ex.Message}")
             Return False
         Finally
-            If compareDoc IsNot Nothing Then Try : compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If processedDoc IsNot Nothing Then Try : processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If originalDoc IsNot Nothing Then Try : originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If wordApp IsNot Nothing Then Try : wordApp.ScreenUpdating = True : Catch : End Try
-            If weCreatedWordApp AndAlso wordApp IsNot Nothing Then Try : wordApp.Quit(False) : Catch : End Try
+            If compareDoc IsNot Nothing Then
+                Try : compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
+            End If
+            If processedDoc IsNot Nothing Then
+                Try : processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(processedDoc) : Catch : End Try
+            End If
+            If originalDoc IsNot Nothing Then
+                Try : originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
+            End If
+            If wordApp IsNot Nothing Then
+                Try : wordApp.ScreenUpdating = True : Catch : End Try
+                If weCreatedWordApp Then
+                    Try : wordApp.Quit(False) : Catch : End Try
+                End If
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
+            End If
         End Try
     End Function
-
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: extract_pdf_text
@@ -4138,49 +4270,113 @@ Partial Public Class ThisAddIn
             ' Ensure font resolver is configured before any XFont usage
             EnsureApPdfSharpFontResolver()
 
-            ' Write to a temp file first, then move to final path to avoid lock conflicts
-            Dim tempOutputPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+            Dim inputSize As Long = New FileInfo(att.TempFilePath).Length
+            Dim rasterizeWarning As String = Nothing
 
-            Try
-                ' Copy source to temp output
-                File.Copy(att.TempFilePath, tempOutputPath, True)
-                Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempOutputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
-                    Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
-                    Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
-                        PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
+            ' Check for encryption — encrypted PDFs may silently produce invisible overlays
+            Dim isEncrypted = APOverlayIsPdfEncrypted(att.TempFilePath)
 
-                    For Each page In doc.Pages
-                        Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+            Dim directSuccess As Boolean = False
+
+            If Not isEncrypted Then
+                ' Try direct PdfSharp overlay first
+                Dim tempOutputPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+                Try
+                    File.Copy(att.TempFilePath, tempOutputPath, True)
+                    Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempOutputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                        Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
+                        Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
+                            PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
+
+                        For Each page In doc.Pages
+                            Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                                Dim state = gfx.Save()
+                                gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
+                                gfx.RotateTransform(-45)
+                                Dim size = gfx.MeasureString(watermarkText, wmFont)
+                                gfx.DrawString(watermarkText, wmFont, wmBrush,
+                                               New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
+                                               PdfSharp.Drawing.XStringFormats.Center)
+                                gfx.Restore(state)
+                            End Using
+                        Next
+                        doc.Save(tempOutputPath)
+                    End Using
+
+                    ' Verify output grew (watermark adds data)
+                    Dim outputSize = New FileInfo(tempOutputPath).Length
+                    If outputSize > inputSize Then
+                        If File.Exists(outputPath) Then File.Delete(outputPath)
+                        File.Move(tempOutputPath, outputPath)
+                        directSuccess = True
+                    End If
+                Catch
+                    directSuccess = False
+                Finally
+                    Try : If File.Exists(tempOutputPath) Then File.Delete(tempOutputPath)
+                    Catch : End Try
+                End Try
+
+                ' Verify page count matches if direct succeeded
+                If directSuccess Then
+                    Dim pageWarning = APOverlayVerifyPageCount(att.TempFilePath, outputPath)
+                    If pageWarning IsNot Nothing Then
+                        ' Page count mismatch — discard and fall back to rasterize
+                        Try : If File.Exists(outputPath) Then File.Delete(outputPath)
+                        Catch : End Try
+                        directSuccess = False
+                    End If
+                End If
+            End If
+
+            ' Fallback: rasterize all pages, then apply watermark on clean rasterized pages
+            If Not directSuccess Then
+                context.Log($"Direct watermark failed or PDF is encrypted — falling back to rasterize for: {fileName}")
+                ApDashboardLog($"⚠ Rasterize fallback for watermark: {fileName}", "warn")
+
+                Try
+                    APOverlayViaRasterize(att.TempFilePath, outputPath,
+                        Sub(gfx As PdfSharp.Drawing.XGraphics, pageW As Double, pageH As Double, pageIdx As Integer)
+                            Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
+                            Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
+                                PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
                             Dim state = gfx.Save()
-
-                            ' Move origin to center of page
-                            gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
+                            gfx.TranslateTransform(pageW / 2, pageH / 2)
                             gfx.RotateTransform(-45)
-
-                            ' Measure and draw the watermark text centered
                             Dim size = gfx.MeasureString(watermarkText, wmFont)
                             gfx.DrawString(watermarkText, wmFont, wmBrush,
                                            New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
                                            PdfSharp.Drawing.XStringFormats.Center)
-
                             gfx.Restore(state)
-                        End Using
-                    Next
-                    doc.Save(tempOutputPath)
-                End Using
+                        End Sub)
 
-                ' All handles released — safe to move
-                If File.Exists(outputPath) Then File.Delete(outputPath)
-                File.Move(tempOutputPath, outputPath)
-            Finally
-                ' Clean up temp file on any failure
-                Try : If File.Exists(tempOutputPath) Then File.Delete(tempOutputPath)
-                Catch : End Try
-            End Try
+                    rasterizeWarning = If(isEncrypted,
+                        "PDF is encrypted or restricted — was rasterized to ensure watermark visibility (text no longer selectable).",
+                        "PDF could not be watermarked directly — was rasterized instead (text no longer selectable).")
+                Catch rasterEx As Exception
+                    Dim msg = rasterEx.Message
+                    If String.IsNullOrWhiteSpace(msg) OrElse
+                       msg.Equals("No error", StringComparison.OrdinalIgnoreCase) OrElse
+                       msg.Equals("No error.", StringComparison.OrdinalIgnoreCase) Then
+                        msg = "PDF appears to be encrypted or corrupt and could not be processed"
+                    End If
+                    response.Success = False
+                    response.ErrorMessage = msg
+                    response.Response = $"Error adding watermark: {msg}"
+                    Return response
+                End Try
+            End If
+
+            ' Validate output
+            APOverlayValidateOutput(att.TempFilePath, outputPath)
 
             att.OutputFiles.Add(outputPath)
             response.Success = True
-            response.Response = $"Watermark '{watermarkText}' added to {outputName}."
+            Dim resultMsg = $"Watermark '{watermarkText}' added to {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB)."
+            If Not String.IsNullOrWhiteSpace(rasterizeWarning) Then
+                resultMsg &= $" Note: {rasterizeWarning}"
+            End If
+            response.Response = resultMsg
             ApDashboardLog($"✓ Watermark added: {outputName}", "info")
 
         Catch ex As Exception
@@ -4191,6 +4387,7 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: word_to_pdf
@@ -4247,12 +4444,17 @@ Partial Public Class ThisAddIn
                                                    Debug.WriteLine($"WordToPdf error: {ex.Message}")
                                                    Return False
                                                Finally
-                                                   Try : If doc IsNot Nothing Then doc.Close(False)
-                                                   Catch : End Try
+                                                   If doc IsNot Nothing Then
+                                                       Try : doc.Close(False) : Catch : End Try
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                   End If
                                                    Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
                                                    Catch : End Try
                                                    If weCreated AndAlso wordApp IsNot Nothing Then
                                                        Try : wordApp.Quit(False) : Catch : End Try
+                                                   End If
+                                                   If wordApp IsNot Nothing Then
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                    End If
                                                End Try
                                            End Function)
@@ -4324,6 +4526,7 @@ Partial Public Class ThisAddIn
                                         Dim prevAutoSec As Microsoft.Office.Core.MsoAutomationSecurity =
                                             Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityByUI
                                         Dim prevFileConverters As Object = Nothing
+                                        Dim prevScreenUpdating As Boolean = True
                                         Try
                                             Try
                                                 wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
@@ -4336,6 +4539,7 @@ Partial Public Class ThisAddIn
                                             ' Capture current state BEFORE modifying
                                             prevAlerts = wordApp.DisplayAlerts
                                             prevAutoSec = wordApp.AutomationSecurity
+                                            Try : prevScreenUpdating = wordApp.ScreenUpdating : Catch : End Try
 
                                             ' Suppress all alerts and macro execution
                                             wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
@@ -4368,12 +4572,19 @@ Partial Public Class ThisAddIn
                                             Debug.WriteLine($"PdfToWord error: {ex.Message}")
                                             Return False
                                         Finally
-                                            Try : If doc IsNot Nothing Then doc.Close(False)
+                                            ' Close the document and release its COM reference
+                                            Try
+                                                If doc IsNot Nothing Then
+                                                    Try : doc.Close(False) : Catch : End Try
+                                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                    doc = Nothing
+                                                End If
                                             Catch : End Try
+                                            ' Restore Word application state
                                             Try
                                                 If wordApp IsNot Nothing Then
                                                     wordApp.DisplayAlerts = prevAlerts
-                                                    wordApp.ScreenUpdating = True
+                                                    wordApp.ScreenUpdating = prevScreenUpdating
                                                     wordApp.AutomationSecurity = prevAutoSec
                                                     Try
                                                         If prevFileConverters IsNot Nothing Then
@@ -4383,8 +4594,13 @@ Partial Public Class ThisAddIn
                                                     End Try
                                                 End If
                                             Catch : End Try
+                                            ' Quit only if we created this instance, then release COM reference
                                             If weCreated AndAlso wordApp IsNot Nothing Then
                                                 Try : wordApp.Quit(False) : Catch : End Try
+                                            End If
+                                            If wordApp IsNot Nothing Then
+                                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
+                                                wordApp = Nothing
                                             End If
                                         End Try
                                     End Function)
@@ -5418,186 +5634,107 @@ Partial Public Class ThisAddIn
                 End If
             Next
 
-            ' Work on a temp copy to avoid source file lock issues
-            Dim tempWorkPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+            Dim inputSize As Long = New FileInfo(att.TempFilePath).Length
+            Dim rasterizeWarning As String = Nothing
             Dim textCount = 0
             Dim imageCount = 0
 
-            Try
-                File.Copy(att.TempFilePath, tempWorkPath, True)
+            ' Check for encryption — encrypted PDFs may silently produce invisible overlays
+            Dim isEncrypted = APOverlayIsPdfEncrypted(att.TempFilePath)
 
-                Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempWorkPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
-                    Dim totalPages = doc.PageCount
+            Dim directSuccess As Boolean = False
 
-                    For Each elemObj As JObject In elementsArray
-                        Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
-                        Dim pagesSpec = If(elemObj.Value(Of String)("pages"), "all").Trim().ToLowerInvariant()
-                        Dim x As Double = GetJDouble(elemObj, "x", 0)
-                        Dim y As Double = GetJDouble(elemObj, "y", 0)
-                        Dim rotation As Double = GetJDouble(elemObj, "rotation", 0)
-                        Dim opacity As Double = GetJDouble(elemObj, "opacity", 1.0)
+            If Not isEncrypted Then
+                ' ── Try direct PdfSharp overlay first ──
+                Dim tempWorkPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+                Dim directTextCount = 0
+                Dim directImageCount = 0
 
-                        ' Resolve target page indices (0-based)
-                        Dim pageIndices = ResolvePageIndices(pagesSpec, totalPages)
-                        If pageIndices.Count = 0 Then Continue For
+                Try
+                    File.Copy(att.TempFilePath, tempWorkPath, True)
 
-                        For Each pageIdx In pageIndices
-                            If pageIdx < 0 OrElse pageIdx >= totalPages Then Continue For
-                            Dim page = doc.Pages(pageIdx)
+                    Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempWorkPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                        Dim totalPages = doc.PageCount
 
-                            Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
-                                If elemType = "text" Then
-                                    ' ── TEXT ELEMENT ──
-                                    Dim text = If(elemObj.Value(Of String)("text"), "")
-                                    If String.IsNullOrEmpty(text) Then Continue For
+                        APOverlayDrawElements(doc, totalPages, elementsArray, imageCache, context,
+                                              directTextCount, directImageCount)
 
-                                    ' Handle \n escape sequences for multi-line text
-                                    text = text.Replace("\\n", vbLf).Replace("\n", vbLf)
+                        doc.Save(tempWorkPath)
+                    End Using
 
-                                    Dim fontFamily = If(elemObj.Value(Of String)("font_family"), "Arial")
-                                    Dim fontSize As Double = GetJDouble(elemObj, "font_size", 12)
-                                    Dim isBold = GetJBool(elemObj, "bold")
-                                    Dim isItalic = GetJBool(elemObj, "italic")
-                                    Dim hAlign = If(elemObj.Value(Of String)("h_align"), "left").ToLowerInvariant()
-                                    Dim maxWidth As Double = GetJDouble(elemObj, "max_width", 0)
-                                    Dim fontColorHex = If(elemObj.Value(Of String)("font_color"), "#000000")
+                    ' Verify output grew (overlay adds image/text data)
+                    Dim outputSize = New FileInfo(tempWorkPath).Length
+                    If outputSize > inputSize Then
+                        If File.Exists(outputPath) Then File.Delete(outputPath)
+                        File.Move(tempWorkPath, outputPath)
+                        directSuccess = True
+                        textCount = directTextCount
+                        imageCount = directImageCount
+                    End If
+                Catch
+                    directSuccess = False
+                Finally
+                    Try : If File.Exists(tempWorkPath) Then File.Delete(tempWorkPath)
+                    Catch : End Try
+                End Try
 
-                                    ' Build font style
-                                    Dim fontStyle As PdfSharp.Drawing.XFontStyleEx = PdfSharp.Drawing.XFontStyleEx.Regular
-                                    If isBold AndAlso isItalic Then
-                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.BoldItalic
-                                    ElseIf isBold Then
-                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.Bold
-                                    ElseIf isItalic Then
-                                        fontStyle = PdfSharp.Drawing.XFontStyleEx.Italic
-                                    End If
+                ' Verify page count matches if direct succeeded
+                If directSuccess Then
+                    Dim pageWarning = APOverlayVerifyPageCount(att.TempFilePath, outputPath)
+                    If pageWarning IsNot Nothing Then
+                        ' Page count mismatch — discard and fall back to rasterize
+                        Try : If File.Exists(outputPath) Then File.Delete(outputPath)
+                        Catch : End Try
+                        directSuccess = False
+                    End If
+                End If
+            End If
 
-                                    Dim font = New PdfSharp.Drawing.XFont(fontFamily, fontSize, fontStyle)
+            ' ── Fallback: rasterize affected pages, then re-apply overlay ──
+            If Not directSuccess Then
+                context.Log($"Direct overlay failed or PDF is encrypted — falling back to rasterize for: {fileName}")
+                ApDashboardLog($"⚠ Rasterize fallback for overlay: {fileName}", "warn")
 
-                                    ' Parse color
-                                    Dim brush As PdfSharp.Drawing.XBrush = PdfSharp.Drawing.XBrushes.Black
-                                    Try
-                                        Dim colorHex = fontColorHex.TrimStart("#"c)
-                                        If colorHex.Length = 6 Then
-                                            Dim r = System.Convert.ToInt32(colorHex.Substring(0, 2), 16)
-                                            Dim g = System.Convert.ToInt32(colorHex.Substring(2, 2), 16)
-                                            Dim b = System.Convert.ToInt32(colorHex.Substring(4, 2), 16)
-                                            Dim alphaInt = CInt(Math.Round(Math.Max(0, Math.Min(1, opacity)) * 255))
-                                            brush = New PdfSharp.Drawing.XSolidBrush(
-                                                PdfSharp.Drawing.XColor.FromArgb(alphaInt, r, g, b))
-                                        End If
-                                    Catch
-                                    End Try
+                textCount = 0
+                imageCount = 0
 
-                                    ' Determine string format for alignment
-                                    Dim xFormat As New PdfSharp.Drawing.XStringFormat()
-                                    xFormat.LineAlignment = PdfSharp.Drawing.XLineAlignment.Near
-                                    Select Case hAlign
-                                        Case "center" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Center
-                                        Case "right" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Far
-                                        Case Else : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Near
-                                    End Select
+                Try
+                    ' Build a lookup: which page indices need overlay elements?
+                    ' We rasterize ALL pages (to handle encrypted PDFs where even non-overlaid
+                    ' pages can't be copied via PdfSharp Import mode), then draw elements on
+                    ' the appropriate pages.
+                    APOverlayViaRasterizeWithElements(att.TempFilePath, outputPath, elementsArray,
+                                                      imageCache, context, textCount, imageCount)
 
-                                    ' Apply rotation if specified
-                                    Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
-                                    If rotation <> 0 Then
-                                        state = gfx.Save()
-                                        gfx.TranslateTransform(x, y)
-                                        gfx.RotateTransform(rotation)
-                                        gfx.TranslateTransform(-x, -y)
-                                    End If
+                    rasterizeWarning = If(isEncrypted,
+                        "PDF is encrypted or restricted — was rasterized to ensure overlay visibility (text no longer selectable).",
+                        "PDF could not be overlaid directly — was rasterized instead (text no longer selectable).")
+                Catch rasterEx As Exception
+                    Dim msg = rasterEx.Message
+                    If String.IsNullOrWhiteSpace(msg) OrElse
+                       msg.Equals("No error", StringComparison.OrdinalIgnoreCase) OrElse
+                       msg.Equals("No error.", StringComparison.OrdinalIgnoreCase) Then
+                        msg = "PDF appears to be encrypted or corrupt and could not be processed"
+                    End If
+                    response.Success = False
+                    response.ErrorMessage = msg
+                    response.Response = $"Error overlaying PDF: {msg}"
+                    Return response
+                End Try
+            End If
 
-                                    ' Handle multi-line text
-                                    Dim lines = text.Split({vbLf}, StringSplitOptions.None)
-                                    Dim lineHeight = fontSize * 1.25
-                                    Dim currentY = y
-
-                                    For Each line In lines
-                                        If maxWidth > 0 Then
-                                            Dim rect As New PdfSharp.Drawing.XRect(x, currentY, maxWidth, lineHeight)
-                                            gfx.DrawString(line, font, brush, rect, xFormat)
-                                        Else
-                                            Dim drawPoint As New PdfSharp.Drawing.XPoint(x, currentY)
-                                            gfx.DrawString(line, font, brush, drawPoint, xFormat)
-                                        End If
-                                        currentY += lineHeight
-                                    Next
-
-                                    If state IsNot Nothing Then gfx.Restore(state)
-                                    textCount += 1
-
-                                ElseIf elemType = "image" Then
-                                    ' ── IMAGE ELEMENT ──
-                                    Dim imgName = elemObj.Value(Of String)("image_attachment_name")
-                                    If String.IsNullOrWhiteSpace(imgName) Then Continue For
-
-                                    Dim imgPath As String = Nothing
-                                    If Not imageCache.TryGetValue(imgName, imgPath) OrElse
-                                       String.IsNullOrEmpty(imgPath) OrElse Not File.Exists(imgPath) Then
-                                        context.Log($"Image attachment not found: {imgName}")
-                                        Continue For
-                                    End If
-
-                                    Dim imgWidth As Double = GetJDouble(elemObj, "width", 0)
-                                    Dim imgHeight As Double = GetJDouble(elemObj, "height", 0)
-
-                                    ' Load image via stream to support all formats
-                                    Using imgStream As New FileStream(imgPath, FileMode.Open, FileAccess.Read, FileShare.Read)
-                                        Using xImg = PdfSharp.Drawing.XImage.FromStream(imgStream)
-                                            ' Default to native size if not specified
-                                            If imgWidth <= 0 AndAlso imgHeight <= 0 Then
-                                                imgWidth = xImg.PointWidth
-                                                imgHeight = xImg.PointHeight
-                                            ElseIf imgWidth > 0 AndAlso imgHeight <= 0 Then
-                                                ' Scale proportionally
-                                                imgHeight = xImg.PointHeight * (imgWidth / xImg.PointWidth)
-                                            ElseIf imgHeight > 0 AndAlso imgWidth <= 0 Then
-                                                imgWidth = xImg.PointWidth * (imgHeight / xImg.PointHeight)
-                                            End If
-
-                                            ' Apply rotation if specified
-                                            Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
-                                            If rotation <> 0 Then
-                                                state = gfx.Save()
-                                                Dim cx = x + imgWidth / 2
-                                                Dim cy = y + imgHeight / 2
-                                                gfx.TranslateTransform(cx, cy)
-                                                gfx.RotateTransform(rotation)
-                                                gfx.TranslateTransform(-cx, -cy)
-                                            End If
-
-                                            ' Apply opacity for images by drawing on a separate layer
-                                            ' PdfSharp does not directly support image opacity, but we can
-                                            ' use a workaround with XGraphics state if needed.
-                                            ' For now, draw directly (opacity < 1 is best-effort).
-                                            gfx.DrawImage(xImg, x, y, imgWidth, imgHeight)
-
-                                            If state IsNot Nothing Then gfx.Restore(state)
-                                            imageCount += 1
-                                        End Using
-                                    End Using
-                                End If
-                            End Using
-                        Next
-                    Next
-
-                    doc.Save(tempWorkPath)
-                End Using
-
-                ' Move temp to final
-                If File.Exists(outputPath) Then File.Delete(outputPath)
-                File.Move(tempWorkPath, outputPath)
-
-            Finally
-                Try : If File.Exists(tempWorkPath) Then File.Delete(tempWorkPath)
-                Catch : End Try
-            End Try
+            ' Validate output
+            APOverlayValidateOutput(att.TempFilePath, outputPath)
 
             If File.Exists(outputPath) Then
                 att.OutputFiles.Add(outputPath)
                 response.Success = True
-                response.Response = $"PDF overlay complete: {textCount} text element(s) and {imageCount} image element(s) placed. " &
+                Dim resultMsg = $"PDF overlay complete: {textCount} text element(s) and {imageCount} image element(s) placed. " &
                     $"Output: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                If Not String.IsNullOrWhiteSpace(rasterizeWarning) Then
+                    resultMsg &= $" Note: {rasterizeWarning}"
+                End If
+                response.Response = resultMsg
                 ApDashboardLog($"✓ PDF overlay: {outputName} ({textCount} text, {imageCount} image)", "info")
             Else
                 response.Success = False
@@ -5678,6 +5815,619 @@ Partial Public Class ThisAddIn
         End If
         Return defaultVal
     End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  PDF OVERLAY/WATERMARK HARDENING HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Checks whether a PDF file is encrypted by inspecting PdfSharp's SecurityHandler
+    ''' and falling back to a chunked byte-level scan for the /Encrypt marker.
+    ''' Mirrors ExhibitStampService.IsPdfEncrypted from the Word add-in.
+    ''' </summary>
+    Private Shared Function APOverlayIsPdfEncrypted(pdfPath As String) As Boolean
+        ' Method 1: Try PdfSharp — check SecurityHandler
+        Try
+            Using doc As PdfSharp.Pdf.PdfDocument =
+                    PdfSharp.Pdf.IO.PdfReader.Open(pdfPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                If doc.SecurityHandler IsNot Nothing Then
+                    Return True
+                End If
+            End Using
+        Catch
+            ' PdfSharp couldn't open it at all — likely encrypted with a user password.
+            ' Fall through to byte-level scan.
+        End Try
+
+        ' Method 2: Byte-level scan for /Encrypt marker (chunked for large files)
+        Try
+            Const chunkSize As Integer = 65536
+            Dim overlap As Integer = 7 ' Length of "/Encrypt" minus 1
+
+            Using fs As New FileStream(pdfPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                Dim buffer(chunkSize + overlap - 1) As Byte
+                Dim carryOver As Integer = 0
+
+                While True
+                    Dim bytesRead As Integer = fs.Read(buffer, carryOver, chunkSize)
+                    If bytesRead = 0 Then Exit While
+
+                    Dim totalInBuffer As Integer = carryOver + bytesRead
+                    Dim text As String = System.Text.Encoding.ASCII.GetString(buffer, 0, totalInBuffer)
+                    If text.IndexOf("/Encrypt", StringComparison.Ordinal) >= 0 Then
+                        Return True
+                    End If
+
+                    ' Keep the last few bytes for overlap into next chunk
+                    If totalInBuffer > overlap Then
+                        Array.Copy(buffer, totalInBuffer - overlap, buffer, 0, overlap)
+                        carryOver = overlap
+                    Else
+                        carryOver = totalInBuffer
+                    End If
+                End While
+            End Using
+
+            Return False
+        Catch
+            Return True ' Can't read → assume encrypted
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Counts pages in a PDF file using PdfPig (read-only, handles most PDF types).
+    ''' Returns -1 if the file cannot be read.
+    ''' </summary>
+    Private Shared Function APOverlayGetPdfPageCount(pdfPath As String) As Integer
+        Try
+            Using doc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath)
+                Return doc.NumberOfPages
+            End Using
+        Catch
+            Return -1
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Compares the page count of an original PDF with its output.
+    ''' Returns a warning string if they differ, or Nothing if they match.
+    ''' </summary>
+    Private Shared Function APOverlayVerifyPageCount(originalPath As String, outputPath As String) As String
+        Dim origPages = APOverlayGetPdfPageCount(originalPath)
+        Dim outPages = APOverlayGetPdfPageCount(outputPath)
+
+        If origPages = -1 OrElse outPages = -1 Then
+            Return $"Could not verify page count (original={If(origPages = -1, "unreadable", origPages.ToString())}, output={If(outPages = -1, "unreadable", outPages.ToString())})."
+        End If
+
+        If origPages <> outPages Then
+            Return $"PAGE COUNT MISMATCH: original has {origPages} page(s) but output has {outPages} page(s)."
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Validates that an output PDF file exists, is non-empty, and readable.
+    ''' Throws <see cref="InvalidOperationException"/> on failure.
+    ''' </summary>
+    Private Shared Sub APOverlayValidateOutput(inputPath As String, outputPath As String)
+        If Not File.Exists(outputPath) Then
+            Throw New InvalidOperationException(
+                "Output file was not created — the source PDF may be encrypted or corrupt.")
+        End If
+
+        Dim outputSize As Long = New FileInfo(outputPath).Length
+        If outputSize = 0 Then
+            Try : File.Delete(outputPath) : Catch : End Try
+            Throw New InvalidOperationException(
+                "Output file is empty — the source PDF may be encrypted or corrupt.")
+        End If
+
+        Dim pageCount = APOverlayGetPdfPageCount(outputPath)
+        If pageCount = 0 Then
+            Try : File.Delete(outputPath) : Catch : End Try
+            Throw New InvalidOperationException(
+                "Output PDF contains no pages — the source PDF may be encrypted or corrupt.")
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Draws overlay elements (text and image) onto PdfSharp document pages.
+    ''' Shared by both the direct overlay path and the rasterize fallback.
+    ''' </summary>
+    Private Sub APOverlayDrawElements(
+            doc As PdfSharp.Pdf.PdfDocument,
+            totalPages As Integer,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        For Each elemObj As JObject In elementsArray
+            Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
+            Dim pagesSpec = If(elemObj.Value(Of String)("pages"), "all").Trim().ToLowerInvariant()
+            Dim x As Double = GetJDouble(elemObj, "x", 0)
+            Dim y As Double = GetJDouble(elemObj, "y", 0)
+            Dim rotation As Double = GetJDouble(elemObj, "rotation", 0)
+            Dim opacity As Double = GetJDouble(elemObj, "opacity", 1.0)
+
+            ' Resolve target page indices (0-based)
+            Dim pageIndices = ResolvePageIndices(pagesSpec, totalPages)
+            If pageIndices.Count = 0 Then Continue For
+
+            For Each pageIdx In pageIndices
+                If pageIdx < 0 OrElse pageIdx >= totalPages Then Continue For
+                Dim page = doc.Pages(pageIdx)
+
+                Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                    If elemType = "text" Then
+                        ' ── TEXT ELEMENT ──
+                        Dim text = If(elemObj.Value(Of String)("text"), "")
+                        If String.IsNullOrEmpty(text) Then Continue For
+
+                        ' Handle \n escape sequences for multi-line text
+                        text = text.Replace("\\n", vbLf).Replace("\n", vbLf)
+
+                        Dim fontFamily = If(elemObj.Value(Of String)("font_family"), "Arial")
+                        Dim fontSize As Double = GetJDouble(elemObj, "font_size", 12)
+                        Dim isBold = GetJBool(elemObj, "bold")
+                        Dim isItalic = GetJBool(elemObj, "italic")
+                        Dim hAlign = If(elemObj.Value(Of String)("h_align"), "left").ToLowerInvariant()
+                        Dim maxWidth As Double = GetJDouble(elemObj, "max_width", 0)
+                        Dim fontColorHex = If(elemObj.Value(Of String)("font_color"), "#000000")
+
+                        ' Build font style
+                        Dim fontStyle As PdfSharp.Drawing.XFontStyleEx = PdfSharp.Drawing.XFontStyleEx.Regular
+                        If isBold AndAlso isItalic Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.BoldItalic
+                        ElseIf isBold Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.Bold
+                        ElseIf isItalic Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.Italic
+                        End If
+
+                        Dim font = New PdfSharp.Drawing.XFont(fontFamily, fontSize, fontStyle)
+
+                        ' Parse color
+                        Dim brush As PdfSharp.Drawing.XBrush = PdfSharp.Drawing.XBrushes.Black
+                        Try
+                            Dim colorHex = fontColorHex.TrimStart("#"c)
+                            If colorHex.Length = 6 Then
+                                Dim r = System.Convert.ToInt32(colorHex.Substring(0, 2), 16)
+                                Dim g = System.Convert.ToInt32(colorHex.Substring(2, 2), 16)
+                                Dim b = System.Convert.ToInt32(colorHex.Substring(4, 2), 16)
+                                Dim alphaInt = CInt(Math.Round(Math.Max(0, Math.Min(1, opacity)) * 255))
+                                brush = New PdfSharp.Drawing.XSolidBrush(
+                                    PdfSharp.Drawing.XColor.FromArgb(alphaInt, r, g, b))
+                            End If
+                        Catch
+                        End Try
+
+                        ' Determine string format for alignment
+                        Dim xFormat As New PdfSharp.Drawing.XStringFormat()
+                        xFormat.LineAlignment = PdfSharp.Drawing.XLineAlignment.Near
+                        Select Case hAlign
+                            Case "center" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Center
+                            Case "right" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Far
+                            Case Else : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Near
+                        End Select
+
+                        ' Apply rotation if specified
+                        Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                        If rotation <> 0 Then
+                            state = gfx.Save()
+                            gfx.TranslateTransform(x, y)
+                            gfx.RotateTransform(rotation)
+                            gfx.TranslateTransform(-x, -y)
+                        End If
+
+                        ' Handle multi-line text
+                        Dim lines = text.Split({vbLf}, StringSplitOptions.None)
+                        Dim lineHeight = fontSize * 1.25
+                        Dim currentY = y
+
+                        For Each line In lines
+                            If maxWidth > 0 Then
+                                Dim rect As New PdfSharp.Drawing.XRect(x, currentY, maxWidth, lineHeight)
+                                gfx.DrawString(line, font, brush, rect, xFormat)
+                            Else
+                                Dim drawPoint As New PdfSharp.Drawing.XPoint(x, currentY)
+                                gfx.DrawString(line, font, brush, drawPoint, xFormat)
+                            End If
+                            currentY += lineHeight
+                        Next
+
+                        If state IsNot Nothing Then gfx.Restore(state)
+                        textCount += 1
+
+                    ElseIf elemType = "image" Then
+                        ' ── IMAGE ELEMENT ──
+                        Dim imgName = elemObj.Value(Of String)("image_attachment_name")
+                        If String.IsNullOrWhiteSpace(imgName) Then Continue For
+
+                        Dim imgPath As String = Nothing
+                        If Not imageCache.TryGetValue(imgName, imgPath) OrElse
+                           String.IsNullOrEmpty(imgPath) OrElse Not File.Exists(imgPath) Then
+                            context.Log($"Image attachment not found: {imgName}")
+                            Continue For
+                        End If
+
+                        Dim imgWidth As Double = GetJDouble(elemObj, "width", 0)
+                        Dim imgHeight As Double = GetJDouble(elemObj, "height", 0)
+
+                        ' Load image via stream to support all formats
+                        Using imgStream As New FileStream(imgPath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                            Using xImg = PdfSharp.Drawing.XImage.FromStream(imgStream)
+                                ' Default to native size if not specified
+                                If imgWidth <= 0 AndAlso imgHeight <= 0 Then
+                                    imgWidth = xImg.PointWidth
+                                    imgHeight = xImg.PointHeight
+                                ElseIf imgWidth > 0 AndAlso imgHeight <= 0 Then
+                                    ' Scale proportionally
+                                    imgHeight = xImg.PointHeight * (imgWidth / xImg.PointWidth)
+                                ElseIf imgHeight > 0 AndAlso imgWidth <= 0 Then
+                                    imgWidth = xImg.PointWidth * (imgHeight / xImg.PointHeight)
+                                End If
+
+                                ' Apply rotation if specified
+                                Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                                If rotation <> 0 Then
+                                    state = gfx.Save()
+                                    Dim cx = x + imgWidth / 2
+                                    Dim cy = y + imgHeight / 2
+                                    gfx.TranslateTransform(cx, cy)
+                                    gfx.RotateTransform(rotation)
+                                    gfx.TranslateTransform(-cx, -cy)
+                                End If
+
+                                gfx.DrawImage(xImg, x, y, imgWidth, imgHeight)
+
+                                If state IsNot Nothing Then gfx.Restore(state)
+                                imageCount += 1
+                            End Using
+                        End Using
+                    End If
+                End Using
+            Next
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Rasterize fallback for watermark: renders every page via PdfiumViewer, then
+    ''' invokes a callback to draw the watermark on each rasterized page.
+    ''' CRITICAL: PdfiumViewer types must NOT appear in the calling method's signature
+    ''' to avoid JIT resolution before pdfium.dll is loaded.
+    ''' </summary>
+    Private Shared Sub APOverlayViaRasterize(
+            inputPath As String,
+            outputPath As String,
+            drawCallback As Action(Of PdfSharp.Drawing.XGraphics, Double, Double, Integer))
+
+        APRedactEnsurePdfiumLoaded()
+        EnsureApPdfSharpFontResolver()
+        APOverlayViaRasterizeCore(inputPath, outputPath, drawCallback)
+    End Sub
+
+    ''' <summary>
+    ''' Core rasterize implementation for watermark, separated to ensure pdfium.dll
+    ''' is loaded before PdfiumViewer types are JIT-resolved.
+    ''' </summary>
+    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
+    Private Shared Sub APOverlayViaRasterizeCore(
+            inputPath As String,
+            outputPath As String,
+            drawCallback As Action(Of PdfSharp.Drawing.XGraphics, Double, Double, Integer))
+
+        Const renderDpi As Integer = 200
+
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            If pdf.PageCount = 0 Then
+                Throw New InvalidOperationException("The PDF contains no pages.")
+            End If
+
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+            Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
+
+            For pageIndex As Integer = 0 To pdf.PageCount - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * renderDpi))
+                Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * renderDpi))
+
+                ' Declare outPage OUTSIDE the Using rendered block so it stays in scope
+                Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                Using rendered As System.Drawing.Image =
+                    pdf.Render(pageIndex, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
+
+                    ' Draw rasterized page image
+                    Using ms As New MemoryStream()
+                        Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                        For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                            If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                        Next
+                        If jpegEncoder IsNot Nothing Then
+                            Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                            ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
+                            rendered.Save(ms, jpegEncoder, ep)
+                        Else
+                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        End If
+
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+
+                ' Draw overlay content on top of the rasterized page
+                Using gfx As PdfSharp.Drawing.XGraphics =
+                    PdfSharp.Drawing.XGraphics.FromPdfPage(outPage, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                    drawCallback(gfx, outPage.Width.Point, outPage.Height.Point, pageIndex)
+                End Using
+            Next
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
+    End Sub
+    Private Sub APOverlayViaRasterizeWithElements(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        EnsureApPdfSharpFontResolver()
+
+        Dim usedWindowsPdf As Boolean = False
+
+#If HAS_WINRT Then
+        If Environment.OSVersion.Version.Major >= 10 Then
+            Try
+                APOverlayViaRasterizeWithElementsWindowsPdf(inputPath, outputPath, elementsArray,
+                                                             imageCache, context, textCount, imageCount)
+                usedWindowsPdf = True
+            Catch ex As Exception
+                Debug.WriteLine($"APOverlayViaRasterizeWithElements: Windows.Data.Pdf failed: {ex.Message} — falling back to PdfiumViewer")
+                usedWindowsPdf = False
+            End Try
+        End If
+#End If
+
+        If Not usedWindowsPdf Then
+            APRedactEnsurePdfiumLoaded()
+            APOverlayViaRasterizeWithElementsCore(inputPath, outputPath, elementsArray,
+                                                   imageCache, context, textCount, imageCount)
+        End If
+    End Sub
+
+    Private Sub APOverlayViaRasterizeWithElementsWindowsPdf(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Dim tc As Integer = 0
+        Dim ic As Integer = 0
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    APOverlayViaRasterizeWithElementsWindowsPdfCore(
+                        inputPath, outputPath, elementsArray, imageCache, context, tc, ic)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Throw New TimeoutException("Windows.Data.Pdf rendering timed out after 5 minutes.")
+        End If
+
+        textCount = tc
+        imageCount = ic
+
+        If renderException IsNot Nothing Then
+            Throw renderException
+        End If
+#End If
+    End Sub
+
+    Private Sub APOverlayViaRasterizeWithElementsWindowsPdfCore(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Const renderDpi As Integer = 200
+
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        If winPdf.PageCount = 0 Then
+            Throw New InvalidOperationException("The PDF contains no pages.")
+        End If
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+        Dim totalPages As Integer = CInt(winPdf.PageCount)
+        Dim scaleFactor As Double = renderDpi / 96.0
+
+        ' Rasterize all pages
+        For pageIndex As UInteger = 0 To CUInt(totalPages - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+            Dim renderWidthPx As UInteger = CUInt(Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(Math.Round(page.Size.Height * scaleFactor))
+
+            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+                renderStream.Seek(0)
+
+                Dim netStream As System.IO.Stream =
+                    System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using pngMs As New MemoryStream()
+                    netStream.CopyTo(pngMs)
+                    pngMs.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(pngMs)
+                        Using jpegMs As New MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                            For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                                If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                            Next
+                            If jpegEncoder IsNot Nothing Then
+                                Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                                ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, ep)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+                            jpegMs.Position = 0
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics =
+                                PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage =
+                                    PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        ' Draw overlay elements on the rasterized pages
+        APOverlayDrawElements(outDoc, totalPages, elementsArray, imageCache, context,
+                              textCount, imageCount)
+
+        outDoc.Save(outputPath)
+        outDoc.Close()
+#End If
+    End Sub
+
+    ''' <summary>
+    ''' Core rasterize + overlay implementation, separated to ensure pdfium.dll
+    ''' is loaded before PdfiumViewer types are JIT-resolved.
+    ''' </summary>
+    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
+    Private Sub APOverlayViaRasterizeWithElementsCore(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        Const renderDpi As Integer = 200
+
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            If pdf.PageCount = 0 Then
+                Throw New InvalidOperationException("The PDF contains no pages.")
+            End If
+
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+            Dim totalPages = pdf.PageCount
+
+            Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
+
+            ' Rasterize all pages first
+            For pageIndex As Integer = 0 To totalPages - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * renderDpi))
+                Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * renderDpi))
+
+                ' Declare outPage OUTSIDE the Using rendered block so it stays in scope
+                Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                Using rendered As System.Drawing.Image =
+                    pdf.Render(pageIndex, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
+
+                    Using ms As New MemoryStream()
+                        Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                        For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                            If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                        Next
+                        If jpegEncoder IsNot Nothing Then
+                            Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                            ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
+                            rendered.Save(ms, jpegEncoder, ep)
+                        Else
+                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        End If
+
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            Next
+
+            ' Now draw overlay elements on the rasterized pages
+            APOverlayDrawElements(outDoc, totalPages, elementsArray, imageCache, context,
+                                  textCount, imageCount)
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL IDENTIFICATION

@@ -73,6 +73,14 @@ Partial Public Class ThisAddIn
         ''' replies for non-whitelisted senders instead of blocking with an approval dialog.
         ''' </summary>
         Public Property IsUnattended As Boolean = False
+
+        ''' <summary>
+        ''' Number of hours to look back and re-propose already-processed mails for reprocessing.
+        ''' 0 = disabled (only unprocessed mails are proposed in catch-up).
+        ''' When > 0, mails within this window that match filters are shown in the catch-up dialog
+        ''' even if they were already processed, allowing the operator to select them for reprocessing.
+        ''' </summary>
+        Public Property ReprocessLookbackHours As Integer = 0
     End Class
 
     ''' <summary>
@@ -257,18 +265,22 @@ Partial Public Class ThisAddIn
         config.RequireApprovalForNonWhitelisted = True
 
         ' ── Step 5: Rate limits ──
-        Dim params(2) As InputParameter
+        Dim params(3) As InputParameter
         params(0) = New InputParameter() With {
             .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
         }
         params(1) = New InputParameter() With {
-            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession})",
+            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
         }
         params(2) = New InputParameter() With {
             .Name = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
+        }
+        params(3) = New InputParameter() With {
+            .Name = "Reprocess lookback (hours, 0 = only new mails)",
+            .Value = saved.ReprocessLookbackHours.ToString()
         }
 
         Dim limitsOk = ShowCustomVariableInputForm(
@@ -284,13 +296,18 @@ Partial Public Class ThisAddIn
         End If
 
         Dim maxReplies As Integer
-        If Integer.TryParse(params(1).Value?.ToString(), maxReplies) AndAlso maxReplies > 0 Then
+        If Integer.TryParse(params(1).Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
             config.MaxRepliesPerSession = maxReplies
         End If
 
         Dim maxMb As Integer
         If Integer.TryParse(params(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
             config.MaxAttachmentBytes = CLng(maxMb) * 1024 * 1024
+        End If
+
+        Dim reprocessHours As Integer
+        If Integer.TryParse(params(3).Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
+            config.ReprocessLookbackHours = reprocessHours
         End If
 
         ' ── Step 6: Source selection (only if model supports tooling) ──
@@ -351,8 +368,13 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Trigger word: {If(String.IsNullOrWhiteSpace(config.SubjectTriggerWord), "(none)", config.SubjectTriggerWord)}")
         summaryBuilder.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
         summaryBuilder.AppendLine($"Cooldown: {config.CooldownSeconds}s per sender")
-        summaryBuilder.AppendLine($"Max replies: {config.MaxRepliesPerSession} per session")
+        summaryBuilder.AppendLine($"Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())} per session")
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
+        If config.ReprocessLookbackHours > 0 Then
+            summaryBuilder.AppendLine($"Reprocess lookback: {config.ReprocessLookbackHours}h (already-processed mails re-proposed)")
+        Else
+            summaryBuilder.AppendLine("Reprocess lookback: disabled (only new mails)")
+        End If
         summaryBuilder.AppendLine($"{ToolFriendlyName}: {If(config.SelectedExternalTools?.Count, 0)}")
         If modelSupportsTools Then
             summaryBuilder.AppendLine($"Internal tools: document processing, PDF extraction")
@@ -421,6 +443,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_MonitoredMailbox = If(config.MonitoredMailbox, "")
         My.Settings.AP_SelectedModelKey = If(config.SelectedModelKey, "")
         My.Settings.AP_UseSecondApi = config.UseSecondApi
+        My.Settings.AP_ReprocessLookbackHours = config.ReprocessLookbackHours
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -441,13 +464,14 @@ Partial Public Class ThisAddIn
         Dim config As New AutoPilotConfig()
         config.SubjectTriggerWord = If(String.IsNullOrWhiteSpace(My.Settings.AP_SubjectTriggerWord), Nothing, My.Settings.AP_SubjectTriggerWord)
         config.CooldownSeconds = If(My.Settings.AP_CooldownSeconds > 0, CInt(My.Settings.AP_CooldownSeconds), AP_DefaultCooldownSeconds)
-        config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession > 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)
+        config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession >= 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)
         config.MaxAttachmentBytes = CLng(If(My.Settings.AP_MaxAttachmentMB > 0, My.Settings.AP_MaxAttachmentMB, 10)) * 1024 * 1024
         config.FooterText = If(My.Settings.AP_FooterText, "")
         config.RequireApprovalForNonWhitelisted = My.Settings.AP_RequireApproval
         config.MonitoredMailbox = If(My.Settings.AP_MonitoredMailbox, "")
         config.SelectedModelKey = If(My.Settings.AP_SelectedModelKey, "")
         config.UseSecondApi = My.Settings.AP_UseSecondApi
+        config.ReprocessLookbackHours = If(My.Settings.AP_ReprocessLookbackHours >= 0, My.Settings.AP_ReprocessLookbackHours, 0)
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -529,7 +553,7 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Model: {modelLabel}")
             summary.AppendLine($"Filters: {config.FilterRules.Count} rule(s)")
             summary.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
-            summary.AppendLine($"Cooldown: {config.CooldownSeconds}s | Max replies: {config.MaxRepliesPerSession}")
+            summary.AppendLine($"Cooldown: {config.CooldownSeconds}s | Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())}")
             If Not String.IsNullOrWhiteSpace(config.MonitoredMailbox) Then
                 summary.AppendLine($"Mailbox: {config.MonitoredMailbox}")
             End If

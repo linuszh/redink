@@ -77,9 +77,9 @@ Partial Class frmAIChat
 
     End Sub
 
-    Friend WithEvents lblInstructions As Windows.Forms.Label
-    Friend WithEvents txtChatHistory As Windows.Forms.TextBox
-    Friend WithEvents txtUserInput As Windows.Forms.TextBox
+    Friend WithEvents lblInstructions As System.Windows.Forms.Label
+    Friend WithEvents txtChatHistory As System.Windows.Forms.TextBox
+    Friend WithEvents txtUserInput As System.Windows.Forms.TextBox
 
 End Class
 

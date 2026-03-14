@@ -47,8 +47,63 @@
     <OfficeApplicationDescription />
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
+  <!--
+	  ═══════════════════════════════════════════════════════════════════════
+	  WINDOWS SDK / WinRT DEPENDENCY — MUST UPDATE WHEN SDK VERSION CHANGES
+	  ═══════════════════════════════════════════════════════════════════════
+	  The Windows.Data.Pdf API (used for PDF rasterization and flattening)
+	  requires references to the Windows 10 SDK WinRT metadata.
+	  
+	  THREE locations in this .vbproj reference a SPECIFIC SDK version and
+	  MUST ALL be updated together when the installed SDK version changes:
+	  
+	    1. PropertyGroup (HAS_WINRT conditional constant):
+	       Defines the HAS_WINRT compilation constant if Windows.winmd exists.
+	       All #If HAS_WINRT code blocks depend on this.
+	  
+	    2. Reference "Windows" (Windows.winmd):
+	       Points to the WinRT union metadata file for Windows.Data.Pdf,
+	       Windows.Storage, Windows.Graphics.Imaging, etc.
+	  
+	    3. Reference "System.Runtime.WindowsRuntime":
+	       Required for WinRT async interop (.GetAwaiter().GetResult() on
+	       IAsyncOperation) and WindowsRuntimeStreamExtensions.
+	  
+	    4. Reference "System.Runtime.InteropServices.WindowsRuntime":
+	       Required for WinRT / .NET interop marshalling.
+	  
+	  HOW TO UPDATE (all three must match):
+	  ─────────────────────────────────────
+	    a) Find your installed SDK version. Open a command prompt and run:
+	         dir "%ProgramFiles(x86)%\Windows Kits\10\UnionMetadata\"
+	       Or check Visual Studio > Tools > Options > Projects > VC++ Directories.
+	  
+	    b) Replace ALL occurrences of the old version string with the new one.
+	       Currently: 10.0.26100.0
+	       Search for: 10.0.26100.0
+	       Replace with: <your installed version, e.g., 10.0.26100.0>
+	  
+	    c) The version string appears in these Condition/HintPath attributes:
+	         - Condition="Exists('...\UnionMetadata\<VERSION>\Windows.winmd')"
+	         - HintPath="...\UnionMetadata\<VERSION>\Windows.winmd"
+	  
+	    d) Rebuild. If HAS_WINRT is NOT defined, Windows.Data.Pdf code is
+	       compiled out and PdfiumViewer is used as fallback. The build will
+	       succeed either way, but PDF flattening quality may differ.
+	  
+	  AFFECTED SOURCE FILES (use Windows.Data.Pdf behind #If HAS_WINRT):
+	    - ThisAddIn.WordHelpers.vb
+	        FlattenPdfToImageOnly, FlattenPdfViaWindowsApi[Core],
+	        RenderPageViaWindowsPdf[Core], RenderAllPagesViaWindowsPdf[Core]
+	    - ThisAddIn.WordHelpers.Stamper.vb
+	        ApplyStampViaRasterize (fallback rasterize path)
+	  ═══════════════════════════════════════════════════════════════════════
+	-->
+  <PropertyGroup Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+    <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.3.2.700</ApplicationVersion>
+    <ApplicationVersion>1.3.3.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Develop%29</ProductName>
@@ -492,6 +547,17 @@
     <Reference Include="Whisper.net, Version=1.9.0.0, Culture=neutral, processorArchitecture=MSIL">
       <HintPath>..\packages\Whisper.net.1.9.0\lib\netstandard2.0\Whisper.net.dll</HintPath>
     </Reference>
+    <Reference Include="Windows" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.WindowsRuntime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <Private>False</Private>
+    </Reference>
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
@@ -561,6 +627,7 @@
   <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
     <Import Include="System" />
+    <Import Include="System.Windows.Forms" />
     <Import Include="System.Collections.Generic" />
     <Import Include="System.Linq" />
     <Import Include="System.Text" />

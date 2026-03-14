@@ -1066,20 +1066,17 @@ Partial Public Class ThisAddIn
             End Try
         End Function
 
-
         ''' <summary>
-        ''' Rasterize fallback: renders page 1 via PdfiumViewer, creates a clean page,
-        ''' stamps it, then copies all remaining pages as-is from the original PDF.
-        ''' Handles password-protected, corrupt, and problematic PDFs.
+        ''' Rasterize fallback: renders page 1 via Windows.Data.Pdf (preferred) or PdfiumViewer,
+        ''' creates a clean page, stamps it, then copies all remaining pages as-is from the
+        ''' original PDF. Handles password-protected, corrupt, and problematic PDFs.
         ''' </summary>
         Private Shared Sub ApplyStampViaRasterize(inputPath As System.String,
-                                                   outputPath As System.String,
-                                                   labelText As System.String,
-                                                   canUseArial As System.Boolean,
-                                                   imgBytes As System.Byte(),
-                                                   config As StampConfig)
-
-            PdfRedactionService.EnsurePdfiumLoadedPublic()
+                                                    outputPath As System.String,
+                                                    labelText As System.String,
+                                                    canUseArial As System.Boolean,
+                                                    imgBytes As System.Byte(),
+                                                    config As StampConfig)
 
             Dim tempPath As System.String = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(),
@@ -1087,109 +1084,170 @@ Partial Public Class ThisAddIn
 
             Try
                 Dim totalPageCount As System.Int32 = 0
+                Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+                Const renderDpi As System.Int32 = 200
 
-                ' Step 1: Rasterize page 0 to a clean single-page PDF and stamp it
-                Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
-                    totalPageCount = pdf.PageCount
-                    If totalPageCount = 0 Then
-                        Throw New System.InvalidOperationException("The PDF contains no pages.")
-                    End If
+                ' ── Try Windows.Data.Pdf first for page 0 ──
+                Dim usedWindowsPdf As System.Boolean = False
+                Dim page0Result As System.Tuple(Of System.IO.MemoryStream, System.Double, System.Double) = Nothing
 
-                    Dim outDoc As New PdfSharp.Pdf.PdfDocument()
-                    Const renderDpi As System.Int32 = 200
+                Try
+                    page0Result = RenderPageViaWindowsPdf(inputPath, 0, renderDpi)
+                Catch
+                End Try
 
-                    Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(0)
-                    Dim widthPx As System.Int32 = CInt(System.Math.Round(sizePt.Width / 72.0 * renderDpi))
-                    Dim heightPx As System.Int32 = CInt(System.Math.Round(sizePt.Height / 72.0 * renderDpi))
+                If page0Result IsNot Nothing Then
+                    usedWindowsPdf = True
+                    Dim jpegMs As System.IO.MemoryStream = page0Result.Item1
+                    Dim pageWidthPt As System.Double = page0Result.Item2
+                    Dim pageHeightPt As System.Double = page0Result.Item3
 
-                    Dim renderFlags As PdfiumViewer.PdfRenderFlags =
-                        PdfiumViewer.PdfRenderFlags.Annotations Or
-                        PdfiumViewer.PdfRenderFlags.LcdText Or
-                        PdfiumViewer.PdfRenderFlags.ForPrinting
+                    Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                    outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                    outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
 
-                    Using rendered As System.Drawing.Image = pdf.Render(0, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
-                        Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
-                        outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
-                        outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+                    Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                        Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                            xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                        End Using
+                    End Using
+                    jpegMs.Dispose()
 
-                        Using ms As New System.IO.MemoryStream()
-                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
-                            For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
-                                If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
-                            Next
-                            If jpegEncoder IsNot Nothing Then
-                                Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
-                                ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
-                                    System.Drawing.Imaging.Encoder.Quality, 85L)
-                                rendered.Save(ms, jpegEncoder, ep)
-                            Else
-                                rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
-                            End If
+                    totalPageCount = ExhibitStampService.GetPdfPageCount(inputPath)
+                    If totalPageCount < 1 Then totalPageCount = 1
+                End If
 
-                            ms.Position = 0
-                            Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
-                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
-                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                ' ── Fallback to PdfiumViewer if Windows.Data.Pdf failed ──
+                If Not usedWindowsPdf Then
+                    PdfRedactionService.EnsurePdfiumLoadedPublic()
+
+                    Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+                        totalPageCount = pdf.PageCount
+                        If totalPageCount = 0 Then
+                            Throw New System.InvalidOperationException("The PDF contains no pages.")
+                        End If
+
+                        Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(0)
+                        Dim widthPx As System.Int32 = CInt(System.Math.Round(sizePt.Width / 72.0 * renderDpi))
+                        Dim heightPx As System.Int32 = CInt(System.Math.Round(sizePt.Height / 72.0 * renderDpi))
+
+                        Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                            PdfiumViewer.PdfRenderFlags.Annotations Or
+                            PdfiumViewer.PdfRenderFlags.LcdText Or
+                            PdfiumViewer.PdfRenderFlags.ForPrinting
+
+                        Using rendered As System.Drawing.Image = pdf.Render(0, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                            Using ms As New System.IO.MemoryStream()
+                                Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                                For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                                    If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                                Next
+                                If jpegEncoder IsNot Nothing Then
+                                    Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                                    ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                        System.Drawing.Imaging.Encoder.Quality, 85L)
+                                    rendered.Save(ms, jpegEncoder, ep)
+                                Else
+                                    rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                                End If
+
+                                ms.Position = 0
+                                Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                    Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                        xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                    End Using
                                 End Using
                             End Using
                         End Using
                     End Using
+                End If
 
-                    ' Draw stamp on the rasterized page 0
-                    Using gfx As PdfSharp.Drawing.XGraphics =
-                            PdfSharp.Drawing.XGraphics.FromPdfPage(outDoc.Pages(0), PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
-                        DrawStampContent(gfx, outDoc.Pages(0).Width.Point, labelText, canUseArial, imgBytes, config)
-                    End Using
+                ' Draw stamp on the rasterized page 0
+                Using gfx As PdfSharp.Drawing.XGraphics =
+                        PdfSharp.Drawing.XGraphics.FromPdfPage(outDoc.Pages(0), PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                    DrawStampContent(gfx, outDoc.Pages(0).Width.Point, labelText, canUseArial, imgBytes, config)
+                End Using
 
-                    ' Step 2: Copy remaining pages (1..N) as-is from the original PDF
-                    If totalPageCount > 1 Then
-                        Dim srcDoc As PdfSharp.Pdf.PdfDocument = Nothing
-                        Try
-                            srcDoc = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
-                            For pageIdx As System.Int32 = 1 To srcDoc.PageCount - 1
-                                outDoc.AddPage(srcDoc.Pages(pageIdx))
-                            Next
-                        Catch
-                            ' If Import mode fails (e.g., password-protected), rasterize all remaining pages
-                            For pageIdx As System.Int32 = 1 To totalPageCount - 1
-                                Dim pgSize As System.Drawing.SizeF = pdf.PageSizes(pageIdx)
-                                Dim pgWPx As System.Int32 = CInt(System.Math.Round(pgSize.Width / 72.0 * renderDpi))
-                                Dim pgHPx As System.Int32 = CInt(System.Math.Round(pgSize.Height / 72.0 * renderDpi))
+                ' Copy remaining pages (1..N) as-is from the original PDF
+                If totalPageCount > 1 Then
+                    Dim srcDoc As PdfSharp.Pdf.PdfDocument = Nothing
+                    Try
+                        srcDoc = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Import)
+                        For pageIdx As System.Int32 = 1 To srcDoc.PageCount - 1
+                            outDoc.AddPage(srcDoc.Pages(pageIdx))
+                        Next
+                    Catch
+                        ' If Import mode fails, rasterize all remaining pages
+                        For pageIdx As System.Int32 = 1 To totalPageCount - 1
+                            Dim pageResult As System.Tuple(Of System.IO.MemoryStream, System.Double, System.Double) = Nothing
+                            Try
+                                pageResult = RenderPageViaWindowsPdf(inputPath, pageIdx, renderDpi)
+                            Catch
+                            End Try
 
-                                Using pgRendered As System.Drawing.Image = pdf.Render(pageIdx, pgWPx, pgHPx, renderDpi, renderDpi, renderFlags)
-                                    Dim pg As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
-                                    pg.Width = PdfSharp.Drawing.XUnit.FromPoint(pgSize.Width)
-                                    pg.Height = PdfSharp.Drawing.XUnit.FromPoint(pgSize.Height)
+                            If pageResult IsNot Nothing Then
+                                Dim pg As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                                pg.Width = PdfSharp.Drawing.XUnit.FromPoint(pageResult.Item2)
+                                pg.Height = PdfSharp.Drawing.XUnit.FromPoint(pageResult.Item3)
 
-                                    Using pgMs As New System.IO.MemoryStream()
-                                        Dim jpgEnc As System.Drawing.Imaging.ImageCodecInfo = Nothing
-                                        For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
-                                            If codec.MimeType = "image/jpeg" Then jpgEnc = codec : Exit For
-                                        Next
-                                        If jpgEnc IsNot Nothing Then
-                                            Dim ep2 As New System.Drawing.Imaging.EncoderParameters(1)
-                                            ep2.Param(0) = New System.Drawing.Imaging.EncoderParameter(
-                                                System.Drawing.Imaging.Encoder.Quality, 85L)
-                                            pgRendered.Save(pgMs, jpgEnc, ep2)
-                                        Else
-                                            pgRendered.Save(pgMs, System.Drawing.Imaging.ImageFormat.Png)
-                                        End If
+                                Using pgGfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(pg)
+                                    Using pgImg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(pageResult.Item1)
+                                        pgGfx.DrawImage(pgImg, 0, 0, pg.Width.Point, pg.Height.Point)
+                                    End Using
+                                End Using
+                                pageResult.Item1.Dispose()
+                            Else
+                                ' Final fallback: PdfiumViewer
+                                PdfRedactionService.EnsurePdfiumLoadedPublic()
+                                Using pdf2 As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+                                    Dim pgSize As System.Drawing.SizeF = pdf2.PageSizes(pageIdx)
+                                    Dim pgWPx As System.Int32 = CInt(System.Math.Round(pgSize.Width / 72.0 * renderDpi))
+                                    Dim pgHPx As System.Int32 = CInt(System.Math.Round(pgSize.Height / 72.0 * renderDpi))
 
-                                        pgMs.Position = 0
-                                        Using pgGfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(pg)
-                                            Using pgImg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(pgMs)
-                                                pgGfx.DrawImage(pgImg, 0, 0, pg.Width.Point, pg.Height.Point)
+                                    Dim pgRenderFlags As PdfiumViewer.PdfRenderFlags =
+                                        PdfiumViewer.PdfRenderFlags.Annotations Or
+                                        PdfiumViewer.PdfRenderFlags.LcdText Or
+                                        PdfiumViewer.PdfRenderFlags.ForPrinting
+
+                                    Using pgRendered As System.Drawing.Image = pdf2.Render(pageIdx, pgWPx, pgHPx, renderDpi, renderDpi, pgRenderFlags)
+                                        Dim pg As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                                        pg.Width = PdfSharp.Drawing.XUnit.FromPoint(pgSize.Width)
+                                        pg.Height = PdfSharp.Drawing.XUnit.FromPoint(pgSize.Height)
+
+                                        Using pgMs As New System.IO.MemoryStream()
+                                            Dim jpgEnc As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                                            For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                                                If codec.MimeType = "image/jpeg" Then jpgEnc = codec : Exit For
+                                            Next
+                                            If jpgEnc IsNot Nothing Then
+                                                Dim ep2 As New System.Drawing.Imaging.EncoderParameters(1)
+                                                ep2.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                                pgRendered.Save(pgMs, jpgEnc, ep2)
+                                            Else
+                                                pgRendered.Save(pgMs, System.Drawing.Imaging.ImageFormat.Png)
+                                            End If
+
+                                            pgMs.Position = 0
+                                            Using pgGfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(pg)
+                                                Using pgImg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(pgMs)
+                                                    pgGfx.DrawImage(pgImg, 0, 0, pg.Width.Point, pg.Height.Point)
+                                                End Using
                                             End Using
                                         End Using
                                     End Using
                                 End Using
-                            Next
-                        End Try
-                    End If
+                            End If
+                        Next
+                    End Try
+                End If
 
-                    outDoc.Save(outputPath)
-                    outDoc.Close()
-                End Using
+                outDoc.Save(outputPath)
+                outDoc.Close()
 
             Finally
                 If System.IO.File.Exists(tempPath) Then
@@ -1197,7 +1255,6 @@ Partial Public Class ThisAddIn
                 End If
             End Try
         End Sub
-
 
         ''' <summary>
         ''' Draws the stamp image and exhibit number text onto an XGraphics surface.
