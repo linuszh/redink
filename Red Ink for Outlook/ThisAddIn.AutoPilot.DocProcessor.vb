@@ -497,121 +497,96 @@ Partial Public Class ThisAddIn
 
         ApDashboardLog($"DocProcessor: {processable.Count} paragraphs to process (~{totalBatches} batches)", "step")
 
-        ' ── If not already using SecondAPI, try OfflineDocs alternate model ──
-        Dim offlineDocsBackup As ModelConfig = Nothing
-        Dim offlineDocsApplied As Boolean = False
+        While batchIndex < processable.Count
+            ct.ThrowIfCancellationRequested()
 
-        If Not _apUseSecondApi AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
-            Try
-                If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
-                    offlineDocsBackup = GetCurrentConfig(_context)
-                    offlineDocsApplied = True
-                    _apUseSecondApi = True
+            currentBatch += 1
+
+            Dim batchStart = batchIndex
+            Dim batchEnd = Math.Min(batchIndex + AP_ParagraphsPerBatch - 1, processable.Count - 1)
+
+            ' Adjust for character limit
+            Dim batchChars As Integer = 0
+            For j = batchStart To batchEnd
+                batchChars += processable(j).FullText.Length
+                If batchChars > AP_MaxCharsPerBatch AndAlso j > batchStart Then
+                    batchEnd = j - 1
+                    Exit For
                 End If
-            Catch
-            End Try
-        End If
+            Next
 
-        Try
-            While batchIndex < processable.Count
-                ct.ThrowIfCancellationRequested()
+            ApDashboardLog($"DocProcessor: batch {currentBatch}/{totalBatches} (paragraphs {batchStart + 1}-{batchEnd + 1})", "step")
 
-                currentBatch += 1
+            ' Build prompt
+            Dim promptBuilder As New StringBuilder()
 
-                Dim batchStart = batchIndex
-                Dim batchEnd = Math.Min(batchIndex + AP_ParagraphsPerBatch - 1, processable.Count - 1)
-
-                ' Adjust for character limit
-                Dim batchChars As Integer = 0
-                For j = batchStart To batchEnd
-                    batchChars += processable(j).FullText.Length
-                    If batchChars > AP_MaxCharsPerBatch AndAlso j > batchStart Then
-                        batchEnd = j - 1
-                        Exit For
+            ' Context Before
+            Dim contextBeforeStart = Math.Max(0, batchStart - AP_ContextBefore)
+            If contextBeforeStart < batchStart Then
+                promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
+                For j = contextBeforeStart To batchStart - 1
+                    Dim contextText = If(processable(j).TranslatedText, processable(j).FullText)
+                    ' Strip markers from context to avoid LLM echoing them into non-marker paragraphs
+                    If contextText IsNot Nothing Then
+                        contextText = contextText.Replace(AP_RunBoundaryMarker, "")
+                        contextText = contextText.Replace(AP_NoteRefMarker, "")
                     End If
+                    promptBuilder.AppendLine(contextText)
                 Next
-
-                ApDashboardLog($"DocProcessor: batch {currentBatch}/{totalBatches} (paragraphs {batchStart + 1}-{batchEnd + 1})", "step")
-
-                ' Build prompt
-                Dim promptBuilder As New StringBuilder()
-
-                ' Context Before
-                Dim contextBeforeStart = Math.Max(0, batchStart - AP_ContextBefore)
-                If contextBeforeStart < batchStart Then
-                    promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
-                    For j = contextBeforeStart To batchStart - 1
-                        Dim contextText = If(processable(j).TranslatedText, processable(j).FullText)
-                        ' Strip markers from context to avoid LLM echoing them into non-marker paragraphs
-                        If contextText IsNot Nothing Then
-                            contextText = contextText.Replace(AP_RunBoundaryMarker, "")
-                            contextText = contextText.Replace(AP_NoteRefMarker, "")
-                        End If
-                        promptBuilder.AppendLine(contextText)
-                    Next
-                    promptBuilder.AppendLine()
-                End If
-
-                ' Paragraphs to process — use marker text when available
-                promptBuilder.AppendLine("[TEXTTOPROCESS]")
-                Dim batchNumber = 1
-                For j = batchStart To batchEnd
-                    Dim paraText = If(processable(j).MarkerText, processable(j).FullText)
-                    promptBuilder.AppendLine("[" & batchNumber.ToString() & "] " & paraText)
-                    batchNumber += 1
-                Next
-                promptBuilder.AppendLine("[/TEXTTOPROCESS]")
                 promptBuilder.AppendLine()
-
-                ' Context After
-                Dim contextAfterEnd = Math.Min(processable.Count - 1, batchEnd + AP_ContextAfter)
-                If contextAfterEnd > batchEnd Then
-                    promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
-                    For j = batchEnd + 1 To contextAfterEnd
-                        Dim ctxAfterText As String = processable(j).FullText
-                        If ctxAfterText IsNot Nothing Then
-                            ctxAfterText = ctxAfterText.Replace(AP_NoteRefMarker, "")
-                        End If
-                        promptBuilder.AppendLine(ctxAfterText)
-                    Next
-                End If
-
-                ' Call LLM
-                Dim llmResponse = Await LLM(systemPrompt, promptBuilder.ToString(),
-                                             UseSecondAPI:=_apUseSecondApi,
-                                             HideSplash:=True, EnsureUI:=False,
-                                             cancellationToken:=ct)
-
-                If String.IsNullOrWhiteSpace(llmResponse) Then
-                    ApDashboardLog($"DocProcessor: batch {currentBatch} returned empty response", "warn")
-                    Return False
-                End If
-
-                ' Parse response
-                APParseResponse(llmResponse, processable, batchStart, batchEnd)
-
-                ' ─── Restore non-breaking spaces in processed paragraphs ───
-                For j As Integer = batchStart To batchEnd
-                    If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
-                        processable(j).TranslatedText = APRestoreNonBreakingSpaces(
-                            processable(j).TranslatedText, nbspRecords(j))
-                    End If
-                Next
-
-                batchIndex = batchEnd + 1
-            End While
-
-            ApDashboardLog($"DocProcessor: all {currentBatch} batches completed", "success")
-            Return True
-
-        Finally
-            If offlineDocsApplied Then
-                _apUseSecondApi = False
-                If offlineDocsBackup IsNot Nothing Then
-                    RestoreDefaults(_context, offlineDocsBackup)
-                End If
             End If
-        End Try
+
+            ' Paragraphs to process — use marker text when available
+            promptBuilder.AppendLine("[TEXTTOPROCESS]")
+            Dim batchNumber = 1
+            For j = batchStart To batchEnd
+                Dim paraText = If(processable(j).MarkerText, processable(j).FullText)
+                promptBuilder.AppendLine("[" & batchNumber.ToString() & "] " & paraText)
+                batchNumber += 1
+            Next
+            promptBuilder.AppendLine("[/TEXTTOPROCESS]")
+            promptBuilder.AppendLine()
+
+            ' Context After
+            Dim contextAfterEnd = Math.Min(processable.Count - 1, batchEnd + AP_ContextAfter)
+            If contextAfterEnd > batchEnd Then
+                promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
+                For j = batchEnd + 1 To contextAfterEnd
+                    Dim ctxAfterText As String = processable(j).FullText
+                    If ctxAfterText IsNot Nothing Then
+                        ctxAfterText = ctxAfterText.Replace(AP_NoteRefMarker, "")
+                    End If
+                    promptBuilder.AppendLine(ctxAfterText)
+                Next
+            End If
+
+            ' Call LLM
+            Dim llmResponse = Await LLM(systemPrompt, promptBuilder.ToString(),
+                                         UseSecondAPI:=_apUseSecondApi,
+                                         HideSplash:=True, EnsureUI:=False,
+                                         cancellationToken:=ct)
+
+            If String.IsNullOrWhiteSpace(llmResponse) Then
+                ApDashboardLog($"DocProcessor: batch {currentBatch} returned empty response", "warn")
+                Return False
+            End If
+
+            ' Parse response
+            APParseResponse(llmResponse, processable, batchStart, batchEnd)
+
+            ' ─── Restore non-breaking spaces in processed paragraphs ───
+            For j As Integer = batchStart To batchEnd
+                If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                    processable(j).TranslatedText = APRestoreNonBreakingSpaces(
+                        processable(j).TranslatedText, nbspRecords(j))
+                End If
+            Next
+
+            batchIndex = batchEnd + 1
+        End While
+
+        ApDashboardLog($"DocProcessor: all {currentBatch} batches completed", "success")
+        Return True
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -1213,23 +1188,60 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Routes document processing to the appropriate format handler.
+    ''' Applies the OfflineDocs alternate model (if defined) for the entire document
+    ''' processing scope, then restores the previous model configuration.
     ''' </summary>
     ''' <param name="sheetFilter">Optional: restrict Excel processing to these sheet names.</param>
     Private Async Function ProcessDocumentForAutoPilot(inputPath As String, outputPath As String,
                                                        instruction As String, ct As CancellationToken,
                                                        Optional sheetFilter As List(Of String) = Nothing) As Task(Of Boolean)
-        Dim ext = Path.GetExtension(inputPath).ToLowerInvariant()
-        Select Case ext
-            Case ".docx", ".doc"
-                Return Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
-            Case ".pptx"
-                Return Await ProcessPptxForAutoPilot(inputPath, outputPath, instruction, ct)
-            Case ".xlsx"
-                Return Await ProcessXlsxForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
-            Case Else
-                Debug.WriteLine($"ProcessDocumentForAutoPilot: unsupported extension '{ext}'")
-                Return False
-        End Select
+
+        ' ── Try OfflineDocs alternate model for document processing ──
+        ' Always attempt this, even when SecondAPI is already active — OfflineDocs
+        ' is a dedicated document-processing model that should override the default
+        ' AutoPilot model selection. The previous config is restored in Finally.
+        Dim offlineDocsBackup As ModelConfig = Nothing
+        Dim offlineDocsApplied As Boolean = False
+        Dim previousUseSecondApi As Boolean = _apUseSecondApi
+
+        If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            Try
+                ' Capture the current config BEFORE GetSpecialTaskModel overwrites it
+                offlineDocsBackup = GetCurrentConfig(_context)
+                If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
+                    offlineDocsApplied = True
+                    _apUseSecondApi = True
+                    ApDashboardLog("DocProcessor: OfflineDocs model applied", "step")
+                Else
+                    ' GetSpecialTaskModel didn't find an OfflineDocs entry — discard backup
+                    offlineDocsBackup = Nothing
+                End If
+            Catch
+                offlineDocsBackup = Nothing
+            End Try
+        End If
+
+        Try
+            Dim ext = Path.GetExtension(inputPath).ToLowerInvariant()
+            Select Case ext
+                Case ".docx", ".doc"
+                    Return Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
+                Case ".pptx"
+                    Return Await ProcessPptxForAutoPilot(inputPath, outputPath, instruction, ct)
+                Case ".xlsx"
+                    Return Await ProcessXlsxForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
+                Case Else
+                    Debug.WriteLine($"ProcessDocumentForAutoPilot: unsupported extension '{ext}'")
+                    Return False
+            End Select
+        Finally
+            If offlineDocsApplied Then
+                _apUseSecondApi = previousUseSecondApi
+                If offlineDocsBackup IsNot Nothing Then
+                    RestoreDefaults(_context, offlineDocsBackup)
+                End If
+            End If
+        End Try
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════

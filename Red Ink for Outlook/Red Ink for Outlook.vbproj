@@ -47,6 +47,40 @@
     <OfficeApplicationDescription />
     <LoadBehavior>3</LoadBehavior>
   </PropertyGroup>
+  <!--
+  ═══════════════════════════════════════════════════════════════════════
+  WINDOWS SDK / WinRT DEPENDENCY — MUST UPDATE WHEN SDK VERSION CHANGES
+  ═══════════════════════════════════════════════════════════════════════
+  The Windows.Data.Pdf API (used for PDF rasterization in burn-in and
+  overlay fallback) requires references to the Windows 10 SDK WinRT metadata.
+  
+  THREE locations in this .vbproj reference a SPECIFIC SDK version and
+  MUST ALL be updated together when the installed SDK version changes:
+  
+    1. PropertyGroup (HAS_WINRT conditional constant):
+       Defines the HAS_WINRT compilation constant if Windows.winmd exists.
+  
+    2. Reference "Windows" (Windows.winmd):
+       Points to the WinRT union metadata file.
+  
+    3. Reference "System.Runtime.WindowsRuntime":
+       Required for WinRT async interop and WindowsRuntimeStreamExtensions.
+  
+    4. Reference "System.Runtime.InteropServices.WindowsRuntime":
+       Required for WinRT / .NET interop marshalling.
+  
+  HOW TO UPDATE (all must match):
+    Search for: 10.0.26100.0
+    Replace with: <your installed version>
+  
+  AFFECTED SOURCE FILES (use Windows.Data.Pdf behind #If HAS_WINRT):
+    - ThisAddIn.AutoPilot.PdfRedactor.vb (APRedactBurnIn)
+    - ThisAddIn.AutoPIlot.Tools.vb (APOverlayViaRasterizeCore, APOverlayViaRasterizeWithElementsCore)
+  ═══════════════════════════════════════════════════════════════════════
+  -->
+  <PropertyGroup Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+    <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
     <ApplicationVersion>1.2.10.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
@@ -334,6 +368,17 @@
     </Reference>
     <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.13.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
       <HintPath>..\packages\PdfPig.0.1.13\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
+    </Reference>
+    <Reference Include="Windows" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <HintPath>$(MSBuildProgramFiles32)\Reference Assemblies\Microsoft\Framework\.NETCore\v4.5\System.Runtime.WindowsRuntime.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="System.Runtime.InteropServices.WindowsRuntime, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a" Condition="Exists('$(MSBuildProgramFiles32)\Windows Kits\10\UnionMetadata\10.0.26100.0\Windows.winmd')">
+      <Private>False</Private>
     </Reference>
   </ItemGroup>
   <ItemGroup>

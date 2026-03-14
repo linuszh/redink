@@ -604,6 +604,18 @@ Namespace My
                 Me("AP_UseSecondApi") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property AP_ReprocessLookbackHours() As Integer
+            Get
+                Return CType(Me("AP_ReprocessLookbackHours"),Integer)
+            End Get
+            Set
+                Me("AP_ReprocessLookbackHours") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

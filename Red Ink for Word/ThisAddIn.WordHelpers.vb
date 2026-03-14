@@ -1,13 +1,14 @@
-﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland.
+﻿' Copyright (c) LawDigital Ltd., Switzerland.
 ' All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.WordHelpers.vb
 ' Purpose: Word-centric helper utilities for the add-in, including document and
 '          selection comparison workflows, change extraction/analysis for LLM
-'          summarization, markup/time-span analytics, and various editing helpers
-'          (content control removal, regex search/replace, file import/export utilities).
+'          summarization, markup/time-span analytics, PDF operations (flattening,
+'          splitting, exhibit stamping), comment management, and various editing
+'          helpers (content control removal, regex search/replace, file
+'          import/export utilities).
 '
 ' Architecture:
 ' - Comparison UI (HTML viewer):
@@ -19,8 +20,9 @@
 '           exports it to Filtered HTML (temp folder), and displays it with
 '           `ShowHTMLCustomMessageBox`.
 '         - Provides post-actions (buttons) such as: summarize changes, export to PDF,
-'           copy result to clipboard (with formatting), open result in Word, and run
-'           further "compare selected" operations.
+'           copy result to clipboard (with formatting), open result in Word,
+'           switch comparison direction (⇄), and run further "compare selected"
+'           operations.
 '     - `CompareSelectedTextRanges`:
 '         - Captures two user-selected ranges (non-modal prompts so Word stays usable),
 '           compares via `CompareDocuments` on temporary documents, exports to HTML,
@@ -36,14 +38,40 @@
 '     - `SummarizeDocumentChanges` / `ExtractRevisionsAndCommentsWithMarkup`:
 '         - Summarizes revisions/comments from a selection or whole document with optional
 '           date filtering and comment cutoffs relative to earliest revision.
+'         - Ignores pure formatting revisions for output but uses them for date calculation.
+'
+' - PDF Operations:
+'     - `FlattenPdfToImages` / `FlattenPdfToImageOnly`:
+'         - Rasterizes PDF pages to image-only PDFs, removing text layers.
+'         - Prefers Windows.Data.Pdf (Win10+ built-in renderer) via `FlattenPdfViaWindowsApi`;
+'           falls back to PdfiumViewer when unavailable.
+'         - Requires HAS_WINRT compilation constant (auto-detected from Windows SDK).
+'         - Supports per-page JPEG encoding at configurable DPI, metadata preservation,
+'           recursive directory processing, and progress bar with cancellation.
+'     - `RenderPageViaWindowsPdf` / `RenderAllPagesViaWindowsPdf`:
+'         - Single-page and full-document Windows.Data.Pdf rendering helpers
+'           used by both flattening and exhibit stamping (Stamper.vb).
+'         - Execute on STA threads with timeout protection.
+'     - `SplitPdfByExhibits`:
+'         - Extracts text page-by-page (PdfPig, with optional OCR fallback),
+'           sends to LLM for exhibit boundary detection, and splits via PdfSharp.
+'         - Supports configurable output language for descriptions and user
+'           confirmation of proposed splits.
 '
 ' - Export/IO Helpers:
 '     - `ReadHtmlWithEncodingDetection` detects encoding of Word-generated Filtered HTML
 '       (BOM/meta charset; fallback to Windows-1252), used before displaying in the HTML viewer.
-'     - `ExportComparisonToPdfFromHtml` reopens exported HTML in Word and exports to PDF,
-'       prompting for output path and ensuring unique filenames.
-'     - Additional file conversion helpers (e.g., PDF flattening, content export/import)
-'       live in this file and share the same UI/progress patterns.
+'     - `ExportComparisonToPdfFromHtml` / `ExportComparisonToPdf` reopens exported HTML
+'       in Word and exports to PDF, prompting for output path and ensuring unique filenames.
+'     - `ExportFileContentToText` converts files (PDF, DOCX, TXT, etc.) to plain text,
+'       with optional OCR for PDFs and batch processing support.
+'
+' - Comment Management:
+'     - `NewRemoveRIPrefixFromComments` / `RemoveRIPrefixFromComments`:
+'         - Removes leading "RI: " prefix from Word comments (including threaded replies).
+'         - Optionally removes comment date/time via Open XML post-processing
+'           (`RemoveCommentDateTimesViaOpenXml`) by saving to temp DOCX, stripping
+'           w:date attributes from comments.xml and commentsExtended/Extensible parts.
 '
 ' - Editing Utilities:
 '     - Content control removal helpers (`RemoveContentControlsRespectSelection`,
@@ -52,17 +80,32 @@
 '     - `RegexSearchReplace` provides multi-pattern regex operations with persistent settings.
 '     - `AcceptFormatting` accepts formatting-only revisions with escape-to-cancel UX.
 '     - `CalculateUserMarkupTimeSpan` calculates markup/comment time spans by author with optional date filter.
+'     - `CompareSelectionHalves` splits selected paragraphs into two halves and compares them.
 '
 ' Threading / UX:
 ' - Uses non-modal top-most dialogs for selection capture, enabling the user to interact with Word
 '   while prompts are visible.
 ' - Long-running work uses progress/splash patterns, and asynchronous UI rendering uses STA threads
 '   where required by WinForms/embedded browser controls.
+' - Windows.Data.Pdf calls execute on dedicated STA threads with 2–5 minute timeout protection.
+'
+' Build Configuration (Windows SDK / WinRT):
+' - The HAS_WINRT conditional compilation constant is auto-defined in the .vbproj
+'   when Windows.winmd is found at the expected SDK path.
+' - Currently requires Windows SDK 10.0.26100.0 (see .vbproj for update instructions).
+' - When HAS_WINRT is NOT defined, all Windows.Data.Pdf code is compiled out and
+'   PdfiumViewer is used as fallback (reduced rendering fidelity for complex PDFs).
 '
 ' Dependencies:
 ' - Microsoft Office Interop Word (`Microsoft.Office.Interop.Word`)
 ' - Markdig (Markdown → HTML rendering)
-' - SharedLibrary (`SharedLibrary.SharedMethods`) for dialogs, clipboard helpers, and LLM access
+' - PdfSharp (PDF creation/manipulation)
+' - PdfPig (PDF text extraction / page counting)
+' - PdfiumViewer (PDF rendering fallback when Windows.Data.Pdf unavailable)
+' - Windows.Data.Pdf (Win10+ built-in PDF renderer, via WinRT projection)
+' - DocumentFormat.OpenXml (Open XML post-processing for comment date removal)
+' - SharedLibrary (`SharedLibrary.SharedMethods`) for dialogs, clipboard helpers, LLM access,
+'   progress bar, splash screen, drag & drop forms, and OCR utilities
 ' =============================================================================
 
 Option Explicit On
@@ -1368,29 +1411,410 @@ Partial Public Class ThisAddIn
         ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Flatten PDF to Images")
     End Sub
 
+
+
+
+
     ''' <summary>
-    ''' Converts a PDF to an image-only PDF by rasterizing each page.
-    ''' Unlike BurnInPdfToImageOnly, this method does not process annotations and simply
-    ''' renders each page as-is to a rasterized image, removing all text layers.
+    ''' Converts a PDF to an image-only PDF by rasterizing each page via the Windows 10+
+    ''' built-in PDF renderer (Windows.Data.Pdf). This API is maintained by Microsoft via
+    ''' Windows Update, handles all modern PDF features (transparency groups, layered image
+    ''' XObjects, form XObjects, compositing modes), and requires no third-party native DLLs.
+    ''' Falls back to PdfiumViewer if the Windows API is unavailable.
     ''' </summary>
     ''' <param name="inputPath">Input PDF file path</param>
     ''' <param name="outputPath">Output PDF file path</param>
     ''' <param name="dpi">Rasterization DPI (default 200 for balance of size/quality)</param>
     Private Shared Sub FlattenPdfToImageOnly(inputPath As String, outputPath As String, Optional dpi As Integer = 200)
 
-        ' Ensure pdfium.dll is loaded (reuse existing helper from PdfRedactionService)
+        Dim dbg As Action(Of String) = Sub(msg) System.Diagnostics.Debug.WriteLine($"[FlattenPDF] {msg}")
+        dbg($"=== FlattenPdfToImageOnly START === dpi={dpi}")
+        dbg($"Input:  {inputPath}")
+        dbg($"Output: {outputPath}")
+
+        Dim usedWindowsPdf As Boolean = False
+
+#If HAS_WINRT Then
+        If Environment.OSVersion.Version.Major >= 10 Then
+            Try
+                FlattenPdfViaWindowsApi(inputPath, outputPath, dpi)
+                usedWindowsPdf = True
+                dbg("Rendered via Windows.Data.Pdf — all visual elements preserved")
+            Catch ex As Exception
+                dbg($"Windows.Data.Pdf failed: {ex.Message} — falling back to PdfiumViewer")
+                usedWindowsPdf = False
+            End Try
+        Else
+            dbg($"OS version {Environment.OSVersion.Version} — Windows.Data.Pdf not available, using PdfiumViewer")
+        End If
+#End If
+
+        If Not usedWindowsPdf Then
+            dbg("WARNING: PdfiumViewer fallback may not preserve layered image objects with transparency")
+            FlattenPdfToImageOnlyViaPdfium(inputPath, outputPath, dpi)
+        End If
+
+        dbg("=== FlattenPdfToImageOnly END ===")
+    End Sub
+
+    Private Shared Sub FlattenPdfViaWindowsApi(inputPath As String, outputPath As String, dpi As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available (SDK not installed at build time).")
+#Else
+        Dim dbg As Action(Of String) = Sub(msg) System.Diagnostics.Debug.WriteLine($"[FlattenPDF-WinPdf] {msg}")
+
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    FlattenPdfViaWindowsApiCore(inputPath, outputPath, dpi, dbg)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Throw New TimeoutException("Windows.Data.Pdf rendering timed out after 5 minutes.")
+        End If
+
+        If renderException IsNot Nothing Then
+            Throw renderException
+        End If
+#End If
+    End Sub
+
+    Private Shared Sub FlattenPdfViaWindowsApiCore(inputPath As String, outputPath As String,
+                                                    dpi As Integer,
+                                                    dbg As Action(Of String))
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available (SDK not installed at build time).")
+#Else
+        ' Open the PDF via Windows.Data.Pdf
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        dbg($"Opened via Windows.Data.Pdf — {winPdf.PageCount} page(s)")
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+        ' Copy metadata from source
+        Try
+            Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                CopyPdfMetadata(srcDoc, outDoc)
+            End Using
+        Catch
+        End Try
+
+        ' Scale factor: Windows.Data.Pdf renders at 96 DPI by default.
+        Dim scaleFactor As Double = dpi / 96.0
+
+        For pageIndex As UInteger = 0 To CUInt(winPdf.PageCount - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+            Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+            dbg($"Page {pageIndex + 1}: {pageWidthPt:F0}x{pageHeightPt:F0} pts, render {renderWidthPx}x{renderHeightPx} px")
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+                renderStream.Seek(0)
+                Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using ms As New System.IO.MemoryStream()
+                    netStream.CopyTo(ms)
+                    ms.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(ms)
+                        Using jpegMs As New System.IO.MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                            If jpegEncoder IsNot Nothing Then
+                                Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                                encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+
+                            jpegMs.Position = 0
+
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        outDoc.Save(outputPath)
+        outDoc.Close()
+
+        dbg($"Output saved: {New System.IO.FileInfo(outputPath).Length:N0} bytes")
+#End If
+    End Sub
+
+
+    ''' <summary>
+    ''' Renders a single page of a PDF to a JPEG MemoryStream using Windows.Data.Pdf (Win10+).
+    ''' Returns Nothing if the API is unavailable or fails (caller should fall back to PdfiumViewer).
+    ''' </summary>
+    Friend Shared Function RenderPageViaWindowsPdf(inputPath As String, pageIndex As Integer, dpi As Integer) As Tuple(Of MemoryStream, Double, Double)
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        If Environment.OSVersion.Version.Major < 10 Then Return Nothing
+
+        Dim result As Tuple(Of MemoryStream, Double, Double) = Nothing
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    result = RenderPageViaWindowsPdfCore(inputPath, pageIndex, dpi)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(2)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Return Nothing
+        End If
+
+        If renderException IsNot Nothing Then Return Nothing
+        Return result
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Core STA implementation for single-page Windows.Data.Pdf rendering.
+    ''' </summary>
+    Private Shared Function RenderPageViaWindowsPdfCore(inputPath As String, pageIndex As Integer, dpi As Integer) As Tuple(Of MemoryStream, Double, Double)
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        If pageIndex < 0 OrElse pageIndex >= CInt(winPdf.PageCount) Then Return Nothing
+
+        Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(CUInt(pageIndex))
+
+        Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+        Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+        Dim scaleFactor As Double = dpi / 96.0
+        Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+        Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+        Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+            Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+            renderOptions.DestinationWidth = renderWidthPx
+            renderOptions.DestinationHeight = renderHeightPx
+            renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+            page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+            renderStream.Seek(0)
+            Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+            Using pngMs As New MemoryStream()
+                netStream.CopyTo(pngMs)
+                pngMs.Position = 0
+
+                Using bmp As New System.Drawing.Bitmap(pngMs)
+                    Dim jpegMs As New MemoryStream()
+                    Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                    If jpegEncoder IsNot Nothing Then
+                        Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                        encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                            System.Drawing.Imaging.Encoder.Quality, 85L)
+                        bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                    Else
+                        bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                    End If
+                    jpegMs.Position = 0
+
+                    page.Dispose()
+                    Return Tuple.Create(jpegMs, pageWidthPt, pageHeightPt)
+                End Using
+            End Using
+        End Using
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Renders all pages of a PDF to a new image-only PdfSharp document using Windows.Data.Pdf.
+    ''' Returns Nothing if the API is unavailable or fails.
+    ''' </summary>
+    Friend Shared Function RenderAllPagesViaWindowsPdf(inputPath As String, dpi As Integer) As PdfSharp.Pdf.PdfDocument
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        If Environment.OSVersion.Version.Major < 10 Then Return Nothing
+
+        Dim result As PdfSharp.Pdf.PdfDocument = Nothing
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    result = RenderAllPagesViaWindowsPdfCore(inputPath, dpi)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Return Nothing
+        End If
+
+        If renderException IsNot Nothing Then Return Nothing
+        Return result
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Core STA implementation for full-document Windows.Data.Pdf rendering.
+    ''' </summary>
+    Private Shared Function RenderAllPagesViaWindowsPdfCore(inputPath As String, dpi As Integer) As PdfSharp.Pdf.PdfDocument
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+        Dim scaleFactor As Double = dpi / 96.0
+
+        For pageIndex As UInteger = 0 To CUInt(winPdf.PageCount - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+            Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+                renderStream.Seek(0)
+                Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using pngMs As New MemoryStream()
+                    netStream.CopyTo(pngMs)
+                    pngMs.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(pngMs)
+                        Using jpegMs As New MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                            If jpegEncoder IsNot Nothing Then
+                                Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                                encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+
+                            jpegMs.Position = 0
+
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        Return outDoc
+#End If
+    End Function
+
+
+
+
+    <System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet:=System.Runtime.InteropServices.CharSet.Auto, SetLastError:=True)>
+    Private Shared Function LoadLibrary(lpFileName As String) As IntPtr
+    End Function
+
+    ''' <summary>
+    ''' Rasterizes a PDF to an image-only PDF via PdfiumViewer.
+    ''' Used as fallback if Windows.Data.Pdf is unavailable (pre-Windows 10).
+    ''' </summary>
+    Private Shared Sub FlattenPdfToImageOnlyViaPdfium(inputPath As String, outputPath As String,
+                                                      Optional dpi As Integer = 200,
+                                                      Optional metadataSourcePath As String = Nothing)
+
         PdfRedactionService.EnsurePdfiumLoadedPublic()
 
         Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
             Dim outDoc As New PdfSharp.Pdf.PdfDocument()
 
-            ' Preserve metadata from source PDF
+            Dim metaPath As String = If(String.IsNullOrEmpty(metadataSourcePath), inputPath, metadataSourcePath)
             Try
-                Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(metaPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
                     CopyPdfMetadata(srcDoc, outDoc)
                 End Using
             Catch
-                ' Ignore metadata copy failures
             End Try
 
             For pageIndex As Integer = 0 To pdf.PageCount - 1
@@ -1398,27 +1822,24 @@ Partial Public Class ThisAddIn
                 Dim widthPx As Integer = CInt(System.Math.Round(sizePt.Width / 72.0 * dpi))
                 Dim heightPx As Integer = CInt(System.Math.Round(sizePt.Height / 72.0 * dpi))
 
-                ' Render with annotations visible, LCD text smoothing, and print quality
                 Dim renderFlags As PdfiumViewer.PdfRenderFlags =
-                PdfiumViewer.PdfRenderFlags.Annotations Or
-                PdfiumViewer.PdfRenderFlags.LcdText Or
-                PdfiumViewer.PdfRenderFlags.ForPrinting
+                    PdfiumViewer.PdfRenderFlags.Annotations Or
+                    PdfiumViewer.PdfRenderFlags.LcdText Or
+                    PdfiumViewer.PdfRenderFlags.ForPrinting
 
                 Using rendered As System.Drawing.Image = pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
                     Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
                     outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
                     outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
 
-                    ' Save as JPEG for smaller file size (quality 85 is a good balance)
                     Using ms As New System.IO.MemoryStream()
                         Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
                         If jpegEncoder IsNot Nothing Then
                             Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
                             encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
-                            System.Drawing.Imaging.Encoder.Quality, 85L)
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
                             rendered.Save(ms, jpegEncoder, encoderParams)
                         Else
-                            ' Fallback to PNG if JPEG encoder not available
                             rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                         End If
 
@@ -1436,6 +1857,8 @@ Partial Public Class ThisAddIn
             outDoc.Close()
         End Using
     End Sub
+
+
 
     ''' <summary>
     ''' Gets the JPEG image encoder for file size optimization.
@@ -4021,6 +4444,9 @@ Partial Public Class ThisAddIn
             End Using
         End Using
     End Sub
+
+
+
 
 End Class
 
