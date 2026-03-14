@@ -654,6 +654,9 @@ Partial Public Class ThisAddIn
         Public ToolingEnabled As System.Boolean = False
         Public SelectedToolNames As System.Collections.Generic.List(Of String) = New System.Collections.Generic.List(Of String)()
         Public AgentModeEnabled As System.Boolean = False
+        Public PreAgentModelKey As System.String = ""
+        Public PreAgentUseSecondApi As System.Boolean = False
+        Public AgentModelActive As System.Boolean = False
     End Class
 
     ''' <summary>
@@ -929,6 +932,120 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+    ''' <summary>
+    ''' Scans the alternate models INI for an entry with AgentDefaultModel=True.
+    ''' Returns the ModelConfig and its display key without applying it to context.
+    ''' </summary>
+    ''' <param name="displayKey">Output: the display label for the found model.</param>
+    ''' <returns>The ModelConfig if found; Nothing otherwise.</returns>
+    Private Function FindAgentDefaultModel(ByRef displayKey As String) As ModelConfig
+        displayKey = Nothing
+        Try
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then Return Nothing
+
+            Dim alts As List(Of ModelConfig) = Nothing
+            Try
+                alts = LoadAlternativeModels(INI_AlternateModelPath, _context, includeToolOnly:=False, toolsOnly:=False)
+            Catch
+                Return Nothing
+            End Try
+            If alts Is Nothing OrElse alts.Count = 0 Then Return Nothing
+
+            ' GetSpecialTaskModel searches for a key with a truthy value.
+            ' We replicate the search here WITHOUT applying to context.
+            Dim iniPath As String = ExpandEnvironmentVariables(INI_AlternateModelPath)
+            If Not IO.File.Exists(iniPath) Then Return Nothing
+
+            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+                "true", "yes", "wahr", "ja", "on", "1"
+            }
+
+            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            Dim sectionName As String = ""
+
+            Dim checkSection As Func(Of String) =
+                Function()
+                    If currentDict.Count = 0 Then Return Nothing
+                    If Not currentDict.ContainsKey("AgentDefaultModel") Then Return Nothing
+                    Dim raw As String = currentDict("AgentDefaultModel")
+                    If raw Is Nothing Then Return Nothing
+
+                    ' Strip inline comments, quotes
+                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
+                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
+                    raw = raw.Trim()
+                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse
+                                                (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
+                        raw = raw.Substring(1, raw.Length - 2).Trim()
+                    End If
+                    If truthy.Contains(raw.ToLowerInvariant()) Then Return sectionName
+                    Return Nothing
+                End Function
+
+            ' Helper: match a raw INI section name to a loaded ModelConfig.
+            ' ModelDescription may be decorated with ModelNote and/or ToolingSuffix,
+            ' so we use StartsWith for ModelDescription and Equals for Model.
+            Dim matchToConfig As Func(Of String, ModelConfig) =
+                Function(section As String)
+                    Return alts.FirstOrDefault(Function(m)
+                                                   If m Is Nothing Then Return False
+                                                   If Not String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
+                                                      m.ModelDescription.StartsWith(section, StringComparison.OrdinalIgnoreCase) Then Return True
+                                                   If Not String.IsNullOrWhiteSpace(m.Model) AndAlso
+                                                      String.Equals(m.Model, section, StringComparison.OrdinalIgnoreCase) Then Return True
+                                                   Return False
+                                               End Function)
+                End Function
+
+            For Each rawLine In IO.File.ReadAllLines(iniPath)
+                Dim line = rawLine.Trim()
+                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then Continue For
+
+                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
+                    Dim matchedSection = checkSection()
+                    If matchedSection IsNot Nothing Then
+                        Dim mc = matchToConfig(matchedSection)
+                        If mc IsNot Nothing Then
+                            displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
+                            Return mc
+                        End If
+                    End If
+                    currentDict.Clear()
+                    sectionName = line.Substring(1, line.Length - 2).Trim()
+                    Continue For
+                End If
+
+                Dim tokens = line.Split(New Char() {"="c}, 2)
+                If tokens.Length = 2 Then currentDict(tokens(0).Trim()) = tokens(1).Trim()
+            Next
+
+            ' Check final section
+            Dim finalMatch = checkSection()
+            If finalMatch IsNot Nothing Then
+                Dim mc = matchToConfig(finalMatch)
+                If mc IsNot Nothing Then
+                    displayKey = If(Not String.IsNullOrWhiteSpace(mc.ModelDescription), mc.ModelDescription, mc.Model)
+                    Return mc
+                End If
+            End If
+
+            Return Nothing
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Returns True if an AgentDefaultModel is defined in the alternate models INI.
+    ''' Lightweight check — does not load model configs.
+    ''' </summary>
+    Private Function IsAgentDefaultModelAvailable() As Boolean
+        Dim dummy As String = Nothing
+        Return FindAgentDefaultModel(dummy) IsNot Nothing
+    End Function
+
+
     ''' <summary>
     ''' Checks if tooling should be used based on current settings and model capability.
     ''' </summary>
@@ -1080,6 +1197,9 @@ Partial Public Class ThisAddIn
         html.AppendLine("#toolLogBtn{flex-shrink:0;} ")
         html.AppendLine("#toolLogBtn.active{background:#222b35;border-color:var(--border-strong);color:#fff;box-shadow:inset 0 0 0 1px #303c46;} ")
         html.AppendLine(":root.light #toolLogBtn.active{background:#e2e5e9;border-color:var(--border-strong);color:#0e1116;box-shadow:inset 0 0 0 1px #c9cfd6;} ")
+        html.AppendLine("#agentModelBtn{flex-shrink:0;display:none;line-height:1;align-items:center;justify-content:center;padding:.45rem .5rem;transition:background .18s,border-color .18s,color .18s,transform .08s,box-shadow .18s;} ")
+        html.AppendLine("#agentModelBtn.active{background:#1a5276;border-color:#2980b9;color:#fff;box-shadow:inset 0 0 0 1px #2980b9;} ")
+        html.AppendLine(":root.light #agentModelBtn.active{background:#d4e6f1;border-color:#2980b9;color:#1a5276;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine("#agentFiles{font-size:.7rem;color:var(--muted);padding:0 1rem .5rem;display:none;} ")
         html.AppendLine("#agentFiles .file-tag{display:inline-block;background:var(--elev);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin:2px;font-size:.65rem;} ")
         html.AppendLine("</style>")
@@ -1098,6 +1218,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("    </div>")
         html.AppendLine("    <div class=""spacer""></div>")
         html.AppendLine("    <select id=""modelSel"" title=""Model""></select>")
+        html.AppendLine("    <button id=""agentModelBtn"" title=""Toggle agent model (AgentDefaultModel) — auto-switches model, enables agent mode with all tools"" style=""display:none;line-height:1;align-items:center;justify-content:center;padding:.45rem .5rem;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""4"" width=""18"" height=""12"" rx=""2""/><line x1=""7"" y1=""20"" x2=""17"" y2=""20""/><line x1=""12"" y1=""16"" x2=""12"" y2=""20""/><circle cx=""9"" cy=""10"" r=""1""/><circle cx=""15"" cy=""10"" r=""1""/></svg></button>")
         html.AppendLine("    <button id=""copyBtn"" title=""Copy last answer to clipboard"">Copy last</button>")
         html.AppendLine("    <button id=""toWordBtn"" title=""Move this chat thread into a new Word document"">To Word</button>")
         html.AppendLine("    <button id=""clearBtn"" title=""Clear current conversation"">Clear</button>")
@@ -1134,7 +1255,35 @@ Partial Public Class ThisAddIn
                 "</div>")
         html.AppendLine("  </div>")
         html.AppendLine("  <div id=""agentFiles""></div>")
-        html.AppendLine("  <div class=""hint"">Drag & drop a file (only visible to the chatbot for the current prompt) • Enter=send • Shift+Enter=newline • Ctrl+L=clear</div>")
+
+        ' Build dynamic hint text
+        Dim hintParts As New System.Collections.Generic.List(Of String)()
+        hintParts.Add("Drag &amp; drop a file (only visible to the chatbot for the current prompt)")
+        hintParts.Add("Enter=send")
+        hintParts.Add("Shift+Enter=newline")
+        hintParts.Add("Ctrl+L=clear")
+
+        ' Check if (t) trigger is available (ToolDefaultModel defined in INI)
+        Dim toolTriggerAvailable As Boolean = False
+        Try
+            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                toolTriggerAvailable = GetSpecialTaskModel(_context, INI_AlternateModelPath, "ToolDefaultModel")
+                If toolTriggerAvailable Then
+                    ' Immediately restore — we only wanted to check availability
+                    If originalConfigLoaded Then
+                        RestoreDefaults(_context, originalConfig)
+                    End If
+                    originalConfigLoaded = False
+                End If
+            End If
+        Catch
+        End Try
+
+        If toolTriggerAvailable Then
+            hintParts.Add(ToolTrigger & "=use sources with tool model")
+        End If
+
+        html.AppendLine("  <div class=""hint"">" & String.Join(" • ", hintParts) & "</div>")
         html.AppendLine("</div>")
 
         ' JS
@@ -1179,6 +1328,9 @@ Partial Public Class ThisAddIn
         html.AppendLine("const agentLbl=document.getElementById('agentLbl');")
         html.AppendLine("const toolLogBtn=document.getElementById('toolLogBtn');")
         html.AppendLine("const agentFilesEl=document.getElementById('agentFiles');")
+        html.AppendLine("const agentModelBtn=document.getElementById('agentModelBtn');")
+        html.AppendLine("let __agentModelActive=false;")
+        html.AppendLine("let __agentModelAvailable=false;")
         html.AppendLine("let __agentEnabled=false;")
         html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
@@ -1206,8 +1358,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("function stopElapsedTimer(){if(__elapsedTimer){clearInterval(__elapsedTimer);__elapsedTimer=null;}const el=document.getElementById('typingElapsed');if(el)el.style.display='none';}")
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
-        ' Boot
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);updateToolingVisibility();applyCoupling();adjustModelSel();} ")
+        ' Boot        
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);__agentModelAvailable=(st.agentModelAvailable===true);__agentModelActive=(st.agentModelActive===true);updateAgentModelBtn();updateToolingVisibility();applyCoupling();adjustModelSel();} ")
 
         ' Poll job
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
@@ -1226,7 +1378,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
-        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}toolingChk.checked=__toolingEnabled;updateToolingVisibility();applyCoupling();});")
+        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}toolingChk.checked=__toolingEnabled;__agentModelActive=false;updateAgentModelBtn();updateToolingVisibility();applyCoupling();});")
         html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
@@ -1237,7 +1389,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);updateModelTooltip();applyCoupling();adjustModelSel();}")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);if(typeof r.agentModelActive==='boolean'){__agentModelActive=r.agentModelActive;}if(typeof r.agentModelAvailable==='boolean'){__agentModelAvailable=r.agentModelAvailable;}updateAgentModelBtn();updateModelTooltip();applyCoupling();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
@@ -1255,6 +1407,8 @@ Partial Public Class ThisAddIn
 
         ' Agent files display
         html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__agentEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
+        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}__agentModelActive=!!r.active;updateAgentModelBtn();if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);applyCoupling();adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
 
         html.AppendLine("boot();")
         html.AppendLine("</script>")
@@ -1346,6 +1500,132 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle agent mode: " & ex.Message)
+                        End Try
+
+                    Case "inky_toggleagentmodel"
+                        ' Toggle the AgentDefaultModel on/off with one click.
+                        ' When toggling ON:  find AgentDefaultModel in INI, switch model selector to it,
+                        '                    enable agent mode + tooling, return updated model list.
+                        ' When toggling OFF: restore the model that was active before, disable agent model flag.
+                        Try
+                            Dim st = LoadInkyState()
+
+                            If st.AgentModelActive Then
+                                ' ── TOGGLE OFF: restore previous model ──
+                                st.AgentModelActive = False
+                                st.SelectedModelKey = st.PreAgentModelKey
+                                st.UseSecondApi = st.PreAgentUseSecondApi
+                                st.PreAgentModelKey = ""
+                                st.PreAgentUseSecondApi = False
+
+                                ' Also turn off agent mode (tools)
+                                st.AgentModeEnabled = False
+                                _chatAgentModeEnabled = False
+                                ChatAgentClearFiles()
+
+                                ' Re-evaluate tooling/files for restored model
+                                Dim supportsToolingOff = CurrentModelSupportsTooling(st)
+                                If Not supportsToolingOff AndAlso st.ToolingEnabled Then
+                                    st.ToolingEnabled = False
+                                    _chatToolingEnabled = False
+                                End If
+
+                                Try
+                                    st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
+                                Catch
+                                    st.SupportsFileUploads = False
+                                End Try
+
+                                SaveInkyState(st)
+
+                                Dim models = Await GetModelListForBrowserAsync(st)
+                                Dim supTooling As Boolean = False
+                                Dim effTooling As Boolean = SyncToolingState(st, supTooling)
+
+                                Return JsonOk(New With {
+                                    .ok = True,
+                                    .active = False,
+                                    .models = models,
+                                    .supportsFiles = st.SupportsFileUploads,
+                                    .supportsTooling = supTooling,
+                                    .toolingEnabled = effTooling,
+                                    .agentEnabled = False,
+                                    .agentFiles = GetAgentFileListForBrowser()
+                                })
+                            Else
+                                ' ── TOGGLE ON: find and apply AgentDefaultModel ──
+                                If IsChatAgentBlocked() Then
+                                    Return JsonErr("Agent mode is not available while AutoPilot is running.")
+                                End If
+
+                                Dim agentDisplayKey As String = Nothing
+                                Dim agentConfig As ModelConfig = FindAgentDefaultModel(agentDisplayKey)
+
+                                If agentConfig Is Nothing OrElse String.IsNullOrWhiteSpace(agentDisplayKey) Then
+                                    Return JsonErr("No model with 'AgentDefaultModel=True' found in the alternate model configuration.")
+                                End If
+
+                                ' Verify the agent model supports tooling
+                                If Not ModelSupportsTooling(agentConfig) Then
+                                    Return JsonErr("The AgentDefaultModel does not support tool calling. Check its APICall_ToolInstructions setting.")
+                                End If
+
+                                ' Save current model selection so we can restore on toggle-off
+                                st.PreAgentModelKey = st.SelectedModelKey
+                                st.PreAgentUseSecondApi = st.UseSecondApi
+                                st.AgentModelActive = True
+
+                                ' Switch to the agent model
+                                st.UseSecondApi = True
+                                st.SelectedModelKey = agentDisplayKey
+
+                                ' Enable agent mode + tooling
+                                st.AgentModeEnabled = True
+                                _chatAgentModeEnabled = True
+
+                                ' Auto-enable tooling (sources) if tools are available
+                                If Not st.ToolingEnabled Then
+                                    Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
+                                                              (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
+                                    If hasTools Then
+                                        st.ToolingEnabled = True
+                                        _chatToolingEnabled = True
+                                    End If
+                                End If
+
+                                Try
+                                    st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
+                                Catch
+                                    st.SupportsFileUploads = False
+                                End Try
+
+                                Try
+                                    My.Settings.Inky_UseSecondApiSelected = st.UseSecondApi
+                                    My.Settings.Inky_SelectedModelKey = st.SelectedModelKey
+                                    My.Settings.Save()
+                                Catch
+                                End Try
+
+                                SaveInkyState(st)
+
+                                Dim models = Await GetModelListForBrowserAsync(st)
+                                Dim supTooling As Boolean = False
+                                Dim effTooling As Boolean = SyncToolingState(st, supTooling)
+
+                                Return JsonOk(New With {
+                                    .ok = True,
+                                    .active = True,
+                                    .agentModelLabel = agentDisplayKey,
+                                    .models = models,
+                                    .supportsFiles = st.SupportsFileUploads,
+                                    .supportsTooling = supTooling,
+                                    .toolingEnabled = effTooling,
+                                    .agentEnabled = True,
+                                    .agentFiles = GetAgentFileListForBrowser()
+                                })
+                            End If
+                        Catch ex As Exception
+                            Return JsonErr("Agent model toggle failed: " & ex.Message)
                         End Try
 
                     Case "inky_agentaddfiles"
@@ -1518,7 +1798,9 @@ Partial Public Class ThisAddIn
                             .toolingLogEnabled = INI_ToolingLogWindow,
                             .tools = GetToolListForBrowser(),
                             .agentEnabled = _chatAgentModeEnabled,
-                            .agentFiles = GetAgentFileListForBrowser()
+                            .agentFiles = GetAgentFileListForBrowser(),
+                            .agentModelActive = st.AgentModelActive,
+                            .agentModelAvailable = IsAgentDefaultModelAvailable()
                         })
 
                     ' Remaining cases kept intact (command-specific logic)
@@ -1554,7 +1836,9 @@ Partial Public Class ThisAddIn
                                 .toolingLogEnabled = INI_ToolingLogWindow,
                                 .models = models,
                                 .agentEnabled = _chatAgentModeEnabled,
-                                .agentFiles = GetAgentFileListForBrowser()
+                                .agentFiles = GetAgentFileListForBrowser(),
+                                .agentModelActive = stSw.AgentModelActive,
+                                .agentModelAvailable = IsAgentDefaultModelAvailable()
                             })
 
                     Case "inky_upload"
@@ -1698,6 +1982,83 @@ Partial Public Class ThisAddIn
                         End Try
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_Send invoked")
+
+                        ' ------------------ (A2) Detect and strip (t) trigger ------------------
+                        ' If the user includes "(t)" anywhere in the prompt, switch to the
+                        ' ToolDefaultModel for this single request (same pattern as Form1.vb).
+                        Dim toolTriggerDetected As Boolean = False
+                        Dim toolTriggerConfig As ModelConfig = Nothing
+                        Dim toolTriggerDisplayKey As String = Nothing
+
+                        If textBody.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            textBody = textBody.Replace(ToolTrigger, "").Trim()
+                            If Not String.IsNullOrWhiteSpace(textBody) Then
+                                Try
+                                    If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                                        Return JsonErr($"The {ToolTrigger} trigger requires an alternate model configuration file, but none is configured.")
+                                    End If
+
+                                    ' Snapshot → apply ToolDefaultModel → capture → restore
+                                    Dim preConfig As ModelConfig = GetCurrentConfig(_context)
+                                    Dim found As Boolean = GetSpecialTaskModel(
+                                        _context, INI_AlternateModelPath, "ToolDefaultModel")
+
+                                    If found Then
+                                        toolTriggerConfig = GetCurrentConfig(_context)
+                                        toolTriggerDisplayKey = If(Not String.IsNullOrWhiteSpace(toolTriggerConfig.ModelDescription),
+                                                                   toolTriggerConfig.ModelDescription, toolTriggerConfig.Model)
+
+                                        ' Immediately restore original config
+                                        If originalConfigLoaded Then
+                                            RestoreDefaults(_context, originalConfig)
+                                        End If
+                                        originalConfigLoaded = False
+
+                                        ' Verify tooling support
+                                        If ModelSupportsTooling(toolTriggerConfig) Then
+                                            toolTriggerDetected = True
+
+                                            ' Ensure sources are selected (same logic as Form1.vb)
+                                            If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
+                                                If Not EnsureToolsSelected(st) Then
+                                                    ' No persisted tools — prompt user to select
+                                                    Dim selectedTools As List(Of ModelConfig) = Nothing
+                                                    Try
+                                                        Await SwitchToUi(Sub()
+                                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName)
+                                                                         End Sub).ConfigureAwait(False)
+                                                    Catch
+                                                    End Try
+
+                                                    If selectedTools IsNot Nothing AndAlso selectedTools.Count > 0 Then
+                                                        _selectedToolsForChat = selectedTools
+                                                        st.SelectedToolNames = selectedTools.Select(Function(tl) tl.ToolName).ToList()
+                                                        st.ToolingEnabled = True
+                                                        _chatToolingEnabled = True
+                                                        SaveInkyState(st)
+                                                    Else
+                                                        ' User cancelled — abort
+                                                        toolTriggerDetected = False
+                                                        Return JsonErr($"The {ToolTrigger} trigger requires {ToolFriendlyName.ToLower} to be selected. Please select at least one source and try again.")
+                                                    End If
+                                                End If
+                                            End If
+                                        End If
+                                    Else
+                                        ' Restore if GetSpecialTaskModel partially modified state
+                                        If originalConfigLoaded Then
+                                            RestoreDefaults(_context, originalConfig)
+                                        End If
+                                        originalConfigLoaded = False
+                                    End If
+                                Catch
+                                    ' Swallow — fall back to normal send
+                                End Try
+                            Else
+                                ' Prompt was only "(t)" with nothing else
+                                Return JsonErr($"The {ToolTrigger} trigger was used but no prompt text was provided.")
+                            End If
+                        End If
 
                         ' ------------------ (B) File / clipboard object extraction (unchanged logic) ------------
                         Dim extractedDoc As System.String = Nothing
@@ -1872,12 +2233,55 @@ Partial Public Class ThisAddIn
                                     Dim useAgentMode As Boolean = _chatAgentModeEnabled AndAlso stForTooling.AgentModeEnabled AndAlso Not _apActive
                                     Dim agentToolsForJob As List(Of ModelConfig) = Nothing
 
+                                    ' (t) trigger: override model selection for this single call
+                                    Dim useToolTrigger As Boolean = toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing
+                                    If useToolTrigger Then
+                                        ' Apply the ToolDefaultModel config for this request
+                                        Try
+                                            SyncLock AlternateModelLock
+                                                If Not snapshotTaken Then
+                                                    configSnapshot = GetCurrentConfig(_context)
+                                                    snapshotTaken = True
+                                                End If
+                                                ApplyModelConfig(_context, toolTriggerConfig)
+                                            End SyncLock
+                                        Catch
+                                        End Try
+                                    End If
+
                                     If useAgentMode Then
                                         agentToolsForJob = ChatAgentSetupToolContext()
                                     End If
 
                                     Try
-                                        If useAgentMode AndAlso agentToolsForJob IsNot Nothing AndAlso agentToolsForJob.Count > 0 Then
+                                        If useToolTrigger AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
+                                            ' (t) trigger path: use ToolDefaultModel with selected sources
+                                            ' Respects INI_ToolingLogWindow (same as Form1.vb chkShowToolingLog)
+                                            localOutput = ExecuteToolingLoop(
+                                                    sysPromptBase,
+                                                    "",
+                                                    _selectedToolsForChat,
+                                                    True,
+                                                    finalFileObject,
+                                                    False, "",
+                                                    False, False, "",
+                                                    False, "",
+                                                    False, "", "", "",
+                                                    sbDialog.ToString(),
+                                                    True,
+                                                    Not INI_ToolingLogWindow,
+                                                    False,
+                                                    jobCts.Token
+                                                ).GetAwaiter().GetResult()
+
+                                            ' Restore config AFTER tooling completes
+                                            If snapshotTaken Then
+                                                SyncLock AlternateModelLock
+                                                    RestoreDefaults(_context, configSnapshot)
+                                                End SyncLock
+                                                snapshotTaken = False
+                                            End If
+                                        ElseIf useAgentMode AndAlso agentToolsForJob IsNot Nothing AndAlso agentToolsForJob.Count > 0 Then
                                             ' Match AutoPilot's iteration limit for agent/tool mode
                                             Dim previousMaxIterations = INI_ToolingMaximumIterations
                                             INI_ToolingMaximumIterations = AP_MaxToolIterations
@@ -2287,6 +2691,13 @@ Partial Public Class ThisAddIn
                             st.UseSecondApi = True
                             st.SelectedModelKey = key
                         End If
+                        ' Reset agent model toggle when user manually selects a different model
+                        If st.AgentModelActive Then
+                            st.AgentModelActive = False
+                            st.PreAgentModelKey = ""
+                            st.PreAgentUseSecondApi = False
+                        End If
+
                         Try
                             My.Settings.Inky_UseSecondApiSelected = st.UseSecondApi
                             My.Settings.Inky_SelectedModelKey = st.SelectedModelKey

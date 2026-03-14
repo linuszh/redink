@@ -1471,46 +1471,60 @@ Partial Public Class ThisAddIn
                     inputDoc.Save(tempPath)
                 End Using
 
-                ' Rasterize to new PDF with remaining annotations (e.g., note icons) rendered by Pdfium
-                Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(tempPath)
-                    Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+                ' Rasterize to new PDF — try Windows.Data.Pdf first, fallback to PdfiumViewer
+                Dim winPdfDoc As PdfSharp.Pdf.PdfDocument = Nothing
+                Try
+                    winPdfDoc = RenderAllPagesViaWindowsPdf(tempPath, dpi)
+                Catch
+                End Try
 
-                    ' Preserve metadata from the source PDF
-                    CopyPdfInfoFromPath(tempPath, outDoc)
+                If winPdfDoc IsNot Nothing Then
+                    ' Windows.Data.Pdf succeeded — copy metadata and save
+                    CopyPdfInfoFromPath(tempPath, winPdfDoc)
+                    winPdfDoc.Save(outputPath)
+                    winPdfDoc.Close()
+                Else
+                    ' Fallback to PdfiumViewer
+                    Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(tempPath)
+                        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
 
-                    For pageIndex As Integer = 0 To pdf.PageCount - 1
-                        Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
-                        Dim widthPx As Integer = CInt(System.Math.Round(sizePt.Width / 72.0 * dpi))
-                        Dim heightPx As Integer = CInt(System.Math.Round(sizePt.Height / 72.0 * dpi))
+                        ' Preserve metadata from the source PDF
+                        CopyPdfInfoFromPath(tempPath, outDoc)
 
-                        Dim renderFlags As PdfiumViewer.PdfRenderFlags =
-            PdfiumViewer.PdfRenderFlags.Annotations Or
-            PdfiumViewer.PdfRenderFlags.LcdText Or
-            PdfiumViewer.PdfRenderFlags.ForPrinting
+                        For pageIndex As Integer = 0 To pdf.PageCount - 1
+                            Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                            Dim widthPx As Integer = CInt(System.Math.Round(sizePt.Width / 72.0 * dpi))
+                            Dim heightPx As Integer = CInt(System.Math.Round(sizePt.Height / 72.0 * dpi))
 
-                        Using rendered As System.Drawing.Image =
-            pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
+                            Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
 
-                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
-                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
-                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+                            Using rendered As System.Drawing.Image =
+                pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
 
-                            Using ms As New System.IO.MemoryStream()
-                                rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
-                                ms.Position = 0
-                                Using xgfx As PdfSharp.Drawing.XGraphics =
+                                Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                                outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                                outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                                Using ms As New System.IO.MemoryStream()
+                                    rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                                    ms.Position = 0
+                                    Using xgfx As PdfSharp.Drawing.XGraphics =
                     PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
-                                    Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
-                                        xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                        Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                            xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                        End Using
                                     End Using
                                 End Using
                             End Using
-                        End Using
-                    Next
+                        Next
 
-                    outDoc.Save(outputPath)
-                    outDoc.Close()
-                End Using
+                        outDoc.Save(outputPath)
+                        outDoc.Close()
+                    End Using
+                End If
             Finally
                 If System.IO.File.Exists(tempPath) Then
                     System.IO.File.Delete(tempPath)

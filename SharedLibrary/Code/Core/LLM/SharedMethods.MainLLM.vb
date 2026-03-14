@@ -636,22 +636,16 @@ Namespace SharedLibrary
                                     If useGetMethod Then
                                         ' Build a GET request (no request body is sent here).
                                         Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, Endpoint)
-                                        If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
-                                            If Not getReq.Headers.Contains(HeaderA) Then
-                                                getReq.Headers.Add(HeaderA, HeaderB)
-                                            End If
-                                        End If
+                                        ApplyHeaders(getReq.Headers, HeaderA, HeaderB)
+
                                         If context.INI_APIDebug Then
                                             Debug.WriteLine($"SENT TO API as GET ({Endpoint}):{Environment.NewLine}{String.Empty}") ' No body.
                                         End If
                                         response = Await client.SendAsync(getReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
                                     Else
                                         ' Standard POST request.
-                                        If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
-                                            If Not client.DefaultRequestHeaders.Contains(HeaderA) Then
-                                                client.DefaultRequestHeaders.Add(HeaderA, HeaderB)
-                                            End If
-                                        End If
+                                        ApplyHeaders(client.DefaultRequestHeaders, HeaderA, HeaderB)
+
                                         If context.INI_APIDebug Then
                                             If requiresMultipart Then
                                                 Dim multipartInfo As New System.Text.StringBuilder()
@@ -823,9 +817,7 @@ Namespace SharedLibrary
                                     ' 4) Prepare GET request and set header.
                                     Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, rawGetEndpoint)
 
-                                    If Not String.IsNullOrEmpty(HeaderA) AndAlso Not String.IsNullOrEmpty(HeaderB) Then
-                                        getReq.Headers.Add(HeaderA, HeaderB)
-                                    End If
+                                    ApplyHeaders(getReq.Headers, HeaderA, HeaderB)
 
                                     If Not String.IsNullOrWhiteSpace(rawGetBody) Then
                                         getReq.Content = New System.Net.Http.StringContent(rawGetBody, System.Text.Encoding.UTF8, "application/json")
@@ -1002,6 +994,39 @@ Namespace SharedLibrary
                 End If
             End Try
         End Function
+
+
+        ''' <summary>
+        ''' Splits <paramref name="headerNames"/> and <paramref name="headerValues"/> on the "¦" separator
+        ''' and adds each valid (non-empty) pair to <paramref name="headers"/>.
+        ''' Pairs where either the name or value is empty/whitespace are silently skipped.
+        ''' If the counts do not match, only the overlapping pairs are applied.
+        ''' </summary>
+        ''' <param name="headers">Target header collection (request or client default headers).</param>
+        ''' <param name="headerNames">One or more header names separated by "¦".</param>
+        ''' <param name="headerValues">One or more header values separated by "¦".</param>
+        Private Shared Sub ApplyHeaders(headers As System.Net.Http.Headers.HttpHeaders, headerNames As String, headerValues As String)
+            If String.IsNullOrWhiteSpace(headerNames) OrElse String.IsNullOrWhiteSpace(headerValues) Then Return
+
+            Dim sep As String = "¦"
+
+            Dim names() As String = headerNames.Split(New String() {sep}, StringSplitOptions.None)
+            Dim values() As String = headerValues.Split(New String() {sep}, StringSplitOptions.None)
+
+            Dim count As Integer = Math.Min(names.Length, values.Length)
+            For i As Integer = 0 To count - 1
+                Dim name As String = names(i).Trim()
+                Dim value As String = values(i).Trim()
+                If String.IsNullOrWhiteSpace(name) OrElse String.IsNullOrWhiteSpace(value) Then Continue For
+                Try
+                    If Not headers.Contains(name) Then
+                        headers.Add(name, value)
+                    End If
+                Catch
+                    ' Silently skip invalid header names/values (e.g. Content-Type must go on content headers).
+                End Try
+            Next
+        End Sub
 
         ''' <summary>
         ''' Generates a GUID-based unique id string without separators (32 hex characters).

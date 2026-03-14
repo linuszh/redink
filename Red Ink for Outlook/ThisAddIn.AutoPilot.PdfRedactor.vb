@@ -689,164 +689,296 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>
-    ''' Burns annotations into rasterized images. Excludes sticky notes and popups.
-    ''' Optionally renders reason code labels in white text inside burned-in boxes.
-    ''' </summary>
     Private Shared Sub APRedactBurnIn(inputPath As String, outputPath As String,
-                                       includeReasonCodes As Boolean,
-                                       Optional dpi As Integer = 300)
+                                        includeReasonCodes As Boolean,
+                                        Optional dpi As Integer = 300)
 
-        ' CRITICAL: Pre-load pdfium.dll BEFORE the JIT touches any PdfiumViewer type.
-        ' This must happen in a separate method from the one that references
-        ' PdfiumViewer.PdfDocument, because the JIT resolves type references when
-        ' compiling the method — not when execution reaches the line.
-        APRedactEnsurePdfiumLoaded()
         EnsureApPdfSharpFontResolver()
 
-        ' Delegate to NoInlining helper so PdfiumViewer types are resolved
-        ' only after LoadLibrary has already succeeded.
-        APRedactBurnInCore(inputPath, outputPath, includeReasonCodes, dpi)
+        ' Step 1: Draw annotation rectangles and save to temp PDF (unchanged)
+        Dim tempPath As String = Path.GetTempFileName() & ".pdf"
+        Try
+            APRedactDrawAnnotations(inputPath, tempPath, includeReasonCodes)
+
+            ' Step 2: Rasterize — prefer Windows.Data.Pdf, fall back to PdfiumViewer
+            Dim usedWindowsPdf As Boolean = False
+
+#If HAS_WINRT Then
+            If Environment.OSVersion.Version.Major >= 10 Then
+                Try
+                    APRedactRasterizeViaWindowsPdf(tempPath, outputPath, dpi)
+                    usedWindowsPdf = True
+                    Debug.WriteLine("APRedactBurnIn: rasterized via Windows.Data.Pdf")
+                Catch ex As Exception
+                    Debug.WriteLine($"APRedactBurnIn: Windows.Data.Pdf failed: {ex.Message} — falling back to PdfiumViewer")
+                    usedWindowsPdf = False
+                End Try
+            End If
+#End If
+
+            If Not usedWindowsPdf Then
+                APRedactEnsurePdfiumLoaded()
+                APRedactRasterizeViaPdfium(tempPath, outputPath, dpi)
+            End If
+
+        Finally
+            Try : If File.Exists(tempPath) Then File.Delete(tempPath)
+            Catch : End Try
+        End Try
     End Sub
 
     ''' <summary>
-    ''' Core burn-in implementation, separated to ensure pdfium.dll is loaded
-    ''' before PdfiumViewer types are JIT-resolved.
+    ''' Draws annotation rectangles (burn-in shapes) into the PDF and saves to outputPath.
+    ''' This is step 1 of burn-in — no rasterization yet.
     ''' </summary>
-    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
-    Private Shared Sub APRedactBurnInCore(inputPath As String, outputPath As String,
-                                           includeReasonCodes As Boolean, dpi As Integer)
+    Private Shared Sub APRedactDrawAnnotations(inputPath As String, outputPath As String,
+                                                includeReasonCodes As Boolean)
+        Using inputDoc As PdfSharp.Pdf.PdfDocument =
+            PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
 
-        Dim tempPath As String = Path.GetTempFileName() & ".pdf"
+            For Each page As PdfSharp.Pdf.PdfPage In inputDoc.Pages
+                If page.Annotations IsNot Nothing AndAlso page.Annotations.Count > 0 Then
+                    Dim toRemove As New List(Of PdfSharp.Pdf.Annotations.PdfAnnotation)()
 
-        Try
-            Using inputDoc As PdfSharp.Pdf.PdfDocument =
-                PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                    Using gfx As PdfSharp.Drawing.XGraphics =
+                        PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
 
-                For Each page As PdfSharp.Pdf.PdfPage In inputDoc.Pages
-                    If page.Annotations IsNot Nothing AndAlso page.Annotations.Count > 0 Then
-                        Dim toRemove As New List(Of PdfSharp.Pdf.Annotations.PdfAnnotation)()
+                        For Each annot As PdfSharp.Pdf.Annotations.PdfAnnotation In page.Annotations
+                            Dim subtypeRaw As String =
+                                annot.Elements.GetName(PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Subtype)
+                            Dim subtype As String =
+                                If(String.IsNullOrEmpty(subtypeRaw), String.Empty,
+                                   subtypeRaw.TrimStart("/"c).ToLowerInvariant())
 
-                        Using gfx As PdfSharp.Drawing.XGraphics =
-                            PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                            If subtype = "text" OrElse subtype = "popup" Then Continue For
 
-                            For Each annot As PdfSharp.Pdf.Annotations.PdfAnnotation In page.Annotations
-                                Dim subtypeRaw As String =
-                                    annot.Elements.GetName(PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Subtype)
-                                Dim subtype As String =
-                                    If(String.IsNullOrEmpty(subtypeRaw), String.Empty,
-                                       subtypeRaw.TrimStart("/"c).ToLowerInvariant())
+                            Dim rect As PdfSharp.Pdf.PdfRectangle =
+                                annot.Elements.GetRectangle(PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Rect)
+                            If rect Is Nothing Then Continue For
 
-                                ' Keep sticky notes and popups
-                                If subtype = "text" OrElse subtype = "popup" Then Continue For
+                            Dim x As Double = rect.X1
+                            Dim yTop As Double = rect.Y2
+                            Dim width As Double = rect.X2 - rect.X1
+                            Dim height As Double = rect.Y2 - rect.Y1
+                            Dim yDraw As Double = page.Height.Point - yTop
 
-                                Dim rect As PdfSharp.Pdf.PdfRectangle =
-                                    annot.Elements.GetRectangle(PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Rect)
-                                If rect Is Nothing Then Continue For
+                            gfx.DrawRectangle(New PdfSharp.Drawing.XSolidBrush(
+                                PdfSharp.Drawing.XColors.Black), x, yDraw, width, height)
 
-                                Dim x As Double = rect.X1
-                                Dim yTop As Double = rect.Y2
-                                Dim width As Double = rect.X2 - rect.X1
-                                Dim height As Double = rect.Y2 - rect.Y1
-                                Dim yDraw As Double = page.Height.Point - yTop
+                            Dim contents As String = annot.Elements.GetString(
+                                PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Contents)
+                            If includeReasonCodes AndAlso Not String.IsNullOrEmpty(contents) Then
+                                Dim pad As Double = Math.Max(1.0, Math.Min(6.0, height * 0.1))
+                                Dim textRect As New PdfSharp.Drawing.XRect(
+                                    x + pad, yDraw + pad,
+                                    Math.Max(0, width - 2 * pad),
+                                    Math.Max(0, height - 2 * pad))
 
-                                gfx.DrawRectangle(New PdfSharp.Drawing.XSolidBrush(
-                                    PdfSharp.Drawing.XColors.Black), x, yDraw, width, height)
+                                If textRect.Width > 2 AndAlso textRect.Height > 6 Then
+                                    Dim family As String = "Arial"
+                                    Dim maxFontSize As Double = Math.Max(6.0, Math.Min(22.0, textRect.Height * 0.9))
+                                    Dim fittedSize As Double = APRedactFitFontSize(
+                                        gfx, contents, family, textRect, 6.0, maxFontSize)
 
-                                ' Render reason code label if requested
-                                Dim contents As String = annot.Elements.GetString(
-                                    PdfSharp.Pdf.Annotations.PdfAnnotation.Keys.Contents)
-                                If includeReasonCodes AndAlso Not String.IsNullOrEmpty(contents) Then
-                                    Dim pad As Double = Math.Max(1.0, Math.Min(6.0, height * 0.1))
-                                    Dim textRect As New PdfSharp.Drawing.XRect(
-                                        x + pad, yDraw + pad,
-                                        Math.Max(0, width - 2 * pad),
-                                        Math.Max(0, height - 2 * pad))
+                                    Dim style As PdfSharp.Drawing.XFontStyleEx
+                                    Try
+                                        style = CType([Enum].Parse(GetType(PdfSharp.Drawing.XFontStyleEx),
+                                            "Regular", True), PdfSharp.Drawing.XFontStyleEx)
+                                    Catch
+                                        style = CType([Enum].ToObject(GetType(PdfSharp.Drawing.XFontStyleEx), 0),
+                                            PdfSharp.Drawing.XFontStyleEx)
+                                    End Try
 
-                                    If textRect.Width > 2 AndAlso textRect.Height > 6 Then
-                                        Dim family As String = "Arial"
-                                        Dim maxFontSize As Double = Math.Max(6.0, Math.Min(22.0, textRect.Height * 0.9))
-                                        Dim fittedSize As Double = APRedactFitFontSize(
-                                            gfx, contents, family, textRect, 6.0, maxFontSize)
-
-                                        Dim style As PdfSharp.Drawing.XFontStyleEx
-                                        Try
-                                            style = CType([Enum].Parse(GetType(PdfSharp.Drawing.XFontStyleEx),
-                                                "Regular", True), PdfSharp.Drawing.XFontStyleEx)
-                                        Catch
-                                            style = CType([Enum].ToObject(GetType(PdfSharp.Drawing.XFontStyleEx), 0),
-                                                PdfSharp.Drawing.XFontStyleEx)
-                                        End Try
-
-                                        Dim font As New PdfSharp.Drawing.XFont(family, fittedSize, style)
-                                        Dim state = gfx.Save()
-                                        Try
-                                            gfx.IntersectClip(textRect)
-                                            Dim tf As New PdfSharp.Drawing.Layout.XTextFormatter(gfx)
-                                            tf.Alignment = PdfSharp.Drawing.Layout.XParagraphAlignment.Left
-                                            tf.DrawString(contents, font, PdfSharp.Drawing.XBrushes.White,
-                                                          textRect, PdfSharp.Drawing.XStringFormats.TopLeft)
-                                        Finally
-                                            gfx.Restore(state)
-                                        End Try
-                                    End If
+                                    Dim font As New PdfSharp.Drawing.XFont(family, fittedSize, style)
+                                    Dim state = gfx.Save()
+                                    Try
+                                        gfx.IntersectClip(textRect)
+                                        Dim tf As New PdfSharp.Drawing.Layout.XTextFormatter(gfx)
+                                        tf.Alignment = PdfSharp.Drawing.Layout.XParagraphAlignment.Left
+                                        tf.DrawString(contents, font, PdfSharp.Drawing.XBrushes.White,
+                                                      textRect, PdfSharp.Drawing.XStringFormats.TopLeft)
+                                    Finally
+                                        gfx.Restore(state)
+                                    End Try
                                 End If
+                            End If
 
-                                toRemove.Add(annot)
-                            Next
-                        End Using
-
-                        For Each a In toRemove
-                            page.Annotations.Remove(a)
+                            toRemove.Add(annot)
                         Next
-                    End If
-                Next
+                    End Using
 
-                inputDoc.Save(tempPath)
-            End Using
+                    For Each a In toRemove
+                        page.Annotations.Remove(a)
+                    Next
+                End If
+            Next
 
-            ' Rasterize to final output
-            Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(tempPath)
-                Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+            inputDoc.Save(outputPath)
+        End Using
+    End Sub
 
-                ' Preserve metadata
-                APRedactCopyMetadataFromPath(tempPath, outDoc)
+    ''' <summary>
+    ''' Rasterizes a PDF via Windows.Data.Pdf (Win10+ built-in renderer).
+    ''' Runs on a dedicated STA thread with 5-minute timeout.
+    ''' </summary>
+    Private Shared Sub APRedactRasterizeViaWindowsPdf(inputPath As String, outputPath As String, dpi As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Dim renderException As Exception = Nothing
 
-                For pageIndex As Integer = 0 To pdf.PageCount - 1
-                    Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
-                    Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * dpi))
-                    Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * dpi))
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    APRedactRasterizeViaWindowsPdfCore(inputPath, outputPath, dpi)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
 
-                    Dim renderFlags As PdfiumViewer.PdfRenderFlags =
-                        PdfiumViewer.PdfRenderFlags.Annotations Or
-                        PdfiumViewer.PdfRenderFlags.LcdText Or
-                        PdfiumViewer.PdfRenderFlags.ForPrinting
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
 
-                    Using rendered As System.Drawing.Image =
-                        pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
-                        Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
-                        outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
-                        outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
-                        Using ms As New MemoryStream()
-                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
-                            ms.Position = 0
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Throw New TimeoutException("Windows.Data.Pdf rendering timed out after 5 minutes.")
+        End If
+
+        If renderException IsNot Nothing Then
+            Throw renderException
+        End If
+#End If
+    End Sub
+
+    ''' <summary>
+    ''' Core STA implementation — rasterizes each page via Windows.Data.Pdf to JPEG,
+    ''' then assembles into a PdfSharp output document.
+    ''' </summary>
+    Private Shared Sub APRedactRasterizeViaWindowsPdfCore(inputPath As String, outputPath As String, dpi As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+        ' Copy metadata from source
+        APRedactCopyMetadataFromPath(inputPath, outDoc)
+
+        Dim scaleFactor As Double = dpi / 96.0
+
+        For pageIndex As UInteger = 0 To CUInt(winPdf.PageCount - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+            Dim renderWidthPx As UInteger = CUInt(Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(Math.Round(page.Size.Height * scaleFactor))
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+                renderStream.Seek(0)
+
+                Dim netStream As System.IO.Stream =
+                    System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using pngMs As New MemoryStream()
+                    netStream.CopyTo(pngMs)
+                    pngMs.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(pngMs)
+                        Using jpegMs As New MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                            For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                                If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                            Next
+                            If jpegEncoder IsNot Nothing Then
+                                Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                                ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, ep)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+
+                            jpegMs.Position = 0
+
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
                             Using xgfx As PdfSharp.Drawing.XGraphics =
                                 PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
-                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                Using ximg As PdfSharp.Drawing.XImage =
+                                    PdfSharp.Drawing.XImage.FromStream(jpegMs)
                                     xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
                                 End Using
                             End Using
                         End Using
                     End Using
-                Next
-
-                outDoc.Save(outputPath)
-                outDoc.Close()
+                End Using
             End Using
-        Finally
-            Try : If File.Exists(tempPath) Then File.Delete(tempPath)
-            Catch : End Try
-        End Try
+
+            page.Dispose()
+        Next
+
+        outDoc.Save(outputPath)
+        outDoc.Close()
+#End If
+    End Sub
+
+    ''' <summary>
+    ''' Rasterizes a PDF via PdfiumViewer (fallback when Windows.Data.Pdf is unavailable).
+    ''' </summary>
+    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
+    Private Shared Sub APRedactRasterizeViaPdfium(inputPath As String, outputPath As String, dpi As Integer)
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+            APRedactCopyMetadataFromPath(inputPath, outDoc)
+
+            For pageIndex As Integer = 0 To pdf.PageCount - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * dpi))
+                Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * dpi))
+
+                Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                    PdfiumViewer.PdfRenderFlags.Annotations Or
+                    PdfiumViewer.PdfRenderFlags.LcdText Or
+                    PdfiumViewer.PdfRenderFlags.ForPrinting
+
+                Using rendered As System.Drawing.Image =
+                    pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
+                    Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                    outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                    outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+                    Using ms As New MemoryStream()
+                        rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics =
+                            PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            Next
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
     End Sub
 
 

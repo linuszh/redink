@@ -992,7 +992,7 @@ Partial Public Class ThisAddIn
                 AddItem("terms", "Insert configured usage restrictions/permissions into the document.")
                 AddItem("version", "Show the installed Red Ink version.")
                 AddItem("switch", "Temporarily swap primary and secondary models.")
-                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
+                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients and CentralConfigClients).")
                 AddItem("license", "Show license information and access license manage dialog.")
 
                 ' CONFIG / MENU
@@ -1330,7 +1330,7 @@ Partial Public Class ThisAddIn
             ' Get computername (e.g., for UpdateClients parameter)
             If String.Equals(OtherPrompt.Trim(), "clientname", StringComparison.OrdinalIgnoreCase) Then
                 SLib.PutInClipboard(GetCurrentClientIdentifier())
-                ShowCustomMessageBox("Your client name is '" & GetCurrentClientIdentifier() & "' (also in the clipboard).", AN)
+                ShowCustomMessageBox("Your hostname / client name is '" & GetCurrentClientIdentifier() & "' (also in the clipboard).", AN)
                 Return
             End If
 

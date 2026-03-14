@@ -1075,18 +1075,6 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
-        Public Property ChatShowToolingLog() As Boolean
-            Get
-                Return CType(Me("ChatShowToolingLog"),Boolean)
-            End Get
-            Set
-                Me("ChatShowToolingLog") = value
-            End Set
-        End Property
-        
-        <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
          Global.System.Configuration.DefaultSettingValueAttribute("")>  _
         Public Property TableComplete_LastInstructions() As String
             Get

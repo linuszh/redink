@@ -158,7 +158,7 @@ Partial Public Class ThisAddIn
     Private _apConfig As AutoPilotConfig = Nothing
     Private _apCts As CancellationTokenSource = Nothing
     Private _apDashboard As LogWindow = Nothing
-    Private ReadOnly _apSenderCooldowns As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
+    Private ReadOnly _apSenderLastMailSentUtc As New ConcurrentDictionary(Of String, DateTime)(StringComparer.OrdinalIgnoreCase)
     Private _apSessionReplyCount As Integer = 0
     Private ReadOnly _apMailQueue As New ConcurrentQueue(Of String)()
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
@@ -250,6 +250,10 @@ Partial Public Class ThisAddIn
     ''' <summary>UTC time of the last active-job progress notification sent for the current mail.</summary>
     Private _apActiveJobLastNotifiedUtc As DateTime = DateTime.MinValue
 
+    ''' <summary>Tracks entry IDs that were explicitly selected for catch-up or reprocessing.
+    ''' These mails bypass cooldown because the operator (or unattended mode) explicitly chose them.</summary>
+    Private ReadOnly _apCatchUpEntryIds As New ConcurrentDictionary(Of String, Boolean)()
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PUBLIC ENTRY POINTS
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -275,12 +279,11 @@ Partial Public Class ThisAddIn
         _apCurrentJobCts = Nothing
         Dim dummy As String = Nothing
         While _apMailQueue.TryDequeue(dummy) : End While
-        _apSenderCooldowns.Clear()
         _apSessionReplyCount = 0
         _apSelectedTools = Nothing
         _apConfig = Nothing
         _apBaseModelConfig = Nothing
-        _apSenderCooldowns.Clear()
+        _apSenderLastMailSentUtc.Clear()
         _apProcessedConversations.Clear()
         _apQueueNotifiedEntryIds.Clear()
         _apQueueEnqueueTimes.Clear()
@@ -290,6 +293,7 @@ Partial Public Class ThisAddIn
         _apHelpMeManualCache = Nothing
         _apHelpMeManualCacheLoaded = False
         _apHoldingOnlyEntryIds.Clear()
+        _apCatchUpEntryIds.Clear()
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
         ApDashboardLog("AutoPilot stopped.", "info")
@@ -348,7 +352,7 @@ Partial Public Class ThisAddIn
         _apActive = True
         _apCts = New CancellationTokenSource()
         _apSessionReplyCount = 0
-        _apSenderCooldowns.Clear()
+        _apSenderLastMailSentUtc.Clear()
         _apUseSecondApi = config.UseSecondApi
 
         ' Capture the current model config at startup so we can re-apply it
@@ -452,6 +456,8 @@ Partial Public Class ThisAddIn
     ''' preview dialog where the operator can check/uncheck individual mails.
     ''' Only mails that have NOT already been processed (no AP_CategoryName tag) are shown.
     ''' Mails that have received only a holding notice (not a substantive reply) ARE shown.
+    ''' When ReprocessLookbackHours > 0, already-processed mails within that window are
+    ''' also shown, allowing the operator to select them for reprocessing.
     ''' </summary>
     Private Sub CatchUpMissedMails()
         Try
@@ -487,8 +493,24 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' Determine the reprocess lookback cutoff (for already-processed mails)
+            Dim reprocessLookbackHours = If(_apConfig IsNot Nothing, _apConfig.ReprocessLookbackHours, 0)
+            Dim reprocessCutoffLocal As DateTime = DateTime.MinValue
+            If reprocessLookbackHours > 0 Then
+                reprocessCutoffLocal = DateTime.Now.AddHours(-reprocessLookbackHours)
+                ApDashboardLog($"Reprocess lookback: {reprocessLookbackHours}h (mails since {reprocessCutoffLocal:yyyy-MM-dd HH:mm:ss})", "info")
+            End If
+
+            ' Use the earlier of the two cutoffs for the scan window
+            Dim scanCutoffLocal As DateTime
+            If reprocessLookbackHours > 0 AndAlso reprocessCutoffLocal < lastProcessedLocal Then
+                scanCutoffLocal = reprocessCutoffLocal
+            Else
+                scanCutoffLocal = lastProcessedLocal
+            End If
+
             If isFirstRun Then
-                ApDashboardLog($"Scanning for mails received after: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local)", "info")
+                ApDashboardLog($"Scanning for mails received after: {scanCutoffLocal:yyyy-MM-dd HH:mm:ss} (local)", "info")
             Else
                 ApDashboardLog($"Last processed: {lastProcessedLocal:yyyy-MM-dd HH:mm:ss} (local) / {lastProcessed:yyyy-MM-dd HH:mm:ss} (UTC)", "info")
             End If
@@ -520,7 +542,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Sort descending so we process newest first and can stop early
-            ' once we hit mails older than lastProcessedLocal.
+            ' once we hit mails older than scanCutoffLocal.
             Dim allItems = inbox.Items
             allItems.Sort("[ReceivedTime]", Descending:=True)
 
@@ -528,6 +550,7 @@ Partial Public Class ThisAddIn
             Dim skippedAlreadyProcessed As Integer = 0
             Dim skippedOther As Integer = 0
             Dim totalScanned As Integer = 0
+            Dim reprocessCandidateCount As Integer = 0
 
             For Each item As Object In allItems
                 If Not TypeOf item Is MailItem Then Continue For
@@ -535,8 +558,8 @@ Partial Public Class ThisAddIn
                 Try
 
                     ' MailItem.ReceivedTime is always local time.
-                    ' Stop scanning once we've gone past the cutoff.
-                    If mi.ReceivedTime <= lastProcessedLocal Then
+                    ' Stop scanning once we've gone past the scan cutoff.
+                    If mi.ReceivedTime <= scanCutoffLocal Then
                         Exit For
                     End If
 
@@ -551,27 +574,36 @@ Partial Public Class ThisAddIn
                     Catch
                     End Try
 
-                    ' 2. Skip mails tagged with AP category (fast check, kept as fallback)
+                    ' 2. Check if already processed (AP category tag or substantive reply)
+                    Dim isAlreadyProcessed As Boolean = False
+
                     Try
                         Dim cats = mi.Categories
                         If cats IsNot Nothing AndAlso cats.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                            skippedAlreadyProcessed += 1
-                            Continue For
+                            isAlreadyProcessed = True
                         End If
                     Catch
                     End Try
 
-                    ' 3. Skip mails already replied to by AutoPilot with a SUBSTANTIVE reply —
-                    '    walk the conversation to find any reply with the X-RedInk-AutoReply header
-                    '    whose value is "true" (substantive). Mails that only received a holding
-                    '    notice (value "holding") are NOT skipped and will be re-processed.
-                    Try
-                        If HasSubstantiveAutoPilotReply(mi) Then
+                    If Not isAlreadyProcessed Then
+                        Try
+                            If HasSubstantiveAutoPilotReply(mi) Then
+                                isAlreadyProcessed = True
+                            End If
+                        Catch
+                        End Try
+                    End If
+
+                    ' If already processed: only include if within the reprocess lookback window
+                    If isAlreadyProcessed Then
+                        If reprocessLookbackHours > 0 AndAlso mi.ReceivedTime > reprocessCutoffLocal Then
+                            ' Falls within reprocess window — allow it through as a reprocess candidate
+                            ' (don't skip, let it pass the filter checks below)
+                        Else
                             skippedAlreadyProcessed += 1
                             Continue For
                         End If
-                    Catch
-                    End Try
+                    End If
 
                     ' Full pre-filter: same logic as ProcessIncomingMailAsync
                     Dim mailInfo = ExtractMailInfo(mi)
@@ -598,19 +630,35 @@ Partial Public Class ThisAddIn
                         End If
                     End If
 
+                    Dim displayLabel As String = Nothing
+                    If isAlreadyProcessed Then
+                        reprocessCandidateCount += 1
+                        displayLabel = "[REPROCESS] " & New CatchUpCandidate() With {
+                            .SenderName = mailInfo.SenderName,
+                            .SenderEmail = mailInfo.SenderEmail,
+                            .Subject = mailInfo.Subject,
+                            .ReceivedTime = mailInfo.ReceivedTime
+                        }.ToDisplayLabel()
+                    End If
+
                     candidates.Add(New CatchUpCandidate() With {
                         .EntryID = mi.EntryID,
                         .SenderName = mailInfo.SenderName,
                         .SenderEmail = mailInfo.SenderEmail,
                         .Subject = mailInfo.Subject,
-                        .ReceivedTime = mailInfo.ReceivedTime
+                        .ReceivedTime = mailInfo.ReceivedTime,
+                        .IsReprocessCandidate = isAlreadyProcessed,
+                        .CustomDisplayLabel = displayLabel
                     })
                 Finally
                     Try : Marshal.ReleaseComObject(mi) : Catch : End Try
                 End Try
             Next
 
-            ApDashboardLog($"Scan complete: {totalScanned} mail(s) scanned, {skippedAlreadyProcessed} already processed, {skippedOther} filtered out.", "step")
+            ApDashboardLog($"Scan complete: {totalScanned} mail(s) scanned, {skippedAlreadyProcessed} already processed (outside reprocess window), {skippedOther} filtered out.", "step")
+            If reprocessCandidateCount > 0 Then
+                ApDashboardLog($"Reprocess candidates: {reprocessCandidateCount} already-processed mail(s) within {reprocessLookbackHours}h lookback", "info")
+            End If
 
             If candidates.Count = 0 Then
                 ApDashboardLog("No missed mails found matching filters.", "step")
@@ -620,16 +668,18 @@ Partial Public Class ThisAddIn
             ' Re-sort candidates oldest-first for processing order
             candidates.Sort(Function(a, b) a.ReceivedTime.CompareTo(b.ReceivedTime))
 
-            ApDashboardLog($"Found {candidates.Count} unprocessed mail(s) matching filters.", "info")
+            ApDashboardLog($"Found {candidates.Count} mail(s) matching filters ({candidates.Count - reprocessCandidateCount} new, {reprocessCandidateCount} reprocess).", "info")
 
             Dim selectedEntryIds As List(Of String) = Nothing
 
             If _apConfig.IsUnattended Then
                 ' Unattended auto-start: skip the preview dialog, process all candidates
-                selectedEntryIds = candidates.Select(Function(c) c.EntryID).ToList()
-                ApDashboardLog($"Unattended mode — auto-selecting all {selectedEntryIds.Count} catch-up mail(s).", "info")
+                ' but exclude reprocess candidates in unattended mode (only operator should choose those)
+                selectedEntryIds = candidates.Where(Function(c) Not c.IsReprocessCandidate).Select(Function(c) c.EntryID).ToList()
+                ApDashboardLog($"Unattended mode — auto-selecting {selectedEntryIds.Count} new catch-up mail(s) (skipping {reprocessCandidateCount} reprocess candidates).", "info")
             Else
                 ' Show preview dialog using MultiModelSelectorForm pattern
+                ' Pre-select only NEW (unprocessed) mails; reprocess candidates are unchecked by default
                 selectedEntryIds = ShowCatchUpPreviewDialog(candidates, lastProcessed)
             End If
 
@@ -637,8 +687,9 @@ Partial Public Class ThisAddIn
                 For Each entryId In selectedEntryIds
                     _apMailQueue.Enqueue(entryId)
                     _apQueueEnqueueTimes.TryAdd(entryId, DateTime.UtcNow)
+                    _apCatchUpEntryIds.TryAdd(entryId, True)
                 Next
-                ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} missed mail(s) for processing.", "info")
+                ApDashboardLog($"Queued {selectedEntryIds.Count} of {candidates.Count} mail(s) for processing.", "info")
             Else
                 ApDashboardLog("Operator skipped catch-up processing.", "step")
             End If
@@ -722,6 +773,7 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>Data class for catch-up preview items.</summary>
+    ''' <summary>Data class for catch-up preview items.</summary>
     Private Class CatchUpCandidate
         Public Property EntryID As String
         Public Property SenderName As String
@@ -729,8 +781,15 @@ Partial Public Class ThisAddIn
         Public Property Subject As String
         Public Property ReceivedTime As DateTime
 
+        ''' <summary>True if this mail was already processed but falls within the reprocess lookback window.</summary>
+        Public Property IsReprocessCandidate As Boolean = False
+
+        ''' <summary>Optional custom display label (e.g. prefixed with [REPROCESS]).</summary>
+        Public Property CustomDisplayLabel As String = Nothing
+
         ''' <summary>Returns a display label for the checked list box.</summary>
         Public Function ToDisplayLabel() As String
+            If Not String.IsNullOrWhiteSpace(CustomDisplayLabel) Then Return CustomDisplayLabel
             Dim timeStr = ReceivedTime.ToString("yyyy-MM-dd HH:mm")
             Dim senderStr = If(Not String.IsNullOrWhiteSpace(SenderName), SenderName, SenderEmail)
             Dim subjectStr = If(Subject.Length > 60, Subject.Substring(0, 57) & "...", Subject)
@@ -740,7 +799,7 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Shows a preview dialog listing all catch-up candidate mails with checkboxes.
-    ''' All items are pre-checked. The operator can uncheck mails to exclude them.
+    ''' New (unprocessed) items are pre-checked. Reprocess candidates are unchecked by default.
     ''' Returns the list of EntryIDs for checked items, or Nothing if cancelled.
     ''' </summary>
     Private Function ShowCatchUpPreviewDialog(candidates As List(Of CatchUpCandidate), lastProcessed As DateTime) As List(Of String)
@@ -754,15 +813,22 @@ Partial Public Class ThisAddIn
             })
         Next
 
-        ' Pre-select all items by their display labels
-        Dim allLabels = items.Select(Function(m) m.ModelDescription).ToList()
+        ' Pre-select only NEW (unprocessed) items — reprocess candidates are unchecked
+        Dim preselectLabels = candidates.Where(Function(c) Not c.IsReprocessCandidate).
+            Select(Function(c) c.ToDisplayLabel()).ToList()
+
+        Dim reprocessCount = candidates.Where(Function(c) c.IsReprocessCandidate).Count()
+        Dim instructionText = $"The following {candidates.Count} mail(s) arrived while AutoPilot was inactive. Select the mails to process:"
+        If reprocessCount > 0 Then
+            instructionText &= $" ({reprocessCount} already-processed mail(s) marked [REPROCESS] are unchecked by default.)"
+        End If
 
         Using dlg As New SharedLibrary.SharedLibrary.MultiModelSelectorForm(
             items, Nothing,
             title:=$"{AN6} AutoPilot — Catch-Up ({candidates.Count} mail(s) since {lastProcessed:yyyy-MM-dd HH:mm})",
             resetChecked:=False,
-            preselectMany:=allLabels,
-            instruction:=$"The following {candidates.Count} mail(s) arrived while AutoPilot was inactive. Select the mails to process:")
+            preselectMany:=preselectLabels,
+            instruction:=instructionText)
 
             ' Center on screen since there is no parent form in this context
             dlg.StartPosition = FormStartPosition.CenterScreen
@@ -778,6 +844,7 @@ Partial Public Class ThisAddIn
 
         Return Nothing
     End Function
+
 
     ''' <summary>Queues newly received mail entry IDs for processing.</summary>
     Private Sub AutoPilot_NewMailEx(ByVal EntryIDCollection As String)
@@ -821,10 +888,12 @@ Partial Public Class ThisAddIn
             While Not ct.IsCancellationRequested
                 Dim entryId As String = Nothing
                 If _apMailQueue.TryDequeue(entryId) Then
-                    ' Clean up enqueue time and notification tracking for this mail
+                    ' Clean up enqueue time tracking for this mail
                     Dim dummy As DateTime
                     _apQueueEnqueueTimes.TryRemove(entryId, dummy)
-                    _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+                    ' NOTE: Do NOT remove _apQueueNotifiedEntryIds here.
+                    ' ProcessIncomingMailAsync needs to check it for the holding-notice
+                    ' cooldown bypass. It is cleaned up after processing completes.
 
                     ' Track the active job for progress notifications
                     _apCurrentProcessingEntryId = entryId
@@ -871,6 +940,10 @@ Partial Public Class ThisAddIn
                         _apCurrentProcessingCategory = Nothing
                         _apCurrentProcessingEntryId = Nothing
                         _apActiveJobLastNotifiedUtc = DateTime.MinValue
+                        ' Clean up notification and catch-up tracking AFTER processing is complete
+                        _apQueueNotifiedEntryIds.TryRemove(entryId, dummy)
+                        Dim dummyCatchUp As Boolean
+                        _apCatchUpEntryIds.TryRemove(entryId, dummyCatchUp)
                         Try : _apCurrentJobCts?.Dispose() : Catch : End Try
                         _apCurrentJobCts = Nothing
                     End Try
@@ -1120,14 +1193,17 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' Cooldown — bypass if we already sent a holding notice for this specific mail
-            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
-                Dim alreadyNotified = (entryId IsNot Nothing AndAlso _apQueueNotifiedEntryIds.ContainsKey(entryId))
-                If Not alreadyNotified Then Return False
+            ' Cooldown — bypass if we already sent a holding notice or this is a catch-up mail
+            Dim mailSentUtc As DateTime = mailInfo.SentOn.ToUniversalTime()
+            If IsSenderOnCooldown(mailInfo.SenderEmail, mailSentUtc) Then
+                Dim hasHoldingCommitment = (entryId IsNot Nothing AndAlso
+                    (_apQueueNotifiedEntryIds.ContainsKey(entryId) OrElse _apHoldingOnlyEntryIds.ContainsKey(entryId)))
+                Dim isCatchUpMail = (entryId IsNot Nothing AndAlso _apCatchUpEntryIds.ContainsKey(entryId))
+                If Not hasHoldingCommitment AndAlso Not isCatchUpMail Then Return False
             End If
 
             ' Session limit
-            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then Return False
+            If _apConfig.MaxRepliesPerSession > 0 AndAlso _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then Return False
 
             ' Thread depth
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then Return False
@@ -1436,20 +1512,29 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            If IsSenderOnCooldown(mailInfo.SenderEmail) Then
-                ' If we already sent a holding notice for this mail, we committed to processing it.
-                ' The cooldown may have been recorded by a previous mail from the same sender that
-                ' finished while this mail was waiting in the queue. Skipping it now would be
-                ' misleading since the sender already received "your request is in the queue".
-                If Not _apQueueNotifiedEntryIds.ContainsKey(entryId) Then
-                    ApDashboardLog("SKIP (cooldown): " & mailInfo.SenderEmail, "step")
-                    Return
-                Else
+            ' Convert SentOn to UTC for cooldown comparison.
+            ' SentOn is the time the sender pressed Send — the only independent timestamp
+            ' that correctly represents whether mails were sent in quick succession.
+            Dim mailSentUtc As DateTime = mailInfo.SentOn.ToUniversalTime()
+
+            If IsSenderOnCooldown(mailInfo.SenderEmail, mailSentUtc) Then
+                ' Bypass cooldown if:
+                '   (a) A holding notice was already sent for this mail (we committed to processing it), OR
+                '   (b) This mail was explicitly selected in the catch-up/reprocess dialog.
+                Dim hasHoldingCommitment = _apQueueNotifiedEntryIds.ContainsKey(entryId) OrElse
+                                           _apHoldingOnlyEntryIds.ContainsKey(entryId)
+                Dim isCatchUpMail = _apCatchUpEntryIds.ContainsKey(entryId)
+                If hasHoldingCommitment Then
                     ApDashboardLog("COOLDOWN BYPASS (holding notice already sent): " & mailInfo.SenderEmail, "step")
+                ElseIf isCatchUpMail Then
+                    ApDashboardLog("COOLDOWN BYPASS (catch-up/reprocess mail): " & mailInfo.SenderEmail, "step")
+                Else
+                    ApDashboardLog($"SKIP (cooldown): {mailInfo.SenderEmail} — SentOn {mailSentUtc:HH:mm:ss} UTC", "step")
+                    Return
                 End If
             End If
 
-            If _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (global session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached — " & _apSessionReplyCount.ToString() & " replies sent across all senders): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "warn") : Return : End If
+            If _apConfig.MaxRepliesPerSession > 0 AndAlso _apSessionReplyCount >= _apConfig.MaxRepliesPerSession Then : ApDashboardLog("SKIP (global session limit " & _apConfig.MaxRepliesPerSession.ToString() & " reached — " & _apSessionReplyCount.ToString() & " replies sent across all senders): " & mailInfo.SenderEmail & " — " & mailInfo.Subject, "warn") : Return : End If
 
             If mailInfo.ThreadAIReplyCount >= AP_MaxThreadDepth Then : ApDashboardLog("SKIP (thread depth " & mailInfo.ThreadAIReplyCount.ToString() & " >= " & AP_MaxThreadDepth.ToString() & "): " & mailInfo.Subject, "warn") : Return : End If
 
@@ -1538,7 +1623,7 @@ Partial Public Class ThisAddIn
                     Await SwitchToUi(Sub() SendReplyToSender(mi, oversizedMessage, Nothing, tagAsAutoReply:=True))
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                     Interlocked.Increment(_apSessionReplyCount)
-                    RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     RecordLastProcessedTime()
                     ApDashboardLog($"✉ Sent size-limit rejection to: {mailInfo.SenderEmail} (all {attachmentPaths.Count} attachment(s) over limit)", "info")
                     Return
@@ -1714,7 +1799,7 @@ Partial Public Class ThisAddIn
                         Await SwitchToUi(Sub() SendReplyToSender(mi, abortMessage, attachmentsToSend, tagAsAutoReply:=True, isHoldingOnly:=True))
                         ' Do NOT tag as processed — allow catch-up to pick it up again
                         Interlocked.Increment(_apSessionReplyCount)
-                        RecordSenderCooldown(mailInfo.SenderEmail)
+                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         ApDashboardLog($"✉ Abort notice sent to: {mailInfo.SenderEmail}" & If(hasPartialOutput, $" (with {resultAttachmentsAbort.Count} partial attachment(s))", ""), "info")
                     Else
                         ' Do NOT tag as processed, do NOT record last processed time
@@ -1729,7 +1814,7 @@ Partial Public Class ThisAddIn
                         mailInfo, attachmentPaths, "The AI model returned an empty response.", ct)
                     Await SwitchToUi(Sub() SendReplyToSender(mi, errorMessage, Nothing, tagAsAutoReply:=True))
                     Interlocked.Increment(_apSessionReplyCount)
-                    RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     ApDashboardLog("Sent helpful error response to: " & mailInfo.SenderEmail, "warn")
                     Return
                 End If
@@ -1759,7 +1844,7 @@ Partial Public Class ThisAddIn
                         Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
                         Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                         Interlocked.Increment(_apSessionReplyCount)
-                        RecordSenderCooldown(mailInfo.SenderEmail)
+                        RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                         RecordLastProcessedTime()
                         Dim dummyBool As Boolean
                         _apHoldingOnlyEntryIds.TryRemove(entryId, dummyBool)
@@ -1774,7 +1859,7 @@ Partial Public Class ThisAddIn
                     Await SwitchToUi(Sub() SendReplyToSender(mi, response, resultAttachments, tagAsAutoReply:=True, sourcesHtml:=sourcesHtml))
                     Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
                     Interlocked.Increment(_apSessionReplyCount)
-                    RecordSenderCooldown(mailInfo.SenderEmail)
+                    RecordSenderCooldown(mailInfo.SenderEmail, mailSentUtc)
                     RecordLastProcessedTime()
                     TrackAutoPilotConversation(mi)
                     Dim dummyBool As Boolean
@@ -1845,6 +1930,11 @@ Partial Public Class ThisAddIn
             info.Subject = If(mi.Subject, "")
             info.SenderName = If(mi.SenderName, "")
             info.ReceivedTime = mi.ReceivedTime
+            Try
+                info.SentOn = mi.SentOn
+            Catch
+                info.SentOn = mi.ReceivedTime ' Fallback if SentOn is unavailable
+            End Try
             Try
                 If mi.SenderEmailType = "EX" Then
                     Dim sender As AddressEntry = mi.Sender
@@ -1990,19 +2080,30 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
-    ''' <summary>Checks whether the sender is within the cooldown window.</summary>
-    Private Function IsSenderOnCooldown(senderEmail As String) As Boolean
-        Dim lastReply As DateTime
-        If _apSenderCooldowns.TryGetValue(senderEmail, lastReply) Then
-            Return (DateTime.UtcNow - lastReply).TotalSeconds < _apConfig.CooldownSeconds
+    ''' <summary>
+    ''' Checks whether the current mail should be skipped due to cooldown.
+    ''' Cooldown is based on the mail's SentOn time compared to the SentOn time of the
+    ''' last processed mail from the same sender — NOT on ReceivedTime or wall-clock time.
+    ''' </summary>
+    Private Function IsSenderOnCooldown(senderEmail As String, mailSentTimeUtc As DateTime) As Boolean
+        Dim lastMailSentUtc As DateTime
+        If _apSenderLastMailSentUtc.TryGetValue(senderEmail, lastMailSentUtc) Then
+            Dim delta = (mailSentTimeUtc - lastMailSentUtc).TotalSeconds
+            Return delta >= 0 AndAlso delta < _apConfig.CooldownSeconds
         End If
         Return False
     End Function
 
-    ''' <summary>Records a cooldown entry for the sender.</summary>
-    Private Sub RecordSenderCooldown(senderEmail As String)
-        _apSenderCooldowns(senderEmail) = DateTime.UtcNow
+    ''' <summary>Records the SentOn time of the processed mail for cooldown tracking.</summary>
+    Private Sub RecordSenderCooldown(senderEmail As String, mailSentTimeUtc As DateTime)
+        ' Only advance the cooldown marker forward — never regress it.
+        ' This prevents out-of-order processing from poisoning the cooldown window.
+        _apSenderLastMailSentUtc.AddOrUpdate(
+            senderEmail,
+            addValueFactory:=Function(k) mailSentTimeUtc,
+            updateValueFactory:=Function(k, existing) If(mailSentTimeUtc > existing, mailSentTimeUtc, existing))
     End Sub
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  ATTACHMENT HANDLING (save + improved collect)
@@ -3853,6 +3954,7 @@ Partial Public Class ThisAddIn
         Public Property SenderEmail As String
         Public Property Body As String
         Public Property ReceivedTime As DateTime
+        Public Property SentOn As DateTime
         Public Property HasAutoReplyHeader As Boolean
         Public Property ThreadAIReplyCount As Integer
         Public Property AttachmentCount As Integer
