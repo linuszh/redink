@@ -186,10 +186,53 @@ Partial Public Class ThisAddIn
 #Region "Step 1: Extract Paragraph Styles to JSON (Style Template Creation) and wdStyles"
 
     ''' <summary>
-    ''' Extracts paragraph formatting from the selection (or entire document) and generates
-    ''' a JSON structure describing each paragraph's text, style, and formatting.
+    ''' Entry point for style template creation. Prompts the user to choose between
+    ''' trainer-based extraction (manual trainer document) or automatic extraction
+    ''' (AI-assisted discovery from a properly formatted document), then delegates accordingly.
     ''' </summary>
     Public Sub ExtractParagraphStylesToJson()
+        Try
+            Dim app As Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.ActiveDocument Is Nothing Then
+                ShowCustomMessageBox("No active document found.")
+                Return
+            End If
+
+            Dim choice As Integer = ShowCustomYesNoBox(
+                "How would you like to create the style template?" & vbCrLf & vbCrLf &
+                "Trainer Document (manual):" & vbCrLf &
+                "  • You prepare a document with paragraphs formatted as 'STYLE NAME: description'" & vbCrLf &
+                "  • Full control over style names and descriptions" & vbCrLf &
+                "  • Best when you want precise, hand-crafted style definitions" & vbCrLf & vbCrLf &
+                "Automatic (AI-assisted):" & vbCrLf &
+                "  • Scans any properly formatted document and discovers all used styles" & vbCrLf &
+                "  • AI generates style descriptions automatically — no trainer needed" & vbCrLf &
+                "  • Best for quickly creating templates from existing documents",
+                "Trainer Document", "Automatic (AI)", $"{AN} - Learn Document Style")
+
+            If choice = 0 Then
+                ' User closed the dialog
+                Return
+            ElseIf choice = 1 Then
+                ' Trainer-based extraction
+                ExtractParagraphStylesToJsonFromTrainer()
+            ElseIf choice = 2 Then
+                ' Automatic AI-assisted extraction
+                AutoExtractStyleTemplate()
+            End If
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Error: {ex.Message}")
+        End Try
+    End Sub
+
+
+    ''' <summary>
+    ''' Extracts paragraph formatting from a trainer document (selection or entire document) and generates
+    ''' a JSON structure describing each paragraph's text, style, and formatting.
+    ''' Expects paragraphs formatted as "STYLE NAME: description..." for automatic parsing.
+    ''' </summary>
+    Private Sub ExtractParagraphStylesToJsonFromTrainer()
         Try
             Dim app As Word.Application = Globals.ThisAddIn.Application
             Dim doc As Word.Document = app.ActiveDocument
@@ -354,8 +397,6 @@ Partial Public Class ThisAddIn
             ShowCustomMessageBox($"Error extracting paragraph styles: {ex.Message}")
         End Try
     End Sub
-
-
 
 
     ''' <summary>
@@ -3648,5 +3689,440 @@ Partial Public Class ThisAddIn
     End Function
 
 #End Region
+
+
+    ''' <summary>
+    ''' Automatically extracts a DocStyle template from a properly formatted Word document.
+    ''' Instead of requiring a manually authored trainer document with "STYLE NAME: description" paragraphs,
+    ''' this method discovers all paragraph styles actually used in the document, collects representative
+    ''' samples, uses the LLM to generate semantic "whenToApply" descriptions, and produces the same
+    ''' JSON template structure that <see cref="ExtractParagraphStylesToJson"/> creates.
+    ''' </summary>
+    Public Async Sub AutoExtractStyleTemplate()
+        Try
+            Dim app As Word.Application = Globals.ThisAddIn.Application
+            Dim doc As Word.Document = app.ActiveDocument
+
+            If doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.")
+                Return
+            End If
+
+            ' Expand paths
+            Dim docStylePath As String = ExpandEnvironmentVariables(INI_DocStylePath)
+            If Not String.IsNullOrEmpty(docStylePath) AndAlso Not docStylePath.EndsWith("\") Then docStylePath &= "\"
+
+            Dim docStylePathLocal As String = ExpandEnvironmentVariables(INI_DocStylePathLocal)
+            If Not String.IsNullOrEmpty(docStylePathLocal) AndAlso Not docStylePathLocal.EndsWith("\") Then docStylePathLocal &= "\"
+
+            Dim hasGlobal As Boolean = Not String.IsNullOrWhiteSpace(docStylePath) AndAlso Directory.Exists(docStylePath)
+            Dim hasLocal As Boolean = Not String.IsNullOrWhiteSpace(docStylePathLocal) AndAlso Directory.Exists(docStylePathLocal)
+
+            ' Determine save path
+            Dim savePath As String
+            Dim isLocal As Boolean = False
+
+            If Not hasGlobal AndAlso Not hasLocal Then
+                savePath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop)
+                ShowCustomMessageBox("Warning: Neither 'DocStylePath' nor 'DocStylePathLocal' is configured. The file will be saved to your Desktop.")
+            ElseIf hasGlobal AndAlso hasLocal Then
+                Dim choice As Integer = ShowCustomYesNoBox("Where do you want to save the style template?",
+                    "Central (shared)", "Local (personal)", $"{AN} - Save Location")
+                If choice = 0 Then Return
+                If choice = 1 Then
+                    savePath = docStylePath
+                    isLocal = False
+                Else
+                    savePath = docStylePathLocal
+                    isLocal = True
+                End If
+            ElseIf hasGlobal Then
+                savePath = docStylePath
+            Else
+                savePath = docStylePathLocal
+                isLocal = True
+            End If
+
+            ' Ask for template display name
+            Dim safeDocName As String = Regex.Replace(doc.Name.Replace(".docx", "").Replace(".doc", ""), "[^a-zA-Z0-9_-]", "_")
+            Dim defaultDisplayName As String = $"{safeDocName}_{DateTime.Now:yyyyMMdd_HHmm}"
+
+            Dim templateDisplayName As String = ShowCustomInputBox(
+                "Enter a name for this style template:" & vbCrLf & vbCrLf &
+                "This will auto-extract styles from the active document and use AI to generate 'whenToApply' descriptions.",
+                $"{AN} - Auto-Extract Style Template", True, defaultDisplayName)
+            If String.IsNullOrWhiteSpace(templateDisplayName) OrElse templateDisplayName.Equals("ESC", StringComparison.OrdinalIgnoreCase) Then
+                Return
+            End If
+
+            ' Optional: let user provide document context for better LLM descriptions
+            Dim documentContext As String = ShowCustomInputBox(
+                "Optionally describe the document type/purpose for better style descriptions:" & vbCrLf &
+                "(e.g., 'Swiss law firm contract template', 'Corporate board minutes', 'NDA agreement')" & vbCrLf & vbCrLf &
+                "Leave empty to skip.",
+                $"{AN} - Document Context", True, "")
+            If documentContext IsNot Nothing AndAlso documentContext.Equals("ESC", StringComparison.OrdinalIgnoreCase) Then
+                Return
+            End If
+
+            Dim targetRange As Word.Range
+
+            ' Use selection if available, otherwise entire document
+            If app.Selection.Type = WdSelectionType.wdSelectionIP Then
+                targetRange = doc.Content
+            Else
+                targetRange = app.Selection.Range.Duplicate
+            End If
+
+            ShowProgressBarInSeparateThread($"{AN} - Auto-Extracting Styles", "Scanning document paragraphs...")
+            ProgressBarModule.CancelOperation = False
+
+            ' ──────────────────────────────────────────────────────────────────
+            ' Phase 1: Discover all used styles and collect representative samples
+            '          ALSO capture a representative Word.Paragraph per style so
+            '          we don't need to re-walk targetRange.Paragraphs later
+            '          (the COM enumerator can become stale after an Await).
+            ' ──────────────────────────────────────────────────────────────────
+            Dim styleGroups As New Dictionary(Of String, AutoStyleGroup)(StringComparer.OrdinalIgnoreCase)
+            Dim representativeParas As New Dictionary(Of String, Word.Paragraph)(StringComparer.OrdinalIgnoreCase)
+            Dim paragraphCount As Integer = 0
+
+            Try
+                For Each para As Word.Paragraph In targetRange.Paragraphs
+                    If ProgressBarModule.CancelOperation Then
+                        ShowCustomMessageBox("Operation cancelled.")
+                        Return
+                    End If
+
+                    paragraphCount += 1
+                    Dim text As String = para.Range.Text.TrimEnd(vbCr, vbLf, ChrW(13), ChrW(10)).Trim()
+                    If String.IsNullOrWhiteSpace(text) Then Continue For
+
+                    Dim styleName As String = "Normal"
+                    Try
+                        styleName = para.Style.NameLocal
+                    Catch
+                    End Try
+
+                    If Not styleGroups.ContainsKey(styleName) Then
+                        styleGroups(styleName) = New AutoStyleGroup() With {
+                            .StyleName = styleName,
+                            .Samples = New List(Of AutoStyleSample)(),
+                            .TotalCount = 0
+                        }
+                    End If
+
+                    Dim group As AutoStyleGroup = styleGroups(styleName)
+                    group.TotalCount += 1
+
+                    ' Capture the first non-empty paragraph as the representative for formatting extraction
+                    If Not representativeParas.ContainsKey(styleName) Then
+                        representativeParas(styleName) = para
+                    End If
+
+                    ' Collect up to 5 representative samples per style for LLM context
+                    If group.Samples.Count < 5 Then
+                        Dim sample As New AutoStyleSample()
+                        sample.Text = If(text.Length > 200, text.Substring(0, 200) & "...", text)
+
+                        ' Gather context hints
+                        Try
+                            Dim lf As Word.ListFormat = para.Range.ListFormat
+                            If lf.ListType <> WdListType.wdListNoNumbering Then
+                                If lf.ListType = WdListType.wdListBullet OrElse lf.ListType = WdListType.wdListPictureBullet Then
+                                    sample.ListHint = "Bullet"
+                                Else
+                                    sample.ListHint = "Numbered"
+                                End If
+                                sample.ListLevel = lf.ListLevelNumber
+                            End If
+                        Catch
+                        End Try
+
+                        Try
+                            sample.IsInTable = (para.Range.Tables.Count > 0 OrElse para.Range.Cells.Count > 0)
+                        Catch
+                        End Try
+
+                        Try
+                            sample.OutlineLevel = para.OutlineLevel.ToString()
+                        Catch
+                        End Try
+
+                        Try
+                            sample.IsBold = (para.Range.Font.Bold = -1)
+                        Catch
+                        End Try
+
+                        Try
+                            sample.FontSize = para.Range.Font.Size
+                        Catch
+                        End Try
+
+                        group.Samples.Add(sample)
+                    End If
+                Next
+            Finally
+                ProgressBarModule.CancelOperation = True
+            End Try
+
+            If styleGroups.Count = 0 Then
+                ShowCustomMessageBox("No styles found in the document.")
+                Return
+            End If
+
+            ' ──────────────────────────────────────────────────────────────────
+            ' Phase 2: Use LLM to generate whenToApply descriptions
+            ' ──────────────────────────────────────────────────────────────────
+            GlobalProgressLabel = "Generating style descriptions with AI..."
+
+            Dim styleDescriptionPrompt As New StringBuilder()
+            styleDescriptionPrompt.AppendLine("You are an expert document formatting analyst. You will receive a list of Word paragraph styles discovered in a document, along with representative sample paragraphs for each style.")
+            styleDescriptionPrompt.AppendLine("Your task: For each style, write a concise 'whenToApply' description (1-2 sentences) that explains WHEN and WHERE this style should be used — i.e., what kind of paragraph content or structural role it serves.")
+            styleDescriptionPrompt.AppendLine("The descriptions must be generic and reusable (not specific to this document's content).")
+            styleDescriptionPrompt.AppendLine()
+            styleDescriptionPrompt.AppendLine("RESPOND with a JSON array where each element has:")
+            styleDescriptionPrompt.AppendLine("  {""styleName"": ""<exact style name>"", ""whenToApply"": ""<description>"", ""userStyleName"": ""<short human-friendly name for this style>""}")
+            styleDescriptionPrompt.AppendLine()
+            styleDescriptionPrompt.AppendLine("RULES:")
+            styleDescriptionPrompt.AppendLine("- userStyleName should be a short, descriptive label (e.g., 'Main Heading', 'Body Text', 'Bullet List Item', 'Sub-clause Numbering')")
+            styleDescriptionPrompt.AppendLine("- whenToApply should describe the paragraph's structural role, not its content")
+            styleDescriptionPrompt.AppendLine("- Include hints about list type (bullet vs numbered) when applicable")
+            styleDescriptionPrompt.AppendLine("- Respond ONLY with the JSON array, no other text")
+
+            Dim userPrompt As New StringBuilder()
+            If Not String.IsNullOrWhiteSpace(documentContext) Then
+                userPrompt.AppendLine($"<CONTEXT>Document type: {documentContext}</CONTEXT>")
+                userPrompt.AppendLine()
+            End If
+
+            userPrompt.AppendLine("<STYLES>")
+            Dim styleIndex As Integer = 0
+            For Each kvp In styleGroups.OrderByDescending(Function(g) g.Value.TotalCount)
+                styleIndex += 1
+                Dim group As AutoStyleGroup = kvp.Value
+                userPrompt.AppendLine($"--- Style #{styleIndex}: ""{group.StyleName}"" (used {group.TotalCount} times) ---")
+
+                For Each sample In group.Samples
+                    Dim hints As New StringBuilder()
+                    If Not String.IsNullOrEmpty(sample.ListHint) Then hints.Append($" [LIST:{sample.ListHint}/L{sample.ListLevel}]")
+                    If sample.IsInTable Then hints.Append(" [TABLE]")
+                    If sample.OutlineLevel IsNot Nothing AndAlso Not sample.OutlineLevel.Contains("BodyText") Then hints.Append($" [OUTLINE:{sample.OutlineLevel}]")
+                    If sample.IsBold Then hints.Append(" [BOLD]")
+                    If sample.FontSize > 0 AndAlso sample.FontSize <> 9999 Then hints.Append($" [SIZE:{sample.FontSize}pt]")
+                    userPrompt.AppendLine($"  Sample:{hints} {sample.Text}")
+                Next
+
+                userPrompt.AppendLine()
+            Next
+            userPrompt.AppendLine("</STYLES>")
+
+            Dim llmResponse As String = Await LLM(styleDescriptionPrompt.ToString(), userPrompt.ToString(), "", "", 0, False)
+
+            ' Parse LLM response
+            Dim styleDescriptions As New Dictionary(Of String, (UserStyleName As String, WhenToApply As String))(StringComparer.OrdinalIgnoreCase)
+            Try
+                Dim jsonResponse As String = ExtractJsonFromResponse(llmResponse)
+                Dim descArray As JArray = JArray.Parse(jsonResponse)
+
+                For Each item As JObject In descArray
+                    Dim sName As String = If(item("styleName") IsNot Nothing, CStr(item("styleName")), "")
+                    Dim whenToApply As String = If(item("whenToApply") IsNot Nothing, CStr(item("whenToApply")), "")
+                    Dim userStyleName As String = If(item("userStyleName") IsNot Nothing, CStr(item("userStyleName")), sName)
+
+                    If Not String.IsNullOrWhiteSpace(sName) Then
+                        styleDescriptions(sName) = (userStyleName, whenToApply)
+                    End If
+                Next
+            Catch ex As Exception
+                Debug.WriteLine($"[DocStyle] Auto-extract LLM parse error: {ex.Message}")
+                ' Fall back to using style names as descriptions
+            End Try
+
+            ' ──────────────────────────────────────────────────────────────────
+            ' Phase 3: Build the JSON template (same structure as ExtractParagraphStylesToJson)
+            '          Uses representativeParas captured in Phase 1 — no re-enumeration needed.
+            ' ──────────────────────────────────────────────────────────────────
+            GlobalProgressLabel = "Building style template..."
+
+            Dim userStyles As New JArray()
+            Dim wdStyleDefinitions As New JObject()
+            Dim collectedStyles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim userStyleIndex As Integer = 0
+
+            ' Create one userStyle entry per discovered style, using the cached representative paragraph
+            For Each kvp In styleGroups.OrderByDescending(Function(g) g.Value.TotalCount)
+                Dim group As AutoStyleGroup = kvp.Value
+                userStyleIndex += 1
+
+                ' Use the representative paragraph captured during Phase 1
+                Dim representativePara As Word.Paragraph = Nothing
+                If Not representativeParas.TryGetValue(group.StyleName, representativePara) OrElse representativePara Is Nothing Then
+                    Debug.WriteLine($"[DocStyle] Auto-extract: No representative paragraph for style '{group.StyleName}' — skipping")
+                    Continue For
+                End If
+
+                ' Validate the cached paragraph is still accessible
+                Try
+                    Dim checkText As String = representativePara.Range.Text
+                Catch ex As Exception
+                    Debug.WriteLine($"[DocStyle] Auto-extract: Representative paragraph for style '{group.StyleName}' is no longer accessible ({ex.Message}) — skipping")
+                    Continue For
+                End Try
+
+                ' Build userStyle JSON using the same extraction helpers as the manual flow
+                Dim userStyleName As String = $"UserStyle_{userStyleIndex}"
+                Dim whenToApply As String = $"Paragraphs formatted with the '{group.StyleName}' Word style."
+
+                If styleDescriptions.ContainsKey(group.StyleName) Then
+                    userStyleName = styleDescriptions(group.StyleName).UserStyleName
+                    whenToApply = styleDescriptions(group.StyleName).WhenToApply
+                End If
+
+                Dim result As New JObject()
+                result("userStyleIndex") = userStyleIndex
+                result("userStyleName") = userStyleName
+                result("whenToApply") = whenToApply
+
+                ' Word style info
+                Try
+                    Dim style As Word.Style = representativePara.Style
+                    result("wdStyleName") = style.NameLocal
+                    result("wdStyleBuiltIn") = style.BuiltIn
+                Catch
+                    result("wdStyleName") = group.StyleName
+                    result("wdStyleBuiltIn") = False
+                End Try
+
+                ' Table context
+                Dim isInTable As Boolean = False
+                Try
+                    If representativePara.Range.Tables.Count > 0 OrElse representativePara.Range.Cells.Count > 0 Then
+                        isInTable = True
+                    End If
+                Catch
+                End Try
+                result("isInTableCell") = isInTable
+
+                ' Reuse the same extraction helpers
+                result("paragraphFormatting") = ExtractParagraphFormat(representativePara, representativePara.Range.Duplicate)
+                result("fontFormatting") = ExtractFontFormat(representativePara.Range)
+                result("listFormatting") = ExtractListFormat(representativePara.Range)
+                result("tabStops") = ExtractTabStopsCompact(representativePara)
+
+                Dim borders As JObject = ExtractBorders(representativePara)
+                If borders.Properties().Any(Function(p) p.Name <> "distanceFromText" AndAlso p.Name <> "error") Then
+                    result("borders") = borders
+                End If
+
+                Dim shading As JObject = ExtractShading(representativePara)
+                If shading("backgroundColor") IsNot Nothing OrElse shading("foregroundColor") IsNot Nothing Then
+                    result("shading") = shading
+                End If
+
+                ' Add usage statistics as metadata
+                result("_autoExtractInfo") = New JObject From {
+                    {"paragraphCount", group.TotalCount},
+                    {"autoGenerated", True}
+                }
+
+                userStyles.Add(result)
+
+                ' Collect wdStyle name for style definitions
+                If Not String.IsNullOrWhiteSpace(group.StyleName) AndAlso Not collectedStyles.Contains(group.StyleName) Then
+                    collectedStyles.Add(group.StyleName)
+                End If
+            Next
+
+            ' Extract full wdStyle definitions
+            For Each styleName In collectedStyles
+                Try
+                    Dim styleObj As JObject = ExtractFullStyleDefinition(doc, styleName)
+                    If styleObj IsNot Nothing Then
+                        wdStyleDefinitions(styleName) = styleObj
+                    End If
+                Catch ex As Exception
+                    Debug.WriteLine($"[DocStyle] Auto-extract: Error extracting wdStyle definition for '{styleName}': {ex.Message}")
+                End Try
+            Next
+
+            ' ──────────────────────────────────────────────────────────────────
+            ' Phase 4: Assemble and save the template
+            ' ──────────────────────────────────────────────────────────────────
+            Dim templateResult As New JObject()
+            templateResult("templateName") = templateDisplayName
+            templateResult("description") = "Style template auto-extracted from a formatted document. Each user style includes an AI-generated 'whenToApply' field. Review and refine the 'userStyleName' and 'whenToApply' fields for best results. The 'wdStyleDefinitions' section contains Word style definitions that can optionally be created/updated in target documents."
+            templateResult("documentInfo") = New JObject From {
+                {"extractedFrom", doc.Name},
+                {"extractionDate", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")},
+                {"extractionMethod", "auto"},
+                {"totalParagraphsScanned", paragraphCount},
+                {"totalUserStyles", userStyles.Count},
+                {"totalWdStyles", collectedStyles.Count}
+            }
+            templateResult("userStyles") = userStyles
+            templateResult("wdStyleDefinitions") = wdStyleDefinitions
+
+            Dim jsonString As String = JsonConvert.SerializeObject(templateResult, Formatting.Indented)
+
+            Dim safeTemplateName As String = Regex.Replace(templateDisplayName, "[^a-zA-Z0-9_-]", "_")
+            Dim fileName As String = $"{AN2}-ds-{safeTemplateName}.json"
+            Dim filePath As String = Path.Combine(savePath, fileName)
+
+            If File.Exists(filePath) Then
+                Dim overwrite As Integer = ShowCustomYesNoBox(
+                    $"A style template with this name already exists.{vbCrLf}{vbCrLf}Do you want to overwrite it?",
+                    "Overwrite", "Cancel", $"{AN} - File Exists")
+                If overwrite <> 1 Then Return
+            End If
+
+            Try
+                File.WriteAllText(filePath, jsonString, Encoding.UTF8)
+            Catch ioEx As Exception
+                ShowCustomMessageBox($"Could not save file: {ioEx.Message}")
+                Return
+            End Try
+
+            Dim successMessage As String =
+                $"Auto-extracted style template '{templateDisplayName}' created successfully." & vbCrLf & vbCrLf &
+                $"Styles discovered: {styleGroups.Count}" & vbCrLf &
+                $"Paragraphs scanned: {paragraphCount}" & vbCrLf &
+                $"Location: {filePath}" & vbCrLf & vbCrLf &
+                "Tip: Review and refine the 'userStyleName' and 'whenToApply' fields in the template for best results when applying to other documents." & vbCrLf & vbCrLf &
+                "Would you like to edit the template now?"
+
+            Dim editChoice As Integer = ShowCustomYesNoBox(successMessage,
+                "Edit Template", "Close", $"{AN} - Style Template Created")
+
+            If editChoice = 1 Then
+                SLib.ShowTextFileEditor(filePath, $"{AN} - Style Template '{templateDisplayName}'", True, _context)
+            End If
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Error auto-extracting style template: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Holds metadata for a style group discovered during auto-extraction.
+    ''' </summary>
+    Private Class AutoStyleGroup
+        Public Property StyleName As String
+        Public Property Samples As List(Of AutoStyleSample)
+        Public Property TotalCount As Integer
+    End Class
+
+    ''' <summary>
+    ''' Holds a representative paragraph sample with formatting context hints.
+    ''' </summary>
+    Private Class AutoStyleSample
+        Public Property Text As String = ""
+        Public Property ListHint As String = ""
+        Public Property ListLevel As Integer = 0
+        Public Property IsInTable As Boolean = False
+        Public Property OutlineLevel As String = ""
+        Public Property IsBold As Boolean = False
+        Public Property FontSize As Single = 0
+    End Class
 
 End Class
