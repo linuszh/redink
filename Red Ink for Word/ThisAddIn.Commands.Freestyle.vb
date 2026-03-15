@@ -1060,7 +1060,7 @@ Partial Public Class ThisAddIn
 
                 ' DOCUMENT / CLAUSES
                 AddItem("doccheck", "Run the document check.")
-                AddItem("learndocstyle", "Extract paragraph styles (learn document style).")
+                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document or automatic/AI).")
                 AddItem("applydocstyle", "Apply a style template.")
                 AddItem("findclause", "Search for a clause in the clause library/database.")
                 AddItem("addclause", "Add a clause to the clause library/database.")

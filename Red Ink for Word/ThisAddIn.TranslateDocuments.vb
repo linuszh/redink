@@ -1337,7 +1337,7 @@ Partial Public Class ThisAddIn
         Dim offlineDocsBackup As ModelConfig = Nothing
         Dim offlineDocsApplied As Boolean = False
 
-        If Not _useSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+        If Not _isFreestyle AndAlso Not _useSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
             Try
                 If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
                     offlineDocsBackup = GetCurrentConfig(_context)

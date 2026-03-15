@@ -206,7 +206,7 @@ Partial Public Class ThisAddIn
                 "Enter a label for this original clause snapshot:",
                 $"{AN} Store Original Clause",
                 True,
-                $"Clause {OriginalClauseSnapshots.Count + 1}").Trim()
+                GetNextClauseLabel()).Trim()
 
             If String.IsNullOrEmpty(label) OrElse label = "ESC" Then Return
 
@@ -217,6 +217,26 @@ Partial Public Class ThisAddIn
                             "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Returns the next available "Clause N" label that does not collide with
+    ''' any existing snapshot label in OriginalClauseSnapshots.
+    ''' </summary>
+    Private Shared Function GetNextClauseLabel() As String
+        Dim n As Integer = 1
+        Do
+            Dim candidate As String = $"Clause {n}"
+            Dim exists As Boolean = False
+            For Each snap In OriginalClauseSnapshots
+                If String.Equals(snap.Label, candidate, StringComparison.OrdinalIgnoreCase) Then
+                    exists = True
+                    Exit For
+                End If
+            Next
+            If Not exists Then Return candidate
+            n += 1
+        Loop
+    End Function
 
     ' ========================= Justify Markup =========================
 
