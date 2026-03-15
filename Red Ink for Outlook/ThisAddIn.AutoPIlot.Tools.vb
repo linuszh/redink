@@ -177,8 +177,8 @@ Partial Public Class ThisAddIn
                 "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
                 "Wait for the result. Second call: apply the second operation to the output file from the first call (the '_processed' file). " &
                 "Example for 'correct and translate to German': " &
-                "(1) Call process_word_document with instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
-                "(2) Call process_word_document with instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
+                "(1) Call process_word_document with task_type='correct', instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
+                "(2) Call process_word_document with task_type='translate', instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
                 "NEVER combine two distinct operations into a single instruction string. " &
                 "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
                 "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
@@ -195,6 +195,9 @@ Partial Public Class ThisAddIn
                 """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
                 "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
                 "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+                """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
+                """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
+                "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
                 """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
                 "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
                 "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
@@ -3031,6 +3034,10 @@ Partial Public Class ThisAddIn
             Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
             Dim sheetNames = GetArgStringArray(toolCall.Arguments, "sheet_names")
 
+            ' Parse task_type: "translate", "correct", or "other" (default)
+            Dim taskType = If(GetArgString(toolCall.Arguments, "task_type"), "other").Trim().ToLowerInvariant()
+            Dim useOfflineDocs As Boolean = (taskType = "translate" OrElse taskType = "correct")
+
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
                 ' Resolve each requested name via FindAttachment (supports output files)
@@ -3064,7 +3071,7 @@ Partial Public Class ThisAddIn
             Dim resultMessages As New List(Of String)()
 
             For Each att In toProcess
-                context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction}")
+                context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction} (task_type={taskType})")
 
                 Dim inputPath = att.TempFilePath
                 Dim ext = att.Extension.ToLowerInvariant()
@@ -3084,7 +3091,7 @@ Partial Public Class ThisAddIn
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
-                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
+                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter, useOfflineDocs)
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -3134,7 +3141,6 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
-
 
     ''' <summary>
     ''' Creates a Word tracked-changes comparison document from an original and revised file.

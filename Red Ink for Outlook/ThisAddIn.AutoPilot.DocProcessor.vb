@@ -1188,30 +1188,33 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Routes document processing to the appropriate format handler.
-    ''' Applies the OfflineDocs alternate model (if defined) for the entire document
-    ''' processing scope, then restores the previous model configuration.
+    ''' Applies the OfflineDocs alternate model (if defined) for simple tasks
+    ''' (translation, correction) where a faster model suffices, but skips it
+    ''' for complex tasks that benefit from the more capable primary model.
     ''' </summary>
     ''' <param name="sheetFilter">Optional: restrict Excel processing to these sheet names.</param>
+    ''' <param name="useOfflineDocs">True for simple tasks (translate/correct) where OfflineDocs should be used;
+    ''' False for complex tasks (anonymization, restructuring, etc.) that need the primary model.</param>
     Private Async Function ProcessDocumentForAutoPilot(inputPath As String, outputPath As String,
                                                        instruction As String, ct As CancellationToken,
-                                                       Optional sheetFilter As List(Of String) = Nothing) As Task(Of Boolean)
+                                                       Optional sheetFilter As List(Of String) = Nothing,
+                                                       Optional useOfflineDocs As Boolean = True) As Task(Of Boolean)
 
-        ' ── Try OfflineDocs alternate model for document processing ──
-        ' Always attempt this, even when SecondAPI is already active — OfflineDocs
-        ' is a dedicated document-processing model that should override the default
-        ' AutoPilot model selection. The previous config is restored in Finally.
+        ' ── Try OfflineDocs alternate model for simple document processing tasks ──
+        ' Only apply for translate/correct — complex tasks (anonymization, restructuring,
+        ' etc.) should use the more capable primary/secondary model selected by the user.
         Dim offlineDocsBackup As ModelConfig = Nothing
         Dim offlineDocsApplied As Boolean = False
         Dim previousUseSecondApi As Boolean = _apUseSecondApi
 
-        If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+        If useOfflineDocs AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
             Try
                 ' Capture the current config BEFORE GetSpecialTaskModel overwrites it
                 offlineDocsBackup = GetCurrentConfig(_context)
                 If GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs") Then
                     offlineDocsApplied = True
                     _apUseSecondApi = True
-                    ApDashboardLog("DocProcessor: OfflineDocs model applied", "step")
+                    ApDashboardLog("DocProcessor: OfflineDocs model applied (task_type: translate/correct)", "step")
                 Else
                     ' GetSpecialTaskModel didn't find an OfflineDocs entry — discard backup
                     offlineDocsBackup = Nothing
@@ -1219,6 +1222,8 @@ Partial Public Class ThisAddIn
             Catch
                 offlineDocsBackup = Nothing
             End Try
+        ElseIf Not useOfflineDocs Then
+            ApDashboardLog("DocProcessor: using primary model (task_type: other)", "step")
         End If
 
         Try
@@ -1243,6 +1248,7 @@ Partial Public Class ThisAddIn
             End If
         End Try
     End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PPTX PROCESSING
