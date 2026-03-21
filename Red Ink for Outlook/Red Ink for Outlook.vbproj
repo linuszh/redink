@@ -479,6 +479,7 @@
     <Compile Include="Ribbon1.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.AutoPilot.AudioBook.vb" />
     <Compile Include="ThisAddIn.AutoPilot.CommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Config.vb" />
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />

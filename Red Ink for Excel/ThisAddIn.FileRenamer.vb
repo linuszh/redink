@@ -300,8 +300,13 @@ Partial Public Class ThisAddIn
 
             Dim files() As String = {}
             Try
+                Dim baseExtensions = {".pdf", ".docx", ".txt", ".rtf", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
+                                       ".xlsx", ".pptx", ".msg", ".eml"}
+                Dim allowedExtensions = If(INI_AllowLegacyDocFiles,
+                                           baseExtensions.Concat({".doc"}).ToArray(),
+                                           baseExtensions)
                 files = Directory.GetFiles(selectedFolder, "*.*", SearchOption.TopDirectoryOnly).
-                Where(Function(f) {".pdf", ".docx", ".doc", ".txt", ".rtf", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".ht"}.Contains(Path.GetExtension(f).ToLowerInvariant())).ToArray()
+                    Where(Function(f) allowedExtensions.Contains(Path.GetExtension(f).ToLowerInvariant())).ToArray()
             Catch ex As Exception
                 ShowCustomMessageBox("Failed to enumerate files: " & ex.Message)
                 Return

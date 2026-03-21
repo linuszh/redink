@@ -702,6 +702,7 @@
     <Compile Include="ThisAddIn.Redactions.vb" />
     <Compile Include="ThisAddIn.Slides.vb" />
     <Compile Include="ThisAddIn.SpecialServices.vb" />
+    <Compile Include="ThisAddIn.TabularOverview.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Commands.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Form.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.vb" />
@@ -713,6 +714,7 @@
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
+    <Compile Include="ThisAddIn.WordHelpers,ImageGeneration.vb" />
     <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />

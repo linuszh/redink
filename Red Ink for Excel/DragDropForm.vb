@@ -39,6 +39,10 @@ Public Class DragDropForm
     Private _selectedFilePath As String = String.Empty
     Private _selectionMode As DragDropMode = DragDropMode.FileOnly
 
+    ' Layout constants
+    Private Const LabelToButtonSpacing As Integer = 20
+    Private Const ButtonToFormBottomSpacing As Integer = 24
+
     ''' <summary>
     ''' Gets the file or directory path selected by the user via drag-and-drop or browse dialog.
     ''' </summary>
@@ -95,10 +99,71 @@ Public Class DragDropForm
                 Me.Text = "Drag & Drop Your File or Folder, or Click Browse"
         End Select
 
+        ' Update the supported-formats label to stay in sync with the actual file filter
         If Globals.ThisAddIn.DragDropFormLabel <> "" Then
             Me.Label2.Text = Globals.ThisAddIn.DragDropFormLabel
+        Else
+            Me.Label2.Text = GetDefaultSupportedFormatsText()
         End If
+
+        ' Resize the form so the label, button, and bottom margin all fit
+        AdjustFormLayout()
     End Sub
+
+    ''' <summary>
+    ''' Repositions the browse button below Label2 and resizes the form height to fit all content.
+    ''' </summary>
+    Private Sub AdjustFormLayout()
+        ' Let the label compute its auto-sized height
+        Me.Label2.PerformLayout()
+
+        ' Position the button below the label
+        Me.btnBrowse.Top = Me.Label2.Bottom + LabelToButtonSpacing
+
+        ' Resize the form to fit the button plus bottom margin
+        Me.ClientSize = New Size(Me.ClientSize.Width, Me.btnBrowse.Bottom + ButtonToFormBottomSpacing)
+    End Sub
+
+    ''' <summary>
+    ''' Builds the default "Supported are ..." label text based on the current selection mode and legacy-doc setting.
+    ''' This keeps the UI label in sync with the actual file filter used by BrowseForFile.
+    ''' </summary>
+    Private Function GetDefaultSupportedFormatsText() As String
+        Select Case _selectionMode
+            Case DragDropMode.DirectoryOnly
+                Return "Drop or browse for a folder."
+
+            Case Else
+                ' Build the description from the same extensions used in BrowseForFile
+                Dim parts As New List(Of String)
+
+                If ThisAddIn.INI_AllowLegacyDocFiles Then
+                    parts.Add("Text Files (*.txt; *.ini; *.csv; *.log; *.json; *.xml; *.html; *.htm; *.md; *.yaml; *.yml)")
+                    parts.Add("RTF Files (*.rtf)")
+                    parts.Add("Word Documents (*.doc; *.docx)")
+                    parts.Add("Excel Workbooks (*.xlsx)")
+                    parts.Add("PowerPoint Files (*.pptx)")
+                    parts.Add("PDF Files (*.pdf)")
+                    parts.Add("Email Files (*.msg; *.eml)")
+                Else
+                    parts.Add("Text Files (*.txt; *.ini; *.csv; *.log; *.json; *.xml; *.html; *.htm; *.md; *.yaml; *.yml)")
+                    parts.Add("RTF Files (*.rtf)")
+                    parts.Add("Word Documents (*.docx)")
+                    parts.Add("Excel Workbooks (*.xlsx)")
+                    parts.Add("PowerPoint Files (*.pptx)")
+                    parts.Add("PDF Files (*.pdf)")
+                    parts.Add("Email Files (*.msg; *.eml)")
+                End If
+
+                ' Join with commas and " and " before the last item
+                If parts.Count <= 1 Then
+                    Return "Supported are " & parts(0) & "."
+                End If
+
+                Dim allButLast As String = String.Join(", ", parts.Take(parts.Count - 1))
+                Return "Supported are " & allButLast & " and " & parts.Last() & "."
+        End Select
+    End Function
 
     ''' <summary>
     ''' Sets the form icon from application resources on load.
@@ -191,13 +256,28 @@ Public Class DragDropForm
 
             If Globals.ThisAddIn.DragDropFormFilter = "" Then
 
-                ' Default filter covering text, document formats supported by Excel's GetFileContent
-                ofd.Filter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                             "Text Files (*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm)|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                             "Rich Text Files (*.rtf)|*.rtf|" &
-                             "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
-                             "PDF Files (*.pdf)|*.pdf|" &
-                             "All Files (*.*)|*.*"
+                ' Default filter — legacy formats (.doc) only shown when INI_AllowLegacyDocFiles = True
+                If ThisAddIn.INI_AllowLegacyDocFiles Then
+                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml|" &
+                                 "All Files (*.*)|*.*"
+                Else
+                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.docx)|*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml|" &
+                                 "All Files (*.*)|*.*"
+                End If
 
             Else
 

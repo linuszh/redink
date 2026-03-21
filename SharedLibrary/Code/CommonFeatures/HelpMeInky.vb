@@ -845,7 +845,7 @@ Namespace SharedLibrary
                     Case ".txt", ".md", ".log"
                         Return File.ReadAllText(s, Encoding.UTF8)
                     Case ".docx"
-                        Return ReadDocxWithWordInterop(s)
+                        Return SharedMethods.ReadDocxSandboxed(s)
                     Case ".rtf"
                         Try
                             Return SharedMethods.ReadRtfAsText(s)

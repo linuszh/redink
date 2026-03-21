@@ -119,11 +119,13 @@ Partial Class Ribbon1
         Me.RI_Import = Me.Factory.CreateRibbonButton
         Me.RI_FlattenPDF = Me.Factory.CreateRibbonButton
         Me.RI_ConvertDocToTxt = Me.Factory.CreateRibbonButton
+        Me.RI_Stamper = Me.Factory.CreateRibbonButton
         Me.RI_SplitPDF = Me.Factory.CreateRibbonButton
         Me.RI_Markdown = Me.Factory.CreateRibbonButton
         Me.RI_ContentControls = Me.Factory.CreateRibbonButton
         Me.RI_Remove = Me.Factory.CreateRibbonButton
         Me.RI_InsertClipboard = Me.Factory.CreateRibbonButton
+        Me.RI_Image = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
@@ -131,7 +133,7 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
-        Me.RI_Stamper = Me.Factory.CreateRibbonButton
+        Me.RI_Tabular = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -173,6 +175,7 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.RI_DiscussInky)
         Me.Menu1.Items.Add(Me.RI_Search)
         Me.Menu1.Items.Add(Me.Menu2)
+        Me.Menu1.Items.Add(Me.RI_Image)
         Me.Menu1.Items.Add(Me.RI_Transcriptor)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
         Me.Menu1.Items.Add(Me.Settings)
@@ -470,6 +473,7 @@ Partial Class Ribbon1
         Me.Menu3.Items.Add(Me.RI_DocCheck)
         Me.Menu3.Items.Add(Me.RI_FindClause)
         Me.Menu3.Items.Add(Me.RI_AddClause)
+        Me.Menu3.Items.Add(Me.RI_Tabular)
         Me.Menu3.Items.Add(Me.RI_CreatePodcast)
         Me.Menu3.Items.Add(Me.RI_CreateAudio)
         Me.Menu3.Items.Add(Me.RI_DefineMyStyle)
@@ -775,6 +779,15 @@ Partial Class Ribbon1
     "files for easier analysis by AI (will do OCR, if available)"
         Me.RI_ConvertDocToTxt.ShowImage = True
         '
+        'RI_Stamper
+        '
+        Me.RI_Stamper.Label = "Stamp PDF Exhibits"
+        Me.RI_Stamper.Name = "RI_Stamper"
+        Me.RI_Stamper.OfficeImageId = "HeaderInsertGallery"
+        Me.RI_Stamper.ScreenTip = "Add an image file as an exhibit stamp and an exhibit number based on the name of " &
+    "the file (PDF only)"
+        Me.RI_Stamper.ShowImage = True
+        '
         'RI_SplitPDF
         '
         Me.RI_SplitPDF.Label = "Split PDF with AI"
@@ -818,6 +831,15 @@ Partial Class Ribbon1
         Me.RI_InsertClipboard.ScreenTip = "Will convert to text what is contained in the clipboard (e.g., screenshot, video," &
     " audio, image)"
         Me.RI_InsertClipboard.ShowImage = True
+        '
+        'RI_Image
+        '
+        Me.RI_Image.Label = "Generate Image"
+        Me.RI_Image.Name = "RI_Image"
+        Me.RI_Image.OfficeImageId = "InsertImageHtmlTag"
+        Me.RI_Image.ScreenTip = "Will generate an image based on your prompt (or update an existing image you prov" &
+    "ide)"
+        Me.RI_Image.ShowImage = True
         '
         'RI_Transcriptor
         '
@@ -880,14 +902,14 @@ Partial Class Ribbon1
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
         '
-        'RI_Stamper
+        'RI_Tabular
         '
-        Me.RI_Stamper.Label = "Stamp PDF Exhibits"
-        Me.RI_Stamper.Name = "RI_Stamper"
-        Me.RI_Stamper.OfficeImageId = "HeaderInsertGallery"
-        Me.RI_Stamper.ScreenTip = "Add an image file as an exhibit stamp and an exhibit number based on the name of " &
-    "the file (PDF only)"
-        Me.RI_Stamper.ShowImage = True
+        Me.RI_Tabular.Label = "Tabular Overview"
+        Me.RI_Tabular.Name = "RI_Tabular"
+        Me.RI_Tabular.OfficeImageId = "TableAutoFormat"
+        Me.RI_Tabular.ScreenTip = "This will scan a file or folder(s) for documents and create a tabular overview of" &
+    " their content as per your definition"
+        Me.RI_Tabular.ShowImage = True
         '
         'Ribbon1
         '
@@ -1000,6 +1022,14 @@ Partial Class Ribbon1
             Me.RI_InsertClipboard.Visible = True
         End If
 
+
+        If SharedMethods.IsImageGenerationAvailable(ThisAddIn._context) Then
+            Me.RI_Image.Visible = True
+        Else
+            Me.RI_Image.Visible = False
+        End If
+
+
         If Not TTS_Available Then
             Me.RI_CreateAudio.Visible = False
             Me.RI_CreatePodcast.Label = "Create Podcast Script"
@@ -1071,11 +1101,11 @@ Partial Class Ribbon1
             Me.RI_Snapshot.Visible = True
         End If
 
-        If Trim(ThisAddIn.INI_DiscussInkyPath) = "" And Trim(ThisAddIn.INI_DiscussInkyPathLocal) = "" Then
-            Me.RI_DiscussInky.Visible = False
-        Else
-            Me.RI_DiscussInky.Visible = True
-        End If
+        'If Trim(ThisAddIn.INI_DiscussInkyPath) = "" And Trim(ThisAddIn.INI_DiscussInkyPathLocal) = "" Then
+        'Me.RI_DiscussInky.Visible = False
+        'Else
+        'Me.RI_DiscussInky.Visible = True
+        'End If
 
         Dim LastFreestylePrompt As String = My.Settings.LastFreestylePrompt
         If Trim(LastFreestylePrompt) = "" Then
@@ -1181,6 +1211,8 @@ Partial Class Ribbon1
     Friend WithEvents RI_StoreOriginalClause As RibbonButton
     Friend WithEvents RI_JustifyMarkup As RibbonButton
     Friend WithEvents RI_Stamper As RibbonButton
+    Friend WithEvents RI_Image As RibbonButton
+    Friend WithEvents RI_Tabular As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

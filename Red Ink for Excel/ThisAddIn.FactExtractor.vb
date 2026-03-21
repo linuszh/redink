@@ -18,6 +18,14 @@
 '   - Merge Resolution: Based on checkbox, manual merge key column, and library metadata
 '       (backwards-compatible with MergeDateCol).
 '   - Schema Handling: Manual overrides; prepared; optional AI generation.
+' - Multiple files:
+'     When enabled, prompts for a folder and processes all supported files in the top directory:
+'     .pdf, .docx, .doc (if INI_AllowLegacyDocFiles), .txt, .rtf, .ini, .csv, .log,
+'     .json, .xml, .html, .htm, .md, .yaml, .yml, .xlsx, .pptx, .msg, .eml,
+'     .png, .jpg, .jpeg, .gif, .bmp, .tiff, .tif, .webp, .svg (images),
+'     .mp3, .wav, .ogg, .flac, .m4a, .aac, .wma, .opus (audio),
+'     .mp4, .avi, .mkv, .mov, .wmv, .webm (video).
+'     A progress UI is shown. Summary rows are appended after data.
 '   - Execution: Single-file or folder batch; progress via global progress variables.
 '   - Result Insertion: Headers, rows, optional date formatting (date/datetime only), wrapping,
 '       bounded auto-fit, and appended summary rows.
@@ -44,6 +52,13 @@ Partial Public Class ThisAddIn
     Private Const BuilderSentinel As String = "✨ Build new library entry..."
 
     ''' <summary>
+    ''' Sentinel markers for the structured failed-files block in Excel, enabling retry detection.
+    ''' </summary>
+    Private Const FailedFilesBlockStart As String = "[FAILED FILES]"
+    Private Const FailedFilesBlockEnd As String = "[END FAILED FILES]"
+
+
+    ''' <summary>
     ''' Main entry point for fact extraction. Collects user parameters, resolves instruction/schema,
     ''' optional secondary model usage, executes extraction (single or multi-file) and inserts results into Excel.
     ''' </summary>
@@ -53,6 +68,40 @@ Partial Public Class ThisAddIn
         Dim do2ndModel As Boolean = False
 
         Try
+            ' ── Retry detection: check if the sheet contains a failed-files block from a previous run ──
+            Dim retryFiles As System.Collections.Generic.List(Of String) = Nothing
+            Dim retrySourceDir As String = Nothing
+            Dim retryAppendRow As Integer = 0
+            Dim isRetryMode As Boolean = False
+
+            Try
+                Dim currentSheet As Worksheet = CType(Application.ActiveSheet, Worksheet)
+                Dim detected = DetectFailedFilesBlock(currentSheet)
+                If detected.HasValue AndAlso detected.Value.FilePaths.Count > 0 Then
+                    ' Filter to files that still exist on disk
+                    Dim existing = detected.Value.FilePaths.Where(Function(f) File.Exists(f)).ToList()
+                    If existing.Count > 0 Then
+                        Dim retryAns = ShowCustomYesNoBox(
+                            "This worksheet contains " & detected.Value.FilePaths.Count.ToString() &
+                            " previously failed file(s) from a prior extraction run." & vbCrLf &
+                            If(existing.Count < detected.Value.FilePaths.Count,
+                               existing.Count.ToString() & " of them still exist on disk." & vbCrLf, "") &
+                            vbCrLf &
+                            "Would you like to retry extraction for these files?",
+                            "Retry failed files",
+                            "Start new extraction")
+                        If retryAns = 1 Then
+                            retryFiles = existing
+                            retrySourceDir = detected.Value.SourceDirectory
+                            retryAppendRow = detected.Value.AppendAfterRow
+                            isRetryMode = True
+                        End If
+                    End If
+                End If
+            Catch
+                ' Detection failed; proceed with normal flow
+            End Try
+
             Dim displayToInstruction As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
             Dim displayToSchema As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
@@ -183,7 +232,6 @@ Partial Public Class ThisAddIn
             Dim clampFrom = defaultClampFrom
             Dim clampTo = defaultClampTo
             Dim UserOutputLanguage = defaultOutputLanguage
-            Dim multipleFiles As Boolean = False
             Dim doOcr = defaultDoOcr
             Dim dateOutputFormat = defaultDateOutputFormat
             Dim defaultPreparedDisplay = If(displayOptions.Count > 0, displayOptions(0), "<<disabled>>")
@@ -201,14 +249,12 @@ Partial Public Class ThisAddIn
                                                New SLib.InputParameter("Manual instruction (overrides)", manualInstruction))
             Dim pSchema As New SLib.InputParameter("Manual schema (semicolon Name[:type][*]; empty=auto)", manualSchemaText)
             Dim p2 As New SLib.InputParameter("Date column indices (CSV, 1-based)", dateColumnsText)
-            ' Move clamp inputs directly after date column indices
             Dim pClampFrom As New SLib.InputParameter("Only dates on or later", clampFrom)
             Dim pClampTo As New SLib.InputParameter("Only dates up and until", clampTo)
             Dim p3 As New SLib.InputParameter("Column to sort (1-based, auto=*, empty=none)", sortColumnText)
             Dim displaySortDirection = If(sortDirection = "DESC", "Descending", "Ascending")
             Dim p4 As New SLib.InputParameter("Sort direction", displaySortDirection)
             p4.Options = New System.Collections.Generic.List(Of String) From {"Ascending", "Descending"}
-            Dim p5 As New SLib.InputParameter("Multiple files", multipleFiles)
             ' OCR checkbox: pass Nothing if OCR is unavailable to show disabled checkbox
             Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
             Dim p6 As New SLib.InputParameter("Do OCR if needed (PDFs)", If(ocrAvailable, CObj(doOcr), Nothing))
@@ -217,6 +263,7 @@ Partial Public Class ThisAddIn
             Dim pMergeEnable As New SLib.InputParameter("Permit row merging (if requested)", mergeRowsViaLlm)
             Dim pMergeDateCol As New SLib.InputParameter("Column to merge/group on (1-based)", If(mergeDateColumn <= 0, "", mergeDateColumn.ToString()))
             Dim pMergeInstruction As New SLib.InputParameter("Additional merge instructions (optional, overrides)", mergeInstruction)
+            Dim pLinkFiles As New SLib.InputParameter("Make file names clickable (hyperlinks)", False)
 
             Dim p11 As SLib.InputParameter = Nothing
             If hasSecondary Then
@@ -230,8 +277,8 @@ Partial Public Class ThisAddIn
 
             Dim params() As SLib.InputParameter =
                 If(hasSecondary,
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p5, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, p11},
-                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p5, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction})
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles, p11},
+                   New SLib.InputParameter() {p0, p1, pSchema, p2, pClampFrom, pClampTo, p3, p4, p6, p9, p10, pMergeEnable, pMergeDateCol, pMergeInstruction, pLinkFiles})
 
             ' Optional extra button: "Edit Local Library"
             Dim extraText As String = Nothing
@@ -301,10 +348,6 @@ ShowBuilderLoop:
             If String.Equals(chosenPreparedDisplay, BuilderSentinel, StringComparison.Ordinal) Then
                 Dim builderResult = Await RunLibraryEntryBuilderAsync(localPath)
                 If builderResult Then
-                    ' Reload the main dialog so the newly created entry appears in the dropdown.
-                    ' Recursive re-entry via restart of FactExtraction would be cleanest, but to
-                    ' avoid complexity we inform the user and return — the new entry will be available
-                    ' on the next invocation.
                     ShowCustomMessageBox("The new library entry has been saved." & vbCrLf &
                                          "Please re-open the Data Extraction to use it.")
                 End If
@@ -322,20 +365,22 @@ ShowBuilderLoop:
                 Case "DESC", "DESCENDING" : sortDirection = "DESC"
                 Case Else : sortDirection = "ASC"
             End Select
-            Try : multipleFiles = System.Convert.ToBoolean(params(8).Value) : Catch : multipleFiles = False : End Try
-            Try : doOcr = System.Convert.ToBoolean(params(9).Value) : Catch : doOcr = False : End Try
-            UserOutputLanguage = System.Convert.ToString(params(10).Value)
-            dateOutputFormat = System.Convert.ToString(params(11).Value)
+            Try : doOcr = System.Convert.ToBoolean(params(8).Value) : Catch : doOcr = False : End Try
+            UserOutputLanguage = System.Convert.ToString(params(9).Value)
+            dateOutputFormat = System.Convert.ToString(params(10).Value)
 
-            Try : mergeRowsViaLlm = System.Convert.ToBoolean(params(12).Value) : Catch : mergeRowsViaLlm = defaultMergeEnable : End Try
-            Dim mergeDateColRaw = System.Convert.ToString(params(13).Value)
+            Try : mergeRowsViaLlm = System.Convert.ToBoolean(params(11).Value) : Catch : mergeRowsViaLlm = defaultMergeEnable : End Try
+            Dim mergeDateColRaw = System.Convert.ToString(params(12).Value)
             Dim tmpMergeCol As Integer
             If Integer.TryParse(If(mergeDateColRaw, "").Trim(), tmpMergeCol) AndAlso tmpMergeCol > 0 Then
                 mergeDateColumn = tmpMergeCol
             Else
                 mergeDateColumn = 0
             End If
-            mergeInstruction = System.Convert.ToString(params(14).Value)
+            mergeInstruction = System.Convert.ToString(params(13).Value)
+
+            Dim linkFiles As Boolean = False
+            Try : linkFiles = System.Convert.ToBoolean(params(14).Value) : Catch : linkFiles = False : End Try
 
             If hasSecondary Then
                 Try : do2ndModel = System.Convert.ToBoolean(params(15).Value) : Catch : do2ndModel = False : End Try
@@ -377,7 +422,6 @@ ShowBuilderLoop:
             End If
 
             ' Rule summary:
-            ' Rule summary:
             ' 1. Checkbox (mergeRowsViaLlm) must be True to allow any merging.
             ' 2. If user supplied a merge column (>0) AND checkbox True => manual override (use user's column & instruction).
             ' 3. If user did NOT supply a merge column (>0) but checkbox True:
@@ -390,7 +434,6 @@ ShowBuilderLoop:
             Dim userProvidedDateColumn As Boolean = (mergeDateColumn > 0)
 
             If Not userRequestedMerge Then
-                ' User did not permit merging
                 mergeRowsViaLlm = False
                 mergeDateColumn = 0
                 mergeInstruction = ""
@@ -398,7 +441,6 @@ ShowBuilderLoop:
                 If userProvidedDateColumn Then
                     ' Manual override active: keep user-specified date column & instruction (even if blank)
                 Else
-                    ' No manual date column; attempt to adopt from library entry
                     If Not String.IsNullOrWhiteSpace(chosenPreparedDisplay) Then
                         Dim libEnable As Boolean = False
                         Dim libDateCol As Integer = 0
@@ -415,13 +457,11 @@ ShowBuilderLoop:
                             End If
                             mergeRowsViaLlm = True
                         Else
-                            ' Library insufficient: disable merging
                             mergeRowsViaLlm = False
                             mergeDateColumn = 0
                             mergeInstruction = ""
                         End If
                     Else
-                        ' No library entry selected and no manual date column => disable merging
                         mergeRowsViaLlm = False
                         mergeDateColumn = 0
                         mergeInstruction = ""
@@ -510,7 +550,6 @@ ShowBuilderLoop:
                     Return
                 End If
                 fixedSchema = aiSchema
-                ' If user requested auto and schema just generated, attempt detection
                 If wantsAutoSort AndAlso sortColumn = 0 Then
                     autoSortColumn = DetectSortColumnFromSpec(String.Join(";", aiSchema.Select(Function(sc) sc.Name & ":" & sc.Type)))
                     If autoSortColumn > 0 Then sortColumn = autoSortColumn
@@ -568,13 +607,107 @@ ShowBuilderLoop:
                 startRow = 1
             End If
 
-            If Not multipleFiles Then
-                DragDropFormLabel = ""
-                Dim filePath = GetFileName()
-                If String.IsNullOrWhiteSpace(filePath) Then Return
-                Dim list As New System.Collections.Generic.List(Of String) From {filePath}
+            ' ── Retry path: process only the previously failed files ──
+            If isRetryMode AndAlso retryFiles IsNot Nothing AndAlso retryFiles.Count > 0 Then
+                ShowProgressBarInSeparateThread(AN & " Data Extraction (Retry)", "Retrying failed files...")
+                ProgressBarModule.CancelOperation = False
+                GlobalProgressMax = retryFiles.Count
+                GlobalProgressValue = 0
+                GlobalProgressLabel = "Starting retry..."
 
-                ' Initialize progress bar for single-file flow
+                Dim cancelFunc As Func(Of Boolean) = Function() ProgressBarModule.CancelOperation
+
+                Dim retryRes As FactExtractionAggregateResult = Nothing
+                Try
+                    retryRes = Await RunFactExtractionAsync(retryFiles,
+                                                           effectiveInstruction,
+                                                           dateCols,
+                                                           sortColumn,
+                                                           sortDirection,
+                                                           doOcr,
+                                                           useSecondApi,
+                                                           If(retrySourceDir, ""),
+                                                           AddressOf InterpolateAtRuntime,
+                                                           AddressOf LLM,
+                                                           AddressOf GetFileContent,
+                                                           _context,
+                                                           fixedSchema,
+                                                           clampFrom,
+                                                           clampTo,
+                                                           Sub(cur, total, label)
+                                                               GlobalProgressValue = cur
+                                                               GlobalProgressMax = total
+                                                               GlobalProgressLabel = label
+                                                           End Sub,
+                                                           mergeDateColumn,
+                                                           mergeRowsViaLlm,
+                                                           mergeInstruction,
+                                                           cancellationRequested:=cancelFunc,
+                                                           llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
+                                                                                Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
+                                                                            End Function)
+                Catch ex As Exception
+                    ProgressBarModule.CancelOperation = True
+                    ShowCustomMessageBox("Retry extraction failed: " & ex.Message)
+                    Return
+                Finally
+                    ProgressBarModule.CancelOperation = True
+                End Try
+
+                If retryRes Is Nothing OrElse retryRes.Rows.Count = 0 Then
+                    Dim msg = "No data extracted on retry."
+                    If retryRes IsNot Nothing AndAlso retryRes.FailedFiles > 0 Then
+                        msg &= vbCrLf & "Still failed: " & String.Join(", ", retryRes.FailedFileNames)
+                    End If
+                    ShowCustomMessageBox(msg)
+                    Return
+                End If
+
+                ' Append retry results below the old failed-files block
+                InsertResultIntoExcel(retryRes, If(retrySourceDir, ""), dateOutputFormat, retryAppendRow, False, linkFiles)
+
+                Dim retryMsg As New System.Text.StringBuilder()
+                retryMsg.AppendLine("Retry completed.")
+                retryMsg.AppendLine("Newly processed: " & retryRes.ProcessedFiles)
+                retryMsg.AppendLine("Still failed: " & retryRes.FailedFiles)
+                If retryRes.FailedFiles > 0 Then
+                    retryMsg.AppendLine("Failed: " & String.Join(", ", retryRes.FailedFileNames))
+                End If
+                ShowCustomMessageBox(retryMsg.ToString())
+                Return
+            End If
+
+            ' ── Unified file/folder selection via drag-and-drop form ──
+            DragDropFormLabel = ""
+            Dim selectedPath As String = Nothing
+            Dim selectedIsDirectory As Boolean = False
+            Try
+                Using form As New DragDropForm(DragDropMode.FileOrDirectory)
+                    If form.ShowDialog() <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(form.SelectedFilePath) Then
+                        Return
+                    End If
+                    selectedPath = form.SelectedFilePath.Trim()
+                    selectedIsDirectory = form.IsDirectory
+                End Using
+            Catch ex As Exception
+                ShowCustomMessageBox("Selection failed: " & ex.Message)
+                Return
+            End Try
+
+            If Not selectedIsDirectory Then
+                ' ── Single file ──
+                Try
+                    selectedPath = Path.GetFullPath(selectedPath)
+                Catch
+                End Try
+
+                If Not File.Exists(selectedPath) Then
+                    ShowCustomMessageBox($"The file '{selectedPath}' was not found.")
+                    Return
+                End If
+
+                Dim list As New System.Collections.Generic.List(Of String) From {selectedPath}
+
                 ShowProgressBarInSeparateThread(AN & " Data Extraction", "Extracting data...")
                 ProgressBarModule.CancelOperation = False
                 GlobalProgressMax = list.Count
@@ -592,7 +725,7 @@ ShowBuilderLoop:
                                                        sortDirection,
                                                        doOcr,
                                                        useSecondApi,
-                                                       Path.GetDirectoryName(filePath),
+                                                       Path.GetDirectoryName(selectedPath),
                                                        AddressOf InterpolateAtRuntime,
                                                        AddressOf LLM,
                                                        AddressOf GetFileContent,
@@ -608,7 +741,10 @@ ShowBuilderLoop:
                                                        mergeDateColumn,
                                                        mergeRowsViaLlm,
                                                        mergeInstruction,
-                                                       cancellationRequested:=cancelFunc)
+                                                       cancellationRequested:=cancelFunc,
+                                                       llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
+                                                                            Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
+                                                                        End Function)
                 Catch ex As Exception
                     ProgressBarModule.CancelOperation = True
                     ShowCustomMessageBox("Single-file extraction failed: " & ex.Message)
@@ -621,34 +757,82 @@ ShowBuilderLoop:
                     ShowCustomMessageBox("No data extracted.")
                     Return
                 End If
-                InsertResultIntoExcel(res, filePath, dateOutputFormat, startRow, overwriteAtA1)
+                InsertResultIntoExcel(res, selectedPath, dateOutputFormat, startRow, overwriteAtA1, linkFiles)
                 ShowCustomMessageBox("Data extraction completed.")
             Else
-                Dim selectedFolder As String = Nothing
+                ' ── Folder (multiple files) ──
+                Dim selectedFolder = selectedPath
+
+                ' Determine whether to include subdirectories
+                Dim searchOpt As SearchOption = SearchOption.TopDirectoryOnly
                 Try
-                    Using dlg As New FolderBrowserDialog()
-                        dlg.Description = "Select folder with files to extract data from"
-                        dlg.ShowNewFolderButton = False
-                        If dlg.ShowDialog() <> DialogResult.OK OrElse String.IsNullOrWhiteSpace(dlg.SelectedPath) Then
-                            ShowCustomMessageBox("No folder selected.")
+                    Dim subDirs = Directory.GetDirectories(selectedFolder, "*", SearchOption.TopDirectoryOnly)
+                    If subDirs IsNot Nothing AndAlso subDirs.Length > 0 Then
+                        Dim subAns = ShowCustomYesNoBox(
+                            "The selected folder contains " & subDirs.Length.ToString() &
+                            " subfolder(s)." & vbCrLf & vbCrLf &
+                            "Do you want to include files from subdirectories?",
+                            "Yes, include subdirectories",
+                            "No, top-level only")
+                        If subAns = 1 Then
+                            searchOpt = SearchOption.AllDirectories
+                        ElseIf subAns <> 2 Then
+                            ShowCustomMessageBox("Operation cancelled.")
                             Return
                         End If
-                        selectedFolder = dlg.SelectedPath
-                    End Using
-                Catch ex As Exception
-                    ShowCustomMessageBox("Folder selection failed: " & ex.Message)
-                    Return
+                    End If
+                Catch
                 End Try
+
                 Dim files() As String = {}
+                Dim skippedFiles As New System.Collections.Generic.List(Of String)
                 Try
-                    files = Directory.GetFiles(selectedFolder, "*.*", SearchOption.TopDirectoryOnly).
-                        Where(Function(f) {".pdf", ".docx", ".doc", ".txt", ".rtf", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".ht"}.Contains(Path.GetExtension(f).ToLowerInvariant())).ToArray()
+                    Dim baseExtensions = {".pdf", ".docx", ".txt", ".rtf", ".ini", ".csv", ".log",
+                                           ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml",
+                                           ".xlsx", ".pptx", ".msg", ".eml",
+                                           ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+                                           ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus",
+                                           ".mp4", ".avi", ".mkv", ".mov", ".wmv", ".webm"}
+                    Dim allowedExts = If(INI_AllowLegacyDocFiles,
+                                               baseExtensions.Concat({".doc"}).ToArray(),
+                                               baseExtensions)
+
+                    allowedExts = allowedExts.
+                        Where(Function(ext) IsModelCapableForExtension(_context, ext)).ToArray()
+
+                    Dim allFiles = Directory.GetFiles(selectedFolder, "*.*", searchOpt)
+                    Dim supported As New System.Collections.Generic.List(Of String)
+                    For Each f In allFiles
+                        If allowedExts.Contains(Path.GetExtension(f).ToLowerInvariant()) Then
+                            supported.Add(f)
+                        Else
+                            skippedFiles.Add(f)
+                        End If
+                    Next
+                    files = supported.ToArray()
                 Catch ex As Exception
                     ShowCustomMessageBox("Failed to enumerate files: " & ex.Message)
                     Return
                 End Try
+
+                ' Warn about large file counts when subdirectories are included
+                If searchOpt = SearchOption.AllDirectories AndAlso files.Length > 50 Then
+                    Dim warnAns = ShowCustomYesNoBox(
+                        "Found " & files.Length.ToString() & " files across all subdirectories." &
+                        If(skippedFiles.Count > 0, vbCrLf & skippedFiles.Count.ToString() & " unsupported file(s) will be skipped.", "") &
+                        vbCrLf & vbCrLf &
+                        "This may take a while. Continue?",
+                        "Continue",
+                        "Cancel")
+                    If warnAns <> 1 Then
+                        ShowCustomMessageBox("Operation cancelled.")
+                        Return
+                    End If
+                End If
+
                 If files.Length = 0 Then
-                    ShowCustomMessageBox("Folder contains no supported files.")
+                    ShowCustomMessageBox("Folder contains no supported files." &
+                        If(skippedFiles.Count > 0, vbCrLf & skippedFiles.Count.ToString() & " unsupported file(s) were found.", ""))
                     Return
                 End If
                 ShowProgressBarInSeparateThread(AN & " Data Extraction", "Extracting data...")
@@ -682,9 +866,11 @@ ShowBuilderLoop:
                                                        mergeDateColumn,
                                                        mergeRowsViaLlm,
                                                        mergeInstruction,
-                                                       cancellationRequested:=cancelFunc)
+                                                       cancellationRequested:=cancelFunc,
+                                                       llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
+                                                                            Return Await LLM(sys, usr, mdl, tmp, tmo, use2nd, True, "", fileObj)
+                                                                        End Function)
 
-                ' Capture cancellation state before closing progress bar
                 Dim wasCancelled As Boolean = ProgressBarModule.CancelOperation
                 ProgressBarModule.CancelOperation = True
 
@@ -699,13 +885,17 @@ ShowBuilderLoop:
                     ShowCustomMessageBox(msg)
                     Return
                 End If
-                InsertResultIntoExcel(res, selectedFolder, dateOutputFormat, startRow, overwriteAtA1)
+                InsertResultIntoExcel(res, selectedFolder, dateOutputFormat, startRow, overwriteAtA1, linkFiles, skippedFiles)
                 Dim summary As New System.Text.StringBuilder()
                 summary.AppendLine("Processed files: " & res.ProcessedFiles)
                 summary.AppendLine("Failed files: " & res.FailedFiles)
-                If res.FailedFiles > 0 Then
-                    summary.AppendLine("Failed file names:")
-                    summary.AppendLine(String.Join(", ", res.FailedFileNames))
+                'If res.FailedFiles > 0 Then
+                'summary.AppendLine("Failed file names:")
+                'summary.AppendLine(String.Join(", ", res.FailedFileNames))
+                'End If
+                If skippedFiles.Count > 0 Then
+                    summary.AppendLine("Skipped (unsupported): " & skippedFiles.Count.ToString())
+                    'summary.AppendLine(String.Join(", ", skippedFiles))
                 End If
                 ShowCustomMessageBox("Data extraction completed." & vbCrLf & summary.ToString())
             End If
@@ -745,25 +935,7 @@ ShowBuilderLoop:
             If String.IsNullOrWhiteSpace(description) OrElse description = "ESC" Then Return False
 
             ' Step 2: Call LLM to generate the structured library entry
-            Dim systemPrompt =
-                "You are an expert at designing structured data extraction schemas for document analysis. " &
-                "Given the user's description of what they want to extract, generate a complete fact extraction library entry. " &
-                "Respond ONLY as compact JSON with these fields:" & vbCrLf &
-                "{""title"":""Short descriptive title""," & vbCrLf &
-                " ""instruction"":""Detailed extraction instruction for the LLM""," & vbCrLf &
-                " ""schema"":""Name1:type1; Name2:type2*; Name3:type3""," & vbCrLf &
-                " ""merge_enabled"":true/false," & vbCrLf &
-                " ""merge_column"":0," & vbCrLf &
-                " ""merge_instruction"":""Optional merge guidance""}" & vbCrLf & vbCrLf &
-                "Schema rules:" & vbCrLf &
-                "- Use semicolon-separated entries: Name[:type][*]" & vbCrLf &
-                "- Allowed types: text, number, integer, decimal, date, datetime, other" & vbCrLf &
-                "- Append * to the type of one column to mark it as the preferred sort column (typically a date column)" & vbCrLf &
-                "- merge_column is 1-based index referring to the schema column to group on (0 = no merge)" & vbCrLf &
-                "- Set merge_enabled=true only when rows are likely to share a grouping key (e.g., same date from multiple files)" & vbCrLf &
-                "- The instruction should be thorough and specific, telling the LLM exactly what to extract and how" & vbCrLf &
-                "- Keep the title short (2-5 words)" & vbCrLf &
-                "- No commentary, no markdown fences, ONLY the JSON object."
+            Dim systemPrompt = SP_ExtractBuilder
 
             Dim userPrompt = description
 
@@ -916,15 +1088,19 @@ ShowBuilderLoop:
         End Try
     End Function
 
+
     ''' <summary>
     ''' Inserts extracted fact data and summary information into the active worksheet with formatting,
-    ''' optional date normalization and column width adjustments.
+    ''' optional date normalization, column width adjustments, optional file hyperlinks, a
+    ''' structured failed-files block for retry support, and an optional skipped-files block.
     ''' </summary>
     Private Sub InsertResultIntoExcel(res As FactExtractionAggregateResult,
                                       basePath As String,
                                       dateFormat As String,
                                       startRow As Integer,
-                                      overwrite As Boolean)
+                                      overwrite As Boolean,
+                                      Optional linkFiles As Boolean = False,
+                                      Optional skippedFiles As System.Collections.Generic.List(Of String) = Nothing)
         Try
             Dim sheet As Worksheet = CType(Application.ActiveSheet, Worksheet)
             Dim cols = res.Schema.Count
@@ -937,8 +1113,13 @@ ShowBuilderLoop:
             Dim normalizedDateFormat As String = NormalizeUserDateFormat(dateFormat)
 
             Dim startCol As Integer = 1
-            Dim summaryRows = If(res.FailedFiles > 0, 4, 3)
-            Dim endRowEstimate = startRow + rows + 1 + summaryRows
+            ' Estimate rows: header + data + gap + 3 summary + gap + failed block + skipped block
+            Dim failedCount = If(res.FailedFileNames IsNot Nothing, res.FailedFileNames.Count, 0)
+            Dim skippedCount = If(skippedFiles IsNot Nothing, skippedFiles.Count, 0)
+            Dim summaryRows = 3
+            Dim failedBlockRows = If(failedCount > 0, failedCount + 3, 0) ' sentinel + entries + sentinel + blank
+            Dim skippedBlockRows = If(skippedCount > 0, skippedCount + 2, 0) ' header + entries + blank
+            Dim endRowEstimate = startRow + rows + 1 + summaryRows + 1 + failedBlockRows + skippedBlockRows
 
             If overwrite Then
                 Try
@@ -955,6 +1136,33 @@ ShowBuilderLoop:
             Dim headerRange As Range = sheet.Range(sheet.Cells(startRow, startCol), sheet.Cells(startRow, startCol + cols - 1))
             headerRange.Font.Bold = True
             headerRange.HorizontalAlignment = XlHAlign.xlHAlignLeft
+
+            ' Locate the "File" column index for hyperlink insertion
+            Dim fileColSchemaIndex As Integer = -1
+            If linkFiles Then
+                For ci = 0 To cols - 1
+                    If res.Schema(ci).Name.Equals("File", StringComparison.OrdinalIgnoreCase) Then
+                        fileColSchemaIndex = ci
+                        Exit For
+                    End If
+                Next
+            End If
+
+            ' Resolve the base directory for constructing full file paths.
+            ' For single-file mode basePath is the full file path; for multi-file it is the folder.
+            Dim resolvedBaseDir As String = ""
+            If linkFiles AndAlso fileColSchemaIndex >= 0 Then
+                Try
+                    If Not String.IsNullOrWhiteSpace(basePath) Then
+                        If Directory.Exists(basePath) Then
+                            resolvedBaseDir = basePath
+                        Else
+                            resolvedBaseDir = Path.GetDirectoryName(basePath)
+                        End If
+                    End If
+                Catch
+                End Try
+            End If
 
             For r = 0 To rows - 1
                 For c = 0 To cols - 1
@@ -976,6 +1184,28 @@ ShowBuilderLoop:
             Dim dataRange As Range = sheet.Range(sheet.Cells(startRow + 1, startCol), sheet.Cells(startRow + rows, startCol + cols - 1))
             dataRange.HorizontalAlignment = XlHAlign.xlHAlignLeft
 
+            ' Insert hyperlinks into the File column cells when requested
+            If linkFiles AndAlso fileColSchemaIndex >= 0 AndAlso Not String.IsNullOrWhiteSpace(resolvedBaseDir) Then
+                For r = 0 To rows - 1
+                    Try
+                        Dim cellValue = res.Rows(r).Values(fileColSchemaIndex)
+                        Dim displayName As String = If(cellValue Is Nothing, "", cellValue.ToString())
+                        If String.IsNullOrWhiteSpace(displayName) Then Continue For
+
+                        Dim fullPath = Path.Combine(resolvedBaseDir, displayName)
+                        If Not File.Exists(fullPath) Then Continue For
+
+                        Dim cell As Range = CType(sheet.Cells(startRow + 1 + r, startCol + fileColSchemaIndex), Range)
+                        sheet.Hyperlinks.Add(
+                            Anchor:=cell,
+                            Address:=fullPath,
+                            TextToDisplay:=displayName)
+                    Catch
+                        ' Non-critical: skip hyperlink for this cell
+                    End Try
+                Next
+            End If
+
             Dim summaryRow = startRow + rows + 2
             sheet.Cells(summaryRow, startCol).Value2 = "Directory:"
             sheet.Cells(summaryRow, startCol + 1).Value2 = basePath
@@ -983,14 +1213,68 @@ ShowBuilderLoop:
             sheet.Cells(summaryRow + 1, startCol + 1).Value2 = res.ProcessedFiles
             sheet.Cells(summaryRow + 2, startCol).Value2 = "Files failed:"
             sheet.Cells(summaryRow + 2, startCol + 1).Value2 = res.FailedFiles
-            If res.FailedFiles > 0 Then
-                sheet.Cells(summaryRow + 3, startCol).Value2 = "Failed file list:"
-                sheet.Cells(summaryRow + 3, startCol + 1).Value2 = String.Join(", ", res.FailedFileNames)
-            End If
-            Dim summaryLastRow = summaryRow + If(res.FailedFiles > 0, 3, 2)
+            Dim summaryLastRow = summaryRow + 2
             Dim summaryRange As Range = sheet.Range(sheet.Cells(summaryRow, startCol), sheet.Cells(summaryLastRow, startCol + 1))
             summaryRange.Font.Italic = True
             summaryRange.HorizontalAlignment = XlHAlign.xlHAlignLeft
+
+            ' Write structured failed-files block (one file per row with reason code)
+            If failedCount > 0 Then
+                Dim failBlockRow = summaryLastRow + 2
+                sheet.Cells(failBlockRow, startCol).Value2 = FailedFilesBlockStart
+                CType(sheet.Cells(failBlockRow, startCol), Range).Font.Bold = True
+                CType(sheet.Cells(failBlockRow, startCol), Range).Font.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.DarkRed)
+
+                For fi = 0 To res.FailedFileNames.Count - 1
+                    Dim fName = res.FailedFileNames(fi)
+                    Dim reason As String = ""
+                    If res.FailedFileReasons IsNot Nothing Then res.FailedFileReasons.TryGetValue(fName, reason)
+                    Dim cellText = fName & If(String.IsNullOrWhiteSpace(reason), "", " [" & reason & "]")
+                    sheet.Cells(failBlockRow + 1 + fi, startCol).Value2 = cellText
+
+                    ' Write the full path in column B so the retry logic can resolve it
+                    Dim fPath As String = ""
+                    If res.FailedFilePaths IsNot Nothing Then res.FailedFilePaths.TryGetValue(fName, fPath)
+                    If Not String.IsNullOrWhiteSpace(fPath) Then
+                        sheet.Cells(failBlockRow + 1 + fi, startCol + 1).Value2 = fPath
+                    End If
+                Next
+
+                Dim endSentinelRow = failBlockRow + 1 + res.FailedFileNames.Count
+                sheet.Cells(endSentinelRow, startCol).Value2 = FailedFilesBlockEnd
+                CType(sheet.Cells(endSentinelRow, startCol), Range).Font.Bold = True
+                CType(sheet.Cells(endSentinelRow, startCol), Range).Font.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.DarkRed)
+
+                ' Format the failed-files block
+                Dim failRange As Range = sheet.Range(sheet.Cells(failBlockRow, startCol), sheet.Cells(endSentinelRow, startCol + 1))
+                failRange.Font.Italic = True
+                failRange.HorizontalAlignment = XlHAlign.xlHAlignLeft
+                failRange.VerticalAlignment = XlVAlign.xlVAlignTop
+                failRange.WrapText = True
+
+                summaryLastRow = endSentinelRow
+            End If
+
+            ' Write skipped (unsupported) files block
+            If skippedCount > 0 Then
+                Dim skippedHeaderRow = summaryLastRow + 2
+                sheet.Cells(skippedHeaderRow, startCol).Value2 = "Skipped (unsupported): " & skippedCount.ToString()
+                CType(sheet.Cells(skippedHeaderRow, startCol), Range).Font.Bold = True
+                CType(sheet.Cells(skippedHeaderRow, startCol), Range).Font.Italic = True
+                CType(sheet.Cells(skippedHeaderRow, startCol), Range).Font.Color = System.Drawing.ColorTranslator.ToOle(System.Drawing.Color.Gray)
+
+                For si = 0 To skippedFiles.Count - 1
+                    sheet.Cells(skippedHeaderRow + 1 + si, startCol).Value2 = skippedFiles(si)
+                Next
+
+                Dim skippedLastRow = skippedHeaderRow + skippedFiles.Count
+                Dim skippedRange As Range = sheet.Range(sheet.Cells(skippedHeaderRow, startCol), sheet.Cells(skippedLastRow, startCol))
+                skippedRange.Font.Italic = True
+                skippedRange.HorizontalAlignment = XlHAlign.xlHAlignLeft
+                skippedRange.VerticalAlignment = XlVAlign.xlVAlignTop
+
+                summaryLastRow = skippedLastRow
+            End If
 
             headerRange.VerticalAlignment = XlVAlign.xlVAlignTop
             dataRange.VerticalAlignment = XlVAlign.xlVAlignTop
@@ -1029,6 +1313,95 @@ ShowBuilderLoop:
             ShowCustomMessageBox("Failed inserting into Excel: " & ex.Message)
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Scans the active worksheet for a structured failed-files block written by a previous extraction run.
+    ''' If found, returns the list of full file paths, the source directory, and the row after the block
+    ''' (for appending new results). Returns Nothing if no block is detected.
+    ''' </summary>
+    Private Function DetectFailedFilesBlock(sheet As Worksheet) As (FilePaths As System.Collections.Generic.List(Of String),
+                                                                     SourceDirectory As String,
+                                                                     AppendAfterRow As Integer)?
+        Try
+            Dim used = sheet.UsedRange
+            If used Is Nothing OrElse used.Rows.Count = 0 Then Return Nothing
+
+            Dim lastRow As Integer = used.Row + used.Rows.Count - 1
+            Dim startSentinelRow As Integer = -1
+            Dim endSentinelRow As Integer = -1
+            Dim sourceDir As String = ""
+
+            ' Scan column A for the sentinel markers and "Directory:" label
+            For r = 1 To lastRow
+                Dim val As String = ""
+                Try
+                    Dim cv = CType(sheet.Cells(r, 1), Range).Value2
+                    If cv IsNot Nothing Then val = cv.ToString().Trim()
+                Catch
+                    Continue For
+                End Try
+
+                If val.Equals(FailedFilesBlockStart, StringComparison.Ordinal) Then
+                    startSentinelRow = r
+                ElseIf val.Equals(FailedFilesBlockEnd, StringComparison.Ordinal) AndAlso startSentinelRow > 0 Then
+                    endSentinelRow = r
+                ElseIf val.Equals("Directory:", StringComparison.OrdinalIgnoreCase) Then
+                    Try
+                        Dim dirVal = CType(sheet.Cells(r, 2), Range).Value2
+                        If dirVal IsNot Nothing Then sourceDir = dirVal.ToString().Trim()
+                    Catch
+                    End Try
+                End If
+            Next
+
+            If startSentinelRow < 0 OrElse endSentinelRow < 0 OrElse endSentinelRow <= startSentinelRow + 1 Then
+                Return Nothing
+            End If
+
+            ' Parse file paths from column B (full paths) between the sentinels
+            Dim filePaths As New System.Collections.Generic.List(Of String)
+            For r = startSentinelRow + 1 To endSentinelRow - 1
+                Dim fullPath As String = ""
+                Try
+                    ' Column B holds the full path
+                    Dim cv = CType(sheet.Cells(r, 2), Range).Value2
+                    If cv IsNot Nothing Then fullPath = cv.ToString().Trim()
+                Catch
+                End Try
+
+                ' Fallback: if no full path in B, try to reconstruct from directory + display name in A
+                If String.IsNullOrWhiteSpace(fullPath) AndAlso Not String.IsNullOrWhiteSpace(sourceDir) Then
+                    Try
+                        Dim displayVal = CType(sheet.Cells(r, 1), Range).Value2
+                        If displayVal IsNot Nothing Then
+                            Dim display = displayVal.ToString().Trim()
+                            ' Strip trailing reason code [REASON] if present
+                            Dim bracketIdx = display.LastIndexOf(" [")
+                            If bracketIdx > 0 AndAlso display.EndsWith("]") Then
+                                display = display.Substring(0, bracketIdx).Trim()
+                            End If
+                            If display.Length > 0 Then
+                                fullPath = Path.Combine(sourceDir, display)
+                            End If
+                        End If
+                    Catch
+                    End Try
+                End If
+
+                If Not String.IsNullOrWhiteSpace(fullPath) Then
+                    filePaths.Add(fullPath)
+                End If
+            Next
+
+            If filePaths.Count = 0 Then Return Nothing
+
+            Return (filePaths, sourceDir, endSentinelRow + 1)
+
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
 
     ''' <summary>
     ''' Normalizes a user-supplied date format to use 'M' for months in simple month-year patterns
@@ -1271,12 +1644,21 @@ End Class
 '     Hint to the model/normalization for language-specific outputs where applicable.
 '
 ' - Multiple files:
-'     When enabled, prompts for a folder and processes all supported files in the top directory
-'     (.pdf, .docx, .doc, .txt, .rtf, .ini, .csv, .log, .json, .xml, .html, .ht).
+'     When enabled, prompts for a folder and processes all supported files in the top directory:
+'     .pdf, .docx, .doc (if INI_AllowLegacyDocFiles), .txt, .rtf, .ini, .csv, .log,
+'     .json, .xml, .html, .htm, .md, .yaml, .yml, .xlsx, .pptx, .msg, .eml,
+'     .png, .jpg, .jpeg, .gif, .bmp, .tiff, .tif, .webp, .svg (images),
+'     .mp3, .wav, .ogg, .flac, .m4a, .aac, .wma, .opus (audio),
+'     .mp4, .avi, .mkv, .mov, .wmv, .webm (video).
 '     A progress UI is shown. Summary rows are appended after data.
 '
 ' - Do OCR if needed (PDFs):
 '     Attempts OCR for unsearchable PDFs.
+'
+' - Make file names clickable (hyperlinks):
+'     When enabled, the File column cells are turned into clickable hyperlinks pointing to the
+'     source file on disk. Only cells where the resolved file path exists are linked.
+'     This setting is not persisted between sessions.
 '
 ' - Secondary model:
 '     If configured (alternate model path or second API), toggling this will use the secondary

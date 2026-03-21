@@ -239,8 +239,13 @@ Partial Public Class ThisAddIn
 
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
-        Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
-        Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
+        If INI_AllowLegacyDocFiles Then
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
+        Else
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.docx;*.pptx|Word Document (*.docx)|*.docx|PowerPoint (*.pptx)|*.pptx"
+        End If
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
@@ -265,7 +270,9 @@ Partial Public Class ThisAddIn
 
         ' Collect files
         Dim filesToProcess As New List(Of String)()
-        Dim supportedExtensions As String() = {".doc", ".docx", ".pptx"}
+        Dim supportedExtensions As String() = If(INI_AllowLegacyDocFiles,
+                                                  {".doc", ".docx", ".pptx"},
+                                                  {".docx", ".pptx"})
 
         If isFile Then
             Dim ext As String = Path.GetExtension(selectedPath).ToLowerInvariant()
@@ -283,11 +290,10 @@ Partial Public Class ThisAddIn
 
             Dim searchOption As SearchOption = If(recurseChoice = 1, SearchOption.AllDirectories, SearchOption.TopDirectoryOnly)
 
-            ' Get all files and filter by exact extension match to avoid duplicates
             Dim allFiles = Directory.GetFiles(selectedPath, "*.*", searchOption)
             For Each f In allFiles
                 Dim ext As String = Path.GetExtension(f).ToLowerInvariant()
-                If ext = ".doc" OrElse ext = ".docx" OrElse ext = ".pptx" Then
+                If supportedExtensions.Contains(ext) Then
                     filesToProcess.Add(f)
                 End If
             Next
