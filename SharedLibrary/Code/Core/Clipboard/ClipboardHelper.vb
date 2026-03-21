@@ -47,6 +47,99 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
+        ''' Sniffs the MIME type from raw bytes using the urlmon FindMimeFromData API.
+        ''' Falls back to "application/octet-stream" on failure.
+        ''' </summary>
+        ''' <param name="data">The raw file bytes.</param>
+        ''' <param name="fileNameHint">Optional file name hint (with extension) to assist detection.</param>
+        ''' <returns>Detected MIME type string.</returns>
+        Private Function SniffMimeFromBytes(data() As Byte, Optional fileNameHint As String = Nothing) As String
+            Try
+                Dim sniffSize As Integer = Math.Min(data.Length, 256)
+                Dim buffer(sniffSize - 1) As Byte
+                Array.Copy(data, buffer, sniffSize)
+
+                ' Write bytes to a temporary file so MimeHelper.GetFileMimeTypeAndBase64 can use
+                ' FindMimeFromData with a file-path hint (which improves detection for container formats
+                ' like M4A/MP4 that share the same ftyp magic bytes).
+                Dim tempPath As String = Nothing
+                Try
+                    Dim ext As String = ""
+                    If Not String.IsNullOrWhiteSpace(fileNameHint) Then
+                        ext = System.IO.Path.GetExtension(fileNameHint)
+                    End If
+                    If String.IsNullOrEmpty(ext) Then ext = ".tmp"
+                    tempPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                                                       System.Guid.NewGuid().ToString("N") & ext)
+                    System.IO.File.WriteAllBytes(tempPath, data)
+                    Dim result = MimeHelper.GetFileMimeTypeAndBase64(tempPath)
+                    Dim mime As String = result.MimeType.Trim()
+                    If Not String.IsNullOrWhiteSpace(mime) AndAlso
+                       Not mime.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase) Then
+                        Return mime
+                    End If
+                Catch
+                    ' Fall through to extension-based mapping below.
+                Finally
+                    Try
+                        If tempPath IsNot Nothing AndAlso System.IO.File.Exists(tempPath) Then
+                            System.IO.File.Delete(tempPath)
+                        End If
+                    Catch
+                    End Try
+                End Try
+            Catch
+                ' Ignore sniffing failures.
+            End Try
+            Return "application/octet-stream"
+        End Function
+
+        ''' <summary>
+        ''' Returns a MIME type from a file extension. Returns Nothing if the extension is not recognized.
+        ''' </summary>
+        Private Function MimeFromExtension(ext As String) As String
+            If String.IsNullOrWhiteSpace(ext) Then Return Nothing
+            Select Case ext.ToLowerInvariant()
+                Case ".wav" : Return "audio/wav"
+                Case ".mp3" : Return "audio/mpeg"
+                Case ".m4a", ".mp4a" : Return "audio/mp4"
+                Case ".aac" : Return "audio/aac"
+                Case ".ogg", ".oga" : Return "audio/ogg"
+                Case ".flac" : Return "audio/flac"
+                Case ".wma" : Return "audio/x-ms-wma"
+                Case ".opus" : Return "audio/opus"
+                Case ".webm" : Return "audio/webm"
+                Case ".mp4" : Return "video/mp4"
+                Case ".avi" : Return "video/x-msvideo"
+                Case ".mov" : Return "video/quicktime"
+                Case ".mkv" : Return "video/x-matroska"
+                Case ".wmv" : Return "video/x-ms-wmv"
+                Case ".txt" : Return "text/plain"
+                Case ".png" : Return "image/png"
+                Case ".jpg", ".jpeg" : Return "image/jpeg"
+                Case ".gif" : Return "image/gif"
+                Case ".bmp" : Return "image/bmp"
+                Case ".tif", ".tiff" : Return "image/tiff"
+                Case ".webp" : Return "image/webp"
+                Case ".svg" : Return "image/svg+xml"
+                Case ".pdf" : Return "application/pdf"
+                Case ".doc" : Return "application/msword"
+                Case ".docx" : Return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                Case ".xls" : Return "application/vnd.ms-excel"
+                Case ".xlsx" : Return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                Case ".ppt" : Return "application/vnd.ms-powerpoint"
+                Case ".pptx" : Return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                Case ".csv" : Return "text/csv"
+                Case ".json" : Return "application/json"
+                Case ".xml" : Return "application/xml"
+                Case ".html", ".htm" : Return "text/html"
+                Case ".rtf" : Return "application/rtf"
+                Case ".zip" : Return "application/zip"
+                Case Else : Return Nothing
+            End Select
+        End Function
+
+        ''' <summary>
         ''' Tries to read the current clipboard content and returns the first supported payload as a
         ''' MIME type and Base64-encoded content.
         ''' </summary>
@@ -73,10 +166,21 @@ Sub()
                 If fgStream IsNot Nothing Then
                     Using reader As New System.IO.BinaryReader(fgStream, System.Text.Encoding.Unicode, leaveOpen:=False)
                         ' Read file name from FILEGROUPDESCRIPTOR structure (first item only).
-                        reader.ReadInt32() ' itemCount
+                        reader.ReadInt32() ' itemCount (UINT cItems)
 
-                        ' Skip fixed-size fields up to the start of cFileName.
-                        reader.BaseStream.Seek(4 + 16 + 8 + 8 + 8 + 4 + 4, System.IO.SeekOrigin.Current)
+                        ' FILEDESCRIPTORW layout before cFileName:
+                        '   dwFlags          4  bytes (DWORD)
+                        '   clsid           16  bytes (CLSID)
+                        '   sizel            8  bytes (SIZE)
+                        '   pointl           8  bytes (POINTL)
+                        '   dwFileAttributes 4  bytes (DWORD)
+                        '   ftCreationTime   8  bytes (FILETIME)
+                        '   ftLastAccessTime 8  bytes (FILETIME)
+                        '   ftLastWriteTime  8  bytes (FILETIME)
+                        '   nFileSizeHigh    4  bytes (DWORD)
+                        '   nFileSizeLow     4  bytes (DWORD)
+                        '                   ── total = 72 bytes
+                        reader.BaseStream.Seek(72, System.IO.SeekOrigin.Current)
 
                         ' Read filename (up to 260 WCHARs).
                         Dim nameChars As New System.Collections.Generic.List(Of Char)
@@ -103,16 +207,14 @@ Sub()
 
                                         localMimeType = "audio/wav"
                                     Else
-                                        ' Fallback to extension-based MIME mapping derived from the extracted file name.
+                                        ' 1st: try extension-based mapping from the extracted file name.
                                         Dim ext = System.IO.Path.GetExtension(fileName).ToLowerInvariant()
-                                        Select Case ext
-                                            Case ".wav" : localMimeType = "audio/wav"
-                                            Case ".mp3" : localMimeType = "audio/mpeg"
-                                            Case ".txt" : localMimeType = "text/plain"
-                                            Case ".png" : localMimeType = "image/png"
-                                            Case ".jpg", ".jpeg" : localMimeType = "image/jpeg"
-                                            Case Else : localMimeType = "application/octet-stream"
-                                        End Select
+                                        localMimeType = MimeFromExtension(ext)
+
+                                        ' 2nd: if extension was empty or unrecognized, sniff from content bytes.
+                                        If String.IsNullOrWhiteSpace(localMimeType) Then
+                                            localMimeType = SniffMimeFromBytes(bytes, fileName)
+                                        End If
                                     End If
 
                                     localBase64 = System.Convert.ToBase64String(bytes)

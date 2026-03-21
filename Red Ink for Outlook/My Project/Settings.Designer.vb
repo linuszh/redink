@@ -307,8 +307,7 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("10")>  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
         Public Property AP_CooldownSeconds() As Integer
             Get
                 Return CType(Me("AP_CooldownSeconds"),Integer)
@@ -319,8 +318,7 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("50")>  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
         Public Property AP_MaxRepliesPerSession() As Integer
             Get
                 Return CType(Me("AP_MaxRepliesPerSession"),Integer)
@@ -331,8 +329,7 @@ Namespace My
         End Property
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
-         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("10")>  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute()>  _
         Public Property AP_MaxAttachmentMB() As Integer
             Get
                 Return CType(Me("AP_MaxAttachmentMB"),Integer)
@@ -614,6 +611,54 @@ Namespace My
             End Get
             Set
                 Me("AP_ReprocessLookbackHours") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnableWebGrounding() As Boolean
+            Get
+                Return CType(Me("AP_EnableWebGrounding"),Boolean)
+            End Get
+            Set
+                Me("AP_EnableWebGrounding") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnableVoicemailProcessing() As Boolean
+            Get
+                Return CType(Me("AP_EnableVoicemailProcessing"),Boolean)
+            End Get
+            Set
+                Me("AP_EnableVoicemailProcessing") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_VoicemailSenderAddress() As String
+            Get
+                Return CType(Me("AP_VoicemailSenderAddress"),String)
+            End Get
+            Set
+                Me("AP_VoicemailSenderAddress") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property AP_VoicemailCallerIdMapPath() As String
+            Get
+                Return CType(Me("AP_VoicemailCallerIdMapPath"),String)
+            End Get
+            Set
+                Me("AP_VoicemailCallerIdMapPath") = value
             End Set
         End Property
     End Class

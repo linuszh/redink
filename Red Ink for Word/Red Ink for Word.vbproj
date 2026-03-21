@@ -110,7 +110,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.3.3.200</ApplicationVersion>
+    <ApplicationVersion>1.3.4.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
@@ -702,6 +702,7 @@
     <Compile Include="ThisAddIn.Redactions.vb" />
     <Compile Include="ThisAddIn.Slides.vb" />
     <Compile Include="ThisAddIn.SpecialServices.vb" />
+    <Compile Include="ThisAddIn.TabularOverview.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Commands.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.Form.vb" />
     <Compile Include="ThisAddIn.TextToSpeech.vb" />
@@ -713,6 +714,7 @@
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
+    <Compile Include="ThisAddIn.WordHelpers,ImageGeneration.vb" />
     <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />

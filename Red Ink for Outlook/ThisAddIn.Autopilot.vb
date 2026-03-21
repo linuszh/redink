@@ -296,6 +296,8 @@ Partial Public Class ThisAddIn
         _apCatchUpEntryIds.Clear()
         _apCurrentProcessingEntryId = Nothing
         _apActiveJobLastNotifiedUtc = DateTime.MinValue
+        _apVoicemailCallerIdMap = Nothing
+        WebGrounding = ""
         ApDashboardLog("AutoPilot stopped.", "info")
         ApDashboardMarkComplete()
         ShowCustomMessageBox($"{AN6} AutoPilot has been stopped.", AN)
@@ -355,6 +357,26 @@ Partial Public Class ThisAddIn
         _apSenderLastMailSentUtc.Clear()
         _apUseSecondApi = config.UseSecondApi
 
+        ' Set the WebGrounding field for InterpolateAtRuntime resolution
+        If config.EnableWebGrounding Then
+            WebGrounding = "WEB GROUNDING: Your model has built-in Internet search / web grounding capability. " &
+                "When a user's question would benefit from current, factual, or verifiable information, " &
+                "you SHOULD proactively use your web search capability to look up the answer. " &
+                "You do not need a tool call for this — use your native search functionality directly. " &
+                "When presenting search results, cite sources when possible, but NEVER invent URLs. " &
+                "NEVER echo your search queries in the response. " &
+                "The CONFIDENTIALITY AND QUERY SANITIZATION RULE above applies equally to your web searches."
+        Else
+            WebGrounding = ""
+        End If
+
+        ' Load voicemail caller ID map if voicemail processing is enabled
+        If config.EnableVoicemailProcessing AndAlso Not String.IsNullOrWhiteSpace(config.VoicemailCallerIdMapPath) Then
+            LoadVoicemailCallerIdMap(config.VoicemailCallerIdMapPath)
+        Else
+            _apVoicemailCallerIdMap = Nothing
+        End If
+
         ' Capture the current model config at startup so we can re-apply it
         ' before every LLM call, ensuring tooling templates are always pristine.
         _apBaseModelConfig = GetCurrentConfig(_context)
@@ -412,6 +434,19 @@ Partial Public Class ThisAddIn
             'ApDashboardLog($"ToolResponses template: {If(Not String.IsNullOrWhiteSpace(_context.INI_APICall_ToolResponses_Template_2), "set", "EMPTY")}", "step")
             'ApDashboardLog($"ToolCallPart template: {If(Not String.IsNullOrWhiteSpace(_context.INI_APICall_ToolCallPart_Template_2), "set", "EMPTY")}", "step")
             'ApDashboardLog($"APICall_2 contains toolinstructions placeholder: {If(_context.INI_APICall_2 IsNot Nothing AndAlso _context.INI_APICall_2.Contains("toolinstructions"), "YES", "NO")}", "step")
+        End If
+
+        If config.EnableWebGrounding Then
+            ApDashboardLog("🌐 Web grounding enabled (model has built-in web search)", "info")
+        End If
+
+        If config.EnableVoicemailProcessing Then
+            ApDashboardLog($"📞 Voicemail processing enabled (sender: {config.VoicemailSenderAddress})", "info")
+            If _apVoicemailCallerIdMap IsNot Nothing Then
+                ApDashboardLog($"   Caller ID map: {_apVoicemailCallerIdMap.Count} mapping(s) loaded", "info")
+            Else
+                ApDashboardLog("   ⚠ Caller ID map not loaded", "warn")
+            End If
         End If
 
         ApDashboardLog($"Filters: {config.FilterRules.Count} rule(s) active", "info")
@@ -1479,7 +1514,13 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' ── Filter checks ──
+            ' ── Voicemail detection (bypasses normal filter pipeline) ──
+            If IsVoicemailFromRegisteredSender(mailInfo) Then
+                Await ProcessVoicemailAsync(mi, mailInfo, entryId, ct)
+                Return
+            End If
+
+            ' ── Filter checks ──            
 
             ' Loop prevention: skip if this mail itself is an auto-reply from us
             If mailInfo.HasAutoReplyHeader Then : ApDashboardLog("SKIP (own auto-reply): " & mailInfo.Subject, "step") : Return : End If
@@ -3574,6 +3615,192 @@ Partial Public Class ThisAddIn
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  VOICEMAIL PROCESSING
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Audio file extensions recognized as voicemail attachments.</summary>
+    Private Shared ReadOnly AP_VoicemailAudioExtensions As String() = {
+        ".wav", ".mp3", ".m4a", ".aac", ".wma", ".ogg", ".flac", ".amr"
+    }
+
+    ''' <summary>
+    ''' In-memory caller ID → email map loaded from the user-provided CSV.
+    ''' Key = normalized phone number (digits only), Value = (Email, DisplayName).
+    ''' </summary>
+    Private _apVoicemailCallerIdMap As Dictionary(Of String, (Email As String, DisplayName As String)) = Nothing
+
+    ''' <summary>
+    ''' Loads the caller ID → email map from a CSV file.
+    ''' Format per line: phone,email[,displayname]
+    ''' Lines starting with ; or # are comments. Empty lines are skipped.
+    ''' Phone numbers are normalized (stripped of +, spaces, dashes, parentheses).
+    ''' Multiple numbers mapping to the same email are supported naturally.
+    ''' </summary>
+    Private Sub LoadVoicemailCallerIdMap(csvPath As String)
+        _apVoicemailCallerIdMap = New Dictionary(Of String, (Email As String, DisplayName As String))()
+        Try
+            If Not IO.File.Exists(csvPath) Then
+                ApDashboardLog($"⚠ Voicemail caller ID map not found: {csvPath}", "warn")
+                Return
+            End If
+
+            Dim lines = IO.File.ReadAllLines(csvPath, Text.Encoding.UTF8)
+            Dim loaded As Integer = 0
+
+            For Each line In lines
+                Dim trimmed = line.Trim()
+                If String.IsNullOrWhiteSpace(trimmed) Then Continue For
+                If trimmed.StartsWith(";") OrElse trimmed.StartsWith("#") Then Continue For
+
+                Dim parts = trimmed.Split(","c)
+                If parts.Length < 2 Then Continue For
+
+                Dim rawPhone = parts(0).Trim()
+                Dim email = parts(1).Trim()
+                Dim displayName = If(parts.Length >= 3, parts(2).Trim(), "")
+
+                If String.IsNullOrWhiteSpace(rawPhone) OrElse String.IsNullOrWhiteSpace(email) Then Continue For
+
+                Dim normalizedPhone = NormalizePhoneNumber(rawPhone)
+                If normalizedPhone.Length >= 6 Then
+                    _apVoicemailCallerIdMap(normalizedPhone) = (email, displayName)
+                    loaded += 1
+                End If
+            Next
+
+            ApDashboardLog($"Loaded {loaded} caller ID mapping(s) from: {IO.Path.GetFileName(csvPath)}", "info")
+
+        Catch ex As System.Exception
+            ApDashboardLog($"⚠ Error loading voicemail caller ID map: {ex.Message}", "warn")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Normalizes a phone number to digits only for consistent matching.
+    ''' Strips +, spaces, dashes, parentheses, dots, and leading 00 (international prefix).
+    ''' Examples:
+    '''   +41 76 548 32 21  → 41765483221
+    '''   0041765483221     → 41765483221
+    '''   (076) 548-32-21   → 765483221
+    '''   41765483221       → 41765483221
+    ''' </summary>
+    Private Shared Function NormalizePhoneNumber(phone As String) As String
+        If String.IsNullOrWhiteSpace(phone) Then Return ""
+        ' Strip all non-digit characters
+        Dim digitsOnly = Regex.Replace(phone, "[^\d]", "")
+        ' Strip leading 00 (international dialing prefix → country code)
+        If digitsOnly.StartsWith("00") AndAlso digitsOnly.Length > 6 Then
+            digitsOnly = digitsOnly.Substring(2)
+        End If
+        Return digitsOnly
+    End Function
+
+    ''' <summary>
+    ''' Extracts a caller ID (phone number) from a voicemail filename and/or email subject/body.
+    ''' Tries multiple patterns:
+    '''   1. Filename pattern: From_41765483221_... → 41765483221
+    '''   2. Subject pattern: "COMBOX pro 0860793221038" → 0860793221038
+    '''   3. Flexible: any sequence of 8+ digits in the filename
+    '''   4. Flexible: any sequence of 8+ digits in the subject
+    ''' Returns the normalized phone number, or empty string if no caller ID found.
+    ''' </summary>
+    Private Shared Function ExtractCallerIdFromVoicemail(
+            audioFileName As String,
+            subject As String,
+            body As String) As String
+
+        ' 1. Filename pattern: From_{digits}_...
+        If Not String.IsNullOrWhiteSpace(audioFileName) Then
+            Dim fileMatch = Regex.Match(audioFileName, "From[_\-]?(\d{6,})", RegexOptions.IgnoreCase)
+            If fileMatch.Success Then
+                Return NormalizePhoneNumber(fileMatch.Groups(1).Value)
+            End If
+        End If
+
+        ' 2. Subject/body pattern: "COMBOX pro {digits}" or similar PBX patterns
+        For Each textSource In {subject, body}
+            If String.IsNullOrWhiteSpace(textSource) Then Continue For
+            ' "COMBOX pro 0860793221038" or "Voicemail from +41765483221"
+            Dim pbxMatch = Regex.Match(textSource, "(?:COMBOX|voicemail|mailbox|anruf|appel|chiamata)\s+(?:pro|from|von|de|di)?\s*\+?(\d[\d\s\-\.]{5,})", RegexOptions.IgnoreCase)
+            If pbxMatch.Success Then
+                Return NormalizePhoneNumber(pbxMatch.Groups(1).Value)
+            End If
+        Next
+
+        ' 3. Flexible: first sequence of 8+ digits in the filename
+        If Not String.IsNullOrWhiteSpace(audioFileName) Then
+            Dim digitMatch = Regex.Match(audioFileName, "(\d{8,})")
+            If digitMatch.Success Then
+                Return NormalizePhoneNumber(digitMatch.Groups(1).Value)
+            End If
+        End If
+
+        ' 4. Flexible: first sequence of 8+ digits in the subject
+        If Not String.IsNullOrWhiteSpace(subject) Then
+            Dim digitMatch = Regex.Match(subject, "(\d{8,})")
+            If digitMatch.Success Then
+                Return NormalizePhoneNumber(digitMatch.Groups(1).Value)
+            End If
+        End If
+
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' Looks up a normalized caller ID in the caller ID map.
+    ''' Tries exact match first, then suffix matching (last N digits) to handle
+    ''' country code variations (e.g., 41765483221 vs 765483221).
+    ''' </summary>
+    Private Function LookupCallerIdEmail(normalizedCallerId As String) As (Email As String, DisplayName As String)?
+        If _apVoicemailCallerIdMap Is Nothing OrElse String.IsNullOrWhiteSpace(normalizedCallerId) Then Return Nothing
+
+        ' Exact match
+        Dim result As (Email As String, DisplayName As String) = Nothing
+        If _apVoicemailCallerIdMap.TryGetValue(normalizedCallerId, result) Then
+            Return result
+        End If
+
+        ' Suffix match: try matching the last N digits (N = min of caller and map entry lengths)
+        ' This handles cases where the voicemail system sends "765483221" but the map has "41765483221"
+        For Each kvp In _apVoicemailCallerIdMap
+            Dim mapPhone = kvp.Key
+            Dim shorter = Math.Min(normalizedCallerId.Length, mapPhone.Length)
+            If shorter >= 7 Then ' at least 7 digits must match
+                If normalizedCallerId.Length >= shorter AndAlso mapPhone.Length >= shorter Then
+                    If normalizedCallerId.Substring(normalizedCallerId.Length - shorter) =
+                       mapPhone.Substring(mapPhone.Length - shorter) Then
+                        Return kvp.Value
+                    End If
+                End If
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Determines whether a mail item is a voicemail from the registered voicemail sender.
+    ''' Returns True if:
+    '''   1. Voicemail processing is enabled
+    '''   2. The sender matches the configured voicemail sender address
+    '''   3. The mail has at least one audio attachment
+    ''' </summary>
+    Private Function IsVoicemailFromRegisteredSender(mailInfo As AutoPilotMailInfo) As Boolean
+        If _apConfig Is Nothing OrElse Not _apConfig.EnableVoicemailProcessing Then Return False
+        If String.IsNullOrWhiteSpace(_apConfig.VoicemailSenderAddress) Then Return False
+        If Not mailInfo.SenderEmail.Equals(_apConfig.VoicemailSenderAddress, StringComparison.OrdinalIgnoreCase) Then Return False
+        ' Must have at least one audio attachment
+        If mailInfo.AttachmentNames Is Nothing OrElse mailInfo.AttachmentNames.Count = 0 Then Return False
+        For Each name In mailInfo.AttachmentNames
+            Dim ext = IO.Path.GetExtension(name).ToLowerInvariant()
+            For Each audioExt In AP_VoicemailAudioExtensions
+                If ext = audioExt Then Return True
+            Next
+        Next
+        Return False
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  HELPFUL FAILURE RESPONSE
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -3941,6 +4168,284 @@ Partial Public Class ThisAddIn
             RestoreDefaults(_context, backupConfig)
         End Try
     End Function
+
+    ''' <summary>
+    ''' Processes an incoming voicemail: extracts the audio attachment, identifies the caller ID,
+    ''' looks up the mapped email address, transcribes the audio via the LLM's binary input,
+    ''' treats the transcription as an instruction, generates a response, and sends the reply
+    ''' to the mapped email address (not to the voicemail system sender).
+    ''' </summary>
+    Private Async Function ProcessVoicemailAsync(
+            mi As MailItem,
+            mailInfo As AutoPilotMailInfo,
+            entryId As String,
+            ct As CancellationToken) As Task
+
+        ApDashboardLog("━━━ VOICEMAIL ━━━", "info")
+        ApDashboardLog($"From voicemail system: {mailInfo.SenderEmail}", "info")
+        ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
+
+        ' ── Find the audio attachment ──
+        Dim audioFileName As String = Nothing
+        For Each name In mailInfo.AttachmentNames
+            Dim ext = IO.Path.GetExtension(name).ToLowerInvariant()
+            For Each audioExt In AP_VoicemailAudioExtensions
+                If ext = audioExt Then audioFileName = name : Exit For
+            Next
+            If audioFileName IsNot Nothing Then Exit For
+        Next
+
+        If audioFileName Is Nothing Then
+            ApDashboardLog("SKIP (voicemail: no audio attachment found)", "warn")
+            Return
+        End If
+
+        ' ── Extract caller ID ──
+        Dim rawCallerId = ExtractCallerIdFromVoicemail(audioFileName, mailInfo.Subject, mailInfo.Body)
+        If String.IsNullOrWhiteSpace(rawCallerId) Then
+            ApDashboardLog($"SKIP (voicemail: no caller ID found in '{audioFileName}' or subject)", "warn")
+            Return
+        End If
+
+        ApDashboardLog($"Caller ID extracted: {rawCallerId}", "info")
+
+        ' ── Look up caller ID in map ──
+        Dim lookup = LookupCallerIdEmail(rawCallerId)
+        If Not lookup.HasValue Then
+            ApDashboardLog($"SKIP (voicemail: caller ID '{rawCallerId}' not found in caller ID map)", "warn")
+            Return
+        End If
+
+        Dim recipientEmail = lookup.Value.Email
+        Dim recipientName = If(String.IsNullOrWhiteSpace(lookup.Value.DisplayName),
+                               recipientEmail, lookup.Value.DisplayName)
+
+        ApDashboardLog($"Caller mapped to: {recipientName} <{recipientEmail}>", "info")
+
+        ' ── Save audio to temp ──
+        Dim tempDir As String = IO.Path.Combine(IO.Path.GetTempPath(), AP_TempPrefix & Guid.NewGuid().ToString("N"))
+        IO.Directory.CreateDirectory(tempDir)
+
+        Try
+            Dim audioTempPath As String = Nothing
+            Await SwitchToUi(Sub()
+                                 For i As Integer = 1 To mi.Attachments.Count
+                                     Dim att = mi.Attachments(i)
+                                     Try
+                                         If att.FileName = audioFileName Then
+                                             audioTempPath = IO.Path.Combine(tempDir, audioFileName)
+                                             att.SaveAsFile(audioTempPath)
+                                             Exit For
+                                         End If
+                                     Catch
+                                     End Try
+                                 Next
+                             End Sub)
+
+            If audioTempPath Is Nothing OrElse Not IO.File.Exists(audioTempPath) Then
+                ApDashboardLog("SKIP (voicemail: failed to save audio attachment to temp)", "warn")
+                Return
+            End If
+
+            ApDashboardLog($"Audio saved: {audioFileName} ({New IO.FileInfo(audioTempPath).Length / 1024:F0} KB)", "info")
+
+            ' ── Transcribe the audio via LLM binary input ──
+            ApDashboardLog("Transcribing voicemail...", "llm")
+
+            ' Re-apply base model config for clean state
+            ApplyModelConfig(_context, _apBaseModelConfig)
+
+            Dim transcription = Await LLM(
+                SP_InsertClipboard, "",
+                Model:="", Temperature:="",
+                Timeout:=_context.INI_Timeout * 2,
+                UseSecondAPI:=_apUseSecondApi,
+                HideSplash:=True, AddUserPrompt:="",
+                FileObject:=audioTempPath,
+                cancellationToken:=ct,
+                EnsureUI:=False)
+
+            If String.IsNullOrWhiteSpace(transcription) Then
+                ApDashboardLog("SKIP (voicemail: transcription returned empty)", "warn")
+                Return
+            End If
+
+            transcription = transcription.Trim()
+
+            ApDashboardLog($"Transcription received ({transcription.Length} chars): {If(transcription.Length > 200, transcription.Substring(0, 200) & "...", transcription)}", "info")
+
+            ' ── Build a synthetic mail info from the transcription ──
+            Dim voicemailMailInfo As New AutoPilotMailInfo() With {
+                .EntryID = entryId,
+                .Subject = $"Voicemail from {rawCallerId}",
+                .SenderName = recipientName,
+                .SenderEmail = recipientEmail,
+                .Body = transcription,
+                .ReceivedTime = mailInfo.ReceivedTime,
+                .SentOn = mailInfo.SentOn,
+                .HasAutoReplyHeader = False,
+                .ThreadAIReplyCount = 0,
+                .AttachmentCount = 0,
+                .AttachmentNames = New List(Of String)(),
+                .FolderPath = mailInfo.FolderPath,
+                .MessageClass = mailInfo.MessageClass,
+                .InternetHeaders = ""
+            }
+
+            ' ── Initialize tool call log ──
+            _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+            _apCurrentTempDir = tempDir
+            _apCurrentAttachments = New List(Of AutoPilotAttachmentInfo)()
+            _apCurrentMailInfo = voicemailMailInfo
+
+            Dim response As String
+
+            Dim previousMaxToolIterations = MaxToolIterations
+            MaxToolIterations = AP_MaxToolIterations
+
+            Try
+                ' Build prompt with the transcription as the "email body"
+                Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
+                Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+                ' Re-apply base model config
+                ApplyModelConfig(_context, _apBaseModelConfig)
+
+                Dim modelCanCallTools As Boolean = ModelSupportsTooling(_apBaseModelConfig)
+
+                If modelCanCallTools AndAlso _apSelectedTools IsNot Nothing AndAlso _apSelectedTools.Count > 0 Then
+                    response = Await ExecuteToolingLoop(
+                        systemPrompt, userPrompt,
+                        _apSelectedTools, _apUseSecondApi,
+                        hideSplash:=True, hideLogWindow:=True,
+                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                Else
+                    Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
+                    response = Await LLM(effectiveSystemPrompt, userPrompt,
+                                         UseSecondAPI:=_apUseSecondApi,
+                                         HideSplash:=True, EnsureUI:=False,
+                                         cancellationToken:=ct,
+                                         binaryOutputDirectory:=tempDir)
+                End If
+            Finally
+                _apCurrentTempDir = Nothing
+                _apCurrentAttachments = Nothing
+                _apCurrentMailInfo = Nothing
+                MaxToolIterations = previousMaxToolIterations
+                ClearAttachmentCaches()
+            End Try
+
+            If String.IsNullOrWhiteSpace(response) Then
+                ApDashboardLog("WARNING: LLM returned empty response for voicemail", "warn")
+                Return
+            End If
+
+            ApDashboardLog($"AI response received ({response.Length} chars).", "info")
+
+            ' Collect any result attachments
+            Dim resultAttachments = CollectResultAttachments(tempDir, _apCurrentAttachments)
+
+            ' Build "Sources used:" footer
+            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
+
+            ' ── Build voicemail footer note ──
+            Dim voicemailNote = $"This reply was generated from a voicemail received on " &
+                $"{mailInfo.ReceivedTime:yyyy-MM-dd HH:mm} from caller {rawCallerId}."
+
+            ' ── Send reply to the MAPPED email address (not the voicemail sender) ──
+            Await SwitchToUi(Sub()
+                                 SendVoicemailReply(mi, recipientEmail, recipientName,
+                                                    voicemailMailInfo.Subject,
+                                                    response, resultAttachments,
+                                                    sourcesHtml, voicemailNote)
+                             End Sub)
+
+            Await SwitchToUi(Sub() TagOriginalMailAsProcessed(mi))
+            Interlocked.Increment(_apSessionReplyCount)
+            RecordLastProcessedTime()
+            ApDashboardLog($"✓ SENT voicemail reply to: {recipientEmail} (caller: {rawCallerId})", "info")
+
+        Finally
+            Try
+                If IO.Directory.Exists(tempDir) Then IO.Directory.Delete(tempDir, recursive:=True)
+            Catch
+            End Try
+            _apCurrentToolCallLog = Nothing
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Sends a reply for a voicemail to a specific recipient (the mapped email address),
+    ''' not to the voicemail system sender. Creates a new MailItem rather than using Reply().
+    ''' </summary>
+    Private Sub SendVoicemailReply(originalMail As MailItem,
+                                   recipientEmail As String,
+                                   recipientName As String,
+                                   subject As String,
+                                   responseText As String,
+                                   resultAttachments As List(Of String),
+                                   sourcesHtml As String,
+                                   voicemailNote As String)
+        Dim newMail As MailItem = Nothing
+        Try
+            newMail = Application.CreateItem(OlItemType.olMailItem)
+            newMail.To = recipientEmail
+            newMail.Subject = "Re: " & subject
+            newMail.BodyFormat = OlBodyFormat.olFormatHTML
+
+            ' Build HTML body
+            Dim htmlBody = ConvertResponseToHtml(responseText)
+
+            ' Append voicemail note
+            htmlBody &= "<br/><div style='font-size:9pt;color:#888888;font-style:italic;margin-top:12px;'>" &
+                         System.Net.WebUtility.HtmlEncode(voicemailNote) & "</div>"
+
+            ' Append sources
+            If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
+                htmlBody &= sourcesHtml
+            End If
+
+            htmlBody &= BuildAutoPilotFooter()
+            newMail.HTMLBody = htmlBody
+
+            ' Add result attachments
+            If resultAttachments IsNot Nothing Then
+                For Each attachPath In resultAttachments
+                    If IO.File.Exists(attachPath) Then
+                        newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , IO.Path.GetFileName(attachPath))
+                    End If
+                Next
+            End If
+
+            ' Tag as AutoPilot reply
+            Try
+                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
+            Catch : End Try
+            Try : newMail.Categories = AP_CategoryName : Catch : End Try
+
+            ' Use the same sending account as the monitored mailbox
+            If Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Try
+                    Dim ns = Application.GetNamespace("MAPI")
+                    For i As Integer = 1 To ns.Accounts.Count
+                        If ns.Accounts(i).SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then
+                            newMail.SendUsingAccount = ns.Accounts(i)
+                            Exit For
+                        End If
+                    Next
+                Catch
+                End Try
+            End If
+
+            newMail.Send()
+            Try : MoveLastSentToInkyReplies() : Catch : End Try
+
+        Catch ex As System.Exception
+            ApDashboardLog($"ERROR sending voicemail reply: {ex.Message}", "error")
+        Finally
+            If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
+        End Try
+    End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASSES

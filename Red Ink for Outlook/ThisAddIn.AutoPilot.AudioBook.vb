@@ -1,0 +1,1106 @@
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+
+' =============================================================================
+' File: ThisAddIn.AutoPilot.AudioBook.vb
+' Purpose: AutoPilot tool that generates audio files (podcast or audiobook)
+'          from email body text or document attachments using Google Cloud TTS
+'          or OpenAI TTS. Supports multi-speaker podcast dialogues (via LLM
+'          script generation) and single/alternating-voice audiobook narration.
+' =============================================================================
+
+Option Explicit On
+Option Strict Off
+
+Imports System.Diagnostics
+Imports System.IO
+Imports System.Net
+Imports System.Net.Http
+Imports System.Text
+Imports System.Text.RegularExpressions
+Imports System.Threading
+Imports System.Threading.Tasks
+Imports Newtonsoft.Json.Linq
+Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.SharedLibrary.SharedMethods
+
+Partial Public Class ThisAddIn
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — CONSTANTS & STATE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Const AB_DefaultFile As String = "audiobook.mp3"
+    Private Const AB_GoogleIdentifier As String = "googleapis.com"
+    Private Const AB_OpenAIIdentifier As String = "openai.com"
+    Private Const AB_OpenAI_Model As String = "tts-1-hd"
+    Private Const AB_OpenAI_FallbackEndpoint As String = "https://api.openai.com/v1/audio/speech"
+
+    ''' <summary>Max characters per TTS API call to avoid timeouts.</summary>
+    Private Const AB_MaxCharsPerSegment As Integer = 4000
+
+    ''' <summary>Duration of silence inserted between same-speaker paragraphs in audiobook mode (seconds).</summary>
+    Private Const AB_SilenceBetweenParagraphs As Double = 0.9
+
+    ''' <summary>Duration of silence inserted when the narrator voice changes in audiobook mode (seconds).</summary>
+    Private Const AB_SilenceOnSpeakerChange As Double = 1.6
+
+    ''' <summary>Duration of silence inserted between speaker turns in podcast mode (seconds).</summary>
+    Private Const AB_SilenceBetweenPodcastTurns As Double = 0.8
+
+    ''' <summary>Duration of silence inserted after title/heading segments (seconds).</summary>
+    Private Const AB_SilenceAfterTitle As Double = 0.7
+
+    Private Shared AB_googleAvailable As Boolean = False
+    Private Shared AB_googleSecondary As Boolean = False
+    Private Shared AB_openAIAvailable As Boolean = False
+    Private Shared AB_openAISecondary As Boolean = False
+    Private Shared AB_GoogleEndpoint As String = ""
+    Private Shared AB_OpenAIEndpoint As String = ""
+
+    Private Enum ABEngine
+        Google = 0
+        OpenAI = 1
+    End Enum
+
+    Private Shared AB_SelectedEngine As ABEngine = ABEngine.OpenAI
+
+    Private Shared ReadOnly AB_DefaultVoiceA_OpenAI As String = "alloy"
+    Private Shared ReadOnly AB_DefaultVoiceB_OpenAI As String = "nova"
+    Private Shared ReadOnly AB_DefaultLanguage As String = "en-US"
+
+    Private Shared ReadOnly AB_HostTags As String() = {"H:", "Host:", "A:", "1:"}
+    Private Shared ReadOnly AB_GuestTags As String() = {"G:", "Guest:", "Gast:", "B:", "2:"}
+
+    Private Shared AB_AccessToken1 As String = String.Empty
+    Private Shared AB_TokenExpiry1 As DateTime = DateTime.MinValue
+    Private Shared AB_AccessToken2 As String = String.Empty
+    Private Shared AB_TokenExpiry2 As DateTime = DateTime.MinValue
+
+    ''' <summary>
+    ''' Cached API key captured at TTS engine detection time.
+    ''' Avoids reading DecodedAPI/DecodedAPI_2 at execution time when the
+    ''' tooling loop may have overwritten them with a different model's key.
+    ''' </summary>
+    Private Shared AB_CachedApiKey As String = ""
+
+    ''' <summary>
+    ''' Cached Google OAuth2 parameters captured at TTS engine detection time.
+    ''' The tooling loop's ApplyModelConfig overwrites the _context INI_OAuth2*
+    ''' properties with the LLM model's values (e.g. Gemini), wiping the TTS
+    ''' service account credentials. These cached copies survive that mutation.
+    ''' </summary>
+    Private Shared AB_CachedOAuth2ClientMail As String = ""
+    Private Shared AB_CachedOAuth2Scopes As String = ""
+    Private Shared AB_CachedOAuth2RawKey As String = ""
+    Private Shared AB_CachedOAuth2Endpoint As String = ""
+    Private Shared AB_CachedOAuth2ATExpiry As Long = 3600
+
+    ''' <summary>
+    ''' A minimal valid MP3 frame encoding silence (MPEG1 Layer 3, 128 kbps,
+    ''' 44100 Hz, mono). Duration ≈ 26 ms per frame. We repeat this to build
+    ''' arbitrary-length silence without requiring NAudio or MediaFoundation.
+    ''' </summary>
+    Private Shared ReadOnly AB_SilentMp3Frame As Byte() = {
+        &HFF, &HFB, &H90, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H49, &H6E, &H66, &H6F,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
+        &H0, &H0, &H0
+    }
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — GOOGLE VOICE DEFAULTS PER LANGUAGE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Returns a pair of default Google Cloud TTS voice names for the given
+    ''' language code. Google TTS requires the voice name prefix to match the
+    ''' language code exactly (e.g. "de-DE-Studio-B" for language "de-DE").
+    ''' Falls back to Standard voices when Studio is not known for a language.
+    ''' </summary>
+    Private Shared Function AB_GetGoogleDefaultVoices(languageCode As String) As (VoiceA As String, VoiceB As String)
+        ' Normalise to full BCP-47 if only a 2-letter code was supplied
+        Dim lang = If(String.IsNullOrWhiteSpace(languageCode), "en-US", languageCode.Trim())
+
+        Select Case lang.ToLowerInvariant()
+            Case "en-us", "en"
+                Return ("en-US-Journey-D", "en-US-Journey-F")
+            Case "en-gb"
+                Return ("en-GB-Journey-D", "en-GB-Journey-F")
+            Case "de-de", "de"
+                Return ("de-DE-Journey-D", "de-DE-Journey-F")
+            Case "de-ch"
+                Return ("de-DE-Journey-D", "de-DE-Journey-F")
+            Case "fr-fr", "fr"
+                Return ("fr-FR-Journey-D", "fr-FR-Journey-F")
+            Case "fr-ch"
+                Return ("fr-FR-Journey-D", "fr-FR-Journey-F")
+            Case "it-it", "it"
+                Return ("it-IT-Journey-D", "it-IT-Journey-F")
+            Case "es-es", "es"
+                Return ("es-ES-Journey-D", "es-ES-Journey-F")
+            Case "pt-br", "pt"
+                Return ("pt-BR-Standard-B", "pt-BR-Standard-C")
+            Case "nl-nl", "nl"
+                Return ("nl-NL-Standard-A", "nl-NL-Standard-B")
+            Case "ja-jp", "ja"
+                Return ("ja-JP-Standard-C", "ja-JP-Standard-B")
+            Case "ko-kr", "ko"
+                Return ("ko-KR-Standard-C", "ko-KR-Standard-B")
+            Case "zh-cn", "zh"
+                Return ("cmn-CN-Standard-C", "cmn-CN-Standard-B")
+            Case "ru-ru", "ru"
+                Return ("ru-RU-Standard-C", "ru-RU-Standard-B")
+            Case "pl-pl", "pl"
+                Return ("pl-PL-Standard-C", "pl-PL-Standard-B")
+            Case Else
+                ' Generic fallback: attempt to construct a Standard voice name
+                ' from the language code. Google uses the pattern {lang}-Standard-A.
+                ' If the language code is too short, fall back to en-US.
+                If lang.Length >= 5 AndAlso lang.Contains("-"c) Then
+                    Return (lang & "-Standard-A", lang & "-Standard-B")
+                ElseIf lang.Length = 2 Then
+                    ' Try common mappings for 2-letter codes
+                    Dim full = lang.ToLowerInvariant() & "-" & lang.ToUpperInvariant()
+                    Return (full & "-Standard-A", full & "-Standard-B")
+                Else
+                    Return ("en-US-Studio-O", "en-US-Studio-Q")
+                End If
+        End Select
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — ENGINE DETECTION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Sub AB_DetectTTSEngines()
+        Dim auth1 As String = If(INI_Endpoint, "")
+        Dim auth2 As String = If(INI_Endpoint_2, "")
+
+        Dim rawTts As String = If(INI_TTSEndpoint, "")
+        Dim ttsEps = If(String.IsNullOrEmpty(rawTts),
+                     Array.Empty(Of String)(),
+                     rawTts.Split("¦"c))
+        Dim tts1 As String = If(ttsEps.Length > 0, ttsEps(0), "")
+        Dim tts2 As String = If(ttsEps.Length > 1, ttsEps(1), "")
+
+        AB_googleAvailable = False : AB_googleSecondary = False
+        AB_openAIAvailable = False : AB_openAISecondary = False
+        AB_GoogleEndpoint = "" : AB_OpenAIEndpoint = ""
+
+        If auth1.Contains(AB_GoogleIdentifier) AndAlso INI_OAuth2 Then
+            AB_googleAvailable = True : AB_googleSecondary = False
+        End If
+        If auth2.Contains(AB_GoogleIdentifier) AndAlso INI_OAuth2_2 Then
+            AB_googleAvailable = True : AB_googleSecondary = True
+        End If
+        If auth1.Contains(AB_OpenAIIdentifier) Then
+            AB_openAIAvailable = True : AB_openAISecondary = False
+        End If
+        If auth2.Contains(AB_OpenAIIdentifier) Then
+            AB_openAIAvailable = True : AB_openAISecondary = True
+        End If
+
+        If tts1.Contains(AB_GoogleIdentifier) Then AB_GoogleEndpoint = tts1
+        If tts2.Contains(AB_GoogleIdentifier) Then AB_GoogleEndpoint = tts2
+        If tts1.Contains(AB_OpenAIIdentifier) Then AB_OpenAIEndpoint = tts1
+        If tts2.Contains(AB_OpenAIIdentifier) Then AB_OpenAIEndpoint = tts2
+
+        ' Fallback: if OpenAI is available (API key present) but no dedicated
+        ' TTS endpoint was configured in INI_TTSEndpoint, use the standard URL.
+        If AB_openAIAvailable AndAlso String.IsNullOrWhiteSpace(AB_OpenAIEndpoint) Then
+            AB_OpenAIEndpoint = AB_OpenAI_FallbackEndpoint
+        End If
+
+        ' Default engine selection: prefer Google for non-English languages
+        ' because Google TTS produces native-sounding voices per language,
+        ' whereas OpenAI voices have an English accent regardless of input.
+        ' The caller can override AB_SelectedEngine after detection.
+        If AB_openAIAvailable Then
+            AB_SelectedEngine = ABEngine.OpenAI
+        ElseIf AB_googleAvailable Then
+            AB_SelectedEngine = ABEngine.Google
+        End If
+
+        ' Cache the correct API key at detection time so it survives
+        ' ApplyModelConfig mutations during the tooling loop.
+        If AB_openAIAvailable Then
+            AB_CachedApiKey = If(AB_openAISecondary, DecodedAPI_2, DecodedAPI)
+        ElseIf AB_googleAvailable Then
+            AB_CachedApiKey = If(AB_googleSecondary, DecodedAPI_2, DecodedAPI)
+        Else
+            AB_CachedApiKey = ""
+        End If
+
+        ' Cache Google OAuth2 parameters at detection time. The tooling loop's
+        ' ApplyModelConfig overwrites the _context INI_OAuth2* properties with
+        ' the LLM model's values (e.g. Gemini), wiping the TTS service account
+        ' credentials that AB_GetFreshToken needs.
+        If AB_googleAvailable Then
+            If AB_googleSecondary Then
+                AB_CachedOAuth2ClientMail = If(INI_OAuth2ClientMail_2, "")
+                AB_CachedOAuth2Scopes = If(INI_OAuth2Scopes_2, "")
+                AB_CachedOAuth2RawKey = If(INI_APIKey_2, "")
+                AB_CachedOAuth2Endpoint = If(INI_OAuth2Endpoint_2, "")
+                AB_CachedOAuth2ATExpiry = INI_OAuth2ATExpiry_2
+            Else
+                AB_CachedOAuth2ClientMail = If(INI_OAuth2ClientMail, "")
+                AB_CachedOAuth2Scopes = If(INI_OAuth2Scopes, "")
+                AB_CachedOAuth2RawKey = If(INI_APIKey, "")
+                AB_CachedOAuth2Endpoint = If(INI_OAuth2Endpoint, "")
+                AB_CachedOAuth2ATExpiry = INI_OAuth2ATExpiry
+            End If
+        Else
+            AB_CachedOAuth2ClientMail = ""
+            AB_CachedOAuth2Scopes = ""
+            AB_CachedOAuth2RawKey = ""
+            AB_CachedOAuth2Endpoint = ""
+            AB_CachedOAuth2ATExpiry = 3600
+        End If
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — ENGINE SELECTION HELPER
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Selects the best TTS engine based on the user/LLM request and language.
+    ''' When both engines are available:
+    '''   - An explicit "google"/"openai" preference is honoured.
+    '''   - For non-English languages, Google is preferred (native-accent voices).
+    '''   - For English (or unknown language), OpenAI is preferred.
+    ''' When only one engine is available it is always used.
+    ''' </summary>
+    Private Shared Sub AB_SelectBestEngine(enginePreference As String, language As String)
+        ' If only one engine is available, there is nothing to choose.
+        If AB_openAIAvailable AndAlso Not AB_googleAvailable Then
+            AB_SelectedEngine = ABEngine.OpenAI
+            Return
+        End If
+        If AB_googleAvailable AndAlso Not AB_openAIAvailable Then
+            AB_SelectedEngine = ABEngine.Google
+            Return
+        End If
+
+        ' Both engines are available — check for explicit preference first.
+        If Not String.IsNullOrWhiteSpace(enginePreference) Then
+            Dim pref = enginePreference.Trim().ToLowerInvariant()
+            If pref.Contains("google") Then
+                AB_SelectedEngine = ABEngine.Google
+                Return
+            End If
+            If pref.Contains("openai") Then
+                AB_SelectedEngine = ABEngine.OpenAI
+                Return
+            End If
+        End If
+
+        ' Auto-select based on language: Google produces better non-English accents.
+        Dim lang = If(String.IsNullOrWhiteSpace(language), "en", language.Trim().ToLowerInvariant())
+        If lang.StartsWith("en") Then
+            AB_SelectedEngine = ABEngine.OpenAI
+        Else
+            AB_SelectedEngine = ABEngine.Google
+        End If
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — PRIVATE KEY FORMATTING (mirrors Word TranscriptionForm helper)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Formats a raw private key string into PEM format with proper headers
+    ''' and 64-character line breaks required by BouncyCastle.
+    ''' </summary>
+    Private Shared Function AB_FormatPrivateKey(rawKey As String) As String
+        Dim noEscapes = rawKey.Replace("\n", "")
+        Dim sb As New StringBuilder()
+        For i As Integer = 0 To noEscapes.Length - 1 Step 64
+            Dim chunk = If(i + 64 <= noEscapes.Length,
+                          noEscapes.Substring(i, 64),
+                          noEscapes.Substring(i))
+            sb.AppendLine(chunk)
+        Next
+        Return "-----BEGIN PRIVATE KEY-----" & vbLf &
+               sb.ToString() &
+               "-----END PRIVATE KEY-----" & vbLf
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — TOKEN MANAGEMENT (Google OAuth2)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Obtains a fresh Google OAuth2 access token for TTS, using the cached
+    ''' OAuth2 parameters that were captured at engine detection time.
+    ''' This avoids reading the live INI_OAuth2* properties which may have been
+    ''' overwritten by ApplyModelConfig during the tooling loop.
+    ''' </summary>
+    Private Shared Async Function AB_GetFreshToken(useSecond As Boolean) As Task(Of String)
+        Try
+            Dim token = If(useSecond, AB_AccessToken2, AB_AccessToken1)
+            Dim expiry = If(useSecond, AB_TokenExpiry2, AB_TokenExpiry1)
+
+            If String.IsNullOrEmpty(token) OrElse DateTime.UtcNow >= expiry Then
+                ' Use the cached OAuth2 parameters instead of the live INI_* properties.
+                ' The live properties are overwritten by the tooling loop's ApplyModelConfig
+                ' with the LLM model's config (e.g. Gemini), wiping the TTS service account.
+                Dim clientEmail = AB_CachedOAuth2ClientMail
+                Dim scopes = AB_CachedOAuth2Scopes
+                Dim rawKey = AB_CachedOAuth2RawKey
+                Dim authServer = AB_CachedOAuth2Endpoint
+                Dim life = AB_CachedOAuth2ATExpiry
+
+                If String.IsNullOrWhiteSpace(clientEmail) OrElse String.IsNullOrWhiteSpace(rawKey) OrElse
+                   String.IsNullOrWhiteSpace(authServer) Then
+                    Debug.WriteLine($"[AB-TTS] Google OAuth2 cached credentials are empty — cannot obtain token. " &
+                                    $"clientEmail='{If(Not String.IsNullOrWhiteSpace(clientEmail), "(set)", "(empty)")}' " &
+                                    $"rawKey='{If(Not String.IsNullOrWhiteSpace(rawKey), "(set)", "(empty)")}' " &
+                                    $"authServer='{If(Not String.IsNullOrWhiteSpace(authServer), "(set)", "(empty)")}'")
+                    Return String.Empty
+                End If
+
+                GoogleOAuthHelper.client_email = clientEmail
+                GoogleOAuthHelper.private_key = AB_FormatPrivateKey(rawKey)
+                GoogleOAuthHelper.scopes = scopes
+                GoogleOAuthHelper.token_uri = authServer
+                GoogleOAuthHelper.token_life = life
+
+                Dim newToken = Await GoogleOAuthHelper.GetAccessToken()
+                Dim newExpiry = DateTime.UtcNow.AddSeconds(life - 300)
+
+                If useSecond Then
+                    AB_AccessToken2 = newToken : AB_TokenExpiry2 = newExpiry
+                Else
+                    AB_AccessToken1 = newToken : AB_TokenExpiry1 = newExpiry
+                End If
+                token = newToken
+            End If
+            Return token
+        Catch ex As Exception
+            Debug.WriteLine($"[AB-TTS] Token error: {ex.Message}")
+            Return String.Empty
+        End Try
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — SILENCE GENERATION (lightweight, no NAudio dependency)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Creates a short silent MP3 file by repeating a minimal valid MP3 frame.
+    ''' Each frame ≈ 26 ms at 128 kbps / 44100 Hz mono.
+    ''' </summary>
+    Private Shared Function AB_GenerateSilenceFile(durationSeconds As Double, tempDir As String) As String
+        Try
+            ' Each frame is ~26.12 ms; compute how many frames we need.
+            Dim frameCount = CInt(Math.Ceiling(durationSeconds / 0.02612))
+            If frameCount < 1 Then frameCount = 1
+
+            Dim filePath = Path.Combine(tempDir, $"ab_silence_{CInt(durationSeconds * 1000)}ms.mp3")
+
+            Using fs As New FileStream(filePath, FileMode.Create, FileAccess.Write)
+                For i = 0 To frameCount - 1
+                    fs.Write(AB_SilentMp3Frame, 0, AB_SilentMp3Frame.Length)
+                Next
+            End Using
+
+            Return filePath
+        Catch ex As Exception
+            Debug.WriteLine($"[AB-TTS] Silence generation error: {ex.Message}")
+            Return Nothing
+        End Try
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — SINGLE SEGMENT AUDIO GENERATION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Shared Async Function AB_GenerateSegmentAsync(
+        text As String,
+        languageCode As String,
+        voiceName As String,
+        Optional ct As System.Threading.CancellationToken = Nothing) As System.Threading.Tasks.Task(Of Byte())
+
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12
+
+        If AB_SelectedEngine = ABEngine.OpenAI Then
+            Dim endpoint = AB_OpenAIEndpoint
+            If String.IsNullOrWhiteSpace(endpoint) Then
+                Debug.WriteLine("[AB-TTS] OpenAI endpoint is empty — cannot generate segment.")
+                Return Nothing
+            End If
+
+            ' Use the cached API key that was captured at TTS engine detection time
+            ' (before the tooling loop's ApplyModelConfig could overwrite DecodedAPI/DecodedAPI_2
+            ' with the LLM model's key). Only fall back to the live properties if the cache is empty.
+            Dim apiKey = AB_CachedApiKey
+            If String.IsNullOrWhiteSpace(apiKey) Then
+                apiKey = If(AB_openAISecondary, DecodedAPI_2, DecodedAPI)
+            End If
+            If String.IsNullOrWhiteSpace(apiKey) Then
+                Debug.WriteLine("[AB-TTS] OpenAI API key is empty (both cached and live).")
+                Return Nothing
+            End If
+
+            If String.IsNullOrWhiteSpace(text) Then
+                Debug.WriteLine("[AB-TTS] Input text is empty.")
+                Return Nothing
+            End If
+
+            If text.Length > 4096 Then
+                Debug.WriteLine($"[AB-TTS] Input too long for OpenAI speech API: {text.Length} chars.")
+                Return Nothing
+            End If
+
+            Dim safeVoice As String = voiceName.Split(" "c)(0).Trim().ToLowerInvariant()
+
+            Using client As New System.Net.Http.HttpClient()
+                client.Timeout = TimeSpan.FromSeconds(120)
+                client.DefaultRequestHeaders.Authorization =
+                New Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey)
+
+                Dim j = New JObject From {
+                {"model", AB_OpenAI_Model},
+                {"input", text},
+                {"voice", safeVoice},
+                {"response_format", "mp3"}
+            }
+
+                Dim content = New System.Net.Http.StringContent(j.ToString(), Encoding.UTF8, "application/json")
+
+                Debug.WriteLine($"[AB-TTS] POST {endpoint} model={AB_OpenAI_Model} voice={safeVoice} len={text.Length}")
+
+                Dim resp = Await client.PostAsync(endpoint, content, ct).ConfigureAwait(False)
+
+                If resp.IsSuccessStatusCode Then
+                    Return Await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(False)
+                Else
+                    Dim err = Await resp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                    Debug.WriteLine($"[AB-TTS] OpenAI error {(CInt(resp.StatusCode)).ToString()} {resp.StatusCode}: {err}")
+                    Return Nothing
+                End If
+            End Using
+        Else
+            Dim token = Await AB_GetFreshToken(AB_googleSecondary)
+            If String.IsNullOrEmpty(token) Then Return Nothing
+
+            Dim endpoint = AB_GoogleEndpoint
+            If String.IsNullOrWhiteSpace(endpoint) Then
+                Debug.WriteLine("[AB-TTS] Google endpoint is empty — cannot generate segment.")
+                Return Nothing
+            End If
+
+            Using client As New System.Net.Http.HttpClient()
+                client.Timeout = TimeSpan.FromSeconds(120)
+                client.DefaultRequestHeaders.Authorization =
+                New Net.Http.Headers.AuthenticationHeaderValue("Bearer", token)
+
+                Dim textLabel = "text"
+                Dim processedText = text
+                If Regex.IsMatch(processedText, "<[^>]+>") Then
+                    If Not processedText.Trim().StartsWith("<speak>") Then
+                        processedText = "<speak>" & processedText & "</speak>"
+                    End If
+                    textLabel = "ssml"
+                End If
+
+                Dim requestBody = New JObject From {
+                {"input", New JObject From {{textLabel, processedText}}},
+                {"voice", New JObject From {
+                    {"languageCode", languageCode},
+                    {"name", voiceName}
+                }},
+                {"audioConfig", New JObject From {
+                    {"audioEncoding", "MP3"},
+                    {"pitch", 0},
+                    {"speakingRate", 1},
+                    {"effectsProfileId", New JArray("small-bluetooth-speaker-class-device")}
+                }}
+            }
+
+                Dim content = New System.Net.Http.StringContent(requestBody.ToString(), Encoding.UTF8, "application/json")
+                Debug.WriteLine($"[AB-TTS] POST {endpoint}text:synthesize lang={languageCode} voice={voiceName} len={text.Length}")
+
+                Dim resp = Await client.PostAsync(endpoint & "text:synthesize", content, ct).ConfigureAwait(False)
+                If resp.IsSuccessStatusCode Then
+                    Dim respStr = Await resp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                    Dim respJson = JObject.Parse(respStr)
+                    If respJson.ContainsKey("audioContent") Then
+                        Return System.Convert.FromBase64String(respJson("audioContent").ToString())
+                    Else
+                        Debug.WriteLine($"[AB-TTS] Google response missing 'audioContent'. Keys: {String.Join(", ", respJson.Properties().Select(Function(p) p.Name))}")
+                    End If
+                Else
+                    Dim err = Await resp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                    Debug.WriteLine($"[AB-TTS] Google error {(CInt(resp.StatusCode)).ToString()} {resp.StatusCode}: {err}")
+                End If
+
+                Return Nothing
+            End Using
+        End If
+    End Function
+
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — AUDIO FILE MERGING (MP3 byte concatenation — no NAudio needed)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Merges multiple MP3 files into a single output MP3 by direct byte
+    ''' concatenation. This works reliably for MP3 files from the same TTS
+    ''' provider since they share identical encoding parameters.
+    ''' </summary>
+    Private Shared Sub AB_MergeAudioFiles(inputFiles As List(Of String), outputFile As String)
+        If inputFiles Is Nothing OrElse inputFiles.Count = 0 Then Return
+
+        Using outStream As New FileStream(outputFile, FileMode.Create, FileAccess.Write)
+            For Each inPath In inputFiles
+                If Not File.Exists(inPath) Then Continue For
+                Dim bytes = File.ReadAllBytes(inPath)
+                outStream.Write(bytes, 0, bytes.Length)
+            Next
+        End Using
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — CONVERSATION PARSER
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Shared Function AB_ParseConversation(text As String) As List(Of Tuple(Of String, String))
+        Dim conversation As New List(Of Tuple(Of String, String))()
+        Dim currentSpeaker As String = ""
+        Dim currentText As String = ""
+
+        ' Normalise literal \n escape sequences (from JSON string values) to real newlines
+        Dim normalised = text.Replace("\r\n", vbCrLf).Replace("\r", vbCr).Replace("\n", vbLf)
+
+        Dim paragraphs = normalised.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
+        For Each para In paragraphs
+            Dim trimmed = para.Trim()
+            If String.IsNullOrEmpty(trimmed) Then Continue For
+
+            ' Clean Markdown formatting from the start of the line (e.g. "**Host:**" -> "Host:")
+            ' preventing first-segment loss if LLM bolds the first speaker tag.
+            Dim cleanPara = Regex.Replace(trimmed, "^[\*#_]+", "")
+
+            Dim newSpeaker As String = ""
+            If AB_HostTags.Any(Function(tag) cleanPara.StartsWith(tag, StringComparison.OrdinalIgnoreCase)) Then
+                newSpeaker = "H"
+                trimmed = cleanPara.Substring(cleanPara.IndexOf(":"c) + 1).Trim()
+            ElseIf AB_GuestTags.Any(Function(tag) cleanPara.StartsWith(tag, StringComparison.OrdinalIgnoreCase)) Then
+                newSpeaker = "G"
+                trimmed = cleanPara.Substring(cleanPara.IndexOf(":"c) + 1).Trim()
+            End If
+
+            If newSpeaker <> "" Then
+                If Not String.IsNullOrEmpty(currentSpeaker) Then
+                    conversation.Add(Tuple.Create(currentSpeaker, AB_StripSsml(currentText.Trim())))
+                End If
+                currentSpeaker = newSpeaker
+                currentText = trimmed
+            Else
+                If Not String.IsNullOrEmpty(currentSpeaker) Then
+                    currentText &= " " & trimmed
+                End If
+            End If
+        Next
+
+        If Not String.IsNullOrEmpty(currentSpeaker) Then
+            conversation.Add(Tuple.Create(currentSpeaker, AB_StripSsml(currentText.Trim())))
+        End If
+        Return conversation
+    End Function
+
+    ''' <summary>
+    ''' Strips SSML / XML tags from text produced by the LLM podcast script.
+    ''' The podcast system prompt instructs the LLM to embed SSML tags like
+    ''' &lt;emphasis&gt;, &lt;prosody&gt;, &lt;lang&gt;, &lt;break&gt;, &lt;say-as&gt;.
+    ''' LLM output is rarely well-formed XML, and malformed SSML causes Google
+    ''' TTS to reject the entire segment.  Stripping the tags and sending as
+    ''' plain text is safer and still produces correct pronunciation.
+    ''' </summary>
+    Private Shared Function AB_StripSsml(text As String) As String
+        If String.IsNullOrWhiteSpace(text) Then Return text
+        ' Remove all XML/SSML tags (opening, closing, self-closing)
+        Dim stripped = Regex.Replace(text, "<[^>]+>", "")
+
+        ' Collapse runs of horizontal whitespace (spaces/tabs) but PRESERVE NEWLINES.
+        ' The original \s{2,} regex matched newlines, merging "H: ...\nG: ..." into "H: ... G: ...",
+        ' breaking the dialogue parser which relies on line breaks.
+        stripped = Regex.Replace(stripped, "[ \t]{2,}", " ")
+
+        ' Unescape common XML entities the LLM may have emitted
+        stripped = stripped.Replace("&amp;", "&").
+                           Replace("&lt;", "<").
+                           Replace("&gt;", ">").
+                           Replace("&quot;", """").
+                           Replace("&apos;", "'")
+        Return stripped.Trim()
+    End Function
+
+    ''' <summary>
+    ''' Strips narrator-style labels ("Host:", "Segment 1:", etc.) that the
+    ''' outer tooling LLM sometimes adds when it pre-formats the text before
+    ''' passing it to create_audio_file.  These labels confuse the podcast
+    ''' dialogue detector (hasHostTag is True but hasGuestTag is False) and
+    ''' pollute the source material sent to the inner LLM for script generation.
+    ''' </summary>
+    Private Shared Function AB_StripNarratorLabels(text As String) As String
+        If String.IsNullOrWhiteSpace(text) Then Return text
+        ' Remove "Host:" / "Narrator:" / "Segment N:" labels at line starts
+        Dim cleaned = Regex.Replace(text, "(?mi)^\s*(Host|Narrator|Segment\s*\d+)\s*:\s*", "")
+        Return cleaned.Trim()
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — PARAGRAPH SPLITTER FOR AUDIOBOOK MODE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Shared Function AB_SplitIntoParagraphs(text As String) As List(Of Tuple(Of String, String))
+        Dim segments As New List(Of Tuple(Of String, String))()
+
+        ' Normalise literal \n escape sequences (from JSON string values) to real newlines
+        Dim normalised = text.Replace("\r\n", vbCrLf).Replace("\r", vbCr).Replace("\n", vbLf)
+
+        ' Split on double newlines first (blank-line paragraph breaks).
+        ' If that produces only one segment (e.g. text uses single-line breaks
+        ' or the LLM script fallback path lands here), re-split on single newlines
+        ' so short texts and LLM-generated scripts always produce multiple segments.
+        Dim paragraphs As String()
+        paragraphs = normalised.Split({vbCrLf & vbCrLf, vbCr & vbCr, vbLf & vbLf}, StringSplitOptions.RemoveEmptyEntries)
+        If paragraphs.Length <= 1 Then
+            paragraphs = normalised.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
+        End If
+
+        Dim speaker = "A"
+
+        For Each para In paragraphs
+            Dim trimmed = para.Trim()
+            If String.IsNullOrEmpty(trimmed) Then Continue For
+
+            If trimmed.Length <= AB_MaxCharsPerSegment Then
+                segments.Add(Tuple.Create(speaker, trimmed))
+                speaker = If(speaker = "A", "B", "A")
+            Else
+                Dim sentences = Regex.Split(trimmed, "(?<=[.!?])\s+")
+                Dim chunk As New StringBuilder()
+                For Each sentence In sentences
+                    If chunk.Length + sentence.Length + 1 > AB_MaxCharsPerSegment AndAlso chunk.Length > 0 Then
+                        segments.Add(Tuple.Create(speaker, chunk.ToString().Trim()))
+                        speaker = If(speaker = "A", "B", "A")
+                        chunk.Clear()
+                    End If
+                    If chunk.Length > 0 Then chunk.Append(" ")
+                    chunk.Append(sentence)
+                Next
+                If chunk.Length > 0 Then
+                    segments.Add(Tuple.Create(speaker, chunk.ToString().Trim()))
+                    speaker = If(speaker = "A", "B", "A")
+                End If
+            End If
+        Next
+        Return segments
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — MAIN ORCHESTRATOR
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function AB_GenerateAudioFileAsync(
+            text As String,
+            outputPath As String,
+            mode As String,
+            language As String,
+            voiceA As String,
+            voiceB As String,
+            podcastDuration As String,
+            podcastContext As String,
+            podcastInstructions As String,
+            ct As CancellationToken) As Task(Of Boolean)
+
+        If String.IsNullOrWhiteSpace(language) Then language = AB_DefaultLanguage
+
+        If String.IsNullOrWhiteSpace(voiceA) Then
+            If AB_SelectedEngine = ABEngine.OpenAI Then
+                voiceA = AB_DefaultVoiceA_OpenAI
+            Else
+                voiceA = AB_GetGoogleDefaultVoices(language).VoiceA
+            End If
+        End If
+        If String.IsNullOrWhiteSpace(voiceB) Then
+            If AB_SelectedEngine = ABEngine.OpenAI Then
+                voiceB = AB_DefaultVoiceB_OpenAI
+            Else
+                voiceB = AB_GetGoogleDefaultVoices(language).VoiceB
+            End If
+        End If
+        If String.IsNullOrWhiteSpace(mode) Then mode = "audiobook"
+        If String.IsNullOrWhiteSpace(podcastDuration) Then podcastDuration = "5 minutes"
+
+        Debug.WriteLine($"[AB-TTS] Orchestrator: engine={AB_SelectedEngine} lang={language} voiceA={voiceA} voiceB={voiceB} mode={mode}")
+
+        Dim segments As List(Of Tuple(Of String, String))
+
+        ' Normalise literal \n escape sequences that arrive from JSON-encoded
+        ' tool parameters so that tag detection and parsing work consistently.
+        text = text.Replace("\r\n", vbCrLf).Replace("\r", vbCr).Replace("\n", vbLf)
+
+        If mode.Equals("podcast", StringComparison.OrdinalIgnoreCase) Then
+            ' Check whether the text already contains a dialogue script with
+            ' speaker tags at the START of lines.  We require BOTH a host tag
+            ' and a guest tag to treat the text as a pre-formed dialogue.
+            Dim lines = text.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
+            Dim hasHostTag As Boolean = lines.Any(Function(l)
+                                                      Dim tr = l.TrimStart()
+                                                      Return AB_HostTags.Any(Function(tag) tr.StartsWith(tag, StringComparison.OrdinalIgnoreCase))
+                                                  End Function)
+            Dim hasGuestTag As Boolean = lines.Any(Function(l)
+                                                       Dim tr = l.TrimStart()
+                                                       Return AB_GuestTags.Any(Function(tag) tr.StartsWith(tag, StringComparison.OrdinalIgnoreCase))
+                                                   End Function)
+
+            If hasHostTag AndAlso hasGuestTag Then
+                ' The text already has both H: and G: tags — parse it directly.
+                segments = AB_ParseConversation(text)
+                ApDashboardLog("🎙 Parsed existing dialogue script for podcast audio.", "step")
+            Else
+                ' The text does NOT have a proper two-speaker dialogue.
+                ' Generate one via the LLM using the podcast system prompt.
+                ' IMPORTANT: Use a separate variable for the truncated language code
+                ' so the full BCP-47 code (e.g. "de-DE") remains intact for TTS.
+                ApDashboardLog("🎙 Generating podcast dialogue script via LLM...", "step")
+
+                HostName = "Alex"
+                GuestName = "Sam"
+                TargetAudience = "General audience"
+                Duration = podcastDuration
+                DialogueContext = If(String.IsNullOrWhiteSpace(podcastContext), "None", podcastContext)
+                ExtraInstructions = If(String.IsNullOrWhiteSpace(podcastInstructions), "None", podcastInstructions)
+
+                Dim llmLanguage = If(language.Length > 2, language.Substring(0, 2), language)
+
+                ' NOTE: Do NOT overwrite the main 'language' variable here. The full BCP-47 code
+                ' (e.g. "en-US") must be preserved for the TTS engine call later.
+                ' language = llmLanguage 
+
+                ' Strip any pre-existing Host:/Segment: labels from the text so
+                ' the LLM receives clean source material, not a half-formatted
+                ' narration that the outer LLM may have produced.
+                Dim cleanText = AB_StripNarratorLabels(text)
+
+                Debug.WriteLine($"[AB-TTS] Generating podcast currently. Input text len: {cleanText.Length}. Language: {language}")
+
+                Dim systemPrompt = InterpolateAtRuntime(SP_Podcast)
+                ' Explicitly instruct the LLM to use the generic Standard language (e.g. "de")
+                ' to prevent it from writing in dialects (like Swiss German) when the locale is specific (e.g. "de-CH").
+                Dim langInstruction = $"[IMPORTANT: Write the script in standard {llmLanguage} language. Do not use {llmLanguage} dialects.]"
+                Dim userPrompt = langInstruction & vbCrLf & vbCrLf & "<TEXTTOPROCESS>" & cleanText & "</TEXTTOPROCESS>"
+
+                Dim script = Await LLM(systemPrompt, userPrompt,
+                                       UseSecondAPI:=_apUseSecondApi,
+                                       HideSplash:=True, EnsureUI:=False,
+                                       cancellationToken:=ct)
+
+                If String.IsNullOrWhiteSpace(script) Then
+                    ApDashboardLog("⚠ LLM returned empty podcast script.", "warn")
+                    Return False
+                End If
+
+                Debug.WriteLine($"[AB-TTS] LLM returned script (len={script.Length}). Preview: {script.Substring(0, Math.Min(script.Length, 200)).Replace(vbCr, "").Replace(vbLf, " ")}...")
+
+                ct.ThrowIfCancellationRequested()
+
+                ' Strip SSML tags from the LLM-generated script. The podcast
+                ' system prompt instructs the LLM to include SSML (<emphasis>,
+                ' <prosody>, <lang>, <break>, <say-as>), but LLM output is
+                ' rarely well-formed XML.  Malformed SSML causes Google TTS to
+                ' reject the entire segment.  Plain text is safer and still
+                ' produces correct pronunciation for the target language.
+                script = AB_StripSsml(script)
+
+                segments = AB_ParseConversation(script)
+                ApDashboardLog($"🎙 Podcast script generated: {segments.Count} dialogue segments.", "step")
+                Debug.WriteLine($"[AB-TTS] Parsed {segments.Count} segments from script.")
+
+                If segments.Count < 2 Then
+                    ApDashboardLog("⚠ Script had no H:/G: tags — falling back to audiobook mode.", "warn")
+                    segments = AB_SplitIntoParagraphs(script)
+                End If
+            End If
+        Else
+            segments = AB_SplitIntoParagraphs(text)
+            ApDashboardLog($"📖 Audiobook mode: {segments.Count} text segments.", "step")
+        End If
+
+        If segments.Count = 0 Then
+            ApDashboardLog("⚠ No segments to process.", "warn")
+            Return False
+        End If
+
+        ' Pre-generate silence files at each duration tier
+        Dim tempDir = Path.GetDirectoryName(outputPath)
+        Dim silenceFileParagraph = AB_GenerateSilenceFile(AB_SilenceBetweenParagraphs, tempDir)
+        Dim silenceFileSpeakerChange = AB_GenerateSilenceFile(AB_SilenceOnSpeakerChange, tempDir)
+        Dim silenceFilePodcastTurn = AB_GenerateSilenceFile(AB_SilenceBetweenPodcastTurns, tempDir)
+
+        Dim tempFiles As New List(Of String)()
+        Dim silenceFiles As New List(Of String)()
+        If Not String.IsNullOrEmpty(silenceFileParagraph) Then silenceFiles.Add(silenceFileParagraph)
+        If Not String.IsNullOrEmpty(silenceFileSpeakerChange) AndAlso Not silenceFiles.Contains(silenceFileSpeakerChange) Then silenceFiles.Add(silenceFileSpeakerChange)
+        If Not String.IsNullOrEmpty(silenceFilePodcastTurn) AndAlso Not silenceFiles.Contains(silenceFilePodcastTurn) Then silenceFiles.Add(silenceFilePodcastTurn)
+
+        Try
+            Dim previousSpeaker As String = ""
+
+            For i = 0 To segments.Count - 1
+                ct.ThrowIfCancellationRequested()
+
+                Dim speaker = segments(i).Item1
+                Dim segText = segments(i).Item2
+
+                Dim voice As String
+                If mode.Equals("podcast", StringComparison.OrdinalIgnoreCase) Then
+                    voice = If(speaker = "H", voiceA, voiceB)
+                Else
+                    voice = If(speaker = "A", voiceA, voiceB)
+                End If
+
+                Debug.WriteLine($"[AB-TTS] Processing Segment {i + 1}: Speaker={speaker}, Voice={voice}, Lang={language}, Len={segText.Length}")
+
+                If String.IsNullOrWhiteSpace(segText) Then
+                    Debug.WriteLine($"[AB-TTS] Segment {i + 1} text is empty, skipping.")
+                    Continue For
+                End If
+
+                Dim audioBytes = Await AB_GenerateSegmentAsync(segText, language, voice, ct)
+
+                If audioBytes Is Nothing OrElse audioBytes.Length = 0 Then
+                    ApDashboardLog($"⚠ Segment {i + 1}/{segments.Count} returned no audio, skipping.", "warn")
+                    Continue For
+                End If
+
+                Dim tempFile = Path.Combine(tempDir, $"ab_seg_{i:D4}.mp3")
+                File.WriteAllBytes(tempFile, audioBytes)
+                tempFiles.Add(tempFile)
+
+                ' Select the appropriate silence gap based on context:
+                '  - Podcast mode: always use the podcast turn pause between segments
+                '  - Audiobook mode: use the longer speaker-change pause when the
+                '    narrator voice switches, otherwise the regular paragraph pause
+                Dim pauseFile As String = Nothing
+                If mode.Equals("podcast", StringComparison.OrdinalIgnoreCase) Then
+                    pauseFile = silenceFilePodcastTurn
+                Else
+                    Dim speakerChanged = (previousSpeaker <> "" AndAlso speaker <> previousSpeaker)
+                    pauseFile = If(speakerChanged, silenceFileSpeakerChange, silenceFileParagraph)
+                End If
+                If Not String.IsNullOrEmpty(pauseFile) AndAlso File.Exists(pauseFile) Then
+                    tempFiles.Add(pauseFile)
+                End If
+
+                previousSpeaker = speaker
+                ApDashboardLog($"🔊 Segment {i + 1}/{segments.Count} generated ({audioBytes.Length / 1024:F0} KB).", "step")
+                Await Task.Delay(500, ct)
+            Next
+
+            If tempFiles.Count = 0 Then
+                ApDashboardLog("⚠ No audio segments were generated.", "warn")
+                Return False
+            End If
+
+            ct.ThrowIfCancellationRequested()
+            AB_MergeAudioFiles(tempFiles, outputPath)
+            ApDashboardLog($"✅ Audio file created: {Path.GetFileName(outputPath)} ({segments.Count} segments merged).", "step")
+            Return True
+
+        Finally
+            For Each f In tempFiles
+                ' Don't delete the shared silence files yet — they may appear
+                ' multiple times in the list.  Clean them up separately.
+                If silenceFiles.Contains(f) Then Continue For
+                Try : File.Delete(f) : Catch : End Try
+            Next
+            For Each f In silenceFiles
+                Try : File.Delete(f) : Catch : End Try
+            Next
+        End Try
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TTS — TOOL EXECUTOR
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteCreateAudioFileTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName
+        }
+
+        Try
+            Dim text = GetArgString(toolCall.Arguments, "text")
+            If String.IsNullOrWhiteSpace(text) Then
+                Dim errMsg = "Missing required parameter: text"
+                response.Success = False
+                response.ErrorMessage = errMsg
+                response.Response = errMsg
+                Return response
+            End If
+
+            Dim mode = If(GetArgString(toolCall.Arguments, "mode"), "audiobook")
+            Dim language = If(GetArgString(toolCall.Arguments, "language"), AB_DefaultLanguage)
+            Dim voiceA = GetArgString(toolCall.Arguments, "voice_a")
+            Dim voiceB = GetArgString(toolCall.Arguments, "voice_b")
+            Dim duration = If(GetArgString(toolCall.Arguments, "duration"), "5 minutes")
+            Dim instructions = GetArgString(toolCall.Arguments, "instructions")
+            Dim topicContext = GetArgString(toolCall.Arguments, "context")
+            Dim outputFilename = If(GetArgString(toolCall.Arguments, "output_filename"), AB_DefaultFile)
+            Dim enginePref = GetArgString(toolCall.Arguments, "engine")
+
+            For Each c In Path.GetInvalidFileNameChars()
+                outputFilename = outputFilename.Replace(c, "_"c)
+            Next
+            If Not outputFilename.EndsWith(".mp3", StringComparison.OrdinalIgnoreCase) Then
+                outputFilename = Path.GetFileNameWithoutExtension(outputFilename) & ".mp3"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, outputFilename)
+            Dim counter = 1
+            While File.Exists(outputPath)
+                Dim baseName = Path.GetFileNameWithoutExtension(outputFilename)
+                outputPath = Path.Combine(_apCurrentTempDir, baseName & $"_{counter}.mp3")
+                counter += 1
+            End While
+
+            ' Select the best engine for this request (considers language + preference).
+            AB_SelectBestEngine(enginePref, language)
+
+            Dim textLen = text.Length
+            context.Log($"Generating {mode} audio: {textLen} chars, language={language}, engine={AB_SelectedEngine}, voices={If(voiceA, "default")}/{If(voiceB, "default")}")
+            ApDashboardLog($"🔊 Creating {mode} audio ({textLen:N0} chars, {language}, {AB_SelectedEngine})...", "step")
+
+            ' Do NOT call AB_DetectTTSEngines() here. The detection already ran
+            ' at tool registration time (in GetAutoPilotInternalTools) and set
+            ' the shared static fields. Re-detecting here would read INI_Endpoint
+            ' and INI_Endpoint_2 which may have been overwritten by the tooling
+            ' loop's ApplyModelConfig, causing the TTS engine to appear unavailable.
+
+            Debug.WriteLine($"[AB-TTS] Engine state: google={AB_googleAvailable} openai={AB_openAIAvailable} " &
+                            $"selected={AB_SelectedEngine} googleEP='{AB_GoogleEndpoint}' openaiEP='{AB_OpenAIEndpoint}'")
+
+            If Not AB_googleAvailable AndAlso Not AB_openAIAvailable Then
+                Dim errMsg = "No TTS engine is configured. Cannot generate audio. " &
+                    "Ensure INI_Endpoint contains an OpenAI or Google endpoint, " &
+                    "and INI_TTSEndpoint contains the TTS-specific URL."
+                response.Success = False
+                response.ErrorMessage = errMsg
+                response.Response = errMsg
+                Return response
+            End If
+
+            Dim success = Await AB_GenerateAudioFileAsync(
+                          text, outputPath, mode, language,
+                          voiceA, voiceB, duration, topicContext, instructions, ct)
+
+            If success AndAlso File.Exists(outputPath) Then
+
+                Dim fileSize = New FileInfo(outputPath).Length
+                response.Success = True
+                response.Response = $"Audio file '{Path.GetFileName(outputPath)}' generated successfully " &
+                    $"({fileSize / 1024:F0} KB, {mode} mode, engine={AB_SelectedEngine}). The file is attached to the reply."
+
+                ' Register the output file so CollectResultAttachments picks it up.
+                ' Use OutputFiles on the first attachment (if any) so the file appears
+                ' in the "registered outputs" pass.  When the mail has no input
+                ' attachments, the directory-scan fallback will find the file because
+                ' we no longer add a phantom AutoPilotAttachmentInfo whose TempFilePath
+                ' would cause the scan to skip it.
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    Dim firstAtt = _apCurrentAttachments(0)
+                    If firstAtt.OutputFiles Is Nothing Then firstAtt.OutputFiles = New List(Of String)()
+                    firstAtt.OutputFiles.Add(outputPath)
+                End If
+                ' NOTE: We intentionally do NOT add a new AutoPilotAttachmentInfo here.
+                ' Adding one with TempFilePath = outputPath caused CollectResultAttachments
+                ' to treat the generated file as an "original" attachment and exclude it
+                ' from both the OutputFiles pass and the directory-scan fallback, so the
+                ' file was never attached to the reply.
+            Else
+                Dim errMsg = "Audio generation failed. No audio segments could be produced. " &
+                    $"Engine={AB_SelectedEngine}, Endpoint='{If(AB_SelectedEngine = ABEngine.OpenAI, AB_OpenAIEndpoint, AB_GoogleEndpoint)}'. " &
+                    "Check the Output window for [AB-TTS] diagnostic messages."
+                response.Success = False
+                response.ErrorMessage = errMsg
+                response.Response = errMsg
+            End If
+
+        Catch ex As OperationCanceledException
+            Dim errMsg = "Audio generation was cancelled."
+            response.Success = False
+            response.ErrorMessage = errMsg
+            response.Response = errMsg
+        Catch ex As Exception
+            Dim errMsg = If(String.IsNullOrWhiteSpace(ex.Message), ex.GetType().Name, ex.Message)
+            Debug.WriteLine($"[AB-TTS] Tool error: {ex}")
+            response.Success = False
+            response.ErrorMessage = errMsg
+            response.Response = $"Error generating audio: {errMsg}"
+        End Try
+
+        Return response
+    End Function
+
+End Class

@@ -100,10 +100,30 @@ Namespace SharedLibrary
             Public Property FailedFileNames As System.Collections.Generic.List(Of String)
 
             ''' <summary>
+            ''' Maps display names of failed files to structured reason codes for retry/reporting.
+            ''' </summary>
+            Public Property FailedFileReasons As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            ''' <summary>
+            ''' Maps display names of failed files to their original full paths for retry support.
+            ''' </summary>
+            Public Property FailedFilePaths As New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            ''' <summary>
             ''' Source directory associated with the run.
             ''' </summary>
             Public Property SourceDirectory As String
         End Class
+
+        ' Reason codes for failed file tracking
+        Public Const FailReason_FileNotFound As String = "FILE_NOT_FOUND"
+        Public Const FailReason_EmptyContent As String = "EMPTY_CONTENT"
+        Public Const FailReason_ReadError As String = "READ_ERROR"
+        Public Const FailReason_LlmError As String = "LLM_ERROR"
+        Public Const FailReason_EmptyResponse As String = "EMPTY_RESPONSE"
+        Public Const FailReason_LlmResponseError As String = "LLM_RESPONSE_ERROR"
+        Public Const FailReason_ParseError As String = "PARSE_ERROR"
+        Public Const FailReason_Cancelled As String = "CANCELLED"
 
         ''' <summary>
         ''' Setting key: manual instruction for extraction run.
@@ -549,14 +569,18 @@ Namespace SharedLibrary
                                              Optional mergeDateColumn As Integer = 0,
                                              Optional mergeRowsViaLlm As Boolean = False,
                                              Optional mergeInstruction As String = Nothing,
-                                             Optional cancellationRequested As Func(Of Boolean) = Nothing) _
+                                             Optional cancellationRequested As Func(Of Boolean) = Nothing,
+                                             Optional llmWithFileFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, String, Threading.Tasks.Task(Of String)) = Nothing) _
                                              As Threading.Tasks.Task(Of FactExtractionAggregateResult)
 
+            ' Initialize with new properties
             Dim agg As New FactExtractionAggregateResult With {
                 .Schema = New System.Collections.Generic.List(Of ExtractionSchemaColumn),
                 .Rows = New System.Collections.Generic.List(Of ExtractionRow),
                 .Errors = New System.Collections.Generic.List(Of String),
                 .FailedFileNames = New System.Collections.Generic.List(Of String),
+                .FailedFileReasons = New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase),
+                .FailedFilePaths = New System.Collections.Generic.Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase),
                 .SourceDirectory = sourceDirectory
             }
 
@@ -565,6 +589,22 @@ Namespace SharedLibrary
                 Return agg
             End If
 
+            ' Helper: produce a display name that includes the relative subdirectory when applicable.
+            Dim getDisplayName As Func(Of String, String) =
+                Function(p As String)
+                    If Not String.IsNullOrWhiteSpace(sourceDirectory) Then
+                        Try
+                            Dim baseUri As New Uri(sourceDirectory.TrimEnd(IO.Path.DirectorySeparatorChar, IO.Path.AltDirectorySeparatorChar) & IO.Path.DirectorySeparatorChar)
+                            Dim fileUri As New Uri(p)
+                            Dim rel = Uri.UnescapeDataString(baseUri.MakeRelativeUri(fileUri).ToString()).Replace("/"c, IO.Path.DirectorySeparatorChar)
+                            If Not String.IsNullOrWhiteSpace(rel) Then Return rel
+                        Catch
+                        End Try
+                    End If
+                    Return IO.Path.GetFileName(p)
+                End Function
+
+
             For i = 0 To filePaths.Count - 1
                 If cancellationRequested IsNot Nothing AndAlso cancellationRequested() Then
                     agg.Errors.Add("Cancelled by user.")
@@ -572,43 +612,116 @@ Namespace SharedLibrary
                 End If
 
                 Dim path = filePaths(i)
+                Dim displayName = getDisplayName(path)
+
                 If progressCallback IsNot Nothing Then
-                    progressCallback(i, filePaths.Count, "Processing " & System.IO.Path.GetFileName(path) &
+                    progressCallback(i, filePaths.Count, "Processing " & displayName &
                                          " (" & (i + 1).ToString() & " of " & filePaths.Count.ToString() & ")")
                 End If
 
                 If Not File.Exists(path) Then
-                    agg.FailedFileNames.Add(System.IO.Path.GetFileName(path))
-                    Continue For
-                End If
-                Dim text = Await GetFileContentFunc(path, False, doOcr, False)
-                If cancellationRequested IsNot Nothing AndAlso cancellationRequested() Then
-                    agg.Errors.Add("Cancelled by user.")
-                    Exit For
-                End If
-                If String.IsNullOrWhiteSpace(text) Then
-                    agg.FailedFileNames.Add(System.IO.Path.GetFileName(path))
+                    agg.FailedFileNames.Add(displayName)
+                    agg.FailedFileReasons(displayName) = FailReason_FileNotFound
+                    agg.FailedFilePaths(displayName) = path
                     Continue For
                 End If
 
-                Dim userText = "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>"
-                Dim sysPrompt = interpolateSystemPromptFunc(context.SP_Extract)
-                If fixedSchema IsNot Nothing AndAlso fixedSchema.Count > 0 Then
-                    sysPrompt = BuildConstrainedSystemPrompt(sysPrompt, fixedSchema)
-                End If
+                Dim ext = IO.Path.GetExtension(path).ToLowerInvariant()
+                Dim isBinaryMedia As Boolean = SharedLibrary.SharedMethods.IsBinaryMediaExtension(ext)
 
                 Dim jsonResp As String = Nothing
-                Try
-                    jsonResp = Await llmFunc(sysPrompt, userText, "", "", 0, useSecondApi, False)
-                    jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
-                Catch ex As Exception
-                    agg.Errors.Add("LLM call failed for '" & System.IO.Path.GetFileName(path) & "': " & ex.Message)
-                    agg.FailedFileNames.Add(System.IO.Path.GetFileName(path))
-                    Continue For
-                End Try
+
+                If isBinaryMedia AndAlso llmWithFileFunc IsNot Nothing Then
+                    ' ── Binary/media file: send directly to the LLM as a file object ──
+                    Dim sysPrompt = interpolateSystemPromptFunc(context.SP_Extract)
+                    If fixedSchema IsNot Nothing AndAlso fixedSchema.Count > 0 Then
+                        sysPrompt = BuildConstrainedSystemPrompt(sysPrompt, fixedSchema)
+                    End If
+
+                    Try
+                        jsonResp = Await llmWithFileFunc(sysPrompt, "", "", "", 0, useSecondApi, True, path)
+                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
+                    Catch ex As Exception
+                        agg.Errors.Add("LLM call failed for '" & displayName & "': " & ex.Message)
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_LlmError
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End Try
+
+                    ' Treat error-like LLM responses as failures without aborting
+                    If String.IsNullOrWhiteSpace(jsonResp) Then
+                        agg.Errors.Add("Empty AI response for binary file '" & displayName & "'.")
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_EmptyResponse
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End If
+
+                    If jsonResp.TrimStart().StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso jsonResp.Length < 200 Then
+                        agg.Errors.Add("AI returned an error for '" & displayName & "': " & jsonResp.Trim())
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_LlmResponseError
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End If
+                Else
+
+                    ' ── Text-based file: extract text content first, then send to LLM ──
+                    Dim text As String = Nothing
+                    Try
+                        text = Await GetFileContentFunc(path, True, doOcr, False)
+                    Catch ex As Exception
+                        agg.Errors.Add("File read failed for '" & displayName & "': " & ex.Message)
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_ReadError
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End Try
+
+                    If cancellationRequested IsNot Nothing AndAlso cancellationRequested() Then
+                        agg.Errors.Add("Cancelled by user.")
+                        Exit For
+                    End If
+                    If String.IsNullOrWhiteSpace(text) Then
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_EmptyContent
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End If
+
+                    ' Detect error strings returned by the file content helper (e.g. "Error: File type not supported.")
+                    If text.TrimStart().StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso text.Length < 200 Then
+                        agg.Errors.Add("File content error for '" & displayName & "': " & text.Trim())
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_ReadError
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End If
+
+                    Dim userText = "<TEXTTOPROCESS>" & text & "</TEXTTOPROCESS>"
+                    Dim sysPrompt = interpolateSystemPromptFunc(context.SP_Extract)
+                    If fixedSchema IsNot Nothing AndAlso fixedSchema.Count > 0 Then
+                        sysPrompt = BuildConstrainedSystemPrompt(sysPrompt, fixedSchema)
+                    End If
+
+                    Try
+                        jsonResp = Await llmFunc(sysPrompt, userText, "", "", 0, useSecondApi, True)
+                        jsonResp = WebAgentInterpreter.SanitizeLlmResult(jsonResp)
+                    Catch ex As Exception
+                        agg.Errors.Add("LLM call failed for '" & displayName & "': " & ex.Message)
+                        agg.FailedFileNames.Add(displayName)
+                        agg.FailedFileReasons(displayName) = FailReason_LlmError
+                        agg.FailedFilePaths(displayName) = path
+                        Continue For
+                    End Try
+                End If
+
                 If String.IsNullOrWhiteSpace(jsonResp) Then
-                    agg.Errors.Add("Empty AI response for '" & System.IO.Path.GetFileName(path) & "'.")
-                    agg.FailedFileNames.Add(System.IO.Path.GetFileName(path))
+                    agg.Errors.Add("Empty AI response for '" & displayName & "'.")
+                    agg.FailedFileNames.Add(displayName)
+                    agg.FailedFileReasons(displayName) = FailReason_EmptyResponse
+                    agg.FailedFilePaths(displayName) = path
                     Continue For
                 End If
 
@@ -617,11 +730,13 @@ Namespace SharedLibrary
                     parsed.schema.AddRange(fixedSchema.Select(Function(c) New ExtractionSchemaColumn With {.Name = c.Name, .Type = c.Type}))
                 End If
                 If parsed.schema.Count = 0 OrElse parsed.rows.Count = 0 Then
-                    agg.Errors.Add("No rows/schema parsed for '" & System.IO.Path.GetFileName(path) & "'.")
-                    agg.FailedFileNames.Add(System.IO.Path.GetFileName(path))
+                    agg.Errors.Add("No rows/schema parsed for '" & displayName & "'.")
+                    agg.FailedFileNames.Add(displayName)
+                    agg.FailedFileReasons(displayName) = FailReason_ParseError
+                    agg.FailedFilePaths(displayName) = path
                     Continue For
                 End If
-                MergeIntoAggregate(agg, parsed.schema, parsed.rows, System.IO.Path.GetFileName(path), dateColumnsUser)
+                MergeIntoAggregate(agg, parsed.schema, parsed.rows, displayName, dateColumnsUser)
                 agg.ProcessedFiles += 1
             Next
 
@@ -740,7 +855,7 @@ Namespace SharedLibrary
                     "INPUT_GROUP_JSON:" & vbCrLf & rowsArray.ToString()
 
                 Try
-                    Dim resp = Await llmFunc(systemPrompt, userText, "", "", 0, useSecondApi, False)
+                    Dim resp = Await llmFunc(systemPrompt, userText, "", "", 0, useSecondApi, True)
                     resp = WebAgentInterpreter.SanitizeLlmResult(resp)
                     If Not String.IsNullOrWhiteSpace(resp) Then
                         Dim jt = Newtonsoft.Json.Linq.JToken.Parse(resp)

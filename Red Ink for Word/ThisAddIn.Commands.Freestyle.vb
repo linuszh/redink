@@ -1439,7 +1439,6 @@ Partial Public Class ThisAddIn
             End If
 #End If
 
-
             If String.Equals(OtherPrompt.Trim(), "license", StringComparison.OrdinalIgnoreCase) Then
                 SharedMethods.ShowLicenseManagementDialog()
                 Return

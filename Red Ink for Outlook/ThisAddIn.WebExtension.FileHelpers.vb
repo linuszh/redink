@@ -25,8 +25,9 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
-    ''' Attempts plaintext extraction for Word (.doc/.docx/.rtf), Excel (.xls/.xlsx), or PowerPoint (.ppt/.pptx).
-    ''' Sets extracted (content) and label (descriptive file label) on success.
+    ''' Attempts plaintext extraction for Word (.doc/.docx/.rtf), Excel (.xls/.xlsx), or PowerPoint (.ppt/.pptx),
+    ''' plus email files (.msg/.eml). Prefers sandboxed (COM-free) readers for OpenXML formats;
+    ''' falls back to COM Interop for legacy binary formats (.doc, .xls, .ppt, .rtf).
     ''' Truncates output at 1,500,000 characters.
     ''' </summary>
     ''' <param name="filePath">Absolute file path.</param>
@@ -49,28 +50,57 @@ Partial Public Class ThisAddIn
 
         Try
             Select Case ext
-                Case ".doc", ".docx", ".rtf"
+                ' ── Sandboxed readers (no COM) ──
+                Case ".docx"
+                    extracted = SharedLibrary.SharedLibrary.SharedMethods.ReadDocxSandboxed(filePath)
+                    label = "Word document: " & System.IO.Path.GetFileName(filePath)
+                Case ".xlsx"
+                    extracted = SharedLibrary.SharedLibrary.SharedMethods.ReadXlsxSandboxed(filePath)
+                    label = "Excel workbook: " & System.IO.Path.GetFileName(filePath)
+                Case ".pptx"
+                    extracted = SharedLibrary.SharedLibrary.SharedMethods.ReadPptxSandboxed(filePath)
+                    label = "PowerPoint presentation: " & System.IO.Path.GetFileName(filePath)
+                Case ".eml"
+                    extracted = SharedLibrary.SharedLibrary.SharedMethods.ReadEmlSandboxed(filePath)
+                    label = "Email message: " & System.IO.Path.GetFileName(filePath)
+                Case ".msg"
+                    extracted = SharedLibrary.SharedLibrary.SharedMethods.ReadMsgSandboxed(filePath)
+                    label = "Email message: " & System.IO.Path.GetFileName(filePath)
+
+                ' ── COM fallback for legacy binary formats ──
+                Case ".doc"
+                    If Not INI_AllowLegacyDocFiles Then
+                        extracted = Nothing
+                        Return False
+                    End If
                     extracted = ExtractWordText(filePath)
                     label = "Word document: " & System.IO.Path.GetFileName(filePath)
-                Case ".xls", ".xlsx"
+                Case ".rtf"
+                    extracted = ExtractWordText(filePath)
+                    label = "Word document (RTF): " & System.IO.Path.GetFileName(filePath)
+                Case ".xls"
                     extracted = ExtractExcelText(filePath)
                     label = "Excel workbook: " & System.IO.Path.GetFileName(filePath)
-                Case ".ppt", ".pptx"
+                Case ".ppt"
                     extracted = ExtractPowerPointText(filePath)
                     label = "PowerPoint presentation: " & System.IO.Path.GetFileName(filePath)
                 Case Else
                     Return False
             End Select
         Catch ex As System.Exception
-            ' Optional: logging
             System.Diagnostics.Debug.WriteLine("Office extract failed: " & ex.Message)
             extracted = Nothing
             label = Nothing
             Return False
         End Try
 
+        ' Sandboxed readers return "Error:..." on failure — treat as not extracted
+        If extracted IsNot Nothing AndAlso extracted.StartsWith("Error") AndAlso extracted.Length < 200 Then
+            extracted = Nothing
+            Return False
+        End If
+
         If System.String.IsNullOrWhiteSpace(extracted) Then Return False
-        ' Soft limit (optional): throttles extremely large workbooks
         If extracted.Length > 1_500_000 Then
             extracted = extracted.Substring(0, 1_500_000) & System.Environment.NewLine & "[…truncated…]"
         End If
@@ -499,7 +529,7 @@ Partial Public Class ThisAddIn
         ".py", ".rb", ".php", ".java", ".kt", ".kts",
         ".c", ".h", ".hpp", ".hh", ".cpp", ".cc",
         ".ps1", ".psm1", ".bat", ".cmd", ".sh", ".zsh",
-        ".rtf"
+        ".rtf", ".html", ".htm"
     }
 
         If Not textLike.Contains(ext) Then

@@ -81,6 +81,32 @@ Partial Public Class ThisAddIn
         ''' even if they were already processed, allowing the operator to select them for reprocessing.
         ''' </summary>
         Public Property ReprocessLookbackHours As Integer = 0
+
+        ''' <summary>
+        ''' When True, the system prompt tells the model it has built-in web search / grounding capability.
+        ''' Only meaningful when the model natively supports web search (e.g. Gemini with grounding).
+        ''' </summary>
+        Public Property EnableWebGrounding As Boolean = False
+
+        ''' <summary>
+        ''' When True, incoming voicemails (audio attachments from the registered voicemail sender)
+        ''' are transcribed and processed as instructions. Requires binary input support.
+        ''' </summary>
+        Public Property EnableVoicemailProcessing As Boolean = False
+
+        ''' <summary>
+        ''' SMTP address of the voicemail system (e.g. noreply@combox.swisscom.ch).
+        ''' Only mails from this sender with audio attachments are treated as voicemails.
+        ''' </summary>
+        Public Property VoicemailSenderAddress As String = ""
+
+        ''' <summary>
+        ''' Path to a CSV file mapping caller IDs (phone numbers) to e-mail addresses.
+        ''' Format: phone,email[,displayname]  (displayname is optional)
+        ''' </summary>
+        Public Property VoicemailCallerIdMapPath As String = ""
+
+
     End Class
 
     ''' <summary>
@@ -265,49 +291,102 @@ Partial Public Class ThisAddIn
         config.RequireApprovalForNonWhitelisted = True
 
         ' ── Step 5: Rate limits ──
-        Dim params(3) As InputParameter
-        params(0) = New InputParameter() With {
+        Dim paramsList As New List(Of InputParameter)()
+        paramsList.Add(New InputParameter() With {
             .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
-        }
-        params(1) = New InputParameter() With {
+        })
+        paramsList.Add(New InputParameter() With {
             .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
-        }
-        params(2) = New InputParameter() With {
+        })
+        paramsList.Add(New InputParameter() With {
             .Name = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
-        }
-        params(3) = New InputParameter() With {
+        })
+        paramsList.Add(New InputParameter() With {
             .Name = "Reprocess lookback (hours, 0 = only new mails)",
             .Value = saved.ReprocessLookbackHours.ToString()
-        }
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Add web grounding instruction (for models supporting it)",
+            .Value = saved.EnableWebGrounding
+        })
+
+        ' ── Voicemail processing (only if audio transcription is available) ──
+        Dim audioTranscriptionAvailable As Boolean = IsAudioTranscriptionAvailable(_context)
+        Dim pVoicemail As InputParameter = Nothing
+        Dim pVoicemailSender As InputParameter = Nothing
+        Dim pVoicemailMapPath As InputParameter = Nothing
+        If audioTranscriptionAvailable Then
+            pVoicemail = New InputParameter() With {
+                .Name = "Process voicemails (transcribe & respond)",
+                .Value = saved.EnableVoicemailProcessing
+            }
+            paramsList.Add(pVoicemail)
+            pVoicemailSender = New InputParameter() With {
+                .Name = "Voicemail sender address (e.g. noreply@combox.swisscom.ch)",
+                .Value = If(saved.VoicemailSenderAddress, "")
+            }
+            paramsList.Add(pVoicemailSender)
+            pVoicemailMapPath = New InputParameter() With {
+                .Name = "Caller ID → Email map file (CSV path)",
+                .Value = If(saved.VoicemailCallerIdMapPath, "")
+            }
+            paramsList.Add(pVoicemailMapPath)
+        End If
+
+        Dim params = paramsList.ToArray()
 
         Dim limitsOk = ShowCustomVariableInputForm(
-            "Configure rate limits and restrictions:",
-            $"{AN6} AutoPilot — Limits",
+            "Configure rate limits, restrictions, and optional features:",
+            $"{AN6} AutoPilot — Limits & Features",
             params)
 
         If Not limitsOk Then Return Nothing
 
         Dim cooldown As Integer
-        If Integer.TryParse(params(0).Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
+        If Integer.TryParse(paramsList(0).Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
             config.CooldownSeconds = cooldown
         End If
 
         Dim maxReplies As Integer
-        If Integer.TryParse(params(1).Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
+        If Integer.TryParse(paramsList(1).Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
             config.MaxRepliesPerSession = maxReplies
         End If
 
         Dim maxMb As Integer
-        If Integer.TryParse(params(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
+        If Integer.TryParse(paramsList(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
             config.MaxAttachmentBytes = CLng(maxMb) * 1024 * 1024
         End If
 
         Dim reprocessHours As Integer
-        If Integer.TryParse(params(3).Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
+        If Integer.TryParse(paramsList(3).Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
             config.ReprocessLookbackHours = reprocessHours
+        End If
+
+        ' Web grounding checkbox
+        config.EnableWebGrounding = CBool(If(paramsList(4).Value, False))
+
+        ' Voicemail settings
+        If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
+            config.EnableVoicemailProcessing = CBool(If(pVoicemail.Value, False))
+            config.VoicemailSenderAddress = If(pVoicemailSender?.Value?.ToString()?.Trim(), "")
+            config.VoicemailCallerIdMapPath = If(pVoicemailMapPath?.Value?.ToString()?.Trim(), "").Trim(""""c)
+
+            ' Validate voicemail config
+            If config.EnableVoicemailProcessing Then
+                If String.IsNullOrWhiteSpace(config.VoicemailSenderAddress) Then
+                    ShowCustomMessageBox("Voicemail processing requires a voicemail sender address.", AN)
+                    Return Nothing
+                End If
+                If String.IsNullOrWhiteSpace(config.VoicemailCallerIdMapPath) OrElse
+                   Not IO.File.Exists(config.VoicemailCallerIdMapPath) Then
+                    ShowCustomMessageBox("Voicemail processing requires a valid caller ID map file path." & vbCrLf &
+                                         "File not found: " & If(config.VoicemailCallerIdMapPath, "(empty)"), AN)
+                    Return Nothing
+                End If
+            End If
         End If
 
         ' ── Step 6: Source selection (only if model supports tooling) ──
@@ -370,6 +449,10 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Cooldown: {config.CooldownSeconds}s per sender")
         summaryBuilder.AppendLine($"Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())} per session")
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
+        summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
+        If config.EnableVoicemailProcessing Then
+            summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
+        End If
         If config.ReprocessLookbackHours > 0 Then
             summaryBuilder.AppendLine($"Reprocess lookback: {config.ReprocessLookbackHours}h (already-processed mails re-proposed)")
         Else
@@ -377,7 +460,9 @@ Partial Public Class ThisAddIn
         End If
         summaryBuilder.AppendLine($"{ToolFriendlyName}: {If(config.SelectedExternalTools?.Count, 0)}")
         If modelSupportsTools Then
-            summaryBuilder.AppendLine($"Internal tools: document processing, PDF extraction")
+            Dim internalToolCount As Integer = 0
+            Try : internalToolCount = GetAutoPilotInternalTools().Count : Catch : End Try
+            summaryBuilder.AppendLine($"Internal tools: {internalToolCount} (document processing, PDF extraction, etc.)")
         End If
         summaryBuilder.AppendLine()
         summaryBuilder.AppendLine($"Mode: Auto-send for {config.WhitelistedSenders.Count} whitelisted pattern(s); approval required for others.")
@@ -444,6 +529,10 @@ Partial Public Class ThisAddIn
         My.Settings.AP_SelectedModelKey = If(config.SelectedModelKey, "")
         My.Settings.AP_UseSecondApi = config.UseSecondApi
         My.Settings.AP_ReprocessLookbackHours = config.ReprocessLookbackHours
+        My.Settings.AP_EnableWebGrounding = config.EnableWebGrounding
+        My.Settings.AP_EnableVoicemailProcessing = config.EnableVoicemailProcessing
+        My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
+        My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -472,6 +561,10 @@ Partial Public Class ThisAddIn
         config.SelectedModelKey = If(My.Settings.AP_SelectedModelKey, "")
         config.UseSecondApi = My.Settings.AP_UseSecondApi
         config.ReprocessLookbackHours = If(My.Settings.AP_ReprocessLookbackHours >= 0, My.Settings.AP_ReprocessLookbackHours, 0)
+        config.EnableWebGrounding = My.Settings.AP_EnableWebGrounding
+        config.EnableVoicemailProcessing = My.Settings.AP_EnableVoicemailProcessing
+        config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
+        config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

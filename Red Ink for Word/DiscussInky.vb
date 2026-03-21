@@ -133,8 +133,13 @@ Public Class DiscussInky
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
     Private Const ToolTrigger As String = "(t)"
-    Private _currentPersonaName As String = AssistantName
-    Private _currentPersonaPrompt As String = ""
+
+    ' Default fallback persona used when no persona library is configured
+    Private Const DefaultPersonaName As String = "Discussion Partner"
+    Private Const DefaultPersonaPrompt As String = "You are a wise, thoughtful and critical discussion partner. You analyze topics from multiple angles, challenge assumptions constructively, and help the user arrive at well-reasoned conclusions. You are knowledgeable across many domains and provide balanced, nuanced perspectives while being direct and honest in your assessments."
+
+    Private _currentPersonaName As String = DefaultPersonaName
+    Private _currentPersonaPrompt As String = DefaultPersonaPrompt
 
     ' Mission state
     Private _currentMissionName As String = ""
@@ -244,6 +249,7 @@ Public Class DiscussInky
     Private _personaSelectedThisSession As Boolean = False
     Private _isUpdatingPersistCheckbox As Boolean = False ' Prevents recursive event handling    
     Private _toolingControlsInitialized As Boolean = False
+    Private _noPersonaLibraryConfigured As Boolean = False ' True when no persona path is defined
 
     ' Autorespond state
     Private _autoRespondInProgress As Boolean = False
@@ -738,7 +744,7 @@ Public Class DiscussInky
         ' Update tooling controls based on current model
         UpdateToolingControlsState()
 
-        ' Check if persona was previously saved - if not, force selection
+        ' Check if persona was previously saved - if not, use default
         Dim savedPersona = ""
         Try
             savedPersona = My.Settings.DiscussSelectedPersona
@@ -753,6 +759,12 @@ Public Class DiscussInky
                 _currentPersonaPrompt = found.Prompt
                 personaRestoredFromSettings = True
             End If
+        End If
+
+        ' If no persona was restored from settings, apply the default persona
+        If Not personaRestoredFromSettings Then
+            _currentPersonaName = DefaultPersonaName
+            _currentPersonaPrompt = DefaultPersonaPrompt
         End If
 
         ' Restore mission if previously saved
@@ -812,8 +824,9 @@ Public Class DiscussInky
         ' Restore knowledge using the new loading flow
         Await RestoreKnowledgeAsync()
 
-        ' Force persona selection on first run after Word starts (if not restored from settings)
-        If Not personaRestoredFromSettings AndAlso _personas.Count > 0 AndAlso Not _personaSelectedThisSession Then
+        ' Only force persona selection if there are custom personas beyond the default
+        ' (i.e., a persona library is configured and has entries)
+        If Not personaRestoredFromSettings AndAlso _personas.Count > 1 AndAlso Not _personaSelectedThisSession Then
             OnSelectPersona(Nothing, EventArgs.Empty)
             _personaSelectedThisSession = True
         End If
@@ -1379,6 +1392,7 @@ Public Class DiscussInky
 
     ''' <summary>
     ''' Loads persona definitions from configured local and global files into memory.
+    ''' Always ensures at least the default fallback persona is available.
     ''' </summary>
     Private Sub LoadPersonas()
         _personas.Clear()
@@ -1399,12 +1413,19 @@ Public Class DiscussInky
             globalLoaded = LoadPersonasFromFile(globalPath, isLocal:=False)
         End If
 
-        ' Show error only if both paths are configured but neither loaded any personas
-        If _personas.Count = 0 Then
-            If Not String.IsNullOrWhiteSpace(localPath) OrElse Not String.IsNullOrWhiteSpace(globalPath) Then
-                AppendSystemMessage("No personas could be loaded. Please check your persona configuration files.")
-            End If
-        End If
+        ' Always ensure the default fallback persona is available
+        ' Add it at the beginning so it's always the first option
+        Dim defaultDisplay = MakeUniqueDisplay(DefaultPersonaName, _personas.Select(Function(p) p.DisplayName).ToList())
+        _personas.Insert(0, New PersonaEntry With {
+            .Name = DefaultPersonaName,
+            .Prompt = DefaultPersonaPrompt,
+            .IsLocal = False,
+            .DisplayName = defaultDisplay
+        })
+
+        ' Track whether persona library is configured (message shown later in ShowSessionInfo
+        ' after the HTML chat is initialized)
+        _noPersonaLibraryConfigured = String.IsNullOrWhiteSpace(localPath) AndAlso String.IsNullOrWhiteSpace(globalPath)
     End Sub
 
     ''' <summary>
@@ -1482,9 +1503,11 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnSelectPersona(sender As Object, e As EventArgs)
         If _personas.Count = 0 Then
-            ShowCustomMessageBox("No personas configured. Please configure INI_DiscussInkyPath or INI_DiscussInkyPathLocal in your settings.",
-                                 extraButtonText:="Edit Local Personas",
-                                 extraButtonAction:=Sub() OnEditLocalPersona(Nothing, EventArgs.Empty))
+            ' Should not happen since we always have the default, but guard anyway
+            _currentPersonaName = DefaultPersonaName
+            _currentPersonaPrompt = DefaultPersonaPrompt
+            UpdateWindowTitle()
+            UpdateSendButtonText()
             Return
         End If
 
@@ -1531,7 +1554,9 @@ Public Class DiscussInky
         Dim localPath = ExpandEnvironmentVariables(If(_context?.INI_DiscussInkyPathLocal, ""))
 
         If String.IsNullOrWhiteSpace(localPath) Then
-            ShowCustomMessageBox("INI_DiscussInkyPathLocal is not configured in your settings.")
+            ShowCustomMessageBox("'DiscussInkyPathLocal' is not configured in your settings." & vbCrLf & vbCrLf &
+                                 "To create a local persona library, configure this path in your configuration file. " &
+                                 "Sample files are available via 'Get Sample Files' in the settings menu.")
             Return
         End If
 
@@ -1746,7 +1771,7 @@ Public Class DiscussInky
         Dim missionPath = GetMissionFilePath()
 
         If String.IsNullOrWhiteSpace(missionPath) Then
-            ShowCustomMessageBox("No persona library is configured. Missions require a persona library path (INI_DiscussInkyPathLocal or INI_DiscussInkyPath).")
+            ShowCustomMessageBox("No persona library is configured. Missions require a persona library path ('DiscussInkyPathLocal' or 'DiscussInkyPath').")
             Return
         End If
 
@@ -2388,6 +2413,13 @@ Public Class DiscussInky
         End If
 
         AppendSystemMessage(sb.ToString())
+
+        ' Show persona library hint if no paths are configured
+        If _noPersonaLibraryConfigured Then
+            AppendSystemMessage("No persona library is configured — using the default discussion partner. " &
+                               "To add custom personas, define 'DiscussInkyPath' or 'DiscussInkyPathLocal' in your configuration file " &
+                               "(sample files are available via 'Get Sample Files' in the settings menu).")
+        End If
     End Sub
 
     ''' <summary>

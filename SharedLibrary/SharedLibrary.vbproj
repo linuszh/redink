@@ -204,6 +204,7 @@
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
+    <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.IO.Pipelines, Version=10.0.0.3, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.IO.Pipelines.10.0.3\lib\net462\System.IO.Pipelines.dll</HintPath>
     </Reference>
@@ -389,6 +390,7 @@
     <Compile Include="Code\Core\Various\SharedLogger.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.FileImporter.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.ProcessParameterPlaceholders.vb" />
+    <Compile Include="Code\Core\Various\SharedMethods.SandboxedReaders.vb" />
     <Compile Include="Code\Core\Various\SharedMethods.VarHelpers.vb" />
     <Compile Include="Code\Core\UI\SplashScreenWorks.vb">
       <SubType>Form</SubType>

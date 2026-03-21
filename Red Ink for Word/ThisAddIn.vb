@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 15.3.2026
+' 21.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.150326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210326" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -158,20 +158,16 @@ Partial Public Class ThisAddIn
 
     ' Human-readable descriptions for each OpenAI voice.
     Private Shared ReadOnly OpenAIDescriptions As New Dictionary(Of String, String) From {
-    {"alloy", "Female: Versatile and balanced"},
-    {"ash", "Male: Clear and precise"},
-    {"ballad", "Male: Melodic and smooth"},
-    {"coral", "Female: Warm and friendly"},
-    {"echo", "Male: Warm and natural"},
-    {"fable", "Male: Engaging storyteller"},
-    {"nova", "Female: Bright and energetic"},
-    {"onyx", "Male: Deep and authoritative"},
-    {"sage", "Male: Calm and thoughtful"},
-    {"shimmer", "Female: Clear and expressive"},
-    {"verse", "Male: Versatile and expressive"}
+    {"alloy", "Neutral: balanced and versatile (default, general purpose)"},
+    {"echo", "Male: warm, natural, conversational"},
+    {"fable", "Male: expressive storyteller (ideal for narration)"},
+    {"onyx", "Male: deep, authoritative, strong presence"},
+    {"nova", "Female: bright, energetic, modern"},
+    {"shimmer", "Female: clear, expressive, polished"}
 }
 
-    Private Const TTS_OpenAI_Model = "gpt-4o-mini-tts"
+
+    Private Const TTS_OpenAI_Model = "tts-1-hd"
 
     Private Shared ReadOnly OpenAIVoices As String() = OpenAIDescriptions.Keys.ToArray()
     Private Shared ReadOnly OpenAILanguages As String() = {

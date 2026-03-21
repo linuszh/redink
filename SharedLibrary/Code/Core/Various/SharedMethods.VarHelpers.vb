@@ -600,6 +600,45 @@ Namespace SharedLibrary
             Return upperFirst & value.Substring(1)
         End Function
 
+        ''' <summary>
+        ''' Checks whether an ImageGeneration special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="hasObjectCall">
+        ''' Output: <c>True</c> if the ImageGeneration model also has an APICall_Object configured,
+        ''' indicating it supports file/image input (e.g. for image editing).
+        ''' </param>
+        ''' <returns><c>True</c> if an ImageGeneration model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsImageGenerationAvailable(context As SharedContext.ISharedContext,
+                                                          Optional ByRef hasObjectCall As Boolean = False) As Boolean
+            hasObjectCall = False
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "ImageGeneration")
+                If available Then
+                    hasObjectCall = Not String.IsNullOrWhiteSpace(context.INI_APICall_Object_2)
+                End If
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
     End Class
 
 End Namespace
+

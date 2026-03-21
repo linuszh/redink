@@ -798,7 +798,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
         "APIDebug", "AutoPilotAutoStart", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
             Return booleanSettings.Contains(settingKey)
@@ -1052,6 +1052,8 @@ Namespace SharedLibrary
                     Return context.INI_NoLocalConfig.ToString()
                 Case "ForceDrawioLocal"
                     Return context.INI_ForceDrawioLocal.ToString()
+                Case "AllowLegacyDocFiles"
+                    Return context.INI_AllowLegacyDocFiles.ToString()
                 Case "UpdateCheckInterval"
                     Return context.INI_UpdateCheckInterval.ToString()
                 Case "UpdatePath"
@@ -1356,6 +1358,8 @@ Namespace SharedLibrary
                     context.INI_NoLocalConfig = Boolean.Parse(value)
                 Case "ForceDrawioLocal"
                     context.INI_ForceDrawioLocal = Boolean.Parse(value)
+                Case "AllowLegacyDocFiles"
+                    context.INI_AllowLegacyDocFiles = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
                     context.INI_UpdateCheckInterval = Integer.Parse(value)
                 Case "UpdatePath"
@@ -1673,6 +1677,7 @@ Namespace SharedLibrary
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
                     {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
+                    {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
@@ -1755,6 +1760,7 @@ Namespace SharedLibrary
                     {"SP_Redact", context.SP_Redact},
                     {"SP_CheckforII", context.SP_CheckforII},
                     {"SP_Extract", context.SP_Extract},
+                    {"SP_ExtractBuilder", context.SP_ExtractBuilder},
                     {"SP_ExtractSchema", context.SP_ExtractSchema},
                     {"SP_MergeDateRows", context.SP_MergeDateRows},
                     {"SP_ContextSearch", context.SP_ContextSearch},
@@ -1998,6 +2004,7 @@ Namespace SharedLibrary
                 {"SP_Redact", Default_SP_Redact},
                 {"SP_CheckforII", Default_SP_CheckforII},
                 {"SP_Extract", Default_SP_Extract},
+                {"SP_ExtractBuilder", Default_SP_ExtractBuilder},
                 {"SP_ExtractSchema", Default_SP_ExtractSchema},
                 {"SP_MergeDateRows", Default_SP_MergeDateRows},
                 {"SP_ContextSearch", Default_SP_ContextSearch},
@@ -3049,6 +3056,7 @@ Namespace SharedLibrary
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
+            variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
             variableValues.Add("HelpMeInkyPath", context.INI_HelpMeInkyPath)
@@ -3132,6 +3140,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Redact", context.SP_Redact)
             variableValues.Add("SP_CheckforII", context.SP_CheckforII)
             variableValues.Add("SP_Extract", context.SP_Extract)
+            variableValues.Add("SP_ExtractBuilder", context.SP_ExtractBuilder)
             variableValues.Add("SP_ExtractSchema", context.SP_ExtractSchema)
             variableValues.Add("SP_MergeDateRows", context.SP_MergeDateRows)
             variableValues.Add("SP_ContextSearch", context.SP_ContextSearch)
@@ -3317,6 +3326,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Redact") Then context.SP_Redact = CStr(updatedValues("SP_Redact"))
                 If updatedValues.ContainsKey("SP_CheckforII") Then context.SP_CheckforII = CStr(updatedValues("SP_CheckforII"))
                 If updatedValues.ContainsKey("SP_Extract") Then context.SP_Extract = CStr(updatedValues("SP_Extract"))
+                If updatedValues.ContainsKey("SP_ExtractBuilder") Then context.SP_ExtractBuilder = CStr(updatedValues("SP_ExtractBuilder"))
                 If updatedValues.ContainsKey("SP_ExtractSchema") Then context.SP_ExtractSchema = CStr(updatedValues("SP_ExtractSchema"))
                 If updatedValues.ContainsKey("SP_MergeDateRows") Then context.SP_MergeDateRows = CStr(updatedValues("SP_MergeDateRows"))
                 If updatedValues.ContainsKey("SP_ContextSearch") Then context.SP_ContextSearch = CStr(updatedValues("SP_ContextSearch"))
@@ -3390,6 +3400,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
                 If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
+                If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                 If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
                 If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
