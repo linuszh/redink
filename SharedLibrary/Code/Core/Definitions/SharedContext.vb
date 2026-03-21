@@ -101,6 +101,8 @@ Namespace SharedLibrary
             Property INI_APIDebug As Boolean
             Property INI_UsageRestrictions As String
             Property INI_LogPath As String
+            Property INI_AllowLegacyDocFiles As Boolean
+
             Property INI_AutoPilotAutoStart As Boolean
             Property INI_Language1 As String
             Property INI_Language2 As String
@@ -190,6 +192,7 @@ Namespace SharedLibrary
             Property SP_SwitchParty_Document As String
             Property SP_Anonymize_Document As String
             Property SP_Extract As String
+            Property SP_ExtractBuilder As String
             Property SP_ExtractSchema As String
             Property SP_MergeDateRows As String
             Property SP_Rename As String
@@ -406,6 +409,7 @@ Namespace SharedLibrary
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
         Public Property INI_LogPath As String Implements ISharedContext.INI_LogPath
+        Public Property INI_AllowLegacyDocFiles As Boolean Implements ISharedContext.INI_AllowLegacyDocFiles
         Public Property INI_Language1 As String Implements ISharedContext.INI_Language1
         Public Property INI_Language2 As String Implements ISharedContext.INI_Language2
         Public Property INI_MarkdownConvert As Boolean Implements ISharedContext.INI_MarkdownConvert
@@ -493,6 +497,7 @@ Namespace SharedLibrary
         Public Property SP_SwitchParty_Document As String Implements ISharedContext.SP_SwitchParty_Document
         Public Property SP_Anonymize_Document As String Implements ISharedContext.SP_Anonymize_Document
         Public Property SP_Extract As String Implements ISharedContext.SP_Extract
+        Public Property SP_ExtractBuilder As String Implements ISharedContext.SP_ExtractBuilder
         Public Property SP_ExtractSchema As String Implements ISharedContext.SP_ExtractSchema
 
         Public Property SP_MergeDateRows As String Implements ISharedContext.SP_MergeDateRows

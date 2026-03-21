@@ -1583,15 +1583,37 @@ Partial Public Class ThisAddIn
                                 st.AgentModeEnabled = True
                                 _chatAgentModeEnabled = True
 
-                                ' Auto-enable tooling (sources) if tools are available
-                                If Not st.ToolingEnabled Then
-                                    Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
-                                                              (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
-                                    If hasTools Then
-                                        st.ToolingEnabled = True
-                                        _chatToolingEnabled = True
+                                ' Ensure sources are actually selected (prompt user if needed)
+                                If Not EnsureToolsSelected(st) Then
+                                    ' No persisted tools — prompt user to select
+                                    Dim selectedTools As List(Of ModelConfig) = Nothing
+                                    Try
+                                        Await SwitchToUi(Sub()
+                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName)
+                                                         End Sub).ConfigureAwait(False)
+                                    Catch
+                                    End Try
+
+                                    If selectedTools IsNot Nothing AndAlso selectedTools.Count > 0 Then
+                                        _selectedToolsForChat = selectedTools
+                                        st.SelectedToolNames = selectedTools.Select(Function(tl) tl.ToolName).ToList()
+                                    Else
+                                        ' User cancelled — abort the toggle
+                                        st.AgentModelActive = False
+                                        st.SelectedModelKey = st.PreAgentModelKey
+                                        st.UseSecondApi = st.PreAgentUseSecondApi
+                                        st.PreAgentModelKey = ""
+                                        st.PreAgentUseSecondApi = False
+                                        st.AgentModeEnabled = False
+                                        _chatAgentModeEnabled = False
+                                        SaveInkyState(st)
+                                        Return JsonErr($"Agent model requires {ToolFriendlyName.ToLower()} to be selected. Please select at least one source and try again.")
                                     End If
                                 End If
+
+                                ' Force-enable tooling since we verified tools exist above
+                                st.ToolingEnabled = True
+                                _chatToolingEnabled = True
 
                                 Try
                                     st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
@@ -1609,8 +1631,13 @@ Partial Public Class ThisAddIn
                                 SaveInkyState(st)
 
                                 Dim models = Await GetModelListForBrowserAsync(st)
-                                Dim supTooling As Boolean = False
-                                Dim effTooling As Boolean = SyncToolingState(st, supTooling)
+
+                                ' Do NOT call SyncToolingState here — it wipes _selectedToolsForChat
+                                ' and may fail to reload it, undoing the agent model activation.
+                                ' We already know the agent model supports tooling (verified above)
+                                ' and tools are selected (EnsureToolsSelected passed).
+                                Dim supTooling As Boolean = True
+                                Dim effTooling As Boolean = True
 
                                 Return JsonOk(New With {
                                     .ok = True,
@@ -2231,6 +2258,20 @@ Partial Public Class ThisAddIn
                                     ' (2) Run LLM - with or without tooling
                                     Dim stForTooling = LoadInkyState()
                                     Dim useAgentMode As Boolean = _chatAgentModeEnabled AndAlso stForTooling.AgentModeEnabled AndAlso Not _apActive
+
+                                    ' Safety: reload _selectedToolsForChat from persisted state if it was
+                                    ' unexpectedly cleared (e.g. by SyncToolingState in another request)
+                                    If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
+                                        If stForTooling.SelectedToolNames IsNot Nothing AndAlso stForTooling.SelectedToolNames.Count > 0 Then
+                                            Try
+                                                Dim availTools = GetAvailableTools()
+                                                Dim nameSet = New HashSet(Of String)(stForTooling.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
+                                                _selectedToolsForChat = availTools.Where(Function(tl) Not String.IsNullOrWhiteSpace(tl.ToolName) AndAlso nameSet.Contains(tl.ToolName)).ToList()
+                                            Catch
+                                            End Try
+                                        End If
+                                    End If
+
                                     Dim agentToolsForJob As List(Of ModelConfig) = Nothing
 
                                     ' (t) trigger: override model selection for this single call

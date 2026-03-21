@@ -183,6 +183,7 @@ Namespace SharedLibrary
                 context.SP_Redact = If(configDict.ContainsKey("SP_Redact"), configDict("SP_Redact"), Default_SP_Redact)
                 context.SP_CheckforII = If(configDict.ContainsKey("SP_CheckforII"), configDict("SP_CheckforII"), Default_SP_CheckforII)
                 context.SP_Extract = If(configDict.ContainsKey("SP_Extract"), configDict("SP_Extract"), Default_SP_Extract)
+                context.SP_ExtractBuilder = If(configDict.ContainsKey("SP_ExtractBuilder"), configDict("SP_ExtractBuilder"), Default_SP_ExtractBuilder)
                 context.SP_ExtractSchema = If(configDict.ContainsKey("SP_ExtractSchema"), configDict("SP_ExtractSchema"), Default_SP_ExtractSchema)
                 context.SP_MergeDateRows = If(configDict.ContainsKey("SP_MergeDateRows"), configDict("SP_MergeDateRows"), Default_SP_MergeDateRows)
                 context.SP_ContextSearch = If(configDict.ContainsKey("SP_ContextSearch"), configDict("SP_ContextSearch"), Default_SP_ContextSearch)
@@ -277,6 +278,7 @@ Namespace SharedLibrary
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
+                context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
 
@@ -348,6 +350,7 @@ Namespace SharedLibrary
                 SharedMethods.INI_LogoPath_Cached = context.INI_LogoPath
                 SharedMethods.INI_LogoPathMedium_Cached = context.INI_LogoPathMedium
                 SharedMethods.INI_LogoPathLarge_Cached = context.INI_LogoPathLarge
+                SharedMethods.INI_AllowLegacyDocFiles_Cached = context.INI_AllowLegacyDocFiles
 
                 ' Apply administrator-configured registry fixes (e.g., resiliency hardening).
                 ApplyRegistryFixes(configDict, context)

@@ -211,13 +211,27 @@ Partial Public Class ThisAddIn
                 Dim answer As Integer = ShowCustomYesNoBox("You have not selected any text. Do you instead want to analyze text from a document file or Powerpoint presentation?", "Yes", "No, proceed with this text", AN & " Check for Identifiable Information")
                 If answer = 1 Then
                     ' Configure supported file types
-                    DragDropFormLabel = "Document files (.txt, .docx, .pdf) or Powerpoint (.pptx)."
-                    DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.pptx|" &
-                             "Text Files (*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm)|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                             "Rich Text Files (*.rtf)|*.rtf|" &
-                             "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
-                             "PDF Files (*.pdf)|*.pdf|" &
-                             "Powerpoint Files (*.pptx)|*.pptx"
+                    If INI_AllowLegacyDocFiles Then
+                        DragDropFormLabel = "Document files (.txt, .doc, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                        DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml"
+                    Else
+                        DragDropFormLabel = "Document files (.txt, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                        DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.docx)|*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml"
+                    End If
 
                     Dim FilePath As String = GetFileName()
                     DragDropFormLabel = ""

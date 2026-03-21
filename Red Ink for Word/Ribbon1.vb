@@ -445,4 +445,14 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Stamper_Click invoked")
         Globals.ThisAddIn.StampExhibitPDF()
     End Sub
+
+    Private Sub RI_Image_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Image.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_GenerateImage_Click invoked")
+        Globals.ThisAddIn.GenerateImage()
+    End Sub
+
+    Private Sub RI_Tabular_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Tabular.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Tabular_Click invoked")
+        Globals.ThisAddIn.TabularOverview()
+    End Sub
 End Class

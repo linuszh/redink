@@ -246,8 +246,13 @@ Partial Public Class ThisAddIn
     Public Async Sub CompleteWordDocumentTables()
         Dim selectedPath As String = ""
 
-        Globals.ThisAddIn.DragDropFormLabel = "Select a Word document with tables to complete"
-        Globals.ThisAddIn.DragDropFormFilter = "Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc"
+        If INI_AllowLegacyDocFiles Then
+            Globals.ThisAddIn.DragDropFormLabel = "Select a Word document with tables to complete"
+            Globals.ThisAddIn.DragDropFormFilter = "Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc"
+        Else
+            Globals.ThisAddIn.DragDropFormLabel = "Select a Word document with tables to complete"
+            Globals.ThisAddIn.DragDropFormFilter = "Word Documents (*.docx)|*.docx"
+        End If
 
         Try
             Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
@@ -267,8 +272,12 @@ Partial Public Class ThisAddIn
         End If
 
         Dim ext As String = Path.GetExtension(selectedPath).ToLowerInvariant()
+        If ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+            ShowCustomMessageBox("The .doc format is disabled for security. Please convert to .docx first.")
+            Exit Sub
+        End If
         If ext <> ".doc" AndAlso ext <> ".docx" Then
-            ShowCustomMessageBox($"File type '{ext}' is not supported. Please select a .doc or .docx file.")
+            ShowCustomMessageBox($"File type '{ext}' is not supported. Please select a .docx file.")
             Exit Sub
         End If
 

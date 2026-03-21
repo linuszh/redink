@@ -1067,8 +1067,8 @@
     },
     {
       "id": "autopilot",
-      "title": "AutoPilot and Draw.io Restrictions",
-      "description": "Controls which users may use AutoPilot and whether Draw.io must run in local-only mode.",
+      "title": "AutoPilot and Other Restrictions",
+      "description": "Controls which users may use AutoPilot, whether Draw.io must run in local-only mode and whether legacy .doc files may be processed.",
       "fields": [
         {
           "key": "AutoPilot",
@@ -1090,6 +1090,13 @@
           "type": "boolean",
           "default": "True",
           "description": "Enable this to force Draw.io to run only in the local/offline mode offered by Red Ink, which helps protect confidential information. Example: True. [ForceDrawioLocal]"
+        },
+        {
+          "key": "AllowLegacyDocFiles",
+          "label": "Allow Legacy .doc Files",
+          "type": "boolean",
+          "default": "False",
+          "description": "Controls whether legacy .doc (binary Word) files can be opened via COM Interop. Set this to False to block .doc processing for security hardening, which prevents OLE and macro-based attacks. When disabled, .doc files are rejected with a security message. Note that .docx files (OpenXML ZIP) are always permitted as they are processed via sandboxed XML parsing. Example: False. [AllowLegacyDocFiles]"
         }
       ]
     },

@@ -75,6 +75,8 @@
 '  - create_code_file
 '  - extract_data_from_attachments
 '  - redact_pdf
+'  - create_audio_file
+'  - generate_image
 '  - report_inability
 '
 ' Notes:
@@ -97,24 +99,12 @@ Imports System.Threading.Tasks
 Imports System.Xml
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
-    ''' <summary>
-    ''' Tool name for binary attachment description or transcription.
-    ''' </summary>
-    Private Const AP_Tool_DescribeBinary As String = "describe_binary_attachment"
-
-    ''' <summary>
-    ''' Supported binary extensions that can be passed as FileObject to the LLM.
-    ''' </summary>
-    Private Shared ReadOnly AP_BinaryExtensions As String() = {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",
-        ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma",
-        ".mp4", ".avi", ".mov", ".mkv", ".webm"
-    }
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL NAMES (constants for matching)
@@ -130,6 +120,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CompareWordDocs As String = "compare_word_documents"
     Private Const AP_Tool_ReadWordDocDetails As String = "read_word_document_details"
     Private Const AP_Tool_CreatePdfFromText As String = "create_pdf_from_text"
+    Private Const AP_Tool_DescribeBinary As String = "describe_binary_attachment"
     Private Const AP_Tool_ExtractExcelData As String = "extract_excel_data"
     Private Const AP_Tool_SplitPdf As String = "split_pdf"
     Private Const AP_Tool_AddPdfWatermark As String = "add_pdf_watermark"
@@ -145,6 +136,8 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_ExtractDataFromAttachments As String = "extract_data_from_attachments"
     Private Const AP_Tool_RedactPdf As String = "redact_pdf"
     Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
+    Private Const AP_Tool_CreateAudioFile As String = "create_audio_file"
+    Private Const AP_Tool_GenerateImage As String = "generate_image"
     Private Const AP_Tool_ReportInability As String = "report_inability"
 
 
@@ -560,7 +553,7 @@ Partial Public Class ThisAddIn
                 "Also supports formulas, multiple sheets, conditional formatting, charts, VBA macros, and more. " &
                 "STYLING RULES (apply to EVERY spreadsheet unless user explicitly asks for plain output): " &
                 "1. HEADER ROW: bg_color '#4472C4', font_color '#FFFFFF', bold, font_size 12, h_align 'center', border 'all-thin'. " &
-                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows. " &
+                                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows, font_color '#000000' (black) — NEVER use '#FFFFFF' on data rows. " &
                 "3. COLUMN WIDTHS: MUST set for every column. Short labels 12-15, names/descriptions 25-35, numbers/dates 12-18. " &
                 "4. ROW HEIGHTS: header row 28. " &
                 "5. NUMBER FORMATS: '#,##0.00' for currency, '0%' for percent, 'dd/mm/yyyy' for dates, '#,##0' for integers. " &
@@ -646,10 +639,14 @@ Partial Public Class ThisAddIn
                 "Provide slide data as a JSON array of slide objects. Each slide object has: " &
                 "'title' (string, the slide title), 'body' (string, the main content — use newlines for bullet points), " &
                 "and optionally 'notes' (string, speaker notes for that slide). " &
-                "The first slide is typically used as a title slide with a short subtitle in 'body'.",
+                "The first slide is typically used as a title slide with a short subtitle in 'body'. " &
+                "TEMPLATE SUPPORT: If the user provides a .pptx attachment to use as a template (or references an existing presentation), " &
+                "pass its filename as 'template_attachment_name'. New slides will be appended to the template using its slide master/layouts. " &
+                "When using a template, the existing slides are preserved and new slides are added at the end.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
                 """description"":""Creates a new PowerPoint presentation (.pptx) with slides. Each slide has a title, body text (use newlines for bullets), and optional speaker notes. " &
+                "Supports using an existing .pptx as template via template_attachment_name — existing slides are kept, new slides appended. " &
                 "Use when the user asks to create a presentation, slide deck, or pitch deck.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """slides"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
@@ -658,7 +655,9 @@ Partial Public Class ThisAddIn
                 """notes"":{""type"":""string"",""description"":""Optional speaker notes for this slide""}" &
                 "}},""description"":""Array of slide objects defining the presentation""}," &
                 """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Presentation')""}," &
-                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}" &
+                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}," &
+                """template_attachment_name"":{""type"":""string"",""description"":""Filename of an existing .pptx attachment to use as template. " &
+                "Existing slides are preserved, new slides are appended using the template's slide masters and layouts.""}" &
                 "},""required"":[""slides""]}}"
         })
 
@@ -848,6 +847,119 @@ Partial Public Class ThisAddIn
                 "},""required"":[""attachment_name"",""elements""]}}"
         })
 
+        ' ── create_audio_file ──
+        AB_DetectTTSEngines()
+        If AB_googleAvailable OrElse AB_openAIAvailable Then
+            Dim engineHint As String = ""
+            If AB_googleAvailable AndAlso AB_openAIAvailable Then
+                engineHint = " Both Google and OpenAI TTS engines are available. " &
+                    "For non-English text (German, French, etc.), prefer engine='google' for native-sounding pronunciation. " &
+                    "For English text, prefer engine='openai' for natural-sounding voices. " &
+                    "If the user explicitly requests an engine, honour their choice."
+            ElseIf AB_googleAvailable Then
+                engineHint = " Only Google TTS is available."
+            Else
+                engineHint = " Only OpenAI TTS is available."
+            End If
+
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
+                .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
+                    "Supports two modes: " &
+                    "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
+                    "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
+                    "(2) 'audiobook' — reads the text paragraph by paragraph with alternating voices for variety. " &
+                    "Use this when the user wants a straightforward narration or audio version of a document. " &
+                    "The text parameter accepts the full text to convert. For document attachments, first use " &
+                    "read_attachment to extract the text, then pass the extracted text to this tool. " &
+                    "If the user specifies a particular voice (e.g., 'use the voice alloy'), pass it as voice_a or voice_b. " &
+                    "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
+                    "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
+                    "IMPORTANT: The 'language' parameter MUST match the language of the text content (e.g. 'de-DE' for German, 'fr-FR' for French). " &
+                    "This is critical for Google TTS to select the correct voice and for proper pronunciation." &
+                    engineHint &
+                    " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
+                    "Output is an MP3 file attached to the reply.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_CreateAudioFile & """," &
+                    """description"":""Generates an MP3 audio file from text using text-to-speech. " &
+                    "Supports 'podcast' mode (two-speaker dialogue generated by LLM) and 'audiobook' mode " &
+                    "(paragraph-by-paragraph narration with alternating voices). " &
+                    "For document attachments, first extract text using read_attachment, then pass it here. " &
+                    "CRITICAL: Set 'language' to match the text language (e.g. 'de-DE' for German). " &
+                    "For non-English text, set engine='google' for native pronunciation.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """text"":{""type"":""string"",""description"":""The full text content to convert to audio. " &
+                    "For large documents, pass the complete extracted text.""}," &
+                    """mode"":{""type"":""string"",""enum"":[""podcast"",""audiobook""]," &
+                    """description"":""Audio generation mode. 'podcast' = LLM-generated two-speaker dialogue. " &
+                    "'audiobook' = direct paragraph-by-paragraph narration. Default: 'audiobook'""}," &
+                    """language"":{""type"":""string"",""description"":""Language code for TTS (e.g., 'en-US', 'de-DE', 'fr-FR', 'en', 'de'). " &
+                    "MUST match the language of the text content. This is critical for correct pronunciation. Default: 'en-US'""}," &
+                    """engine"":{""type"":""string"",""enum"":[""google"",""openai"",""auto""]," &
+                    """description"":""TTS engine to use. 'google' = Google Cloud TTS (best for non-English languages). " &
+                    "'openai' = OpenAI TTS (best for English). 'auto' = automatically select based on language. Default: 'auto'""}," &
+                    """voice_a"":{""type"":""string"",""description"":""Primary voice name (host in podcast mode, narrator A in audiobook). " &
+                    "If omitted, a default voice is used.""}," &
+                    """voice_b"":{""type"":""string"",""description"":""Secondary voice name (guest in podcast mode, narrator B in audiobook). " &
+                    "If omitted, a default voice is used.""}," &
+                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). " &
+                    "Ignored in audiobook mode. Default: '5 minutes'""}," &
+                    """instructions"":{""type"":""string"",""description"":""Specific instructions for the podcast script generation (e.g., 'Focus on the financial details', 'Be humorous', 'Explain for a child'). Optional.""}," &
+                    """context"":{""type"":""string"",""description"":""Additional context or background info to help generating the podcast script. Optional.""}," &
+                    """output_filename"":{""type"":""string"",""description"":""Filename for the output MP3 file (default: 'audiobook.mp3')""}" &
+                    "},""required"":[""text""]}}"
+            })
+        End If
+
+        ' ── generate_image ──
+        ' Only register if an ImageGeneration special task model is configured
+        Dim imgModelHasObjectCall As Boolean = False
+        Dim imgModelAvailable As Boolean = IsImageGenerationAvailable(_context, imgModelHasObjectCall)
+
+        If imgModelAvailable Then
+            Dim imageEditHint As String = ""
+            Dim imageEditParam As String = ""
+            If imgModelHasObjectCall Then
+                imageEditHint = " Supports image editing/modification: if the user provides a reference image " &
+                    "(e.g. an attached photo to modify, a logo to restyle, a sketch to refine), pass its filename " &
+                    "as 'image_attachment_name'. The reference image is sent alongside the description to the model. " &
+                    "Only use this when the user explicitly wants to modify, edit, or base the generation on an existing image."
+                imageEditParam = """image_attachment_name"":{""type"":""string"",""description"":""Optional: filename of an existing image attachment to use as reference for editing or modification. " &
+                    "The model will use this image as a base and apply the changes described in 'description'. " &
+                    "Only use when the user wants to modify, restyle, or build upon an existing image.""},"
+            End If
+
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_GenerateImage,
+                .ModelDescription = "Generate Image (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_GenerateImage & ": Generates an image from a text description using an image generation model. " &
+                    "Use this when the user asks you to create, generate, draw, design, or produce an image, picture, illustration, " &
+                    "diagram, logo, icon, or any visual content. " &
+                    "The 'description' parameter should contain ONLY the image description — do NOT wrap it in any system prompt " &
+                    "or additional instructions. Pass the user's visual intent directly as the description. " &
+                    "The generated image is saved as a file and attached to the reply. " &
+                    "You can optionally specify a filename for the output image." &
+                    imageEditHint,
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_GenerateImage & """," &
+                    """description"":""Generates an image from a text description using an AI image generation model. " &
+                    "Use when the user wants to create, generate, draw, or design any visual content (image, illustration, diagram, logo, etc.). " &
+                    "Pass the image description directly — no wrapping prompt needed." &
+                    If(imgModelHasObjectCall, " Also supports editing/modifying an existing image when image_attachment_name is provided.", "") & """," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """description"":{""type"":""string"",""description"":""A clear, detailed description of the image to generate. " &
+                    "Pass the user's visual intent directly. Do not add system instructions or prompt wrappers.""}," &
+                    imageEditParam &
+                    """output_filename"":{""type"":""string"",""description"":""Optional filename for the output image (default: auto-generated). " &
+                    "Do not include an extension — the format is determined by the model.""}" &
+                    "},""required"":[""description""]}}"
+            })
+        End If
+
         ' ── report_inability ──
 
         tools.Add(New ModelConfig() With {
@@ -946,6 +1058,10 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_OverlayPdf
                 Return Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreateAudioFile
+                Return Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+            Case AP_Tool_GenerateImage
+                Return Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -1074,7 +1190,140 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Reads text from a single attachment, using cache when available.
     ''' </summary>
+    ''' 
+    ''' <summary>
+    ''' Reads text from a single attachment, using cache when available.
+    ''' Prefers sandboxed (COM-free) readers for Office formats and mail files.
+    ''' </summary>
+    ''' <summary>
+    ''' Reads text from a single attachment, using cache when available.
+    ''' Prefers sandboxed (COM-free) readers for OpenXML and mail formats.
+    ''' Respects <see cref="INI_AllowLegacyDocFiles"/> for .doc files.
+    ''' </summary>
     Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
+        ' Return cache if available
+        If att.CachedText IsNot Nothing Then Return att.CachedText
+
+        If att.TempFilePath Is Nothing OrElse Not File.Exists(att.TempFilePath) Then Return Nothing
+
+        Dim text As String = Nothing
+        Dim extracted As Boolean = False
+
+        ' ── Sandboxed readers first (no COM interop) ──
+        Dim ext = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
+        Try
+            Select Case ext
+                Case ".docx"
+                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".xlsx"
+                    text = SharedMethods.ReadXlsxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".pptx"
+                    text = SharedMethods.ReadPptxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".eml"
+                    text = SharedMethods.ReadEmlSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".msg"
+                    text = SharedMethods.ReadMsgSandboxed(att.TempFilePath,
+                        Function(msgPath As String, tmpDir As String, ByRef nested As List(Of String)) As String
+                            nested = New List(Of String)()
+                            Try
+                                Dim ns = Application.GetNamespace("MAPI")
+                                Dim sharedItem = ns.OpenSharedItem(msgPath)
+                                Dim mi = TryCast(sharedItem, Microsoft.Office.Interop.Outlook.MailItem)
+                                If mi IsNot Nothing Then
+                                    Dim bodyResult = BuildEmbeddedMailText(mi)
+                                    ' Save nested attachments for recursive reading
+                                    Try
+                                        For j As Integer = 1 To mi.Attachments.Count
+                                            Dim nestedAtt = mi.Attachments(j)
+                                            Try
+                                                If nestedAtt.Type = Microsoft.Office.Interop.Outlook.OlAttachmentType.olEmbeddeditem Then
+                                                    Dim nestedName = If(nestedAtt.FileName, $"embedded_{j}.msg")
+                                                    If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
+                                                        nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
+                                                    End If
+                                                    Dim nestedPath = Path.Combine(tmpDir, nestedName)
+                                                    nestedAtt.SaveAsFile(nestedPath)
+                                                    nested.Add(nestedPath)
+                                                Else
+                                                    Dim nestedFileName = nestedAtt.FileName
+                                                    If Not String.IsNullOrWhiteSpace(nestedFileName) Then
+                                                        Dim nestedPath = Path.Combine(tmpDir, nestedFileName)
+                                                        Dim nc = 1
+                                                        While File.Exists(nestedPath)
+                                                            nestedPath = Path.Combine(tmpDir,
+                                                                Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" &
+                                                                Path.GetExtension(nestedFileName))
+                                                            nc += 1
+                                                        End While
+                                                        nestedAtt.SaveAsFile(nestedPath)
+                                                        nested.Add(nestedPath)
+                                                    End If
+                                                End If
+                                            Catch
+                                            End Try
+                                        Next
+                                    Catch
+                                    End Try
+                                    Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(mi) : Catch : End Try
+                                    Return bodyResult
+                                End If
+                                If sharedItem IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(sharedItem) : Catch : End Try
+                            Catch
+                            End Try
+                            Return Nothing
+                        End Function)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".doc"
+                    If Not INI_AllowLegacyDocFiles Then
+                        text = "Error: .doc format disabled for security."
+                        extracted = False
+                    End If
+                    ' Fall through to COM-based TryExtractOfficeText below
+            End Select
+        Catch
+        End Try
+
+        ' ── Fallback: Office COM interop for .doc, .xls, .ppt, .rtf (legacy formats) ──
+        If Not extracted AndAlso ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles) Then
+            Try
+                Dim label As String = Nothing
+                extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+            Catch
+            End Try
+        End If
+
+        ' ── Fallback: text-like files ──
+        If Not extracted Then
+            Try
+                Dim label As String = Nothing
+                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+            Catch
+            End Try
+        End If
+
+        ' ── Fallback: PDF ──
+        If Not extracted AndAlso ext = ".pdf" Then
+            Try
+                text = Await SharedMethods.ReadPdfAsText(att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=False, AskUser:=False)
+                extracted = Not String.IsNullOrWhiteSpace(text)
+            Catch
+            End Try
+        End If
+
+        If extracted AndAlso Not String.IsNullOrWhiteSpace(text) Then
+            att.CachedText = text
+            Return text
+        End If
+
+        Return Nothing
+    End Function
+
+
+    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
         ' Return cache if available
         If att.CachedText IsNot Nothing Then Return att.CachedText
 
@@ -1438,7 +1687,22 @@ Partial Public Class ThisAddIn
 
             Dim presTitle = GetArgString(toolCall.Arguments, "title")
 
-            context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)")
+            ' ── Template support ──
+            Dim templateName = GetArgString(toolCall.Arguments, "template_attachment_name")
+            Dim templatePath As String = Nothing
+            If Not String.IsNullOrWhiteSpace(templateName) Then
+                Dim templateAtt = FindAttachment(templateName)
+                If templateAtt IsNot Nothing AndAlso templateAtt.TempFilePath IsNot Nothing AndAlso
+                   File.Exists(templateAtt.TempFilePath) Then
+                    templatePath = templateAtt.TempFilePath
+                    ApDashboardLog($"📊 Using template: {templateName}", "step")
+                Else
+                    ApDashboardLog($"⚠ Template '{templateName}' not found, creating from scratch", "warn")
+                End If
+            End If
+
+            context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)" &
+                        If(templatePath IsNot Nothing, $" from template: {templateName}", ""))
             ApDashboardLog($"📊 Creating PowerPoint: {fileName}", "step")
 
             ' ppLayoutText = 2, ppLayoutTitleOnly = 11, ppLayoutBlank = 12, ppLayoutTitle = 1
@@ -1461,7 +1725,12 @@ Partial Public Class ThisAddIn
                                                        weOwnApp = True
                                                    End Try
 
-                                                   pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
+                                                   If templatePath IsNot Nothing Then
+                                                       ' Open the template as a new presentation (copy semantics)
+                                                       pres = app.Presentations.Open(templatePath, ReadOnly:=0, Untitled:=-1, WithWindow:=0)
+                                                   Else
+                                                       pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
+                                                   End If
 
                                                    ' Set presentation title metadata if provided
                                                    If Not String.IsNullOrWhiteSpace(presTitle) Then
@@ -1471,7 +1740,10 @@ Partial Public Class ThisAddIn
                                                        End Try
                                                    End If
 
-                                                   Dim slideIndex As Integer = 0
+                                                   ' Determine starting index: append after existing slides when using template
+                                                   Dim existingSlideCount As Integer = CInt(pres.Slides.Count)
+                                                   Dim slideIndex As Integer = existingSlideCount
+
                                                    For Each slideObj As JObject In slidesArray
                                                        slideIndex += 1
 
@@ -1479,8 +1751,14 @@ Partial Public Class ThisAddIn
                                                        Dim body = slideObj.Value(Of String)("body")
                                                        Dim notes = slideObj.Value(Of String)("notes")
 
-                                                       ' First slide uses title layout, rest use text layout
-                                                       Dim layoutType As Integer = If(slideIndex = 1, ppLayoutTitle, ppLayoutText)
+                                                       ' First NEW slide uses title layout only if there are no existing slides,
+                                                       ' otherwise use text layout for all new slides
+                                                       Dim layoutType As Integer
+                                                       If existingSlideCount = 0 AndAlso slideIndex = 1 Then
+                                                           layoutType = ppLayoutTitle
+                                                       Else
+                                                           layoutType = ppLayoutText
+                                                       End If
 
                                                        Dim sld As Object = Nothing
                                                        Try
@@ -1545,14 +1823,14 @@ Partial Public Class ThisAddIn
                                                                    notesPage = sld.NotesPage
                                                                    notesShapes = notesPage.Shapes
                                                                    Dim nCount As Integer = System.Convert.ToInt32(notesShapes.Count,
-                                                                       Globalization.CultureInfo.InvariantCulture)
+                                                                        Globalization.CultureInfo.InvariantCulture)
                                                                    ' Find the body placeholder in notes (type 2 = ppPlaceholderBody)
                                                                    For k As Integer = 1 To nCount
                                                                        Dim nShp As Object = notesShapes(k)
                                                                        Try
                                                                            Dim phType As Integer = System.Convert.ToInt32(
-                                                                               nShp.PlaceholderFormat.Type,
-                                                                               Globalization.CultureInfo.InvariantCulture)
+                                                                                nShp.PlaceholderFormat.Type,
+                                                                                Globalization.CultureInfo.InvariantCulture)
                                                                            If phType = 2 Then ' ppPlaceholderBody
                                                                                nShp.TextFrame.TextRange.Text = notes
                                                                                Exit For
@@ -1617,8 +1895,9 @@ Partial Public Class ThisAddIn
                     _apCurrentAttachments(0).OutputFiles.Add(outputPath)
                 End If
 
+                Dim templateNote = If(templatePath IsNot Nothing, $", based on template '{templateName}'", "")
                 response.Success = True
-                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} slides, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} new slides{templateNote}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
                 ApDashboardLog($"✓ PowerPoint created: {fileName}", "info")
             Else
                 response.Success = False
@@ -2089,12 +2368,56 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
-                ' ── Font color ──
-                Dim fontColor = ParseHexColor(cellObj.Value(Of String)("font_color"))
-                If fontColor.HasValue Then Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                ' ── Font color and background color ──
+                Dim fontColorHex = cellObj.Value(Of String)("font_color")
+                Dim bgColorHex = cellObj.Value(Of String)("bg_color")
+                Dim fontColor = ParseHexColor(fontColorHex)
+                Dim bgColor = ParseHexColor(bgColorHex)
+
+                ' Safety guard: prevent white (or near-white) font on white/no background.
+                ' LLMs sometimes copy the header's #FFFFFF font_color to data rows that have
+                ' no bg_color or a light bg_color, resulting in invisible white-on-white text.
+                If fontColor.HasValue Then
+                    Dim isWhiteFont = False
+                    If Not String.IsNullOrWhiteSpace(fontColorHex) Then
+                        Dim trimHex = fontColorHex.TrimStart("#"c).ToUpperInvariant()
+                        isWhiteFont = (trimHex = "FFFFFF")
+                    End If
+
+                    If isWhiteFont Then
+                        ' Only allow white font when there is a sufficiently dark background
+                        Dim hasDarkBg = False
+                        If bgColor.HasValue AndAlso Not String.IsNullOrWhiteSpace(bgColorHex) Then
+                            Dim bgHex = bgColorHex.TrimStart("#"c).ToUpperInvariant()
+                            ' Consider the background "dark enough" if it's not white/near-white
+                            ' Simple check: if any channel is below 0xC0, the bg is dark enough
+                            If bgHex.Length = 6 Then
+                                Try
+                                    Dim rr = System.Convert.ToInt32(bgHex.Substring(0, 2), 16)
+                                    Dim gg = System.Convert.ToInt32(bgHex.Substring(2, 2), 16)
+                                    Dim bb = System.Convert.ToInt32(bgHex.Substring(4, 2), 16)
+                                    If rr < &HC0 OrElse gg < &HC0 OrElse bb < &HC0 Then
+                                        hasDarkBg = True
+                                    End If
+                                Catch
+                                End Try
+                            End If
+                        End If
+
+                        If hasDarkBg Then
+                            ' White font on dark background is fine
+                            Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                        Else
+                            ' White font on white/no background → override to black
+                            Debug.WriteLine($"[Excel] Safety: overriding white font to black at {addr} (no dark background)")
+                            Try : cell.Font.Color = ParseHexColor("#000000").Value : Catch : End Try
+                        End If
+                    Else
+                        Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                    End If
+                End If
 
                 ' ── Background color ──
-                Dim bgColor = ParseHexColor(cellObj.Value(Of String)("bg_color"))
                 If bgColor.HasValue Then
                     Try
                         cell.Interior.Color = bgColor.Value
@@ -3335,7 +3658,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim ext As String = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
-            If Not AP_BinaryExtensions.Contains(ext) Then
+            If Not IsBinaryMediaExtension(ext) Then
                 response.Success = False
                 response.Response = $"The file format '{ext}' is not supported for binary analysis. " &
                     "Supported formats include images (.png, .jpg, .gif, .webp, .tiff), " &
@@ -4484,6 +4807,186 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: generate_image
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Generates an image by switching to the ImageGeneration special task model,
+    ''' calling the LLM with the user's description (no predefined prompt), and
+    ''' saving the result to the per-mail temp directory for attachment.
+    ''' The LLM/HandleObject pipeline decodes the image from the JSON response
+    ''' and saves it via <see cref="ImageDecoder.DecodeAndSaveImage"/>.
+    ''' </summary>
+    Private Async Function ExecuteGenerateImageTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim description = GetArgString(toolCall.Arguments, "description")
+            If String.IsNullOrWhiteSpace(description) Then
+                response.Success = False
+                response.Response = "Missing required parameter: description"
+                Return response
+            End If
+
+            Dim outputFileName = GetArgString(toolCall.Arguments, "output_filename")
+
+            context.Log($"Generating image: {If(description.Length > 120, description.Substring(0, 120) & "...", description)}")
+            ApDashboardLog("🎨 Generating image...", "step")
+
+            ' ── Switch to ImageGeneration model ──
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                response.Success = False
+                response.Response = "No alternate model configuration file is configured. Image generation requires an ImageGeneration model."
+                Return response
+            End If
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(_context)
+            Dim previousUseSecondApi As Boolean = _apUseSecondApi
+            Dim modelSwitched As Boolean = False
+
+            Try
+                modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, "ImageGeneration")
+            Catch
+            End Try
+
+            If Not modelSwitched Then
+                response.Success = False
+                response.Response = "No ImageGeneration model is configured in the alternate models file. Cannot generate images."
+                Return response
+            End If
+
+            Try
+                _apUseSecondApi = True
+
+                ' ── Resolve optional reference image for editing ──
+                Dim referenceImagePath As String = Nothing
+                Dim refImageName = GetArgString(toolCall.Arguments, "image_attachment_name")
+                If Not String.IsNullOrWhiteSpace(refImageName) Then
+                    Dim refAtt = FindAttachment(refImageName)
+                    If refAtt IsNot Nothing AndAlso refAtt.TempFilePath IsNot Nothing AndAlso
+                       File.Exists(refAtt.TempFilePath) Then
+                        referenceImagePath = refAtt.TempFilePath
+                        context.Log($"Using reference image for editing: {refImageName}")
+                        ApDashboardLog($"🖼 Reference image: {refImageName}", "step")
+                    Else
+                        context.Log($"Reference image '{refImageName}' not found — generating from scratch")
+                        ApDashboardLog($"⚠ Reference image '{refImageName}' not found, generating from scratch", "warn")
+                    End If
+                End If
+
+                ' ── Call LLM with just the description — no system prompt wrapping ──
+                ' The binaryOutputDirectory directs ImageDecoder.DecodeAndSaveImage
+                ' to save the image into the per-mail temp directory.
+                Dim llmResult = Await LLM(
+                    "", description,
+                    UseSecondAPI:=True,
+                    HideSplash:=True,
+                    EnsureUI:=False,
+                    cancellationToken:=ct,
+                    binaryOutputDirectory:=_apCurrentTempDir,
+                    FileObject:=If(referenceImagePath, ""))
+
+                ' ── Locate the saved image file ──
+                ' ImageDecoder.DecodeAndSaveImage returns the path in the LLM response
+                ' as "Image saved to: <path>". We also scan the temp dir for new image files.
+                Dim savedImagePath As String = Nothing
+
+                ' Strategy 1: Parse the "Image saved to:" path from the LLM result
+                If Not String.IsNullOrWhiteSpace(llmResult) Then
+                    Dim imgMatch = System.Text.RegularExpressions.Regex.Match(
+                        llmResult, "Image saved to:\s*(.+?)(?:\r?\n|$)")
+                    If imgMatch.Success Then
+                        Dim candidate = imgMatch.Groups(1).Value.Trim().Replace("\\", "\")
+                        If File.Exists(candidate) Then
+                            savedImagePath = candidate
+                        End If
+                    End If
+                End If
+
+                ' Strategy 2: Scan temp dir for the newest AI_Image_* file
+                If savedImagePath Is Nothing AndAlso Directory.Exists(_apCurrentTempDir) Then
+                    Dim imageFiles = Directory.GetFiles(_apCurrentTempDir, "AI_Image_*.*")
+                    If imageFiles.Length > 0 Then
+                        savedImagePath = imageFiles.OrderByDescending(Function(f) File.GetCreationTimeUtc(f)).First()
+                    End If
+                End If
+
+                If savedImagePath Is Nothing OrElse Not File.Exists(savedImagePath) Then
+                    response.Success = False
+                    response.Response = "The image generation model did not return a valid image. " &
+                        "The model may not support image output, or the response format is not recognized."
+                    ApDashboardLog("⚠ Image generation: no image found in response", "warn")
+                    Return response
+                End If
+
+                ' ── Optionally rename the file to the user's requested filename ──
+                If Not String.IsNullOrWhiteSpace(outputFileName) Then
+                    ' Sanitize
+                    For Each c In Path.GetInvalidFileNameChars()
+                        outputFileName = outputFileName.Replace(c, "_"c)
+                    Next
+                    ' Preserve the original extension from the generated file
+                    Dim ext = Path.GetExtension(savedImagePath)
+                    If Not outputFileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
+                        outputFileName &= ext
+                    End If
+                    Dim renamedPath = Path.Combine(_apCurrentTempDir, outputFileName)
+                    ' Handle collision
+                    Dim counter = 1
+                    While File.Exists(renamedPath)
+                        Dim baseName = Path.GetFileNameWithoutExtension(outputFileName)
+                        renamedPath = Path.Combine(_apCurrentTempDir, baseName & $"_{counter}" & ext)
+                        counter += 1
+                    End While
+                    Try
+                        File.Move(savedImagePath, renamedPath)
+                        savedImagePath = renamedPath
+                    Catch
+                        ' Keep original name on move failure
+                    End Try
+                End If
+
+                ' ── Register as output file for attachment to reply ──
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(savedImagePath)
+                End If
+
+                Dim finalFileName = Path.GetFileName(savedImagePath)
+                Dim sizeKb = New FileInfo(savedImagePath).Length / 1024
+
+                response.Success = True
+                response.Response = $"Image generated: {finalFileName} ({sizeKb:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ Image generated: {finalFileName} ({sizeKb:F0} KB)", "info")
+
+            Finally
+                ' ── Restore the original model configuration ──
+                _apUseSecondApi = previousUseSecondApi
+                If backupConfig IsNot Nothing Then
+                    RestoreDefaults(_context, backupConfig)
+                End If
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error generating image: {ex.Message}"
+            ApDashboardLog($"⚠ Image generation error: {ex.Message}", "warn")
+        End Try
+
+        Return response
+    End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: pdf_to_word
@@ -4681,7 +5184,7 @@ Partial Public Class ThisAddIn
             Else
                 toSearch = _apCurrentAttachments?.Where(
                     Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
-                                Not AP_BinaryExtensions.Contains(a.Extension)).ToList()
+                                Not IsBinaryMediaExtension(a.Extension)).ToList()
             End If
 
             If toSearch Is Nothing OrElse toSearch.Count = 0 Then
@@ -5240,10 +5743,12 @@ Partial Public Class ThisAddIn
                     End If
                 Next
             Else
-                ' Process all readable non-binary attachments
+                ' Process all readable non-binary attachments, plus binary media if the model supports them
                 toProcess = _apCurrentAttachments?.Where(
                     Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
-                                Not AP_BinaryExtensions.Contains(a.Extension)).ToList()
+                                (Not IsBinaryMediaExtension(a.Extension) OrElse
+                                 SharedMethods.IsBinaryMediaSupported(_context, a.Extension,
+                                     SharedMethods.TaskFlagForExtension(a.Extension)))).ToList()
             End If
 
             If toProcess Is Nothing OrElse toProcess.Count = 0 Then
@@ -5278,7 +5783,6 @@ Partial Public Class ThisAddIn
                 filePaths.Add(att.TempFilePath)
             Next
 
-            ' ── Set up the extraction instruction for InterpolateAtRuntime ──
             ' ── Set up the extraction instruction for InterpolateAtRuntime ──
             Dim savedOtherPrompt = OtherPrompt
             Dim savedOutputLanguage = OutputLanguage
@@ -5366,7 +5870,10 @@ Partial Public Class ThisAddIn
                     0,              ' mergeDateColumn
                     False,          ' mergeRowsViaLlm
                     Nothing,        ' mergeInstruction
-                    Function() cancelled OrElse ct.IsCancellationRequested)
+                    Function() cancelled OrElse ct.IsCancellationRequested,
+                    llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
+                                         Return Await ThisAddIn.LLM(sys, usr, mdl, tmp, tmo, use2nd, True, cancellationToken:=ct, FileObject:=fileObj)
+                                     End Function)
 
                 If result Is Nothing OrElse result.Rows.Count = 0 Then
                     Dim errMsg = "No data could be extracted from the provided file(s)."
@@ -6466,6 +6973,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_ExtractDataFromAttachments,
                  AP_Tool_RedactPdf,
                  AP_Tool_OverlayPdf,
+                 AP_Tool_CreateAudioFile,
+                 AP_Tool_GenerateImage,
                  AP_Tool_ReportInability
                 Return True
             Case Else

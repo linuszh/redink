@@ -1348,6 +1348,174 @@ Namespace My
                 Me("Stamp_Regex") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastImageGenPrompt() As String
+            Get
+                Return CType(Me("LastImageGenPrompt"),String)
+            End Get
+            Set
+                Me("LastImageGenPrompt") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_ManualInstruction() As String
+            Get
+                Return CType(Me("Tabular_ManualInstruction"),String)
+            End Get
+            Set
+                Me("Tabular_ManualInstruction") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_ManualSchema() As String
+            Get
+                Return CType(Me("Tabular_ManualSchema"),String)
+            End Get
+            Set
+                Me("Tabular_ManualSchema") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateColumns() As String
+            Get
+                Return CType(Me("Tabular_DateColumns"),String)
+            End Get
+            Set
+                Me("Tabular_DateColumns") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_SortColumn() As String
+            Get
+                Return CType(Me("Tabular_SortColumn"),String)
+            End Get
+            Set
+                Me("Tabular_SortColumn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("ASC")>  _
+        Public Property Tabular_SortDirection() As String
+            Get
+                Return CType(Me("Tabular_SortDirection"),String)
+            End Get
+            Set
+                Me("Tabular_SortDirection") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Tabular_DoOcr() As Boolean
+            Get
+                Return CType(Me("Tabular_DoOcr"),Boolean)
+            End Get
+            Set
+                Me("Tabular_DoOcr") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateClampFrom() As String
+            Get
+                Return CType(Me("Tabular_DateClampFrom"),String)
+            End Get
+            Set
+                Me("Tabular_DateClampFrom") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateClampTo() As String
+            Get
+                Return CType(Me("Tabular_DateClampTo"),String)
+            End Get
+            Set
+                Me("Tabular_DateClampTo") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_OutputLanguage() As String
+            Get
+                Return CType(Me("Tabular_OutputLanguage"),String)
+            End Get
+            Set
+                Me("Tabular_OutputLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateOutputFormat() As String
+            Get
+                Return CType(Me("Tabular_DateOutputFormat"),String)
+            End Get
+            Set
+                Me("Tabular_DateOutputFormat") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Tabular_MergeEnable() As Boolean
+            Get
+                Return CType(Me("Tabular_MergeEnable"),Boolean)
+            End Get
+            Set
+                Me("Tabular_MergeEnable") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_MergeDateColumn() As String
+            Get
+                Return CType(Me("Tabular_MergeDateColumn"),String)
+            End Get
+            Set
+                Me("Tabular_MergeDateColumn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_MergeInstruction() As String
+            Get
+                Return CType(Me("Tabular_MergeInstruction"),String)
+            End Get
+            Set
+                Me("Tabular_MergeInstruction") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

@@ -18,6 +18,8 @@
 '  - PDF: Uses UglyToad.PdfPig to iterate pages and extract text with multiple
 '    fallback strategies; optionally runs OCR via an LLM call when heuristics
 '    indicate that the PDF likely contains scanned images / poor text layer.
+'  - Binary/media files (images, audio, video, etc.): Sent as binary objects
+'    directly to the LLM when the configured model supports the file's MIME type.
 '
 ' External Dependencies:
 '  - Microsoft.Office.Interop.Word (Word automation / COM interop)
@@ -78,6 +80,231 @@ Namespace SharedLibrary
                 Me.OcrWasSkippedDueToHeuristics = ocrSkipped
             End Sub
         End Class
+
+        ' ── Binary / media file extensions that require LLM-based extraction ──
+
+        ''' <summary>
+        ''' Image file extensions that can be processed by a vision-capable LLM.
+        ''' </summary>
+        Private Shared ReadOnly ImageExtensions As String() = {
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg"
+        }
+
+        ''' <summary>
+        ''' Audio file extensions that can be processed by an audio-capable LLM.
+        ''' </summary>
+        Private Shared ReadOnly AudioExtensions As String() = {
+            ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm"
+        }
+
+        ''' <summary>
+        ''' Video file extensions that can be processed by a video-capable LLM.
+        ''' </summary>
+        Private Shared ReadOnly VideoExtensions As String() = {
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv"
+        }
+
+        ''' <summary>
+        ''' Returns True if the extension identifies a binary/media file that cannot be read as text
+        ''' and must instead be sent to the LLM as a binary object.
+        ''' </summary>
+        ''' <param name="extension">File extension including the leading dot (e.g. ".png").</param>
+        ''' <returns>True when the file is a binary/media type.</returns>
+        Public Shared Function IsBinaryMediaExtension(extension As String) As Boolean
+            If String.IsNullOrWhiteSpace(extension) Then Return False
+            Dim ext = extension.ToLowerInvariant()
+            Return ImageExtensions.Contains(ext) OrElse
+                   AudioExtensions.Contains(ext) OrElse
+                   VideoExtensions.Contains(ext)
+        End Function
+
+        ''' <summary>
+        ''' Checks whether the APICall_Object configuration supports a specific MIME type prefix
+        ''' (e.g. "image/", "audio/", "video/") or a wildcard ("*/*").
+        ''' </summary>
+        ''' <param name="apiCallObject">The INI_APICall_Object or INI_APICall_Object_2 string.</param>
+        ''' <param name="mimePrefix">MIME prefix to look for, e.g. "image/", "audio/", "video/".</param>
+        ''' <returns>True if the configuration accepts at least one matching MIME type.</returns>
+        Public Shared Function IsApiCallObjectMimeCapable(apiCallObject As String, mimePrefix As String) As Boolean
+            If String.IsNullOrWhiteSpace(apiCallObject) Then Return False
+
+            Dim segments As String() = apiCallObject.Split(New Char() {"¦"c}, StringSplitOptions.RemoveEmptyEntries)
+            Dim hasUnfilteredSegment As Boolean = False
+            Dim hasMimeFilter As Boolean = False
+            Dim allSegmentsHaveFilters As Boolean = True
+
+            For Each segment As String In segments
+                Dim trimmedSegment As String = segment.Trim()
+
+                If trimmedSegment.StartsWith("[") Then
+                    Dim closeBracketIdx As Integer = trimmedSegment.IndexOf("]"c)
+                    If closeBracketIdx > 1 Then
+                        Dim filterContent As String = trimmedSegment.Substring(1, closeBracketIdx - 1)
+                        If filterContent.IndexOf(mimePrefix, StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                           filterContent.IndexOf("*/*", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            hasMimeFilter = True
+                        End If
+                    End If
+                Else
+                    hasUnfilteredSegment = True
+                    allSegmentsHaveFilters = False
+                End If
+            Next
+
+            If hasUnfilteredSegment Then Return True
+            If hasMimeFilter Then Return True
+            If allSegmentsHaveFilters Then Return False
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Determines whether the configured model can accept a binary file of the given extension
+        ''' by checking MIME type support in the APICall_Object configuration and alternate model paths.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="extension">File extension including the leading dot (e.g. ".png").</param>
+        ''' <param name="taskFlag">
+        ''' Optional alternate-model task flag (e.g. "ImageExtraction", "AudioTranscription").
+        ''' When supplied, the alternate-model INI is checked first.
+        ''' </param>
+        ''' <returns>True if a model capable of handling this file type is available.</returns>
+        Public Shared Function IsBinaryMediaSupported(context As ISharedContext,
+                                                      extension As String,
+                                                      Optional taskFlag As String = Nothing) As Boolean
+            If context Is Nothing Then Return False
+            Dim mimePrefix As String = MimePrefixForExtension(extension)
+            If String.IsNullOrWhiteSpace(mimePrefix) Then Return False
+
+            ' First check: alternate model with specific task flag
+            If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                Dim savedConfig As ModelConfig = GetCurrentConfig(context)
+                Dim savedConfigLoaded As Boolean = originalConfigLoaded
+                Try
+                    If GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
+                        RestoreDefaults(context, savedConfig)
+                        originalConfigLoaded = savedConfigLoaded
+                        Return True
+                    End If
+                Catch
+                Finally
+                    RestoreDefaults(context, savedConfig)
+                    originalConfigLoaded = savedConfigLoaded
+                End Try
+            End If
+
+            ' Second check: primary model's APICall_Object supports the MIME prefix
+            Return IsApiCallObjectMimeCapable(context.INI_APICall_Object, mimePrefix)
+        End Function
+
+        ''' <summary>
+        ''' Sends a binary/media file to the LLM as a file object and returns the LLM's textual response.
+        ''' </summary>
+        ''' <param name="filePath">Path to the binary file.</param>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="systemPrompt">
+        ''' System prompt to use. When empty, falls back to <c>context.SP_InsertClipboard</c>.
+        ''' </param>
+        ''' <param name="askUser">If False, suppresses all UI dialogs.</param>
+        ''' <param name="taskFlag">
+        ''' Optional alternate-model task flag (e.g. "ImageExtraction", "AudioTranscription").
+        ''' </param>
+        ''' <returns>Text returned by the LLM, or an empty string on failure.</returns>
+        Public Shared Async Function ReadBinaryFileViaLLM(filePath As String,
+                                                          context As ISharedContext,
+                                                          Optional systemPrompt As String = "",
+                                                          Optional askUser As Boolean = True,
+                                                          Optional taskFlag As String = Nothing) As Task(Of String)
+            Try
+                If String.IsNullOrWhiteSpace(filePath) OrElse Not IO.File.Exists(filePath) Then
+                    Return ""
+                End If
+
+                Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
+                If Not IsBinaryMediaSupported(context, ext, taskFlag) Then
+                    If askUser Then
+                        ShowCustomMessageBox($"The file type '{ext}' is not supported by your current model configuration.")
+                    End If
+                    Return ""
+                End If
+
+                Dim UseSecondAPI As Boolean = False
+                Dim TimeOut = context.INI_Timeout
+
+                If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                    If Not GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
+                        originalConfigLoaded = False
+                        UseSecondAPI = False
+                    Else
+                        UseSecondAPI = True
+                        TimeOut = context.INI_Timeout_2
+                    End If
+                End If
+
+                Dim sysPrompt As String = If(String.IsNullOrWhiteSpace(systemPrompt),
+                    context.SP_InsertClipboard,
+                    systemPrompt)
+
+                Dim result As String = Await LLM(context, sysPrompt, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", filePath)
+
+                ' Restore model if temporarily switched
+                If UseSecondAPI AndAlso originalConfigLoaded Then
+                    RestoreDefaults(context, originalConfig)
+                    originalConfigLoaded = False
+                End If
+
+                Return If(result, "")
+
+            Catch ex As System.Exception
+                Debug.WriteLine("ReadBinaryFileViaLLM failed: " & ex.Message)
+                Return ""
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Returns the MIME prefix for a file extension (e.g. ".png" → "image/", ".mp3" → "audio/").
+        ''' Returns an empty string for unknown extensions.
+        ''' </summary>
+        Private Shared Function MimePrefixForExtension(extension As String) As String
+            If String.IsNullOrWhiteSpace(extension) Then Return ""
+            Dim ext = extension.ToLowerInvariant()
+            If ImageExtensions.Contains(ext) Then Return "image/"
+            If AudioExtensions.Contains(ext) Then Return "audio/"
+            If VideoExtensions.Contains(ext) Then Return "video/"
+            Return ""
+        End Function
+
+        ''' <summary>
+        ''' Returns the alternate-model task flag appropriate for a file extension.
+        ''' </summary>
+        Public Shared Function TaskFlagForExtension(extension As String) As String
+            If String.IsNullOrWhiteSpace(extension) Then Return Nothing
+            Dim ext = extension.ToLowerInvariant()
+            If ImageExtensions.Contains(ext) Then Return "ImageExtraction"
+            If AudioExtensions.Contains(ext) Then Return "AudioTranscription"
+            If VideoExtensions.Contains(ext) Then Return "VideoExtraction"
+            Return Nothing
+        End Function
+
+        ''' <summary>
+        ''' Determines whether a file with the given extension can be processed for content extraction.
+        ''' Text-based formats (.pdf, .docx, .txt, etc.) are always supported.
+        ''' Binary/media formats (images, audio, video) require model capability and return <c>False</c>
+        ''' when the configured model cannot handle the corresponding MIME type.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="extension">File extension including the leading dot (e.g. ".png").</param>
+        ''' <returns><c>True</c> if the file can be processed; <c>False</c> if it requires unsupported model capabilities.</returns>
+        Public Shared Function IsModelCapableForExtension(context As ISharedContext, extension As String) As Boolean
+            If String.IsNullOrWhiteSpace(extension) Then Return False
+            Dim ext = extension.ToLowerInvariant()
+
+            ' Text-based formats are always supported (no model capability needed)
+            If Not IsBinaryMediaExtension(ext) Then Return True
+
+            ' Binary/media formats require model capability
+            Dim taskFlag = TaskFlagForExtension(ext)
+            Return IsBinaryMediaSupported(context, ext, taskFlag)
+        End Function
 
         ''' <summary>
         ''' Reads a text file as UTF-8 (with BOM detection) and returns its contents.
@@ -415,7 +642,7 @@ Namespace SharedLibrary
         ''' <param name="page">The PDF page to extract text from.</param>
         ''' <returns>Extracted page text (may be empty).</returns>
         Private Shared Function ExtractPageTextFromPdf(page As UglyToad.PdfPig.Content.Page) As String
-            ' 1) Try PdfPig’s content-order extractor (good spacing/reading order on many PDFs)
+            ' 1) Try PdfPig's content-order extractor (good spacing/reading order on many PDFs)
             Try
                 Dim t As String = UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor.ContentOrderTextExtractor.GetText(page)
                 If Not String.IsNullOrWhiteSpace(t) AndAlso (t.Contains(" ") OrElse t.Contains(vbTab) OrElse t.Contains(vbCr) OrElse t.Contains(vbLf)) Then
@@ -570,6 +797,7 @@ Namespace SharedLibrary
             Return IsApiCallObjectOcrCapable(context.INI_APICall_Object)
         End Function
 
+
         ''' <summary>
         ''' Checks if the given APICall_Object configuration string supports PDF/OCR.
         ''' </summary>
@@ -630,6 +858,78 @@ Namespace SharedLibrary
             End If
 
             ' Default: if we have content but couldn't parse filters, assume capable
+            Return True
+        End Function
+
+
+        ''' <summary>
+        ''' Determines whether audio transcription is available based on the configured model capabilities.
+        ''' Checks for audio/* MIME type support in the APICall_Object configuration,
+        ''' mirroring the logic of <see cref="IsOcrAvailable"/> for PDF.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns>True if audio transcription via binary input is available, False otherwise.</returns>
+        Public Shared Function IsAudioTranscriptionAvailable(context As ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+
+            ' First check: alternate model with AudioTranscription task flag
+            If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                Dim savedConfig As ModelConfig = GetCurrentConfig(context)
+                Dim savedConfigLoaded As Boolean = originalConfigLoaded
+
+                Try
+                    If GetSpecialTaskModel(context, context.INI_AlternateModelPath, "AudioTranscription") Then
+                        RestoreDefaults(context, savedConfig)
+                        originalConfigLoaded = savedConfigLoaded
+                        Return True
+                    End If
+                Catch
+                Finally
+                    RestoreDefaults(context, savedConfig)
+                    originalConfigLoaded = savedConfigLoaded
+                End Try
+            End If
+
+            ' Second check: primary model's APICall_Object supports audio MIME types
+            Return IsApiCallObjectAudioCapable(context.INI_APICall_Object)
+        End Function
+
+        ''' <summary>
+        ''' Checks if the given APICall_Object configuration string supports audio input.
+        ''' Mirrors <see cref="IsApiCallObjectOcrCapable"/> but checks for audio/* MIME types.
+        ''' </summary>
+        ''' <param name="apiCallObject">The INI_APICall_Object or INI_APICall_Object_2 string.</param>
+        ''' <returns>True if audio input is supported, False otherwise.</returns>
+        Public Shared Function IsApiCallObjectAudioCapable(apiCallObject As String) As Boolean
+            If String.IsNullOrWhiteSpace(apiCallObject) Then Return False
+
+            Dim segments As String() = apiCallObject.Split(New Char() {"¦"c}, StringSplitOptions.RemoveEmptyEntries)
+            Dim hasUnfilteredSegment As Boolean = False
+            Dim hasAudioFilter As Boolean = False
+            Dim allSegmentsHaveFilters As Boolean = True
+
+            For Each segment As String In segments
+                Dim trimmedSegment As String = segment.Trim()
+
+                If trimmedSegment.StartsWith("[") Then
+                    Dim closeBracketIdx As Integer = trimmedSegment.IndexOf("]"c)
+                    If closeBracketIdx > 1 Then
+                        Dim filterContent As String = trimmedSegment.Substring(1, closeBracketIdx - 1)
+                        If filterContent.IndexOf("audio/", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                           filterContent.IndexOf("audio/*", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                           filterContent.IndexOf("*/*", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            hasAudioFilter = True
+                        End If
+                    End If
+                Else
+                    hasUnfilteredSegment = True
+                    allSegmentsHaveFilters = False
+                End If
+            Next
+
+            If hasUnfilteredSegment Then Return True
+            If hasAudioFilter Then Return True
+            If allSegmentsHaveFilters Then Return False
             Return True
         End Function
 

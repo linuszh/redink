@@ -1070,6 +1070,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property SP_ExtractBuilder As String
+        Get
+            Return _context.SP_ExtractBuilder
+        End Get
+        Set(value As String)
+            _context.SP_ExtractBuilder = value
+        End Set
+    End Property
+
     Public Shared Property SP_ExtractSchema As String
         Get
             Return _context.SP_ExtractSchema
@@ -1805,6 +1815,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_ForceDrawioLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AllowLegacyDocFiles As Boolean
+        Get
+            Return _context.INI_AllowLegacyDocFiles
+        End Get
+        Set(value As Boolean)
+            _context.INI_AllowLegacyDocFiles = value
         End Set
     End Property
 

@@ -351,7 +351,10 @@ Partial Public Class ThisAddIn
             Dim apiKey = If(TTS_openAISecondary, DecodedAPI_2, DecodedAPI)
 
             Debug.WriteLine($"[TTS] OpenAI endpoint = '{TTS_OpenAIEndpoint}'")
-            Debug.WriteLine($"[TTS] OpenAI API Key = '{If(String.IsNullOrEmpty(apiKey), "(empty)", "(configured)")}'")
+            Debug.WriteLine($"[TTS] OpenAI model    = '{TTS_OpenAI_Model}'")
+            Debug.WriteLine($"[TTS] OpenAI voice    = '{voiceName}'")
+            Debug.WriteLine($"[TTS] OpenAI input    = '{Left(input, 200)}'")
+            Debug.WriteLine($"[TTS] OpenAI API Key  = '{If(String.IsNullOrEmpty(apiKey), "(empty)", Left(apiKey, 8) & "...")}'")
 
             Using client As New System.Net.Http.HttpClient()
                 client.DefaultRequestHeaders.Authorization =
@@ -362,9 +365,10 @@ Partial Public Class ThisAddIn
                 {"model", TTS_OpenAI_Model},
                 {"input", input},
                 {"voice", voiceName},
-                {"response_format", "mp3"},
-                {"instructions", ""}
+                {"response_format", "mp3"}
             }
+
+                Debug.WriteLine($"[TTS] Request JSON = {j.ToString()}")
 
                 Dim content = New StringContent(j.ToString(), Encoding.UTF8, "application/json")
 
@@ -374,6 +378,7 @@ Partial Public Class ThisAddIn
                     Return Await resp.Content.ReadAsByteArrayAsync().ConfigureAwait(False)
                 Else
                     Dim err = Await resp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                    Debug.WriteLine($"[TTS] OpenAI error: Status={resp.StatusCode}, Headers={resp.Headers}, Body='{err}'")
                     Throw New System.Exception($"OpenAI TTS Error {resp.StatusCode}: {err}")
                 End If
             End Using

@@ -55,13 +55,27 @@ Partial Public Class ThisAddIn
             Dim answer As Integer = ShowCustomYesNoBox("You have not selected any text. Do you instead want to create audio from a document file or add audio to a powerpoint with speaker notes?", "Yes", "No")
             If answer <> 1 Then Return
 
-            DragDropFormLabel = "Document files (.txt, .docx, .pdf) or Powerpoint (.pptx)."
-            DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.pptx|" &
-                             "Text Files (*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm)|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                             "Rich Text Files (*.rtf)|*.rtf|" &
-                             "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
-                             "PDF Files (*.pdf)|*.pdf|" &
-                             "Powerpoint Files (*.pptx)|*.pptx"
+            If INI_AllowLegacyDocFiles Then
+                DragDropFormLabel = "Document files (.txt, .doc, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml"
+            Else
+                DragDropFormLabel = "Document files (.txt, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                DragDropFormFilter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                 "Rich Text Files (*.rtf)|*.rtf|" &
+                                 "Word Documents (*.docx)|*.docx|" &
+                                 "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                 "PDF Files (*.pdf)|*.pdf|" &
+                                 "PowerPoint Files (*.pptx)|*.pptx|" &
+                                 "Email Files (*.msg;*.eml)|*.msg;*.eml"
+            End If
 
             FilePath = GetFileName()
             DragDropFormLabel = ""
@@ -78,15 +92,28 @@ Partial Public Class ThisAddIn
                     FromFile = ReadTextFile(FilePath, True)
                 Case ".rtf"
                     FromFile = ReadRtfAsText(FilePath, True)
-                Case ".doc", ".docx"
-                    FromFile = ReadWordDocument(FilePath, True)
+                Case ".doc"
+                    If INI_AllowLegacyDocFiles Then
+                        FromFile = ReadWordDocument(FilePath, True)
+                    Else
+                        FromFile = "Error: .doc format disabled for security."
+                    End If
+                Case ".docx"
+                    FromFile = ReadDocxSandboxed(FilePath)
+                Case ".xlsx"
+                    FromFile = ReadXlsxSandboxed(FilePath)
                 Case ".pdf"
                     FromFile = Await ReadPdfAsText(FilePath, True, False, False, _context)
                 Case ".pptx"
                     FromFile = "pptx"
+                Case ".eml"
+                    FromFile = ReadEmlSandboxed(FilePath)
+                Case ".msg"
+                    FromFile = ReadMsgSandboxed(FilePath)
                 Case Else
                     FromFile = "Error: File type not supported."
             End Select
+
             If FromFile.StartsWith("Error:") Then
                 ShowCustomMessageBox(FromFile)
                 Return
