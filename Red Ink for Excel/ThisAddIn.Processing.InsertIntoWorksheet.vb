@@ -214,6 +214,18 @@ Partial Public Class ThisAddIn
                                     ' Add the state to undoStates - do this BEFORE making changes
                                     undoStates.Add(state)
 
+                                    ' Strip wrapping quotes around formulas that LLMs sometimes produce
+                                    ' e.g. '=SUM(A1:A10)' or "=SUM(A1:A10)"
+                                    If formulaOrValue.Length >= 3 Then
+                                        If (formulaOrValue.StartsWith("'") AndAlso formulaOrValue.EndsWith("'")) OrElse
+                                           (formulaOrValue.StartsWith("""") AndAlso formulaOrValue.EndsWith("""")) Then
+                                            Dim inner As String = formulaOrValue.Substring(1, formulaOrValue.Length - 2)
+                                            If inner.StartsWith("=") Then
+                                                formulaOrValue = inner
+                                            End If
+                                        End If
+                                    End If
+
                                     If formulaOrValue.StartsWith($"{AN5}: ") Then
                                         'If DoAlsoBubbles And formulaOrValue.StartsWith($"{AN5}: ") Then
 
@@ -355,6 +367,17 @@ Partial Public Class ThisAddIn
                     ' ignore, handled below
                 End Try
             End Try
+
+            ' 2b. If the formula was not accepted at all (no formula in cell),
+            '     the LLM may have sent a localized formula (e.g. =SUMME on English Excel).
+            '     Try FormulaLocal directly with the raw string before further fallbacks.
+            If Not CBool(cell.HasFormula) Then
+                Try
+                    cell.FormulaLocal = englishFormula
+                Catch ex2b As System.Runtime.InteropServices.COMException
+                    ' ignore, handled below
+                End Try
+            End If
 
             ' 3. If #NAME? appears, retry with FormulaLocal and localized separator
             If CBool(cell.HasFormula) AndAlso Trim(cell.Text.ToString()) = "#NAME?" Then

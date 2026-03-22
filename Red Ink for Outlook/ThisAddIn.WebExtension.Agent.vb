@@ -24,6 +24,7 @@ Option Strict Off
 Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -173,6 +174,7 @@ Partial Public Class ThisAddIn
         }
 
         _chatAgentActive = True
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
         ' Build tool list: internal tools (excluding summarize_thread) + selected external chat tools
         Dim tools As New List(Of ModelConfig)()
