@@ -72,6 +72,7 @@ Imports Markdig
 Imports Microsoft.Office.Interop.Outlook
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -1605,6 +1606,7 @@ Partial Public Class ThisAddIn
             ' Existing conversations: skip approval only (sender already passed domain/sender filter above)
             Dim requiresApproval As Boolean = (_apConfig.RequireApprovalForNonWhitelisted AndAlso Not isWhitelisted AndAlso Not isExistingConversation)
             ApDashboardLog("━━━ PROCESSING ━━━", "info")
+            SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Mail) invoked")
             ApDashboardLog($"From: {mailInfo.SenderName} <{mailInfo.SenderEmail}>", "info")
             ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
             ApDashboardLog($"Attachments: {mailInfo.AttachmentCount}" & If(requiresApproval, " [approval required]", " [auto-send]"), "info")
@@ -4182,6 +4184,7 @@ Partial Public Class ThisAddIn
             ct As CancellationToken) As Task
 
         ApDashboardLog("━━━ VOICEMAIL ━━━", "info")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Voicemail) invoked")
         ApDashboardLog($"From voicemail system: {mailInfo.SenderEmail}", "info")
         ApDashboardLog($"Subject: {mailInfo.Subject}", "info")
 
