@@ -81,11 +81,85 @@ Partial Public Class ThisAddIn
 
             ' ── 2) Collect the image description prompt ──
 
-            Dim insertButtons As System.Tuple(Of String, String, String)() = Nothing
+            Dim insertButtonsList As New System.Collections.Generic.List(Of
+                System.Tuple(Of String, String, String))()
+
             If imgModelHasObjectCall Then
-                insertButtons = New System.Tuple(Of String, String, String)() {
-                    System.Tuple.Create("📎", "Attach a reference image for editing/modification (file)", ImageGen_FileTrigger)
-                }
+                insertButtonsList.Add(
+                    System.Tuple.Create("📎", "Attach a reference image for editing/modification (file)", ImageGen_FileTrigger))
+            End If
+
+            ' Grab the current Word selection and/or entire document text for insert buttons
+            Dim selectionTextForInsert As String = ""
+            Dim documentTextForInsert As String = ""
+            Dim hasExplicitSelection As Boolean = False
+
+            Try
+                Dim application As Word.Application = Globals.ThisAddIn.Application
+                If application IsNot Nothing AndAlso application.Documents IsNot Nothing AndAlso application.Documents.Count > 0 Then
+                    Dim sel As Word.Selection = application.Selection
+
+                    ' Check for an explicit selection (not just an insertion point)
+                    If sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Start <> sel.End Then
+                        hasExplicitSelection = True
+
+                        ' When the selection contains table cells, sel.Text only returns
+                        ' the first cell. Iterate sel.Cells to capture all cell content.
+                        Try
+                            If sel.Cells IsNot Nothing AndAlso sel.Cells.Count > 1 Then
+                                Dim sb As New System.Text.StringBuilder()
+                                Dim lastRowIndex As Integer = -1
+                                For Each cell As Word.Cell In sel.Cells
+                                    Dim cellRange As Word.Range = cell.Range.Duplicate
+                                    ' Exclude the end-of-cell marker character
+                                    cellRange.End -= 1
+                                    Dim cellText As String = cellRange.Text
+                                    If cell.RowIndex <> lastRowIndex Then
+                                        If sb.Length > 0 Then sb.AppendLine()
+                                        lastRowIndex = cell.RowIndex
+                                    Else
+                                        sb.Append(vbTab)
+                                    End If
+                                    sb.Append(If(cellText, ""))
+                                Next
+                                selectionTextForInsert = sb.ToString()
+                            Else
+                                selectionTextForInsert = sel.Text
+                            End If
+                        Catch
+                            ' sel.Cells throws COM exception for non-table selections
+                            selectionTextForInsert = sel.Text
+                        End Try
+                    End If
+
+                    ' Always grab the full document text
+                    documentTextForInsert = application.ActiveDocument.Content.Text
+                End If
+            Catch
+                ' Silently ignore — buttons simply won't appear
+            End Try
+
+            ' Selection button (only when text is explicitly selected)
+            If hasExplicitSelection AndAlso Not String.IsNullOrWhiteSpace(selectionTextForInsert) Then
+                Dim selLabel As String = If(selectionTextForInsert.Length > 200,
+                    "Insert current selection (" & selectionTextForInsert.Length.ToString("N0") & " chars)",
+                    "Insert current selection")
+                insertButtonsList.Add(
+                    System.Tuple.Create("📋", selLabel, selectionTextForInsert))
+            End If
+
+            ' Document button (always, when there is document content)
+            If Not String.IsNullOrWhiteSpace(documentTextForInsert) Then
+                Dim docLabel As String = If(documentTextForInsert.Length > 200,
+                    "Insert entire document text (" & documentTextForInsert.Length.ToString("N0") & " chars)",
+                    "Insert entire document text")
+                insertButtonsList.Add(
+                    System.Tuple.Create("📄", docLabel, documentTextForInsert))
+            End If
+
+            Dim insertButtons As System.Tuple(Of String, String, String)() = Nothing
+            If insertButtonsList.Count > 0 Then
+                insertButtons = insertButtonsList.ToArray()
             End If
 
             Dim lastPromptHint As String = ""
@@ -93,11 +167,16 @@ Partial Public Class ThisAddIn
                 lastPromptHint = " Ctrl-P inserts your last prompt."
             End If
 
+            Dim promptHintParts As New System.Collections.Generic.List(Of String)()
+            If hasExplicitSelection Then promptHintParts.Add("'Clipboard' button below to insert the current selection")
+            promptHintParts.Add("'Document' button to insert the entire document text")
+
             Dim prompt As String = SLib.ShowCustomInputBox(
                 "Describe the image you want to generate." &
                 If(imgModelHasObjectCall,
                    " Add '" & ImageGen_FileTrigger & "' (or use the clip button) to include a reference image for editing.",
                    "") &
+                " Use the " & String.Join(" or ", promptHintParts) & " button." &
                 lastPromptHint,
                 AN & " Image Generation",
                 False,
@@ -321,6 +400,17 @@ Partial Public Class ThisAddIn
 
         Try
             Dim application As Word.Application = Globals.ThisAddIn.Application
+
+            ' Ensure Word is activated and has focus before accessing the selection
+            Try
+                application.Activate()
+                If application.Documents.Count > 0 Then
+                    application.ActiveDocument.ActiveWindow.Activate()
+                End If
+            Catch
+                ' Best-effort activation — continue even if it fails
+            End Try
+
             Dim selection As Word.Selection = application.Selection
             Dim rng As Word.Range = selection.Range
 

@@ -1017,9 +1017,9 @@ Partial Class Ribbon1
         End If
 
         If String.IsNullOrWhiteSpace(ThisAddIn.INI_APICall_Object) Then
-            Me.RI_InsertClipboard.Visible = False
+            Me.RI_InsertClipboard.Enabled = False
         Else
-            Me.RI_InsertClipboard.Visible = True
+            Me.RI_InsertClipboard.Enabled = True
         End If
 
 
@@ -1031,80 +1031,80 @@ Partial Class Ribbon1
 
 
         If Not TTS_Available Then
-            Me.RI_CreateAudio.Visible = False
+            Me.RI_CreateAudio.Enabled = False
             Me.RI_CreatePodcast.Label = "Create Podcast Script"
         Else
-            Me.RI_CreateAudio.Visible = True
+            Me.RI_CreateAudio.Enabled = True
             Me.RI_CreatePodcast.Label = "Create Podcast"
         End If
 
         If Trim(ThisAddIn.INI_SpeechModelPath) = "" And Not IsGoogle Then
-            Me.RI_Transcriptor.Visible = False
+            Me.RI_Transcriptor.Enabled = False
         Else
-            Me.RI_Transcriptor.Visible = True
+            Me.RI_Transcriptor.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_RedactionInstructionsPath) = "" And Trim(ThisAddIn.INI_RedactionInstructionsPathLocal) = "" Then
-            Me.RI_EditRedact.Visible = False
+            Me.RI_EditRedact.Enabled = False
         Else
-            Me.RI_EditRedact.Visible = True
+            Me.RI_EditRedact.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_DocStylePath) = "" And Trim(ThisAddIn.INI_DocStylePath) = "" Then
-            Me.RI_ApplyDocStyle.Visible = False
-            Me.RI_LearnDocStyle.Visible = False
+            Me.RI_ApplyDocStyle.Enabled = False
+            Me.RI_LearnDocStyle.Enabled = False
         Else
-            Me.RI_ApplyDocStyle.Visible = True
-            Me.RI_LearnDocStyle.Visible = True
+            Me.RI_ApplyDocStyle.Enabled = True
+            Me.RI_LearnDocStyle.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_SpecialServicePath) = "" Then
-            Me.RI_SpecialModel.Visible = False
+            Me.RI_SpecialModel.Enabled = False
         Else
-            Me.RI_SpecialModel.Visible = True
+            Me.RI_SpecialModel.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_MyStylePath) = "" Then
-            Me.RI_DefineMyStyle.Visible = False
-            Me.RI_ApplyMyStyle.Visible = False
+            Me.RI_DefineMyStyle.Enabled = False
+            Me.RI_ApplyMyStyle.Enabled = False
         Else
-            Me.RI_DefineMyStyle.Visible = True
-            Me.RI_ApplyMyStyle.Visible = True
+            Me.RI_DefineMyStyle.Enabled = True
+            Me.RI_ApplyMyStyle.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_DocCheckPath) = "" And Trim(ThisAddIn.INI_DocCheckPathLocal) = "" Then
-            Me.RI_DocCheck.Visible = False
+            Me.RI_DocCheck.Enabled = False
         Else
-            Me.RI_DocCheck.Visible = True
+            Me.RI_DocCheck.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_FindClausePath) = "" And Trim(ThisAddIn.INI_FindClausePathLocal) = "" Then
-            Me.RI_FindClause.Visible = False
-            Me.RI_AddClause.Visible = False
+            Me.RI_FindClause.Enabled = False
+            Me.RI_AddClause.Enabled = False
         Else
-            Me.RI_FindClause.Visible = True
-            Me.RI_AddClause.Visible = True
+            Me.RI_FindClause.Enabled = True
+            Me.RI_AddClause.Enabled = True
         End If
 
         If Trim(ThisAddIn.INI_WebAgentPath) = "" And Trim(ThisAddIn.INI_WebAgentPathLocal) = "" Then
-            Me.RI_WebAgent.Visible = False
-            Me.RI_EditWebAgent.Visible = False
+            Me.RI_WebAgent.Enabled = False
+            Me.RI_EditWebAgent.Enabled = False
         Else
-            Me.RI_WebAgent.Visible = True
-            Me.RI_EditWebAgent.Visible = True
+            Me.RI_WebAgent.Enabled = True
+            Me.RI_EditWebAgent.Enabled = True
         End If
 
 
         If Trim(ThisAddIn.INI_SnapshotLibPath) = "" And Trim(ThisAddIn.INI_SnapshotLibPathLocal) = "" Then
-            Me.RI_Snapshot.Visible = False
+            Me.RI_Snapshot.Enabled = False
         Else
-            Me.RI_Snapshot.Visible = True
+            Me.RI_Snapshot.Enabled = True
         End If
 
         'If Trim(ThisAddIn.INI_DiscussInkyPath) = "" And Trim(ThisAddIn.INI_DiscussInkyPathLocal) = "" Then
-        'Me.RI_DiscussInky.Visible = False
+        'Me.RI_DiscussInky.Enabled = False
         'Else
-        'Me.RI_DiscussInky.Visible = True
+        'Me.RI_DiscussInky.Enabled = True
         'End If
 
         Dim LastFreestylePrompt As String = My.Settings.LastFreestylePrompt
