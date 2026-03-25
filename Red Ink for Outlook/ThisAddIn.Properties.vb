@@ -582,6 +582,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_AutoPilotSchedulerLocalChat As Boolean
+        Get
+            Return _context.INI_AutoPilotSchedulerLocalChat
+        End Get
+        Set(value As Boolean)
+            _context.INI_AutoPilotSchedulerLocalChat = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_UsageRestrictions As String
         Get
             Return _context.INI_UsageRestrictions

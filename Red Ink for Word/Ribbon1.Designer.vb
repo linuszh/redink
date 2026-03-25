@@ -95,6 +95,7 @@ Partial Class Ribbon1
         Me.RI_DocCheck = Me.Factory.CreateRibbonButton
         Me.RI_FindClause = Me.Factory.CreateRibbonButton
         Me.RI_AddClause = Me.Factory.CreateRibbonButton
+        Me.RI_Tabular = Me.Factory.CreateRibbonButton
         Me.RI_CreatePodcast = Me.Factory.CreateRibbonButton
         Me.RI_CreateAudio = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
@@ -133,7 +134,6 @@ Partial Class Ribbon1
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
         Me.RI_Correct2 = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
-        Me.RI_Tabular = Me.Factory.CreateRibbonButton
         Me.Tab1.SuspendLayout()
         Me.Group1.SuspendLayout()
         Me.Group2.SuspendLayout()
@@ -562,6 +562,15 @@ Partial Class Ribbon1
         Me.RI_AddClause.ScreenTip = "Will add your current selection to the clause library you choose"
         Me.RI_AddClause.ShowImage = True
         '
+        'RI_Tabular
+        '
+        Me.RI_Tabular.Label = "Tabular Overview"
+        Me.RI_Tabular.Name = "RI_Tabular"
+        Me.RI_Tabular.OfficeImageId = "TableAutoFormat"
+        Me.RI_Tabular.ScreenTip = "This will scan a file or folder(s) for documents and create a tabular overview of" &
+    " their content as per your definition"
+        Me.RI_Tabular.ShowImage = True
+        '
         'RI_CreatePodcast
         '
         Me.RI_CreatePodcast.Label = "Create Podcast"
@@ -772,11 +781,11 @@ Partial Class Ribbon1
         '
         'RI_ConvertDocToTxt
         '
-        Me.RI_ConvertDocToTxt.Label = "Convert PDFs To Txt"
+        Me.RI_ConvertDocToTxt.Label = "Convert PDFs/Files To Txt"
         Me.RI_ConvertDocToTxt.Name = "RI_ConvertDocToTxt"
         Me.RI_ConvertDocToTxt.OfficeImageId = "ConvertInkMenu"
-        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other documents in a directory (and subdirectories) to TXT " &
-    "files for easier analysis by AI (will do OCR, if available)"
+        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other supported files in a directory (and subdirectories) t" &
+    "o TXT files for easier analysis by AI (will do OCR, if available)"
         Me.RI_ConvertDocToTxt.ShowImage = True
         '
         'RI_Stamper
@@ -901,15 +910,6 @@ Partial Class Ribbon1
         Me.RI_Chat.OfficeImageId = "ContactUs"
         Me.RI_Chat.ScreenTip = "Will open a window where you can chat with the LLM"
         Me.RI_Chat.ShowImage = True
-        '
-        'RI_Tabular
-        '
-        Me.RI_Tabular.Label = "Tabular Overview"
-        Me.RI_Tabular.Name = "RI_Tabular"
-        Me.RI_Tabular.OfficeImageId = "TableAutoFormat"
-        Me.RI_Tabular.ScreenTip = "This will scan a file or folder(s) for documents and create a tabular overview of" &
-    " their content as per your definition"
-        Me.RI_Tabular.ShowImage = True
         '
         'Ribbon1
         '

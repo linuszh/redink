@@ -1918,15 +1918,12 @@ Partial Public Class ThisAddIn
 
 
 
-
-
-
-
     ''' <summary>
     ''' Prompts the user for a file or directory, reads content using GetFileContent(),
     ''' and saves the extracted text as a .txt file at the same location (or optionally in a subdirectory).
     ''' Shows a progress bar and allows cancellation. If 2+ PDF files are present and OCR is available,
-    ''' prompts user once for OCR preference.
+    ''' prompts user once for OCR preference. Optionally flattens PDFs to image-only before OCR
+    ''' to ensure all visual elements (layered images, transparency groups) are captured.
     ''' </summary>
     Public Async Sub ExportFileContentToText()
         Dim selectedPath As String = ""
@@ -1957,20 +1954,39 @@ Partial Public Class ThisAddIn
             Return
         End If
 
+        ' Build supported extensions list aligned with GetFileContentEx
+        Dim supportedExtensionsList As New List(Of String)({
+            ".txt", ".rtf", ".docx", ".pdf", ".xlsx", ".pptx", ".ini", ".csv", ".log",
+            ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml",
+            ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql",
+            ".eml", ".msg",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+            ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm",
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv"
+        })
+
+        ' Conditionally include .doc (legacy Word format — may execute macros via COM)
+        If INI_AllowLegacyDocFiles Then
+            supportedExtensionsList.Add(".doc")
+        End If
+
+        ' Filter out binary/media types the current model can't handle
+        Dim supportedExtensions As String() = supportedExtensionsList.
+            Where(Function(ext) Not IsBinaryMediaExtension(ext) OrElse IsModelCapableForExtension(_context, ext)).
+            ToArray()
+
         ' Collect files to process
         Dim filesToProcess As New List(Of String)()
-        Dim supportedExtensions As String() = {
-            ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
-            ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
-            ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-        }
-
         Dim unsupportedFiles As New List(Of String)()
+        Dim legacyDocFilesSkipped As New List(Of String)()
 
         If isFile Then
             Dim ext As String = IO.Path.GetExtension(selectedPath).ToLowerInvariant()
             If supportedExtensions.Contains(ext) Then
                 filesToProcess.Add(selectedPath)
+            ElseIf ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+                ShowCustomMessageBox($"Legacy .doc files are disabled for security reasons (AllowLegacyDocFiles is off). Save as .docx first.")
+                Return
             Else
                 ShowCustomMessageBox($"File type '{ext}' is not supported for text extraction.")
                 Return
@@ -1995,6 +2011,8 @@ Partial Public Class ThisAddIn
                 Dim ext As String = IO.Path.GetExtension(f).ToLowerInvariant()
                 If supportedExtensions.Contains(ext) Then
                     filesToProcess.Add(f)
+                ElseIf ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+                    legacyDocFilesSkipped.Add(f)
                 Else
                     unsupportedFiles.Add(f)
                 End If
@@ -2002,7 +2020,8 @@ Partial Public Class ThisAddIn
 
             If filesToProcess.Count = 0 Then
                 ShowCustomMessageBox($"No supported files found in the selected directory." &
-                    If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported file(s) were ignored.)", ""))
+                    If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported file(s) were ignored.)", "") &
+                    If(legacyDocFilesSkipped.Count > 0, $" ({legacyDocFilesSkipped.Count} .doc file(s) skipped — AllowLegacyDocFiles is off.)", ""))
                 Return
             End If
 
@@ -2011,6 +2030,7 @@ Partial Public Class ThisAddIn
                 Dim confirmAnswer As Integer = ShowCustomYesNoBox(
                     $"The directory contains {filesToProcess.Count} supported files to process." &
                     If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported files will be ignored.)", "") &
+                    If(legacyDocFilesSkipped.Count > 0, $" ({legacyDocFilesSkipped.Count} .doc files skipped — disabled for security.)", "") &
                     " Continue?",
                     "Yes, continue", "No, abort")
                 If confirmAnswer <> 1 Then
@@ -2044,6 +2064,7 @@ Partial Public Class ThisAddIn
         ' Determine OCR settings
         Dim doOcr As Boolean = False
         Dim askUserPerFile As Boolean = False
+        Dim flattenBeforeOcr As Boolean = False
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -2063,9 +2084,32 @@ Partial Public Class ThisAddIn
                 askUserPerFile = False
             End If
         ElseIf pdfCount = 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
-            ' Single PDF - ask per file (default behavior)
-            doOcr = True
-            askUserPerFile = True
+            ' Single PDF - still ask once upfront, but don't interrupt during processing
+            Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                "The PDF may require OCR to extract text from scanned content." & vbCrLf & vbCrLf &
+                "Do you want to enable OCR?",
+                "Yes, enable OCR",
+                "No, skip OCR")
+            If ocrChoice = 0 Then
+                Return ' User aborted
+            End If
+            doOcr = (ocrChoice = 1)
+            askUserPerFile = False ' User already decided — don't interrupt during processing
+        End If
+
+        ' Offer PDF flattening before OCR when OCR is enabled
+        If doOcr AndAlso pdfCount >= 1 Then
+            Dim flattenChoice As Integer = ShowCustomYesNoBox(
+                "Some scanned PDFs contain layered images or transparency groups that OCR may miss." & vbCrLf & vbCrLf &
+                "Would you like to flatten PDFs to image-only format before OCR? " &
+                "This rasterizes each page (like printing to image), ensuring all visual elements are captured." & vbCrLf & vbCrLf &
+                "⚠ This adds processing time (a few seconds per page) but can significantly improve OCR results for complex PDFs.",
+                "Yes, flatten first (recommended for scans)",
+                "No, OCR directly")
+            If flattenChoice = 0 Then
+                Return ' User aborted
+            End If
+            flattenBeforeOcr = (flattenChoice = 1)
         End If
 
         ' Create output subdirectory if needed
@@ -2097,7 +2141,8 @@ Partial Public Class ThisAddIn
         ' Process files
         Dim successCount As Integer = 0
         Dim failedFiles As New List(Of String)()
-        Dim skippedFiles As New List(Of String)()
+        Dim emptyContentFiles As New List(Of String)()
+        Dim flattenedPdfCount As Integer = 0
 
         Try
             For i As Integer = 0 To filesToProcess.Count - 1
@@ -2117,45 +2162,78 @@ Partial Public Class ThisAddIn
                     ' Determine OCR settings for this file
                     Dim isPdf As Boolean = IO.Path.GetExtension(filePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
-                    Dim askForThisFile As Boolean = isPdf AndAlso askUserPerFile
 
-                    ' Read file content
-                    Dim content As String = Await GetFileContent(filePath, True, useOcrForThisFile, askForThisFile)
+                    ' If flattening is requested for PDFs, flatten to temp file first
+                    Dim effectiveFilePath As String = filePath
+                    Dim tempFlattenedPath As String = Nothing
 
-                    If String.IsNullOrWhiteSpace(content) Then
-                        skippedFiles.Add($"{fileName}: Empty content")
-                        Continue For
-                    End If
-
-                    If content.StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso content.Length < 200 Then
-                        failedFiles.Add($"{fileName}: {content}")
-                        Continue For
-                    End If
-
-                    ' Determine output path
-                    Dim outputPath As String
-                    If useSubdirectory Then
-                        ' Preserve relative directory structure if processing subdirectories
-                        If isDirectory Then
-                            Dim relativePath As String = filePath.Substring(selectedPath.Length).TrimStart(IO.Path.DirectorySeparatorChar)
-                            Dim relativeDir As String = IO.Path.GetDirectoryName(relativePath)
-                            If Not String.IsNullOrEmpty(relativeDir) Then
-                                Dim targetDir As String = IO.Path.Combine(outputBaseDir, relativeDir)
-                                If Not IO.Directory.Exists(targetDir) Then
-                                    IO.Directory.CreateDirectory(targetDir)
-                                End If
+                    If isPdf AndAlso flattenBeforeOcr AndAlso useOcrForThisFile Then
+                        Try
+                            ProgressBarModule.GlobalProgressLabel = $"Flattening PDF {i + 1} of {filesToProcess.Count}: {fileName}..."
+                            tempFlattenedPath = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_flatten_{Guid.NewGuid():N}.pdf")
+                            Await System.Threading.Tasks.Task.Run(Sub() FlattenPdfToImageOnly(filePath, tempFlattenedPath, 200))
+                            effectiveFilePath = tempFlattenedPath
+                            flattenedPdfCount += 1
+                            ProgressBarModule.GlobalProgressLabel = $"OCR processing file {i + 1} of {filesToProcess.Count}: {fileName}..."
+                        Catch ex As Exception
+                            ' Flattening failed — fall back to original PDF
+                            effectiveFilePath = filePath
+                            If tempFlattenedPath IsNot Nothing Then
+                                Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
+                                Catch : End Try
                             End If
-                            outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
-                        Else
-                            outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
-                        End If
-                    Else
-                        outputPath = filePath & ".txt"
+                            tempFlattenedPath = Nothing
+                        End Try
                     End If
 
-                    ' Save as text file
-                    IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
-                    successCount += 1
+                    Try
+                        ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
+                        ' preventing the countdown splash from interrupting batch processing.
+                        ' The user has already made all choices upfront (OCR on/off, flatten on/off).
+                        Dim content As String = Await GetFileContent(effectiveFilePath, Silent:=True, DoOCR:=useOcrForThisFile, AskUser:=False)
+
+                        If String.IsNullOrWhiteSpace(content) Then
+                            emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
+                            Continue For
+                        End If
+
+                        If content.StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso content.Length < 200 Then
+                            failedFiles.Add($"{fileName}: {content}")
+                            Continue For
+                        End If
+
+                        ' Determine output path
+                        Dim outputPath As String
+                        If useSubdirectory Then
+                            ' Preserve relative directory structure if processing subdirectories
+                            If isDirectory Then
+                                Dim relativePath As String = filePath.Substring(selectedPath.Length).TrimStart(IO.Path.DirectorySeparatorChar)
+                                Dim relativeDir As String = IO.Path.GetDirectoryName(relativePath)
+                                If Not String.IsNullOrEmpty(relativeDir) Then
+                                    Dim targetDir As String = IO.Path.Combine(outputBaseDir, relativeDir)
+                                    If Not IO.Directory.Exists(targetDir) Then
+                                        IO.Directory.CreateDirectory(targetDir)
+                                    End If
+                                End If
+                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
+                            Else
+                                outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
+                            End If
+                        Else
+                            outputPath = filePath & ".txt"
+                        End If
+
+                        ' Save as text file
+                        IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
+                        successCount += 1
+
+                    Finally
+                        ' Clean up temp flattened PDF
+                        If tempFlattenedPath IsNot Nothing Then
+                            Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
+                            Catch : End Try
+                        End If
+                    End Try
 
                 Catch ex As Exception
                     failedFiles.Add($"{fileName}: {ex.Message}")
@@ -2168,7 +2246,7 @@ Partial Public Class ThisAddIn
         End Try
 
         ' Build summary
-        Dim wasCancelled As Boolean = (successCount + failedFiles.Count + skippedFiles.Count) < filesToProcess.Count
+        Dim wasCancelled As Boolean = (successCount + failedFiles.Count + emptyContentFiles.Count) < filesToProcess.Count
 
         Dim summary As New System.Text.StringBuilder()
 
@@ -2183,12 +2261,53 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Output directory: {outputBaseDir}")
         End If
 
-        If skippedFiles.Count > 0 Then
-            summary.AppendLine($"Skipped (empty content): {skippedFiles.Count} file(s)")
+        If doOcr Then
+            summary.AppendLine($"OCR was enabled for PDF files.")
+            If flattenBeforeOcr Then
+                summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
+            End If
+        End If
+
+        If emptyContentFiles.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"⚠ Files with no extractable content ({emptyContentFiles.Count} file(s)):")
+            For Each f In emptyContentFiles.Take(10)
+                summary.AppendLine($"  • {f}")
+            Next
+            If emptyContentFiles.Count > 10 Then
+                summary.AppendLine($"  ... and {emptyContentFiles.Count - 10} more")
+            End If
+            summary.AppendLine("  (These files were read but returned no text content)")
         End If
 
         If unsupportedFiles.Count > 0 Then
-            summary.AppendLine($"Unsupported file types (ignored): {unsupportedFiles.Count} file(s)")
+            summary.AppendLine()
+            summary.AppendLine($"Skipped due to unsupported file type ({unsupportedFiles.Count} file(s)):")
+            ' Group by extension for readability
+            Dim byExtension = unsupportedFiles.
+                GroupBy(Function(f) IO.Path.GetExtension(f).ToLowerInvariant()).
+                OrderByDescending(Function(g) g.Count())
+            For Each extGroup In byExtension
+                Dim extLabel As String = If(String.IsNullOrEmpty(extGroup.Key), "(no extension)", extGroup.Key)
+                If extGroup.Count() <= 3 Then
+                    For Each f In extGroup
+                        summary.AppendLine($"  • {IO.Path.GetFileName(f)}")
+                    Next
+                Else
+                    summary.AppendLine($"  • {extGroup.Count()} {extLabel} files (e.g., {IO.Path.GetFileName(extGroup.First())})")
+                End If
+            Next
+        End If
+
+        If legacyDocFilesSkipped.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"Skipped .doc files ({legacyDocFilesSkipped.Count} — disabled for security):")
+            For Each f In legacyDocFilesSkipped.Take(5)
+                summary.AppendLine($"  • {IO.Path.GetFileName(f)}")
+            Next
+            If legacyDocFilesSkipped.Count > 5 Then
+                summary.AppendLine($"  ... and {legacyDocFilesSkipped.Count - 5} more")
+            End If
         End If
 
         ' Build detailed failure/skip log for clipboard
@@ -2211,9 +2330,9 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
-        If skippedFiles.Count > 0 Then
-            clipboardLog.AppendLine("=== SKIPPED FILES (Empty Content) ===")
-            For Each f In skippedFiles
+        If emptyContentFiles.Count > 0 Then
+            clipboardLog.AppendLine("=== EMPTY CONTENT FILES ===")
+            For Each f In emptyContentFiles
                 clipboardLog.AppendLine(f)
             Next
             clipboardLog.AppendLine()
@@ -2227,8 +2346,16 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
+        If legacyDocFilesSkipped.Count > 0 Then
+            clipboardLog.AppendLine("=== LEGACY .DOC FILES (Disabled for security) ===")
+            For Each f In legacyDocFilesSkipped
+                clipboardLog.AppendLine(IO.Path.GetFileName(f))
+            Next
+            clipboardLog.AppendLine()
+        End If
+
         ' Copy log to clipboard if there were any issues
-        If failedFiles.Count > 0 OrElse skippedFiles.Count > 0 OrElse unsupportedFiles.Count > 0 Then
+        If failedFiles.Count > 0 OrElse emptyContentFiles.Count > 0 OrElse unsupportedFiles.Count > 0 OrElse legacyDocFilesSkipped.Count > 0 Then
             Dim logText As String = clipboardLog.ToString().TrimEnd()
             SharedMethods.PutInClipboard(logText)
             summary.AppendLine()

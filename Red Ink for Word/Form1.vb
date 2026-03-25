@@ -4088,7 +4088,6 @@ Partial Public Class frmAIChat
     Private ReadOnly _mdPipeline As MarkdownPipeline =
         New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
-            UseEmojiAndSmiley().
             UseSoftlineBreakAsHardlineBreak().
             Build()
 

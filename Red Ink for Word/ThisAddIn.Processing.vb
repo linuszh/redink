@@ -2530,7 +2530,6 @@ Partial Public Class ThisAddIn
         builder.UseAbbreviations()
         builder.UseAutoLinks()
         builder.UseTaskLists()
-        builder.UseEmojiAndSmiley()
         builder.UseMathematics()
         builder.UseFigures()
         builder.UseAdvancedExtensions()

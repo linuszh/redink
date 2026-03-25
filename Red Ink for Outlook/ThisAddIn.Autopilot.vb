@@ -26,10 +26,13 @@
 '  - Catch-up processing:
 '      * On start, scans recent mailbox history since last processed UTC timestamp,
 '        applies full filter pipeline, and offers operator selection dialog.
+'      * Mails marked with holding-only MAPI value (`AP_LoopHeaderValueHolding`)
+'        are re-eligible for full processing.
 '  - Queue + timing:
 '      * Central mail queue with processing pump.
 '      * Attachment-based category classification (text/light/heavy-doc/heavy-pdf).
 '      * Rolling timing estimates and queue position notifications for delayed jobs.
+'      * Active-job progress notifications for long-running tool executions.
 '  - Tooling integration:
 '      * Uses existing `ExecuteToolingLoop` and AutoPilot internal tools.
 '      * Supports per-mail `#model:` override with tooling-capability checks.
@@ -37,6 +40,17 @@
 '      * Sends HTML replies with optional generated attachments.
 '      * Optional approval dialog and "Sources used" footer.
 '      * Moves AutoPilot replies to Sent Items\Inky Replies.
+'  - Web grounding:
+'      * When `EnableWebGrounding` is active, the system prompt informs the model
+'        about its native web-search capability.
+'  - Scheduler lifecycle:
+'      * Starts/stops the scheduler timer (`StartSchedulerTimer`/`StopSchedulerTimer`)
+'        alongside the AutoPilot session when `EnableScheduler` is configured.
+'      * Manages a scheduler dashboard for task monitoring.
+'  - Voicemail processing:
+'      * When enabled, incoming voicemails are identified by sender address,
+'        transcribed via the model's audio capability, and processed as instructions.
+'        Responses are delivered to the mapped e-mail address from the caller ID CSV.
 '
 ' Security Model for Attachments:
 '  - Per-mail isolated temp directory under `%TEMP%` (GUID-based).
@@ -53,6 +67,7 @@
 '  - Outlook COM access is marshaled to UI thread (`SwitchToUi`).
 '  - LLM and queue operations run asynchronously with cancellation support.
 '  - Dashboard updates are thread-safe through `LogWindow` invocation guards.
+'  - Notification timer runs independently of processing pump for timely alerts.
 ' =============================================================================
 
 Option Explicit On
@@ -272,6 +287,9 @@ Partial Public Class ThisAddIn
         Catch : End Try
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
+        StopSchedulerTimer()
+        StopSchedulerTimer()
+        CloseSchedulerDashboard()
         Try : _apCts?.Cancel() : Catch : End Try
         Try : _apCurrentJobCts?.Cancel() : Catch : End Try
         Try : _apCts?.Dispose() : Catch : End Try
@@ -359,17 +377,17 @@ Partial Public Class ThisAddIn
         _apUseSecondApi = config.UseSecondApi
 
         ' Set the WebGrounding field for InterpolateAtRuntime resolution
-        If config.EnableWebGrounding Then
-            WebGrounding = "WEB GROUNDING: Your model has built-in Internet search / web grounding capability. " &
-                "When a user's question would benefit from current, factual, or verifiable information, " &
-                "you SHOULD proactively use your web search capability to look up the answer. " &
-                "You do not need a tool call for this — use your native search functionality directly. " &
-                "When presenting search results, cite sources when possible, but NEVER invent URLs. " &
-                "NEVER echo your search queries in the response. " &
-                "The CONFIDENTIALITY AND QUERY SANITIZATION RULE above applies equally to your web searches."
-        Else
-            WebGrounding = ""
-        End If
+        'If config.EnableWebGrounding Then
+        'WebGrounding = "WEB GROUNDING: Your model has built-in Internet search / web grounding capability. " &
+        '       "When a user's question would benefit from current, factual, or verifiable information, " &
+        '      "you SHOULD proactively use your web search capability to look up the answer. " &
+        '     "You do not need a tool call for this — use your native search functionality directly. " &
+        '    "When presenting search results, cite sources when possible, but NEVER invent URLs. " &
+        '   "NEVER echo your search queries in the response. " &
+        '  "The CONFIDENTIALITY AND QUERY SANITIZATION RULE above applies equally to your web searches."
+        'Else
+        WebGrounding = ""
+        'End If
 
         ' Load voicemail caller ID map if voicemail processing is enabled
         If config.EnableVoicemailProcessing AndAlso Not String.IsNullOrWhiteSpace(config.VoicemailCallerIdMapPath) Then
@@ -400,6 +418,25 @@ Partial Public Class ThisAddIn
         AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
         _apDashboard.ShowAbortJobButton(True)
         _apDashboard.Show()
+
+        ' Add Scheduler dashboard button if scheduler is enabled
+        If config.EnableScheduler Then
+            Try
+                ' Find the button panel (FlowLayoutPanel) in the dashboard
+                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+                If buttonPanel IsNot Nothing Then
+                    Dim btnScheduler As New Button() With {
+                        .Text = "Scheduler",
+                        .AutoSize = True,
+                        .Padding = New Padding(10, 5, 10, 5)
+                    }
+                    AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
+                    buttonPanel.Controls.Add(btnScheduler)
+                End If
+            Catch
+            End Try
+        End If
 
         Dim modelLabel As String
         If Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
@@ -455,6 +492,12 @@ Partial Public Class ThisAddIn
         ApDashboardLog("Watching for new mail...", "info")
 
         CatchUpMissedMails()
+
+        ' Start scheduler if enabled
+        If config.EnableScheduler Then
+            SchedulerCatchUp()
+            StartSchedulerTimer()
+        End If
 
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
         Task.Run(Function() AutoPilotProcessingPump(_apCts.Token))
@@ -3184,7 +3227,7 @@ Partial Public Class ThisAddIn
         builder.UsePipeTables().UseGridTables().UseSoftlineBreakAsHardlineBreak()
         builder.UseListExtras().UseFootnotes().UseDefinitionLists()
         builder.UseAbbreviations().UseAutoLinks().UseTaskLists()
-        builder.UseEmojiAndSmiley().UseMathematics().UseFigures()
+        builder.UseMathematics().UseFigures()
         builder.UseAdvancedExtensions().UseGenericAttributes()
         Dim pipeline = builder.Build()
         Dim htmlBody As String = Markdig.Markdown.ToHtml(responseMarkdown, pipeline)

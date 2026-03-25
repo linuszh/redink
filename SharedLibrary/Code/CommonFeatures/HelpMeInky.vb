@@ -197,7 +197,6 @@ Namespace SharedLibrary
 
             _mdPipeline = New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
-            UseEmojiAndSmiley().
             UseSoftlineBreakAsHardlineBreak().
             Build()
 

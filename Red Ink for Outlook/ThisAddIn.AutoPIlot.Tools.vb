@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
 ' For license to use see https://redink.ai.
 '
 ' =============================================================================
@@ -27,11 +26,19 @@
 '        `FindAttachment` (original attachments + prior tool outputs).
 '  - Office/PDF processing:
 '      * Word/PPT/Excel processing and generation via Interop/OpenXML helpers.
-'      * PDF extraction/merge/split/watermark/comment flows via PdfPig/PdfSharp and
-'        shared OCR-aware extraction helpers.
+'      * PDF extraction/merge/split/watermark/comment/redact/overlay flows via
+'        PdfPig/PdfSharp and shared OCR-aware extraction helpers.
 '  - Text extraction:
 '      * Reads Office/text/PDF attachments with cache reuse
 '        (`CachedText`, `CachedDocxHint`) to reduce repeated I/O and parsing.
+'  - Web grounding:
+'      * `web_grounding` delegates to the model's native web-search capability
+'        when enabled in the session config (`EnableWebGrounding`).
+'  - Scheduler integration:
+'      * `manage_scheduled_tasks` provides CRUD operations (create, list, get,
+'        update, delete, pause, resume) for the AutoPilot Scheduler via the
+'        `SchedulerCreateTask` / `SchedulerListTasks` / `SchedulerFindTask`
+'        API in `ThisAddIn.AutoPilot.Scheduler.vb`.
 '  - Logging and UX:
 '      * Emits execution traces to tooling context and AutoPilot dashboard
 '        (`context.Log`, `ApDashboardLog`) with concise success/failure summaries.
@@ -75,13 +82,17 @@
 '  - create_code_file
 '  - extract_data_from_attachments
 '  - redact_pdf
+'  - overlay_pdf
 '  - create_audio_file
 '  - generate_image
+'  - web_grounding
+'  - manage_scheduled_tasks
 '  - report_inability
 '
 ' Notes:
 '  - This file is a partial `ThisAddIn` implementation and depends on:
 '      * AutoPilot state/config from `ThisAddIn.Autopilot.vb`
+'      * Scheduler state/CRUD from `ThisAddIn.AutoPilot.Scheduler.vb`
 '      * Tooling contracts from `ThisAddIn.Tooling.vb`
 '      * SharedLibrary helpers (`SharedMethods`, OCR/PDF/Office extractors)
 ' =============================================================================
@@ -138,6 +149,8 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
     Private Const AP_Tool_CreateAudioFile As String = "create_audio_file"
     Private Const AP_Tool_GenerateImage As String = "generate_image"
+    Private Const AP_Tool_WebGrounding As String = "web_grounding"
+    Private Const AP_Tool_ManageScheduledTasks As String = "manage_scheduled_tasks"
     Private Const AP_Tool_ReportInability As String = "report_inability"
 
 
@@ -960,6 +973,154 @@ Partial Public Class ThisAddIn
             })
         End If
 
+        ' ── web_grounding ──
+        ' Register if:
+        '   (a) AutoPilot session with web grounding enabled, OR
+        '   (b) Chat agent session (always offer web grounding if models are configured)
+        Dim enableWebGrounding As Boolean = False
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableWebGrounding Then
+            enableWebGrounding = True
+        ElseIf _chatAgentActive Then
+            ' Chat agent mode: always enable web grounding if models are available
+            enableWebGrounding = True
+        End If
+
+        If enableWebGrounding Then
+            Dim webGroundingAvailable As Boolean = IsWebGroundingAvailable(_context)
+            Dim deepResearchAvailable As Boolean = IsDeepResearchAvailable(_context)
+
+            If webGroundingAvailable OrElse deepResearchAvailable Then
+                Dim modeEnum As String
+                Dim modeDescription As String
+                Dim modeInstructions As String
+
+                If webGroundingAvailable AndAlso deepResearchAvailable Then
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard"",""deep_research""]," &
+                        """description"":""'standard' for quick factual lookups, current events, verifying claims, or finding specific information. " &
+                        "'deep_research' for complex multi-faceted questions requiring comprehensive analysis, comparison of multiple sources, " &
+                        "or in-depth investigation. deep_research returns an extensive report. Default: 'standard'""},"
+                    modeDescription = "Supports two modes: 'standard' for quick lookups and 'deep_research' for comprehensive investigation that returns an extensive report."
+                    modeInstructions = "Choose mode='standard' for quick factual queries and mode='deep_research' for complex, multi-faceted questions " &
+                        "requiring thorough analysis from multiple sources. deep_research produces a detailed, structured report with multiple sections."
+                ElseIf webGroundingAvailable Then
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard""]," &
+                        """description"":""Only 'standard' mode is available. Used for factual lookups and current information. Default: 'standard'""},"
+                    modeDescription = "Uses the web grounding model for factual lookups and current information."
+                    modeInstructions = "Only 'standard' mode is available."
+                Else
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""deep_research""]," &
+                        """description"":""Only 'deep_research' mode is available. Used for comprehensive, multi-source investigation. Returns an extensive report. Default: 'deep_research'""},"
+                    modeDescription = "Uses the deep research model for comprehensive, multi-source investigation that returns an extensive report."
+                    modeInstructions = "Only 'deep_research' mode is available. It produces a detailed, structured report with multiple sections."
+                End If
+
+                tools.Add(New ModelConfig() With {
+                    .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WebGrounding,
+                    .ModelDescription = "Web Grounding / Deep Research (built-in)",
+                    .ToolInstructionsPrompt =
+                        AP_Tool_WebGrounding & ": Searches the internet using a web-grounding AI model to retrieve current, factual, " &
+                        "or verifiable information. The model ALWAYS searches the internet — it never answers from memory alone. " &
+                        "Results ALWAYS include citations with source URLs. " &
+                        "Use this when the user's question requires up-to-date data, fact-checking, " &
+                        "research, or information you are not confident about. " &
+                        modeInstructions & " " &
+                        "The 'query' parameter should contain a clear, focused search question or topic. " &
+                        "PRIVACY CONSTRAINT: The query is sent to an external AI model with web access. " &
+                        "You MUST NOT include any personal data, confidential information, private names, " &
+                        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
+                        "account numbers, or any other non-public information in the query. " &
+                        "Only well-known public figures, public institutions, published legislation, " &
+                        "and other clearly public information may appear in the query. " &
+                        "RESPONSE HANDLING — MANDATORY SOURCE CITATION RULES: " &
+                        "The tool returns the raw JSON response from the grounding model. " &
+                        "You MUST extract and present the COMPLETE answer text from the response. Do NOT summarize or shorten it. " &
+                        "For deep_research results, the response contains an extensive report — include it in FULL. " &
+                        "CRITICAL — SOURCES ARE MANDATORY: " &
+                        "Your reply MUST contain a clearly labeled 'Sources' or 'References' section at the end. " &
+                        "You MUST extract ALL citations, sources, and grounding metadata from the JSON " &
+                        "(look for keys such as 'citations', 'citationSources', 'citationMetadata', 'groundingMetadata', " &
+                        "'groundingSupports', 'groundingChunks', 'webSearchQueries', 'searchEntryPoint', 'sources', 'uri', 'url', 'title'). " &
+                        "Every single source URL found in the response MUST appear as a clickable Markdown link in your reply: [Title](URL) or [URL](URL) if no title. " &
+                        "If the response contains inline citation markers (e.g. [1], [2]), keep them AND provide the numbered source list. " &
+                        "FAILURE TO INCLUDE SOURCES IS A CRITICAL ERROR. If you cannot find any URLs in the response JSON, " &
+                        "explicitly state: 'No source URLs were returned by the search engine.' " &
+                        "NEVER omit sources that are present in the response. NEVER invent or fabricate URLs that are not in the response. " &
+                        "A reply without a Sources section when the tool returned URLs is INVALID and MUST be corrected.",
+                    .ToolDefinition =
+                        "{""name"":""" & AP_Tool_WebGrounding & """," &
+                        """description"":""Searches the internet using a web-grounding AI model. The model ALWAYS performs a live internet search " &
+                        "and ALWAYS returns citations with source URLs. Returns the full JSON response including " &
+                        "the answer text and all grounding sources/citations. " &
+                        modeDescription & " " &
+                        "IMPORTANT: When processing the result, you MUST include the complete answer AND all source URLs as clickable links " &
+                        "in a dedicated 'Sources' section. A reply without sources when the tool returned URLs is invalid. " &
+                        "For deep_research mode, include the full extensive report without summarizing. " &
+                        "PRIVACY: The query is sent to an external model. MUST NOT contain personal data, confidential information, or non-public details.""," &
+                        """parameters"":{""type"":""object"",""properties"":{" &
+                        """query"":{""type"":""string"",""description"":""The search question or topic. Must be clear and focused. " &
+                        "MUST NOT contain personal data, confidential information, or any non-public details.""}," &
+                        modeEnum &
+                        """context"":{""type"":""string"",""description"":""Optional additional context to help the grounding model understand the query better. " &
+                        "Same privacy constraints apply — no personal or confidential data.""}" &
+                        "},""required"":[""query""]}}"
+                })
+            End If
+        End If
+
+        ' ── manage_scheduled_tasks ──
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageScheduledTasks,
+                .ModelDescription = "Manage Scheduled Tasks (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_ManageScheduledTasks & ": Manages the AutoPilot task scheduler. " &
+                    "Users can schedule tasks to be executed automatically at specific times (one-time or recurring) " &
+                    "with results delivered by e-mail. Supports creating, listing, querying, updating, and deleting scheduled tasks. " &
+                    "The user gives natural-language scheduling instructions like 'every Monday at 8am', " &
+                    "'every first Sunday of the month at 10:00', 'three times starting tomorrow at 14:00 every 2 days', " &
+                    "'between now and end of October every second day at 09:00'. " &
+                    "You MUST translate these into structured fields: " &
+                    "- schedule_description: the human-readable schedule text as stated by the user " &
+                    "- rrule: an iCalendar RRULE string (e.g. FREQ=WEEKLY;INTERVAL=1;BYDAY=MO or FREQ=MONTHLY;INTERVAL=1;BYDAY=1SU or FREQ=DAILY;INTERVAL=2) " &
+                    "- time_of_day_local: the local time in HH:mm format (e.g. '08:00', '14:30') " &
+                    "- next_due_utc: the ISO 8601 UTC timestamp of the FIRST execution " &
+                    "- end_date_utc: the ISO 8601 UTC end date if specified (otherwise omit) " &
+                    "- remaining_occurrences: number of times to execute if count-limited (e.g. 'three times' → 3), otherwise 0 for unlimited " &
+                    "When the user says 'every Monday at 8am' and today is Wednesday, the next_due_utc should be next Monday at 08:00 local time converted to UTC. " &
+                    "The machine timezone offset is used for UTC conversion (current local time: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm") & ", " &
+                    "UTC offset: " & DateTimeOffset.Now.Offset.ToString() & "). " &
+                    "For the 'list' action, return ALL tasks including their IDs, instructions, schedules, and status. " &
+                    "For 'delete' or 'update', match by task ID prefix or instruction text. " &
+                    "The deliver_to field is the e-mail address(es) for result delivery. " &
+                    "When invoked from an e-mail, use the sender's address as deliver_to unless the user specifies otherwise. " &
+                    "Tasks can reference attached files — use store_attachment_names to copy the current e-mail's attachments " &
+                    "into the task's permanent storage for use during execution.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_ManageScheduledTasks & """," &
+                    """description"":""Manages the AutoPilot task scheduler. Supports creating, listing, querying, updating, and deleting " &
+                    "scheduled tasks that execute automatically and deliver results by e-mail. " &
+                    "Translate natural-language schedules into structured rrule/time_of_day_local/next_due_utc fields.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """action"":{""type"":""string"",""enum"":[""create"",""list"",""get"",""update"",""delete""]," &
+                    """description"":""The operation to perform""}," &
+                    """task_id"":{""type"":""string"",""description"":""Task ID (or prefix) for get/update/delete actions""}," &
+                    """instruction"":{""type"":""string"",""description"":""The task instruction/prompt to execute (for create/update)""}," &
+                    """subject"":{""type"":""string"",""description"":""Subject line for the result e-mail (for create/update)""}," &
+                    """deliver_to"":{""type"":""array"",""items"":{""type"":""string""},""description"":""E-mail addresses for result delivery (for create/update)""}," &
+                    """schedule_description"":{""type"":""string"",""description"":""Human-readable schedule description (e.g. 'every Monday at 08:00')""}," &
+                    """rrule"":{""type"":""string"",""description"":""iCalendar RRULE string (e.g. 'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO'). Empty for one-time tasks.""}," &
+                    """time_of_day_local"":{""type"":""string"",""description"":""Local time of execution in HH:mm format (e.g. '08:00')""}," &
+                    """next_due_utc"":{""type"":""string"",""description"":""ISO 8601 UTC timestamp for the first/next execution (e.g. '2026-03-30T06:00:00Z')""}," &
+                    """end_date_utc"":{""type"":""string"",""description"":""ISO 8601 UTC end date for recurrence (omit for no end date)""}," &
+                    """remaining_occurrences"":{""type"":""integer"",""description"":""Number of remaining executions for count-limited tasks (0 = unlimited)""}," &
+                    """status"":{""type"":""string"",""enum"":[""active"",""paused""],""description"":""Task status (for update)""}," &
+                    """store_attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of current e-mail attachments to copy into the task's permanent storage""}," &
+                    """status_filter"":{""type"":""string"",""description"":""Filter for list action (e.g. 'active', 'completed', 'paused'). Omit to list all.""}" &
+                    "},""required"":[""action""]}}"
+            })
+        End If
+
+
         ' ── report_inability ──
 
         tools.Add(New ModelConfig() With {
@@ -1062,6 +1223,10 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
             Case AP_Tool_GenerateImage
                 Return Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+            Case AP_Tool_WebGrounding
+                Return Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ManageScheduledTasks
+                Return Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -4987,6 +5152,181 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: web_grounding
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Executes a web grounding or deep research query by switching to the
+    ''' appropriate special task model, calling the LLM with INI_Response_2="JSON"
+    ''' to receive the full JSON response (including grounding metadata/citations),
+    ''' and returning the raw JSON to the tooling model for interpretation.
+    ''' </summary>
+    Private Async Function ExecuteWebGroundingTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim query = GetArgString(toolCall.Arguments, "query")
+            If String.IsNullOrWhiteSpace(query) Then
+                response.Success = False
+                response.Response = "Missing required parameter: query"
+                Return response
+            End If
+
+            Dim mode = If(GetArgString(toolCall.Arguments, "mode"), "standard").Trim().ToLowerInvariant()
+            Dim additionalContext = GetArgString(toolCall.Arguments, "context")
+
+            ' Determine which special task model to use
+            Dim taskKey As String
+            Dim modeLabel As String
+            If mode = "deep_research" Then
+                taskKey = "DeepResearch"
+                modeLabel = "deep research"
+            Else
+                taskKey = "WebGrounding"
+                modeLabel = "web grounding"
+            End If
+
+            Dim queryPreview = If(query.Length > 120, query.Substring(0, 120) & "...", query)
+            context.Log($"Web grounding ({modeLabel}): {queryPreview}")
+            ApDashboardLog($"🌐 {If(mode = "deep_research", "Deep research", "Web grounding")}...", "step")
+
+            ' ── Switch to the appropriate special task model ──
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                response.Success = False
+                response.Response = "No alternate model configuration file is configured. Web grounding requires a configured model."
+                Return response
+            End If
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(_context)
+            Dim previousUseSecondApi As Boolean = _apUseSecondApi
+            Dim previousResponse2 As String = INI_Response_2
+            Dim modelSwitched As Boolean = False
+
+            Try
+                modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, taskKey)
+            Catch
+            End Try
+
+            ' If the requested mode isn't available, try the other one as fallback
+            If Not modelSwitched Then
+                Dim fallbackKey = If(taskKey = "WebGrounding", "DeepResearch", "WebGrounding")
+                Try
+                    modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, fallbackKey)
+                    If modelSwitched Then
+                        modeLabel = If(fallbackKey = "DeepResearch", "deep research", "web grounding")
+                        ApDashboardLog($"⚠ {taskKey} model not available, using {fallbackKey} instead", "warn")
+                    End If
+                Catch
+                End Try
+            End If
+
+            If Not modelSwitched Then
+                response.Success = False
+                response.Response = $"No {taskKey} or fallback model is configured in the alternate models file. Cannot perform web grounding."
+                Return response
+            End If
+
+            Try
+                _apUseSecondApi = True
+                ' Set response mode to JSON so LLM() returns the full raw JSON response
+                ' including grounding metadata, citations, and sources
+                INI_Response_2 = "JSON"
+
+                ' ── Build the system prompt ──
+                ' Force the model to ALWAYS use its web search capability and cite sources.
+                ' Without this, grounding models may decide they already know the answer
+                ' and skip searching, returning responses without citations.
+                Dim systemPrompt As String
+                If mode = "deep_research" Then
+                    systemPrompt =
+                        "You are a deep research assistant. You MUST use your internet search and web grounding " &
+                        "capabilities to thoroughly research the user's query. ALWAYS search the internet — " &
+                        "even if you believe you already know the answer. Your knowledge may be outdated or incomplete. " &
+                        "Produce a comprehensive, well-structured research report with the following requirements: " &
+                        "1. Search broadly across multiple sources to gather diverse perspectives. " &
+                        "2. Organize your findings into clear sections with headings. " &
+                        "3. Provide detailed analysis, not just summaries — include key facts, figures, dates, and context. " &
+                        "4. Compare and contrast information from different sources where relevant. " &
+                        "5. Note any conflicting information or areas of uncertainty. " &
+                        "6. ALWAYS cite your sources with complete URLs. Every factual claim must have a citation. " &
+                        "7. Include a 'Sources' section at the end listing all referenced URLs. " &
+                        "8. Aim for thoroughness — a deep research report should be extensive and detailed, " &
+                        "not a brief summary. Cover the topic comprehensively. " &
+                        "NEVER provide an answer without searching the internet first. " &
+                        "NEVER omit citations. If you cannot find sources, explicitly state that."
+                Else
+                    systemPrompt =
+                        "You are a web research assistant. You MUST use your internet search and web grounding " &
+                        "capabilities to answer the user's query. ALWAYS search the internet — even if you believe " &
+                        "you already know the answer. Your knowledge may be outdated or incomplete. " &
+                        "Requirements: " &
+                        "1. ALWAYS search the web before answering. " &
+                        "2. Provide a clear, accurate answer based on what you find. " &
+                        "3. ALWAYS cite your sources with complete URLs for every factual claim. " &
+                        "4. Include a 'Sources' section at the end listing all referenced URLs. " &
+                        "NEVER provide an answer without searching the internet first. " &
+                        "NEVER omit citations. If you cannot find sources, explicitly state that."
+                End If
+
+                ' Build the user prompt
+                Dim userPrompt As String = query
+                If Not String.IsNullOrWhiteSpace(additionalContext) Then
+                    userPrompt = query & vbCrLf & vbCrLf & "Additional context: " & additionalContext
+                End If
+
+                ' Call LLM with the system prompt that forces web search + citations
+                Dim llmResult = Await LLM(
+                    systemPrompt, userPrompt,
+                    UseSecondAPI:=True,
+                    HideSplash:=True,
+                    EnsureUI:=False,
+                    cancellationToken:=ct)
+
+                If String.IsNullOrWhiteSpace(llmResult) Then
+                    response.Success = False
+                    response.Response = $"The {modeLabel} model returned an empty response. The query may have been blocked or the model may be unavailable."
+                    ApDashboardLog($"⚠ Web grounding: empty response", "warn")
+                    Return response
+                End If
+
+                ' Return the full JSON response to the tooling model — it will parse the
+                ' answer text and any grounding sources/citations on its own
+                response.Success = True
+                response.Response = llmResult
+
+                Dim resultLen = llmResult.Length
+                ApDashboardLog($"✓ Web grounding ({modeLabel}): {resultLen:N0} chars returned", "info")
+
+            Finally
+                ' ── Restore the original model configuration ──
+                _apUseSecondApi = previousUseSecondApi
+                INI_Response_2 = previousResponse2
+                If backupConfig IsNot Nothing Then
+                    RestoreDefaults(_context, backupConfig)
+                End If
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during web grounding: {ex.Message}"
+            ApDashboardLog($"⚠ Web grounding error: {ex.Message}", "warn")
+        End Try
+
+        Return response
+    End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: pdf_to_word
@@ -6062,6 +6402,324 @@ Partial Public Class ThisAddIn
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  MANAGE_SCHEDULED_TASKS TOOL EXECUTOR
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Executes the manage_scheduled_tasks tool call.</summary>
+    Private Async Function ExecuteManageScheduledTasksTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName,
+            .Timestamp = DateTime.Now
+        }
+
+        Try
+            Dim args = toolCall.Arguments
+            If args Is Nothing Then
+                response.Success = False
+                response.ErrorMessage = "No arguments provided"
+                response.Response = "Error: No arguments provided."
+                Return response
+            End If
+
+            Dim action As String = ""
+            If args.ContainsKey("action") Then action = args("action")?.ToString()?.Trim()?.ToLowerInvariant()
+
+            Select Case action
+                Case "create"
+                    Dim task As New ScheduledTask()
+                    task.Id = Guid.NewGuid().ToString("N")
+                    task.CreatedUtc = DateTime.UtcNow
+
+                    If args.ContainsKey("instruction") Then task.Instruction = args("instruction")?.ToString()
+                    If args.ContainsKey("subject") Then task.Subject = args("subject")?.ToString()
+                    If args.ContainsKey("schedule_description") Then task.ScheduleDescription = args("schedule_description")?.ToString()
+                    If args.ContainsKey("rrule") Then task.Rrule = args("rrule")?.ToString()
+                    If args.ContainsKey("time_of_day_local") Then task.TimeOfDayLocal = args("time_of_day_local")?.ToString()
+
+                    ' Parse next_due_utc
+                    If args.ContainsKey("next_due_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.NextDueUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+
+                    ' Fallback: if the LLM did not provide next_due_utc, compute it from
+                    ' the RRULE and time_of_day_local so the task fires at the correct time
+                    ' rather than immediately.
+                    If task.NextDueUtc = DateTime.MaxValue Then
+                        task.NextDueUtc = ComputeFirstDueUtc(task.Rrule, task.TimeOfDayLocal)
+                    End If
+
+                    ' Parse end_date_utc
+                    If args.ContainsKey("end_date_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.EndDateUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+
+                    ' Parse remaining_occurrences
+                    If args.ContainsKey("remaining_occurrences") Then
+                        Dim occ As Integer
+                        If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
+                    End If
+
+                    ' Parse deliver_to
+                    If args.ContainsKey("deliver_to") Then
+                        Dim deliverObj = args("deliver_to")
+                        If TypeOf deliverObj Is JArray Then
+                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        ElseIf TypeOf deliverObj Is String Then
+                            task.DeliverTo = CStr(deliverObj).Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
+                                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    ' Fallback: use sender address from current mail
+                    If task.DeliverTo.Count = 0 AndAlso _apCurrentMailInfo IsNot Nothing Then
+                        If Not String.IsNullOrWhiteSpace(_apCurrentMailInfo.SenderEmail) Then
+                            task.DeliverTo.Add(_apCurrentMailInfo.SenderEmail)
+                        End If
+                    End If
+
+                    task.CreatedBy = If(task.DeliverTo.FirstOrDefault(), "")
+
+                    ' Store attachments from current mail if requested
+                    Dim storeNames As List(Of String) = Nothing
+                    If args.ContainsKey("store_attachment_names") Then
+                        Dim storeObj = args("store_attachment_names")
+                        If TypeOf storeObj Is JArray Then
+                            storeNames = DirectCast(storeObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    Dim taskId = SchedulerCreateTask(task)
+
+                    ' Store requested attachments
+                    If storeNames IsNot Nothing AndAlso storeNames.Count > 0 AndAlso _apCurrentAttachments IsNot Nothing Then
+                        For Each name In storeNames
+                            Dim att = _apCurrentAttachments.FirstOrDefault(
+                                Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                            If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
+                                SchedulerStoreAttachment(taskId, att.TempFilePath)
+                            End If
+                        Next
+                    End If
+
+                    response.Success = True
+                    Dim apWarning = ""
+                    If Not _apActive Then
+                        apWarning = vbCrLf & "⚠ AutoPilot is not currently running. " &
+                            "This task will be executed once AutoPilot is started."
+                    End If
+                    response.Response = $"Task created successfully." & vbCrLf &
+                        $"Task ID: {taskId}" & vbCrLf &
+                        $"Instruction: {Truncate(task.Instruction, 100)}" & vbCrLf &
+                        $"Schedule: {If(task.ScheduleDescription, "one-time")}" & vbCrLf &
+                        $"Next execution: {task.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)" & vbCrLf &
+                        $"Deliver to: {String.Join(", ", task.DeliverTo)}" &
+                        If(task.AttachmentFiles.Count > 0, vbCrLf & $"Stored attachments: {String.Join(", ", task.AttachmentFiles)}", "") &
+                        apWarning
+
+                Case "list"
+                    Dim statusFilter As String = Nothing
+                    If args.ContainsKey("status_filter") Then statusFilter = args("status_filter")?.ToString()
+                    Dim tasks = SchedulerListTasks(statusFilter)
+                    response.Success = True
+                    response.Response = FormatTaskListForDisplay(tasks)
+
+                Case "get"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'get' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                    Else
+                        response.Success = True
+                        response.Response = FormatTaskListForDisplay(New List(Of ScheduledTask) From {task})
+                    End If
+
+                Case "update"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'update' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                        Return response
+                    End If
+
+                    ' Apply updates
+                    If args.ContainsKey("instruction") Then task.Instruction = args("instruction")?.ToString()
+                    If args.ContainsKey("subject") Then task.Subject = args("subject")?.ToString()
+                    If args.ContainsKey("schedule_description") Then task.ScheduleDescription = args("schedule_description")?.ToString()
+                    If args.ContainsKey("rrule") Then task.Rrule = args("rrule")?.ToString()
+                    If args.ContainsKey("time_of_day_local") Then task.TimeOfDayLocal = args("time_of_day_local")?.ToString()
+                    If args.ContainsKey("status") Then task.Status = args("status")?.ToString()
+
+                    If args.ContainsKey("next_due_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.NextDueUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+                    If args.ContainsKey("end_date_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.EndDateUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+                    If args.ContainsKey("remaining_occurrences") Then
+                        Dim occ As Integer
+                        If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
+                    End If
+                    If args.ContainsKey("deliver_to") Then
+                        Dim deliverObj = args("deliver_to")
+                        If TypeOf deliverObj Is JArray Then
+                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    ' Store new attachments from current mail if requested
+                    Dim storeNames As List(Of String) = Nothing
+                    If args.ContainsKey("store_attachment_names") Then
+                        Dim storeObj = args("store_attachment_names")
+                        If TypeOf storeObj Is JArray Then
+                            storeNames = DirectCast(storeObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    If SchedulerUpdateTask(task) Then
+                        ' Store attachments after the update succeeds
+                        Dim storedCount = 0
+                        If storeNames IsNot Nothing AndAlso storeNames.Count > 0 AndAlso _apCurrentAttachments IsNot Nothing Then
+                            For Each name In storeNames
+                                Dim att = _apCurrentAttachments.FirstOrDefault(
+                                    Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                                If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
+                                    If SchedulerStoreAttachment(task.Id, att.TempFilePath) Then storedCount += 1
+                                End If
+                            Next
+                        End If
+
+                        response.Success = True
+                        response.Response = $"Task {taskId} updated successfully." &
+                            If(storedCount > 0, vbCrLf & $"Stored {storedCount} new attachment(s).", "") & vbCrLf &
+                            FormatTaskListForDisplay(New List(Of ScheduledTask) From {task})
+                    Else
+                        response.Success = False
+                        response.Response = $"Failed to update task {taskId}."
+                    End If
+
+                Case "delete"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'delete' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                        Return response
+                    End If
+
+                    If SchedulerDeleteTask(task.Id) Then
+                        response.Success = True
+                        response.Response = $"Task {task.Id.Substring(0, Math.Min(8, task.Id.Length))}... deleted successfully."
+                    Else
+                        response.Success = False
+                        response.Response = $"Failed to delete task."
+                    End If
+
+                Case Else
+                    response.Success = False
+                    response.Response = $"Unknown action: '{action}'. Supported: create, list, get, update, delete."
+            End Select
+
+        Catch ex As OperationCanceledException
+            Throw
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Scheduler error: {ex.Message}"
+            context.Log($"Scheduler tool error: {ex.Message}", "error")
+        End Try
+
+        Return response
+    End Function
+
+    ''' <summary>
+    ''' Computes the first NextDueUtc for a newly created task based on its RRULE
+    ''' and time-of-day. If the computed time today has already passed, advances to
+    ''' the next occurrence. Falls back to UtcNow only if no schedule can be derived.
+    ''' </summary>
+    Private Shared Function ComputeFirstDueUtc(rrule As String, timeOfDayLocal As String) As DateTime
+        Try
+            ' If we have a time-of-day, try scheduling for that time today or tomorrow
+            If Not String.IsNullOrWhiteSpace(timeOfDayLocal) Then
+                Dim parsed As DateTime
+                If DateTime.TryParse(timeOfDayLocal, parsed) Then
+                    Dim todayAtTime = DateTime.Today.Add(parsed.TimeOfDay)
+
+                    ' If that time is still in the future today, use it
+                    If todayAtTime > DateTime.Now Then
+                        Return todayAtTime.ToUniversalTime()
+                    End If
+
+                    ' Time already passed today — compute next occurrence from now
+                    If Not String.IsNullOrWhiteSpace(rrule) Then
+                        Dim nextUtc = ComputeNextOccurrence(rrule, todayAtTime.ToUniversalTime(), timeOfDayLocal)
+                        If nextUtc IsNot Nothing Then Return nextUtc.Value
+                    End If
+
+                    ' No RRULE or couldn't compute — use tomorrow at that time
+                    Return todayAtTime.AddDays(1).ToUniversalTime()
+                End If
+            End If
+
+            ' No time-of-day but has RRULE — compute next from now
+            If Not String.IsNullOrWhiteSpace(rrule) Then
+                Dim nextUtc = ComputeNextOccurrence(rrule, DateTime.UtcNow, timeOfDayLocal)
+                If nextUtc IsNot Nothing Then Return nextUtc.Value
+            End If
+
+            ' No schedule info at all — execute immediately
+            Return DateTime.UtcNow
+
+        Catch
+            Return DateTime.UtcNow
+        End Try
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: overlay_pdf
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -6975,6 +7633,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_OverlayPdf,
                  AP_Tool_CreateAudioFile,
                  AP_Tool_GenerateImage,
+                 AP_Tool_WebGrounding,
+                 AP_Tool_ManageScheduledTasks,
                  AP_Tool_ReportInability
                 Return True
             Case Else

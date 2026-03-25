@@ -69,6 +69,7 @@ Namespace SharedLibrary
             Me.MaximizeBox = False
             Me.MinimizeBox = False
             Me.ShowInTaskbar = False
+            Me.TopMost = True
             Me.Text = headerText
 
             ' Set icon

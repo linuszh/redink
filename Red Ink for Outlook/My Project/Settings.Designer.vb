@@ -661,6 +661,18 @@ Namespace My
                 Me("AP_VoicemailCallerIdMapPath") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnableScheduler() As Boolean
+            Get
+                Return CType(Me("AP_EnableScheduler"),Boolean)
+            End Get
+            Set
+                Me("AP_EnableScheduler") = value
+            End Set
+        End Property
     End Class
 End Namespace
 
