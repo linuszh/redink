@@ -107,7 +107,8 @@ Partial Public Class ThisAddIn
 
                 Select Case ext
                     Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
-                         ".md", ".yaml", ".yml"
+                         ".md", ".yaml", ".yml",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                         FromFile = ReadTextFile(filePath)
                     Case ".rtf"
                         FromFile = ReadRtfAsText(filePath)

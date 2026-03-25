@@ -286,15 +286,57 @@ Partial Public Class ThisAddIn
                                                     form.BeginInvoke(
                                                         Sub()
                                                             Try
-                                                                ' Simple extraction - get full body text
+
+                                                                ' Extract body text with inline hyperlinks as Markdown [text](url)
                                                                 Dim extractScript As String = "
                                                 (function() {
-                                                    // Remove script/style/noscript to reduce noise
+                                                    // Remove noise elements
                                                     var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
                                                     toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
 
-                                                    // Get body text
-                                                    var text = document.body ? (document.body.innerText || '') : '';
+                                                    // Recursively extract text, inlining <a> hrefs as Markdown links
+                                                    function walk(node) {
+                                                        if (!node) return '';
+                                                        if (node.nodeType === 3) return node.textContent || '';
+                                                        if (node.nodeType !== 1) return '';
+
+                                                        var tag = node.tagName ? node.tagName.toUpperCase() : '';
+
+                                                        // Skip hidden elements
+                                                        var style = window.getComputedStyle(node);
+                                                        if (style && (style.display === 'none' || style.visibility === 'hidden')) return '';
+
+                                                        // Collect child text first
+                                                        var parts = [];
+                                                        for (var i = 0; i < node.childNodes.length; i++) {
+                                                            parts.push(walk(node.childNodes[i]));
+                                                        }
+                                                        var inner = parts.join('');
+
+                                                        // Anchor: emit Markdown link if href is meaningful
+                                                        if (tag === 'A') {
+                                                            var href = (node.getAttribute('href') || '').trim();
+                                                            var text = inner.trim();
+                                                            if (href && text && href !== '#' && !href.startsWith('javascript:')) {
+                                                                // Resolve relative URLs to absolute
+                                                                try { href = new URL(href, document.baseURI).href; } catch(e) {}
+                                                                // Avoid duplicating link text that IS the URL
+                                                                if (text === href || text === decodeURIComponent(href)) return text;
+                                                                return '[' + text + '](' + href + ')';
+                                                            }
+                                                            return text || '';
+                                                        }
+
+                                                        // Block-level elements get newlines
+                                                        if (/^(DIV|P|BR|H[1-6]|LI|TR|BLOCKQUOTE|SECTION|ARTICLE|ASIDE|MAIN|DT|DD|FIGCAPTION|PRE)$/.test(tag)) {
+                                                            if (tag === 'BR') return '\n';
+                                                            return '\n' + inner + '\n';
+                                                        }
+
+                                                        return inner;
+                                                    }
+
+                                                    var text = document.body ? walk(document.body) : '';
 
                                                     // Clean up whitespace
                                                     text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
@@ -302,6 +344,7 @@ Partial Public Class ThisAddIn
                                                     return text;
                                                 })();
                                                 "
+
                                                                 webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
                                                                     Sub(t)
                                                                         form.BeginInvoke(

@@ -104,6 +104,7 @@ Namespace SharedLibrary
             Property INI_AllowLegacyDocFiles As Boolean
 
             Property INI_AutoPilotAutoStart As Boolean
+            Property INI_AutoPilotSchedulerLocalChat As Boolean
             Property INI_Language1 As String
             Property INI_Language2 As String
             Property INI_DefaultPrefix As String
@@ -407,6 +408,7 @@ Namespace SharedLibrary
         Public Property INI_OAuth2ATExpiry_2 As Long Implements ISharedContext.INI_OAuth2ATExpiry_2
         Public Property INI_APIDebug As Boolean Implements ISharedContext.INI_APIDebug
         Public Property INI_AutoPilotAutoStart As Boolean Implements ISharedContext.INI_AutoPilotAutoStart
+        Public Property INI_AutoPilotSchedulerLocalChat As Boolean Implements ISharedContext.INI_AutoPilotSchedulerLocalChat
         Public Property INI_UsageRestrictions As String Implements ISharedContext.INI_UsageRestrictions
         Public Property INI_LogPath As String Implements ISharedContext.INI_LogPath
         Public Property INI_AllowLegacyDocFiles As Boolean Implements ISharedContext.INI_AllowLegacyDocFiles

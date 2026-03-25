@@ -386,7 +386,6 @@ Public Class DiscussInky
 
         _mdPipeline = New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
-            UseEmojiAndSmiley().
             UseSoftlineBreakAsHardlineBreak().
             Build()
 
