@@ -1085,6 +1085,13 @@
           "description": "Enable this if AutoPilot should automatically start with the last saved configuration when Outlook launches. A 30-second countdown dialog allows the user to cancel or open the full setup instead. Example: True. [AutoPilotAutoStart]"
         },
         {
+          "key": "AutoPilotSchedulerLocalChat",
+          "label": "Permit AutoPilot Scheduler in Local Chat",
+          "type": "boolean",
+          "default": "False",
+          "description": "Enable this if Local Chat users should be able to access the AutoPilot Scheduler (not only via e-mail). This may allow them to misuse e-mail addresses of others. Example: True. [AutoPilotSchedulerLocalChat]"
+        },
+        {
           "key": "ForceDrawioLocal",
           "label": "Force Draw.io Offline",
           "type": "boolean",

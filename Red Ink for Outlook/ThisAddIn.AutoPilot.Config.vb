@@ -9,9 +9,17 @@
 ' Architecture:
 '  - Dialog flow collects model selection, mailbox, filters, subject trigger,
 '    whitelist, rate limits, and tool selection (when supported).
+'  - Additional session options:
+'      * EnableWebGrounding — tells the model about its native web-search capability.
+'      * EnableScheduler — activates the AutoPilot Task Scheduler for recurring tasks.
+'      * EnableVoicemailProcessing — transcribes and processes incoming voicemails
+'        (requires VoicemailSenderAddress and VoicemailCallerIdMapPath).
+'      * ReprocessLookbackHours — re-proposes already-processed mails in catch-up.
+'      * IsUnattended — auto-start mode (skips catch-up preview, auto-approves replies).
 '  - Settings are persisted to My.Settings and loaded as defaults for subsequent runs.
 '  - Filter rule parsing is shared between the dialog and settings loader.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict Off
@@ -105,6 +113,12 @@ Partial Public Class ThisAddIn
         ''' Format: phone,email[,displayname]  (displayname is optional)
         ''' </summary>
         Public Property VoicemailCallerIdMapPath As String = ""
+
+        ''' <summary>
+        ''' When True, the AutoPilot Scheduler is enabled — tasks can be created, managed,
+        ''' and executed automatically on schedule with results delivered by e-mail.
+        ''' </summary>
+        Public Property EnableScheduler As Boolean = False
 
 
     End Class
@@ -309,8 +323,12 @@ Partial Public Class ThisAddIn
             .Value = saved.ReprocessLookbackHours.ToString()
         })
         paramsList.Add(New InputParameter() With {
-            .Name = "Add web grounding instruction (for models supporting it)",
+            .Name = "Add web grounding (if models are configured)",
             .Value = saved.EnableWebGrounding
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Enable task scheduler (create && run scheduled tasks)",
+            .Value = saved.EnableScheduler
         })
 
         ' ── Voicemail processing (only if audio transcription is available) ──
@@ -367,6 +385,9 @@ Partial Public Class ThisAddIn
 
         ' Web grounding checkbox
         config.EnableWebGrounding = CBool(If(paramsList(4).Value, False))
+
+        ' Scheduler checkbox
+        config.EnableScheduler = CBool(If(paramsList(5).Value, False))
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -450,6 +471,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())} per session")
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
         summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -533,6 +555,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_EnableVoicemailProcessing = config.EnableVoicemailProcessing
         My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
         My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
+        My.Settings.AP_EnableScheduler = config.EnableScheduler
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -565,6 +588,7 @@ Partial Public Class ThisAddIn
         config.EnableVoicemailProcessing = My.Settings.AP_EnableVoicemailProcessing
         config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
         config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
+        config.EnableScheduler = My.Settings.AP_EnableScheduler
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

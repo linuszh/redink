@@ -805,7 +805,6 @@ Partial Public Class ThisAddIn
                     UseAbbreviations().
                     UseAutoLinks().
                     UseTaskLists().
-                    UseEmojiAndSmiley().
                     UseMathematics().
                     UseFigures().
                     UseGenericAttributes().

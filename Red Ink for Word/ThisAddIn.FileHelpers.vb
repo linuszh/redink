@@ -17,6 +17,7 @@
 Option Explicit On
 Option Strict On
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -69,7 +70,8 @@ Partial Public Class ThisAddIn
 
                 Select Case ext
                     Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
-                         ".md", ".yaml", ".yml"
+                         ".md", ".yaml", ".yml",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                         FromFile = ReadTextFile(filePath)
                     Case ".rtf"
                         FromFile = ReadRtfAsText(filePath)
@@ -94,7 +96,25 @@ Partial Public Class ThisAddIn
                     Case ".msg"
                         FromFile = ReadMsgSandboxed(filePath)
                     Case Else
-                        FromFile = "Error: File type not supported."
+                        ' Check if this is a binary/media file the model can handle directly
+                        If IsBinaryMediaExtension(ext) Then
+                            Dim taskFlag = TaskFlagForExtension(ext)
+                            If IsBinaryMediaSupported(_context, ext, taskFlag) Then
+                                Try
+                                    FromFile = Await ReadBinaryFileViaLLM(filePath, _context, "", AskUser, taskFlag)
+                                    If String.IsNullOrWhiteSpace(FromFile) Then
+                                        FromFile = ""
+                                    End If
+                                Catch ex As System.Exception
+                                    FromFile = ""
+                                    Debug.WriteLine("Binary media extraction failed for '" & filePath & "': " & ex.Message)
+                                End Try
+                            Else
+                                FromFile = "Error: The file type '" & ext & "' is not supported by your current model configuration."
+                            End If
+                        Else
+                            FromFile = "Error: File type not supported."
+                        End If
                 End Select
 
                 If FromFile.StartsWith("Error") AndAlso Len(FromFile) < 100 AndAlso Not Silent Then

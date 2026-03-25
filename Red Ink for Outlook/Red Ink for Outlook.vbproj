@@ -485,6 +485,7 @@
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />

@@ -358,7 +358,6 @@ Namespace SharedLibrary
                                     ' Convert Markdown to HTML using Markdig
                                     Dim pipeline = New MarkdownPipelineBuilder() _
                                     .UseAdvancedExtensions() _
-                                    .UseEmojiAndSmiley() _
                                     .UseEmphasisExtras() _
                                     .UseFootnotes() _
                                     .UsePipeTables() _

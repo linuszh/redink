@@ -611,7 +611,7 @@ Namespace SharedLibrary
         ''' </param>
         ''' <returns><c>True</c> if an ImageGeneration model is available; otherwise <c>False</c>.</returns>
         Public Shared Function IsImageGenerationAvailable(context As SharedContext.ISharedContext,
-                                                          Optional ByRef hasObjectCall As Boolean = False) As Boolean
+                                                           Optional ByRef hasObjectCall As Boolean = False) As Boolean
             hasObjectCall = False
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
@@ -625,6 +625,64 @@ Namespace SharedLibrary
                 If available Then
                     hasObjectCall = Not String.IsNullOrWhiteSpace(context.INI_APICall_Object_2)
                 End If
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
+        ''' <summary>
+        ''' Checks whether a WebGrounding special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns><c>True</c> if a WebGrounding model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsWebGroundingAvailable(context As SharedContext.ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "WebGrounding")
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
+        ''' <summary>
+        ''' Checks whether a DeepResearch special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns><c>True</c> if a DeepResearch model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsDeepResearchAvailable(context As SharedContext.ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "DeepResearch")
             Catch
             End Try
 

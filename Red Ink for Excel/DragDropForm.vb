@@ -145,6 +145,7 @@ Public Class DragDropForm
                     parts.Add("PowerPoint Files (*.pptx)")
                     parts.Add("PDF Files (*.pdf)")
                     parts.Add("Email Files (*.msg; *.eml)")
+                    parts.Add("Source Code (*.vb; *.cs; *.js; *.ts; *.py; *.java; *.cpp; *.c; *.h; *.sql)")
                 Else
                     parts.Add("Text Files (*.txt; *.ini; *.csv; *.log; *.json; *.xml; *.html; *.htm; *.md; *.yaml; *.yml)")
                     parts.Add("RTF Files (*.rtf)")
@@ -153,6 +154,7 @@ Public Class DragDropForm
                     parts.Add("PowerPoint Files (*.pptx)")
                     parts.Add("PDF Files (*.pdf)")
                     parts.Add("Email Files (*.msg; *.eml)")
+                    parts.Add("Source Code (*.vb; *.cs; *.js; *.ts; *.py; *.java; *.cpp; *.c; *.h; *.sql)")
                 End If
 
                 ' Join with commas and " and " before the last item
@@ -258,7 +260,7 @@ Public Class DragDropForm
 
                 ' Default filter — legacy formats (.doc) only shown when INI_AllowLegacyDocFiles = True
                 If ThisAddIn.INI_AllowLegacyDocFiles Then
-                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql|" &
                                  "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
                                  "Rich Text Files (*.rtf)|*.rtf|" &
                                  "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
@@ -266,9 +268,10 @@ Public Class DragDropForm
                                  "PowerPoint Files (*.pptx)|*.pptx|" &
                                  "PDF Files (*.pdf)|*.pdf|" &
                                  "Email Files (*.msg;*.eml)|*.msg;*.eml|" &
+                                 "Source Code|*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql|" &
                                  "All Files (*.*)|*.*"
                 Else
-                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                    ofd.Filter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql|" &
                                  "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
                                  "Rich Text Files (*.rtf)|*.rtf|" &
                                  "Word Documents (*.docx)|*.docx|" &
@@ -276,6 +279,7 @@ Public Class DragDropForm
                                  "PowerPoint Files (*.pptx)|*.pptx|" &
                                  "PDF Files (*.pdf)|*.pdf|" &
                                  "Email Files (*.msg;*.eml)|*.msg;*.eml|" &
+                                 "Source Code|*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql|" &
                                  "All Files (*.*)|*.*"
                 End If
 

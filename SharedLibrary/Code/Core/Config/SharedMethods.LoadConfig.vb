@@ -273,6 +273,7 @@ Namespace SharedLibrary
                 context.INI_RoastMe = ParseBoolean(configDict, "RoastMe", False)
                 context.INI_APIDebug = ParseBoolean(configDict, "APIDebug")
                 context.INI_AutoPilotAutoStart = ParseBoolean(configDict, "AutoPilotAutoStart")
+                context.INI_AutoPilotSchedulerLocalChat = ParseBoolean(configDict, "AutoPilotSchedulerLocalChat")
                 context.INI_APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")
                 context.INI_ShortcutsWordExcel = If(configDict.ContainsKey("ShortcutsWordExcel"), configDict("ShortcutsWordExcel"), "")
                 context.INI_ContextMenu = ParseBoolean(configDict, "ContextMenu", DEFAULT_BOOL_CONTEXTMENU)

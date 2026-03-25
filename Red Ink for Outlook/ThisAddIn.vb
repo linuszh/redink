@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 22.3.2026
+' 25.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -57,8 +57,9 @@ Partial Public Class ThisAddIn
     Public Const AN2 As String = "red_ink"
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
+    Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.220326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.250324" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -331,6 +332,7 @@ Partial Public Class ThisAddIn
             mainThreadControl.CreateControl()
             StartListenerWatchdog()
             StartupHttpListener()
+
         Catch ex As System.Exception
             ' Handling errors gracefully
         End Try
