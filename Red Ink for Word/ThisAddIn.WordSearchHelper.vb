@@ -77,6 +77,7 @@ Public Module WordSearchHelper
     ''' <param name="nWords">Number of anchor words to use for start/end patterns (default 4).</param>
     ''' <param name="cancel">Cancellation token to abort long-running searches.</param>
     ''' <param name="timeoutSeconds">Maximum search duration in seconds (default 10).</param>
+    ''' <param name="searchOriginal">When True, searches in Original view (hides inserted revisions)</param>
     ''' <returns>True if text was found and selection updated; False otherwise.</returns>
     Public Function FindLongTextAnchoredFast(
         ByRef sel As Microsoft.Office.Interop.Word.Selection,
@@ -84,7 +85,8 @@ Public Module WordSearchHelper
         Optional ByVal skipDeleted As System.Boolean = True,
         Optional ByVal nWords As System.Int32 = 4,
         Optional ByVal cancel As System.Threading.CancellationToken = Nothing,
-        Optional ByVal timeoutSeconds As System.Int32 = 10
+        Optional ByVal timeoutSeconds As System.Int32 = 10,
+        Optional ByVal searchOriginal As System.Boolean = False
     ) As System.Boolean
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application = sel.Application
@@ -96,8 +98,19 @@ Public Module WordSearchHelper
         Dim viewChanged1 As Boolean = False
         Dim viewChanged2 As Boolean = False
 
-        ' Temporarily hide deleted revisions if requested
-        If skipDeleted Then
+        ' Set the appropriate view for searching
+        If searchOriginal Then
+            ' Search against the original (baseline) text — hide insertions, show deletions
+            If view.RevisionsView <> Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewOriginal Then
+                view.RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewOriginal
+                viewChanged1 = True
+            End If
+            If view.ShowRevisionsAndComments Then
+                view.ShowRevisionsAndComments = False
+                viewChanged2 = True
+            End If
+        ElseIf skipDeleted Then
+            ' Search against the accepted (final) text — hide deleted revisions
             If view.RevisionsView <> Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal Then
                 view.RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                 viewChanged1 = True

@@ -71,7 +71,7 @@ Partial Public Class ThisAddIn
         Public Property GlobalDocumentCounter As Integer = 0
         Public Property LoadedFiles As New List(Of Tuple(Of String, Integer))() ' (path, charCount)
         Public Property FailedFiles As New List(Of String)()
-        Public Property IgnoredFilesPerDir As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+        Public Property IgnoredFilesPerDir As New Dictionary(Of String, List(Of String))(StringComparer.OrdinalIgnoreCase) ' directory -> list of ignored file paths
 
         ''' <summary>OCR mode: 0=not set, 1=enable for all, 2=ask individually</summary>
         Public Property DirectoryOCRMode As Integer = 0
@@ -85,6 +85,8 @@ Partial Public Class ThisAddIn
         ''' <summary>PDFs that heuristics suggest may contain images/scanned content but OCR was not performed.</summary>
         Public Property PdfsWithPossibleImages As New List(Of String)()
 
+        ''' <summary>Files that returned empty/whitespace content from GetFileContentEx.</summary>
+        Public Property EmptyContentFiles As New List(Of String)()
 
         ''' <summary>Maximum files to load from a single directory.</summary>
         Public Const MaxFilesPerDirectory As Integer = 50
@@ -95,12 +97,22 @@ Partial Public Class ThisAddIn
         ''' <summary>Ask user confirmation if directory has more than this many files.</summary>
         Public Const ConfirmDirectoryFileCount As Integer = 10
 
-        ''' <summary>Supported file extensions for GetFileContent.</summary>
+        ''' <summary>
+        ''' Supported file extensions for directory scanning, aligned with
+        ''' <see cref="GetFileContentEx"/> (text-based, Office, PDF, email, and binary/media).
+        ''' </summary>
         Public Shared ReadOnly SupportedExtensions As String() = {
-        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
-        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
-        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-    }
+            ".txt", ".rtf", ".ini", ".csv", ".log",
+            ".json", ".xml", ".html", ".htm",
+            ".md", ".yaml", ".yml",
+            ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql",
+            ".doc", ".docx", ".xlsx", ".pptx",
+            ".pdf",
+            ".eml", ".msg",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+            ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm",
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv"
+        }
     End Class
 
     ''' <summary>
@@ -154,6 +166,57 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>
+    ''' Asynchronously loads a single file and returns its content wrapped in numbered
+    ''' XML document tags (e.g. <c>&lt;document1&gt;...&lt;/document1&gt;</c>).
+    ''' </summary>
+    ''' <remarks>
+    ''' <para>
+    ''' Delegates to <see cref="GetFileContentEx"/> for the actual file reading, which
+    ''' supports text files, RTF, Word (.doc/.docx), Excel (.xlsx), PowerPoint (.pptx),
+    ''' PDF (with optional OCR), and email (.eml/.msg).
+    ''' </para>
+    ''' <para>
+    ''' OCR behaviour is determined by <paramref name="isFromDirectory"/> and the
+    ''' <see cref="FileLoadingContext.DirectoryOCRMode"/> setting:
+    ''' <list type="bullet">
+    '''   <item>Mode 1 — OCR enabled for all files without prompting.</item>
+    '''   <item>Mode 2 — OCR enabled, user asked per file.</item>
+    '''   <item>Mode 3 — OCR skipped entirely.</item>
+    '''   <item>Mode 0 / not set — OCR enabled with per-file user prompt (default).</item>
+    ''' </list>
+    ''' For individually selected files (<paramref name="isFromDirectory"/> = False),
+    ''' OCR is always offered with a user prompt when available.
+    ''' </para>
+    ''' <para>
+    ''' When <paramref name="isWrapped"/> is True, the raw file content is returned
+    ''' without document tags (the caller already provides XML wrapping). Otherwise,
+    ''' the content is enclosed in <c>&lt;documentN&gt;</c> tags that include optional
+    ''' <c>directory</c> and <c>filename</c> attributes when multiple files are being
+    ''' loaded.
+    ''' </para>
+    ''' <para>
+    ''' Tracking: successfully loaded files are added to <see cref="FileLoadingContext.LoadedFiles"/>;
+    ''' files that return empty content go to <see cref="FileLoadingContext.EmptyContentFiles"/>;
+    ''' files that throw exceptions go to <see cref="FileLoadingContext.FailedFiles"/>;
+    ''' PDFs flagged as potentially incomplete go to <see cref="FileLoadingContext.PdfsWithPossibleImages"/>.
+    ''' </para>
+    ''' </remarks>
+    ''' <param name="filePath">Absolute path to the file to load.</param>
+    ''' <param name="isWrapped">
+    ''' When True, the trigger was already wrapped in user-supplied XML tags;
+    ''' only the raw file content is returned (no <c>&lt;documentN&gt;</c> envelope).
+    ''' </param>
+    ''' <param name="ctx">Shared <see cref="FileLoadingContext"/> for document numbering,
+    ''' OCR mode, and result tracking across all files in the current operation.</param>
+    ''' <param name="isFromDirectory">
+    ''' True when this file is being loaded as part of a directory scan (uses the
+    ''' directory-level OCR mode); False for individually selected files.
+    ''' </param>
+    ''' <returns>
+    ''' The file content (optionally wrapped in XML document tags), or an empty string
+    ''' if the file could not be read or contained no extractable text.
+    ''' </returns>
     Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
         Try
             Dim doOCR As Boolean = False
@@ -171,6 +234,10 @@ Partial Public Class ThisAddIn
                     ElseIf ctx.DirectoryOCRMode = 2 Then
                         doOCR = True
                         askUser = True
+                    ElseIf ctx.DirectoryOCRMode = 3 Then
+                        ' Skip OCR entirely
+                        doOCR = False
+                        askUser = False
                     Else
                         doOCR = True
                         askUser = True
@@ -198,7 +265,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.IsNullOrWhiteSpace(fileResult.Content) Then
-                ctx.FailedFiles.Add(filePath)
+                ctx.EmptyContentFiles.Add(filePath)
                 Return ""
             End If
 
@@ -234,6 +301,7 @@ Partial Public Class ThisAddIn
     End Function
 
 
+
     ''' <summary>
     ''' Loads all supported files from a directory and returns their combined content.
     ''' Prompts for OCR only when there are multiple PDF files in the directory.
@@ -241,8 +309,14 @@ Partial Public Class ThisAddIn
     ''' <param name="dirPath">The directory path to load files from.</param>
     ''' <param name="isWrapped">If True, the directory trigger was already wrapped in XML (not used for individual files).</param>
     ''' <param name="ctx">The file loading context for tracking state.</param>
+    ''' <param name="ensureProgressBar">
+    ''' When True and the progress bar has not yet been started by the caller,
+    ''' this method will start it before loading files. The caller sets this to
+    ''' True when it defers progress bar creation to avoid showing it during
+    ''' user-interaction dialogs.
+    ''' </param>
     ''' <returns>Combined content of all files, or "ABORT" if user cancelled, or empty string on error.</returns>
-    Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext) As Task(Of String)
+    Private Async Function LoadDirectoryFilesAsync(dirPath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional ensureProgressBar As Boolean = False) As Task(Of String)
         Try
             If Not Directory.Exists(dirPath) Then
                 ctx.FailedFiles.Add(dirPath)
@@ -254,19 +328,19 @@ Partial Public Class ThisAddIn
 
             ' Filter to supported extensions
             Dim supportedFiles As New List(Of String)()
-            Dim ignoredCount As Integer = 0
+            Dim ignoredFiles As New List(Of String)()
 
             For Each f In allFiles
                 Dim ext As String = Path.GetExtension(f).ToLowerInvariant()
                 If FileLoadingContext.SupportedExtensions.Contains(ext) Then
                     supportedFiles.Add(f)
                 Else
-                    ignoredCount += 1
+                    ignoredFiles.Add(f)
                 End If
             Next
 
-            If ignoredCount > 0 Then
-                ctx.IgnoredFilesPerDir(dirPath) = ignoredCount
+            If ignoredFiles.Count > 0 Then
+                ctx.IgnoredFilesPerDir(dirPath) = ignoredFiles
             End If
 
             ' Check if too many files
@@ -302,15 +376,24 @@ Partial Public Class ThisAddIn
 
             ' Only ask about OCR if there are multiple PDF files in the directory AND OCR is available
             If pdfCount > 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim skipOcrChosen As Boolean = False
+
                 Dim ocrChoice As Integer = ShowCustomYesNoBox(
-                    $"The directory '{dirPath}' contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
-                    "Some PDFs may require OCR (optical character recognition) to extract text from scanned documents or images." & vbCrLf & vbCrLf &
-                    "How would you like to handle OCR for these PDF files?",
+                    $"The directory contains {pdfCount} PDF files." & vbCrLf & vbCrLf &
+                    "How would you like to handle OCR for these PDF files?" & vbCrLf &
+                    "(OCR uses the LLM to extract text from scanned documents and can take a moment per file.)",
                     "Enable OCR for all PDFs",
                     "Choose individually for each PDF",
-                    "Close this window to abort")
+                    extraButtonText:="Skip OCR entirely",
+                    extraButtonAction:=Sub()
+                                           skipOcrChosen = True
+                                       End Sub,
+                    CloseAfterExtra:=True)
 
-                If ocrChoice = 0 Then
+                If skipOcrChosen Then
+                    ' Skip OCR entirely
+                    ctx.DirectoryOCRMode = 3
+                ElseIf ocrChoice = 0 Then
                     ' User closed the dialog - abort
                     Return "ABORT"
                 ElseIf ocrChoice = 1 Then
@@ -321,8 +404,6 @@ Partial Public Class ThisAddIn
                     ctx.DirectoryOCRMode = 2
                 End If
             End If
-            ' If pdfCount <= 1 or OCR not available, we don't set DirectoryOCRMode, 
-            ' and individual files will use AskUser=True (which will be silently skipped if OCR unavailable)
 
             ' Set the current directory path for inclusion in document tags
             ctx.CurrentDirectoryPath = dirPath
@@ -330,15 +411,38 @@ Partial Public Class ThisAddIn
             ' Update expected file count to include these directory files
             ctx.ExpectedFileCount += supportedFiles.Count
 
+            ' Start progress bar now — all user dialogs are done, actual loading begins
+            If ensureProgressBar Then
+                ProgressBarModule.CancelOperation = False
+                ProgressBarModule.GlobalProgressMax = supportedFiles.Count
+                ProgressBarModule.GlobalProgressValue = 0
+                ProgressBarModule.GlobalProgressLabel = "Loading directory files..."
+                ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading directory files...")
+            End If
+
             ' Load all files - each file gets its own document wrapper with incrementing counter
             Dim resultBuilder As New System.Text.StringBuilder()
+            Dim dirFileCount As Integer = supportedFiles.Count
+            Dim dirFileIndex As Integer = 0
             For Each filePath In supportedFiles
+                ' Check for user cancellation
+                If ProgressBarModule.CancelOperation Then
+                    Return "ABORT"
+                End If
+
+                dirFileIndex += 1
+                ProgressBarModule.GlobalProgressLabel = $"Loading file {dirFileIndex} of {dirFileCount}: {Path.GetFileName(filePath)}..."
+                ProgressBarModule.GlobalProgressMax = dirFileCount
+                ProgressBarModule.GlobalProgressValue = dirFileIndex - 1
+
                 ' Always wrap individual files from directory with document tags
                 ' Pass isFromDirectory=True to use directory OCR mode for PDFs
                 Dim fileContent As String = Await LoadSingleFileAsync(filePath, False, ctx, isFromDirectory:=True)
                 If Not String.IsNullOrWhiteSpace(fileContent) Then
                     resultBuilder.Append(fileContent)
                 End If
+
+                ProgressBarModule.GlobalProgressValue = dirFileIndex
             Next
 
             ' Clear the current directory path after processing
@@ -350,6 +454,7 @@ Partial Public Class ThisAddIn
             Return ""
         End Try
     End Function
+
 
     ''' <summary>
     ''' Processes all external file/directory/URL triggers in the prompt ({doc}, {dir}, {url}, inline URLs, and fixed paths).
@@ -389,6 +494,9 @@ Partial Public Class ThisAddIn
             Return (True, prompt)
         End If
 
+        ' Reset cancellation flag from any previous operation
+        ProgressBarModule.CancelOperation = False
+
         ' Create context for tracking
         Dim ctx As New FileLoadingContext()
 
@@ -408,16 +516,32 @@ Partial Public Class ThisAddIn
         ' NOTE: OCR prompt is handled per-directory when multiple PDFs are found,
         ' or per-file with AskUser=True for individual files/single PDFs
 
+        ' === Track overall file processing progress ===
+        Dim totalTriggers As Integer = extTriggerCount + dirTriggerCount + urlTriggerCount + inlineUrlCount + fixedPathCount
+        Dim processedTriggers As Integer = 0
+        Dim progressBarStarted As Boolean = False
+
         ' === Process all triggers in positional order ===
         ' We need to find the first trigger of any type, process it, then repeat
         ' This ensures document numbering follows the order in the prompt
 
+        ' searchStartIndex tracks where to begin searching for the next trigger.
+        ' After each replacement, it advances past the inserted content so that
+        ' file/directory content (which may contain trigger-like text such as {doc},
+        ' {dir}, or {path}) is never re-scanned as a new trigger.
+        Dim searchStartIndex As Integer = 0
+
         Dim continueProcessing As Boolean = True
         While continueProcessing
-            ' Find position of each trigger type
-            Dim extIdx As Integer = prompt.IndexOf(ExtTrigger, StringComparison.OrdinalIgnoreCase)
-            Dim dirIdx As Integer = prompt.IndexOf(ExtDirTrigger, StringComparison.OrdinalIgnoreCase)
-            Dim urlIdx As Integer = prompt.IndexOf(ExtUrlTrigger, StringComparison.OrdinalIgnoreCase)
+            ' Check for user cancellation via progress bar
+            If progressBarStarted AndAlso ProgressBarModule.CancelOperation Then
+                Return (False, prompt)
+            End If
+
+            ' Find position of each trigger type, starting from searchStartIndex
+            Dim extIdx As Integer = prompt.IndexOf(ExtTrigger, searchStartIndex, StringComparison.OrdinalIgnoreCase)
+            Dim dirIdx As Integer = prompt.IndexOf(ExtDirTrigger, searchStartIndex, StringComparison.OrdinalIgnoreCase)
+            Dim urlIdx As Integer = prompt.IndexOf(ExtUrlTrigger, searchStartIndex, StringComparison.OrdinalIgnoreCase)
             Dim fixedIdx As Integer = -1
             Dim fixedMatch As Match = Nothing
             Dim inlineUrlIdx As Integer = -1
@@ -425,13 +549,23 @@ Partial Public Class ThisAddIn
 
             ' Check for inline URL pattern {https://...}
             inlineUrlMatch = Regex.Match(prompt, inlineUrlPattern, RegexOptions.IgnoreCase)
-            If inlineUrlMatch.Success Then
+            ' Only consider matches at or after searchStartIndex
+            While inlineUrlMatch IsNot Nothing AndAlso inlineUrlMatch.Success AndAlso inlineUrlMatch.Index < searchStartIndex
+                inlineUrlMatch = inlineUrlMatch.NextMatch()
+            End While
+            If inlineUrlMatch IsNot Nothing AndAlso inlineUrlMatch.Success Then
                 inlineUrlIdx = inlineUrlMatch.Index
+            Else
+                inlineUrlMatch = Nothing
             End If
 
             If Not String.IsNullOrEmpty(patternFixed) Then
                 fixedMatch = Regex.Match(prompt, patternFixed, RegexOptions.IgnoreCase Or RegexOptions.Singleline)
-                If fixedMatch.Success Then
+                ' Only consider matches at or after searchStartIndex
+                While fixedMatch IsNot Nothing AndAlso fixedMatch.Success AndAlso fixedMatch.Index < searchStartIndex
+                    fixedMatch = fixedMatch.NextMatch()
+                End While
+                If fixedMatch IsNot Nothing AndAlso fixedMatch.Success Then
                     ' Check if it looks like a path
                     Dim candidatePath As String = If(fixedMatch.Groups("path").Value, "").Trim()
                     ' Remove quotes if present
@@ -445,6 +579,8 @@ Partial Public Class ThisAddIn
                     Else
                         fixedMatch = Nothing ' Not a path, ignore this match
                     End If
+                Else
+                    fixedMatch = Nothing
                 End If
             End If
 
@@ -495,17 +631,38 @@ Partial Public Class ThisAddIn
                     Dim replacementText As String = ""
 
                     If Not String.IsNullOrWhiteSpace(selectedFile) Then
+                        ' Start progress bar on first actual file load (after all user dialogs)
+                        If Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = 0
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
                         Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
+                        ProgressBarModule.GlobalProgressLabel = $"Loading file {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(selectedFile)}..."
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
                         ' Individual file - isFromDirectory=False means OCR with AskUser=True
                         replacementText = Await LoadSingleFileAsync(selectedFile, isWrapped, ctx, isFromDirectory:=False)
                     Else
                         Dim answer As Integer = ShowCustomYesNoBox(
                         "No file selected. Do you want to continue or abort?",
                         "Continue", "Abort")
-                        If answer <> 1 Then Return (False, prompt)
+                        If answer <> 1 Then
+                            If progressBarStarted Then ProgressBarModule.CancelOperation = True
+                            Return (False, prompt)
+                        End If
                     End If
 
                     prompt = prompt.Substring(0, extIdx) & replacementText & prompt.Substring(extIdx + ExtTrigger.Length)
+                    ' Advance past the replacement so loaded content is not re-scanned
+                    searchStartIndex = extIdx + replacementText.Length
+                    processedTriggers += 1
+                    If progressBarStarted Then
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        ProgressBarModule.GlobalProgressValue = processedTriggers
+                    End If
 
                 Case "dir"
                     ' Process {dir} trigger - directory processing with OCR prompt for multiple PDFs
@@ -522,19 +679,34 @@ Partial Public Class ThisAddIn
 
                     If Not String.IsNullOrWhiteSpace(selectedDir) Then
                         Dim isWrapped As Boolean = IsWrappedInXml(prompt, dirIdx, ExtDirTrigger)
-                        replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx)
+                        ' Do NOT start progress bar here — LoadDirectoryFilesAsync shows user
+                        ' dialogs (file count confirmation, OCR choice) first and will start the
+                        ' progress bar itself once all questions have been answered.
+                        replacementText = Await LoadDirectoryFilesAsync(selectedDir, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        progressBarStarted = True
 
                         If replacementText = "ABORT" Then
+                            ProgressBarModule.CancelOperation = True
                             Return (False, prompt)
                         End If
                     Else
                         Dim answer As Integer = ShowCustomYesNoBox(
                         "No directory selected. Do you want to continue or abort?",
                         "Continue", "Abort")
-                        If answer <> 1 Then Return (False, prompt)
+                        If answer <> 1 Then
+                            If progressBarStarted Then ProgressBarModule.CancelOperation = True
+                            Return (False, prompt)
+                        End If
                     End If
 
                     prompt = prompt.Substring(0, dirIdx) & replacementText & prompt.Substring(dirIdx + ExtDirTrigger.Length)
+                    ' Advance past the replacement so loaded content is not re-scanned
+                    searchStartIndex = dirIdx + replacementText.Length
+                    processedTriggers += 1
+                    If progressBarStarted Then
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        ProgressBarModule.GlobalProgressValue = processedTriggers
+                    End If
 
                 Case "url"
                     ' Process {url} trigger - prompt user for a URL to retrieve
@@ -544,41 +716,73 @@ Partial Public Class ThisAddIn
 
                     If Not String.IsNullOrWhiteSpace(userUrl) AndAlso Not userUrl.Equals("esc", StringComparison.OrdinalIgnoreCase) Then
                         userUrl = userUrl.Trim()
-                        InfoBox.ShowInfoBox($"Retrieving content from {userUrl} ...")
+
+                        ' Start progress bar on first actual file load (after all user dialogs)
+                        If Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = 0
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
+                        ProgressBarModule.GlobalProgressLabel = $"Retrieving URL {processedTriggers + 1} of {totalTriggers}: {userUrl}..."
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
 
                         Try
                             replacementText = Await LoadUrlContentAsync(userUrl, ctx)
-                        Finally
-                            InfoBox.ShowInfoBox("")
+                        Catch
                         End Try
 
                         If String.IsNullOrWhiteSpace(replacementText) Then
                             Dim answer As Integer = ShowCustomYesNoBox(
                                 $"Could not retrieve content from '{userUrl}'. Do you want to continue or abort?",
                                 "Continue", "Abort")
-                            If answer <> 1 Then Return (False, prompt)
+                            If answer <> 1 Then
+                                ProgressBarModule.CancelOperation = True
+                                Return (False, prompt)
+                            End If
                         End If
                     Else
                         Dim answer As Integer = ShowCustomYesNoBox(
                             "No URL provided. Do you want to continue or abort?",
                             "Continue", "Abort")
-                        If answer <> 1 Then Return (False, prompt)
+                        If answer <> 1 Then
+                            If progressBarStarted Then ProgressBarModule.CancelOperation = True
+                            Return (False, prompt)
+                        End If
                     End If
 
                     prompt = prompt.Substring(0, urlIdx) & replacementText & prompt.Substring(urlIdx + ExtUrlTrigger.Length)
+                    ' Advance past the replacement so loaded content is not re-scanned
+                    searchStartIndex = urlIdx + replacementText.Length
+                    processedTriggers += 1
+                    If progressBarStarted Then
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        ProgressBarModule.GlobalProgressValue = processedTriggers
+                    End If
 
                 Case "inlineurl"
                     ' Process inline URL trigger like {https://example.com}
                     Dim inlineUrl As String = inlineUrlMatch.Groups(1).Value.Trim()
 
-                    InfoBox.ShowInfoBox($"Retrieving content from {inlineUrl} ...")
+                    ' Start progress bar on first actual file load (after all user dialogs)
+                    If Not progressBarStarted Then
+                        progressBarStarted = True
+                        ProgressBarModule.CancelOperation = False
+                        ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                        ProgressBarModule.GlobalProgressValue = 0
+                        ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                        ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                    End If
+                    ProgressBarModule.GlobalProgressLabel = $"Retrieving URL {processedTriggers + 1} of {totalTriggers}: {inlineUrl}..."
+                    ProgressBarModule.GlobalProgressMax = totalTriggers
 
                     Dim replacementText As String = ""
 
                     Try
                         replacementText = Await LoadUrlContentAsync(inlineUrl, ctx)
-                    Finally
-                        InfoBox.ShowInfoBox("")
+                    Catch
                     End Try
 
                     If String.IsNullOrWhiteSpace(replacementText) Then
@@ -586,6 +790,13 @@ Partial Public Class ThisAddIn
                     End If
 
                     prompt = prompt.Substring(0, inlineUrlMatch.Index) & replacementText & prompt.Substring(inlineUrlMatch.Index + inlineUrlMatch.Length)
+                    ' Advance past the replacement so loaded content is not re-scanned
+                    searchStartIndex = inlineUrlMatch.Index + replacementText.Length
+                    processedTriggers += 1
+                    If progressBarStarted Then
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        ProgressBarModule.GlobalProgressValue = processedTriggers
+                    End If
 
                 Case "fixed"
                     ' Process fixed path trigger
@@ -612,12 +823,27 @@ Partial Public Class ThisAddIn
 
                     ' Determine if it's a file or directory
                     If File.Exists(candidatePath) Then
+                        ' Start progress bar for file loading (no user dialogs ahead)
+                        If Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = 0
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
+
+                        ProgressBarModule.GlobalProgressLabel = $"Loading {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(candidatePath)}..."
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+
                         ' Individual file - isFromDirectory=False means OCR with AskUser=True
                         replacementText = Await LoadSingleFileAsync(candidatePath, isWrapped, ctx, isFromDirectory:=False)
                     ElseIf Directory.Exists(candidatePath) Then
-                        ' Directory - will prompt for OCR if multiple PDFs found
-                        replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx)
+                        ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
+                        replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
+                        progressBarStarted = True
                         If replacementText = "ABORT" Then
+                            ProgressBarModule.CancelOperation = True
                             Return (False, prompt)
                         End If
                     Else
@@ -626,11 +852,23 @@ Partial Public Class ThisAddIn
                     End If
 
                     prompt = prompt.Substring(0, fixedMatch.Index) & replacementText & prompt.Substring(fixedMatch.Index + fixedMatch.Length)
+                    ' Advance past the replacement so loaded content is not re-scanned
+                    searchStartIndex = fixedMatch.Index + replacementText.Length
+                    processedTriggers += 1
+                    If progressBarStarted Then
+                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        ProgressBarModule.GlobalProgressValue = processedTriggers
+                    End If
             End Select
         End While
 
+        ' Close the progress bar
+        If progressBarStarted Then
+            ProgressBarModule.CancelOperation = True
+        End If
+
         ' === Show summary and confirm before proceeding ===
-        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 Then
+        If ctx.LoadedFiles.Count > 0 OrElse ctx.FailedFiles.Count > 0 OrElse ctx.IgnoredFilesPerDir.Count > 0 OrElse ctx.PdfsWithPossibleImages.Count > 0 OrElse ctx.EmptyContentFiles.Count > 0 Then
             Dim summary As New System.Text.StringBuilder()
             summary.AppendLine("File inclusion summary:")
             summary.AppendLine("")
@@ -655,6 +893,15 @@ Partial Public Class ThisAddIn
                 summary.AppendLine("")
             End If
 
+            If ctx.EmptyContentFiles.Count > 0 Then
+                summary.AppendLine($"⚠ Files with no extractable content ({ctx.EmptyContentFiles.Count} file(s)):")
+                For Each f In ctx.EmptyContentFiles
+                    summary.AppendLine($"  • {Path.GetFileName(f)} ({IO.Path.GetExtension(f).ToLowerInvariant()})")
+                Next
+                summary.AppendLine("  (These files were read but returned no text content)")
+                summary.AppendLine("")
+            End If
+
             If ctx.FailedFiles.Count > 0 Then
                 summary.AppendLine($"Failed to load ({ctx.FailedFiles.Count} items):")
                 For Each f In ctx.FailedFiles
@@ -663,13 +910,29 @@ Partial Public Class ThisAddIn
                 summary.AppendLine("")
             End If
 
-            ' ... rest of summary ...
-
             If ctx.IgnoredFilesPerDir.Count > 0 Then
-                summary.AppendLine("Ignored unsupported files:")
+                Dim totalIgnored As Integer = ctx.IgnoredFilesPerDir.Values.Sum(Function(lst) lst.Count)
+                summary.AppendLine($"Skipped due to unsupported file type ({totalIgnored} file(s)):")
                 For Each kvp In ctx.IgnoredFilesPerDir
-                    summary.AppendLine($"  • {kvp.Key}: {kvp.Value} file(s)")
+                    summary.AppendLine($"  Directory: {kvp.Key}")
+                    ' Group ignored files by extension for readability
+                    Dim byExtension = kvp.Value.
+                        GroupBy(Function(f) IO.Path.GetExtension(f).ToLowerInvariant()).
+                        OrderByDescending(Function(g) g.Count())
+                    For Each extGroup In byExtension
+                        Dim extLabel As String = If(String.IsNullOrEmpty(extGroup.Key), "(no extension)", extGroup.Key)
+                        If extGroup.Count() <= 3 Then
+                            ' List individual filenames when there are few
+                            For Each f In extGroup
+                                summary.AppendLine($"    • {IO.Path.GetFileName(f)}")
+                            Next
+                        Else
+                            ' Summarize when there are many of the same type
+                            summary.AppendLine($"    • {extGroup.Count()} {extLabel} files (e.g., {IO.Path.GetFileName(extGroup.First())})")
+                        End If
+                    Next
                 Next
+                summary.AppendLine($"  Supported types: {String.Join(", ", FileLoadingContext.SupportedExtensions)}")
                 summary.AppendLine("")
             End If
 
@@ -684,7 +947,6 @@ Partial Public Class ThisAddIn
 
         Return (True, prompt)
     End Function
-
 
     ''' <summary>
     ''' Stores the model configuration from the last freestyle command using alternate model.
@@ -836,7 +1098,7 @@ Partial Public Class ThisAddIn
             Dim ChunkSize As Integer = 1
             Dim NoFormatAndFieldSaving As Boolean = False
             Dim DoSlides As Boolean = False
-            Dim DoChart As Boolean = False
+            Dim DoChart As Integer = 0
             Dim DoMyStyle As Boolean = False
             Dim DoMultiModel As Boolean = True
             Dim DoBubblesExtract As Boolean = False
@@ -850,7 +1112,7 @@ Partial Public Class ThisAddIn
             Dim BubblesInstruct As String = $"with '{BubblesPrefix}' for having your text commented"
             Dim PushbackInstruct As String = $"with '{PushbackPrefix}' for responding to comments only"
             Dim SlidesInstruct As String = $"with '{SlidesPrefix}' for adding to a Powerpoint file"
-            Dim ChartInstruct As String = $"with '{ChartPrefix}' for creating a chart"
+            Dim ChartInstruct As String = $"with '{ChartPrefix}'/'{ChartPrefix}' for creating a chart (normal or for webapps)"
             Dim ClipboardInstruct As String = $"with '{ClipboardPrefix}', '{NewdocPrefix}' or '{PanePrefix}' for separate output"
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim ExtInstruct As String = $"; include '{ExtTrigger}' or '{ExtTriggerFixed}' (multiple times) for including the text of (a) file(s) (txt, docx, pdf), {ExtDirTrigger} for a directory of text files, {ExtUrlTrigger} for URL content, or '{AddDocTrigger}' for an open Word doc"
@@ -937,6 +1199,7 @@ Partial Public Class ThisAddIn
 
             Dim InsertButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("📄", "Include document {doc}", "{doc}"),
+                            System.Tuple.Create("📁", "Include directory {dir}", "{dir}"),
                             System.Tuple.Create("📑", "Include other open document (adddoc)", "(adddoc)"),
                             System.Tuple.Create("📎", "Include file object (file)", "(file)")
                         }
@@ -948,7 +1211,8 @@ Partial Public Class ThisAddIn
                     Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix),
-                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
+                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff),
+                            System.Tuple.Create("OK, use bubbles", $"Use this to automatically insert '{BubblesPrefix}' as a prefix.", BubblesPrefix)
                         }
 
 
@@ -991,7 +1255,7 @@ Partial Public Class ThisAddIn
                 AddItem("terms", "Insert configured usage restrictions/permissions into the document.")
                 AddItem("version", "Show the installed Red Ink version.")
                 AddItem("switch", "Temporarily swap primary and secondary models.")
-                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients).")
+                AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients and CentralConfigClients).")
                 AddItem("license", "Show license information and access license manage dialog.")
 
                 ' CONFIG / MENU
@@ -1059,11 +1323,12 @@ Partial Public Class ThisAddIn
 
                 ' DOCUMENT / CLAUSES
                 AddItem("doccheck", "Run the document check.")
-                AddItem("learndocstyle", "Extract paragraph styles (learn document style).")
+                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document or automatic/AI).")
                 AddItem("applydocstyle", "Apply a style template.")
                 AddItem("findclause", "Search for a clause in the clause library/database.")
                 AddItem("addclause", "Add a clause to the clause library/database.")
                 AddItem("splitpdf", "Split a PDF into separate exhibits based on its content.")
+                AddItem("stamper", "Apply an exhibit stamp to a PDF based on its filename.")
 
                 ' WEB AGENT
                 AddItem("webagentcreator", "Create/modify web agent scripts.")
@@ -1328,7 +1593,7 @@ Partial Public Class ThisAddIn
             ' Get computername (e.g., for UpdateClients parameter)
             If String.Equals(OtherPrompt.Trim(), "clientname", StringComparison.OrdinalIgnoreCase) Then
                 SLib.PutInClipboard(GetCurrentClientIdentifier())
-                ShowCustomMessageBox("Your client name is '" & GetCurrentClientIdentifier() & "' (also in the clipboard).", AN)
+                ShowCustomMessageBox("Your hostname / client name is '" & GetCurrentClientIdentifier() & "' (also in the clipboard).", AN)
                 Return
             End If
 
@@ -1437,7 +1702,6 @@ Partial Public Class ThisAddIn
             End If
 #End If
 
-
             If String.Equals(OtherPrompt.Trim(), "license", StringComparison.OrdinalIgnoreCase) Then
                 SharedMethods.ShowLicenseManagementDialog()
                 Return
@@ -1449,6 +1713,11 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
+                CompleteWordDocumentTables()
+                Return
+            End If
+
             If String.Equals(OtherPrompt.Trim(), "mcp", StringComparison.OrdinalIgnoreCase) Then
                 ImportMCPServer()
                 Return
@@ -1456,6 +1725,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "splitpdf", StringComparison.OrdinalIgnoreCase) Then
                 Globals.ThisAddIn.SplitPdfByExhibits()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "stamper", StringComparison.OrdinalIgnoreCase) Then
+                Globals.ThisAddIn.StampExhibitPDF()
                 Return
             End If
 
@@ -1829,7 +2103,12 @@ Partial Public Class ThisAddIn
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(ChartPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(ChartPrefix.Length).Trim()
-                DoChart = True
+                DoChart = 1
+                DoClipboard = True
+                DoChunks = False
+            ElseIf OtherPrompt.StartsWith(ChartPrefixApp, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(ChartPrefixApp.Length).Trim()
+                DoChart = 2
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
@@ -1920,7 +2199,7 @@ Partial Public Class ThisAddIn
             ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
             If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
-                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso Not DoChart Then
+                If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso DoChart = 0 Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
                     End If

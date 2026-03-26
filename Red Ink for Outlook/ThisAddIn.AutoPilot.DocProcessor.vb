@@ -92,9 +92,29 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const AP_NoteRefMarker As String = "‖"
 
+    ''' <summary>
+    ''' Characters treated as non-breaking spaces that must be preserved.
+    ''' U+00A0 = non-breaking space (geschütztes Leerzeichen)
+    ''' U+202F = narrow no-break space (schmales geschütztes Leerzeichen)
+    ''' U+2007 = figure space (ziffernbreites Leerzeichen)
+    ''' </summary>
+    Private Shared ReadOnly AP_NonBreakingSpaceChars As Char() = {ChrW(&HA0), ChrW(&H202F), ChrW(&H2007)}
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  DATA CLASSES (local to AutoPilot, avoid collision with Word add-in)
     ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Represents a non-breaking space occurrence with surrounding word context for restoration.
+    ''' </summary>
+    Private Class APNonBreakingSpaceInfo
+        ''' <summary>The non-breaking space character (U+00A0, U+202F, etc.).</summary>
+        Public Property SpaceChar As Char
+        ''' <summary>The word immediately before the non-breaking space (Nothing if at start).</summary>
+        Public Property WordBefore As String
+        ''' <summary>The word immediately after the non-breaking space (Nothing if at end).</summary>
+        Public Property WordAfter As String
+    End Class
 
     ''' <summary>
     ''' Stores a text node and its original content for a single run.
@@ -427,6 +447,17 @@ Partial Public Class ThisAddIn
         Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processable.Count = 0 Then Return True
 
+        ' ─── Record non-breaking spaces for later restoration ───
+        ' The LLM will normalize U+00A0, U+202F, etc. to regular spaces.
+        ' We record context around each occurrence so we can restore them.
+        Dim nbspRecords As New Dictionary(Of Integer, List(Of APNonBreakingSpaceInfo))()
+        For i As Integer = 0 To processable.Count - 1
+            Dim recorded = APRecordNonBreakingSpaces(processable(i).FullText)
+            If recorded IsNot Nothing Then
+                nbspRecords(i) = recorded
+            End If
+        Next
+
         ' Check if any paragraphs use markers
         Dim hasMarkers = processable.Any(Function(p) p.MarkerText IsNot Nothing)
 
@@ -542,6 +573,14 @@ Partial Public Class ThisAddIn
 
             ' Parse response
             APParseResponse(llmResponse, processable, batchStart, batchEnd)
+
+            ' ─── Restore non-breaking spaces in processed paragraphs ───
+            For j As Integer = batchStart To batchEnd
+                If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                    processable(j).TranslatedText = APRestoreNonBreakingSpaces(
+                        processable(j).TranslatedText, nbspRecords(j))
+                End If
+            Next
 
             batchIndex = batchEnd + 1
         End While
@@ -1149,24 +1188,86 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Routes document processing to the appropriate format handler.
+    ''' Applies format-specific alternate models (if defined) for simple tasks
+    ''' (translation, correction) where a faster model suffices, but skips it
+    ''' for complex tasks that benefit from the more capable primary model.
     ''' </summary>
     ''' <param name="sheetFilter">Optional: restrict Excel processing to these sheet names.</param>
+    ''' <param name="useOfflineDocs">True for simple tasks (translate/correct) where OfflineDocs should be used;
+    ''' False for complex tasks (anonymization, restructuring, etc.) that need the primary model.</param>
     Private Async Function ProcessDocumentForAutoPilot(inputPath As String, outputPath As String,
                                                        instruction As String, ct As CancellationToken,
-                                                       Optional sheetFilter As List(Of String) = Nothing) As Task(Of Boolean)
+                                                       Optional sheetFilter As List(Of String) = Nothing,
+                                                       Optional useOfflineDocs As Boolean = True) As Task(Of Boolean)
+
+        ' ── Determine format-specific SpecialTaskModel key ──
         Dim ext = Path.GetExtension(inputPath).ToLowerInvariant()
+        Dim specialTaskKey As String = "OfflineDocs"
         Select Case ext
-            Case ".docx", ".doc"
-                Return Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
             Case ".pptx"
-                Return Await ProcessPptxForAutoPilot(inputPath, outputPath, instruction, ct)
+                specialTaskKey = "OfflineDocsPptx"
             Case ".xlsx"
-                Return Await ProcessXlsxForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
-            Case Else
-                Debug.WriteLine($"ProcessDocumentForAutoPilot: unsupported extension '{ext}'")
-                Return False
+                specialTaskKey = "OfflineDocsXlsx"
         End Select
+
+        ' ── Try format-specific alternate model for simple document processing tasks ──
+        ' Only apply for translate/correct — complex tasks (anonymization, restructuring,
+        ' etc.) should use the more capable primary/secondary model selected by the user.
+        Dim offlineDocsBackup As ModelConfig = Nothing
+        Dim offlineDocsApplied As Boolean = False
+        Dim previousUseSecondApi As Boolean = _apUseSecondApi
+
+        If useOfflineDocs AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            Try
+                ' Capture the current config BEFORE GetSpecialTaskModel overwrites it
+                offlineDocsBackup = GetCurrentConfig(_context)
+
+                ' Try format-specific key first, fall back to generic OfflineDocs
+                Dim modelFound As Boolean = False
+                If Not specialTaskKey.Equals("OfflineDocs", StringComparison.Ordinal) Then
+                    modelFound = GetSpecialTaskModel(_context, INI_AlternateModelPath, specialTaskKey)
+                End If
+                If Not modelFound Then
+                    modelFound = GetSpecialTaskModel(_context, INI_AlternateModelPath, "OfflineDocs")
+                End If
+
+                If modelFound Then
+                    offlineDocsApplied = True
+                    _apUseSecondApi = True
+                    ApDashboardLog($"DocProcessor: {specialTaskKey} model applied (task_type: translate/correct)", "step")
+                Else
+                    ' GetSpecialTaskModel didn't find an entry — discard backup
+                    offlineDocsBackup = Nothing
+                End If
+            Catch
+                offlineDocsBackup = Nothing
+            End Try
+        ElseIf Not useOfflineDocs Then
+            ApDashboardLog("DocProcessor: using primary model (task_type: other)", "step")
+        End If
+
+        Try
+            Select Case ext
+                Case ".docx", ".doc"
+                    Return Await ProcessDocxForAutoPilot(inputPath, outputPath, instruction, ct)
+                Case ".pptx"
+                    Return Await ProcessPptxForAutoPilot(inputPath, outputPath, instruction, ct)
+                Case ".xlsx"
+                    Return Await ProcessXlsxForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
+                Case Else
+                    Debug.WriteLine($"ProcessDocumentForAutoPilot: unsupported extension '{ext}'")
+                    Return False
+            End Select
+        Finally
+            If offlineDocsApplied Then
+                _apUseSecondApi = previousUseSecondApi
+                If offlineDocsBackup IsNot Nothing Then
+                    RestoreDefaults(_context, offlineDocsBackup)
+                End If
+            End If
+        End Try
     End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PPTX PROCESSING
@@ -1175,6 +1276,10 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Processes a PPTX file by applying the given instruction via LLM to all text paragraphs.
     ''' PPTX uses DrawingML namespace (a:) with a:p → a:r → a:t structure.
+    ''' Uses a presentation-aware system prompt that provides slide-level context so the LLM
+    ''' understands each slide's position in the deck. For global operations (translate,
+    ''' correct, shorten, etc.) all slides are processed normally. The slide outline helps
+    ''' the LLM maintain consistency across the presentation.
     ''' </summary>
     Private Async Function ProcessPptxForAutoPilot(inputPath As String, outputPath As String,
                                                     instruction As String, ct As CancellationToken) As Task(Of Boolean)
@@ -1195,10 +1300,11 @@ Partial Public Class ThisAddIn
                 Return False
             End If
 
-            ' === Collect all slide parts ===
+            ' === Build a full-presentation outline for context ===
             Dim slidesDir As String = Path.Combine(pptDir, "slides")
             Dim notesDir As String = Path.Combine(pptDir, "notesSlides")
             Dim slideCount As Integer = 0
+            Dim outlineBuilder As New StringBuilder()
 
             If Directory.Exists(slidesDir) Then
                 Dim slideFiles = Directory.GetFiles(slidesDir, "slide*.xml").
@@ -1208,6 +1314,29 @@ Partial Public Class ThisAddIn
                             End Function).ToArray()
 
                 slideCount = slideFiles.Length
+
+                ' Build outline: extract first 200 chars of each slide for context
+                For Each slideFile In slideFiles
+                    Dim slideNum As String = Regex.Match(Path.GetFileNameWithoutExtension(slideFile), "\d+").Value
+                    Try
+                        Dim previewDoc As New System.Xml.XmlDocument()
+                        previewDoc.PreserveWhitespace = True
+                        previewDoc.Load(slideFile)
+                        Dim previewNsMgr As New System.Xml.XmlNamespaceManager(previewDoc.NameTable)
+                        previewNsMgr.AddNamespace("a", "http://schemas.openxmlformats.org/drawingml/2006/main")
+                        Dim allText As New StringBuilder()
+                        For Each tNode As System.Xml.XmlNode In previewDoc.SelectNodes("//a:r/a:t", previewNsMgr)
+                            allText.Append(tNode.InnerText)
+                            If allText.Length > 200 Then Exit For
+                        Next
+                        Dim preview = allText.ToString()
+                        If preview.Length > 200 Then preview = preview.Substring(0, 200) & "..."
+                        outlineBuilder.AppendLine($"  Slide {slideNum}: {preview}")
+                    Catch
+                        outlineBuilder.AppendLine($"  Slide {slideNum}: (could not preview)")
+                    End Try
+                Next
+
                 ApDashboardLog($"DocProcessor: found {slideCount} slide(s) to process", "step")
 
                 For Each slideFile In slideFiles
@@ -1217,7 +1346,8 @@ Partial Public Class ThisAddIn
                     Dim slideLabel As String = If(slideNum.Length > 0, $"Slide {slideNum}", Path.GetFileNameWithoutExtension(slideFile))
 
                     ApDashboardLog($"DocProcessor: processing {slideLabel}", "step")
-                    Await APProcessPptxXmlPart(slideFile, instruction, ct)
+                    Await APProcessPptxXmlPart(slideFile, instruction, ct,
+                                               slideCount, slideNum, outlineBuilder.ToString())
                 Next
             End If
 
@@ -1230,6 +1360,7 @@ Partial Public Class ThisAddIn
                     Dim notesLabel As String = If(notesNum.Length > 0, $"Notes {notesNum}", Path.GetFileNameWithoutExtension(notesFile))
 
                     ApDashboardLog($"DocProcessor: processing {notesLabel}", "step")
+                    ' Notes slides: no slide-level context needed, use standard batching
                     Await APProcessPptxXmlPart(notesFile, instruction, ct)
                 Next
             End If
@@ -1257,8 +1388,15 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Processes a single PPTX XML part (slide, notes slide) by extracting
     ''' DrawingML paragraphs, sending text to the LLM, and writing back.
+    ''' When slide context is provided, uses a presentation-aware system prompt that
+    ''' gives the LLM the full deck outline and current slide position. This helps
+    ''' global operations (translate, correct) maintain cross-slide consistency, and
+    ''' helps targeted operations (add/modify specific slides) avoid corrupting others.
     ''' </summary>
-    Private Async Function APProcessPptxXmlPart(xmlPath As String, instruction As String, ct As CancellationToken) As Task(Of Boolean)
+    Private Async Function APProcessPptxXmlPart(xmlPath As String, instruction As String, ct As CancellationToken,
+                                                 Optional totalSlides As Integer = 0,
+                                                 Optional currentSlideNum As String = Nothing,
+                                                 Optional presentationOutline As String = Nothing) As Task(Of Boolean)
         Try
             Dim xmlDoc As New System.Xml.XmlDocument()
             xmlDoc.PreserveWhitespace = True
@@ -1275,8 +1413,15 @@ Partial Public Class ThisAddIn
             Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
             If processable.Count = 0 Then Return True
 
-            ' Process paragraphs in batches (reuses the same LLM batching as DOCX)
-            Dim success As Boolean = Await APProcessBatches(paragraphs, instruction, ct)
+            ' Process paragraphs in batches — use PPTX-aware batching when context is available
+            Dim success As Boolean
+            If totalSlides > 0 AndAlso Not String.IsNullOrWhiteSpace(currentSlideNum) Then
+                success = Await APProcessPptxBatches(paragraphs, instruction, ct,
+                                                     totalSlides, currentSlideNum, presentationOutline)
+            Else
+                ' Fallback for notes slides or when no context is available
+                success = Await APProcessBatches(paragraphs, instruction, ct)
+            End If
             If Not success Then Return False
 
             ' Apply processed text back to XML nodes (reuses the same redistribution logic)
@@ -1292,6 +1437,160 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"APProcessPptxXmlPart error for {Path.GetFileName(xmlPath)}: {ex.Message}")
             Return False
         End Try
+    End Function
+
+    ''' <summary>
+    ''' PPTX-specific batch processing that provides slide-level context to the LLM.
+    ''' The system prompt includes the full presentation outline so the LLM understands
+    ''' the current slide's position and content within the deck. This helps with:
+    ''' - Global operations (translate, correct, shorten): maintains consistency across slides
+    ''' - Targeted operations (modify specific slide): avoids corrupting unrelated content
+    ''' The LLM is always instructed to process every paragraph — the outline is purely
+    ''' contextual, not a filter. The "do not alter unrelated content" rule only applies
+    ''' when the instruction explicitly targets specific slides.
+    ''' </summary>
+    Private Async Function APProcessPptxBatches(paragraphs As List(Of APParagraphInfo),
+                                                 instruction As String, ct As CancellationToken,
+                                                 totalSlides As Integer, currentSlideNum As String,
+                                                 presentationOutline As String) As Task(Of Boolean)
+
+        Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
+        If processable.Count = 0 Then Return True
+
+        ' ─── Record non-breaking spaces for later restoration ───
+        Dim nbspRecords As New Dictionary(Of Integer, List(Of APNonBreakingSpaceInfo))()
+        For i As Integer = 0 To processable.Count - 1
+            Dim recorded = APRecordNonBreakingSpaces(processable(i).FullText)
+            If recorded IsNot Nothing Then
+                nbspRecords(i) = recorded
+            End If
+        Next
+
+        Dim hasMarkers = processable.Any(Function(p) p.MarkerText IsNot Nothing)
+
+        ' ─── Build PPTX-aware system prompt ───
+        Dim systemPrompt As New StringBuilder()
+        systemPrompt.AppendLine("You are a professional presentation processor. Apply the following instruction to the numbered paragraphs " &
+                                "in the [TEXTTOPROCESS] section.")
+        systemPrompt.AppendLine()
+        systemPrompt.AppendLine($"INSTRUCTION: {instruction}")
+        systemPrompt.AppendLine()
+
+        ' Add presentation context so the LLM knows what the deck looks like
+        If Not String.IsNullOrWhiteSpace(presentationOutline) Then
+            systemPrompt.AppendLine($"PRESENTATION OUTLINE ({totalSlides} slides total):")
+            systemPrompt.AppendLine(presentationOutline)
+            systemPrompt.AppendLine()
+            systemPrompt.AppendLine($"You are now processing Slide {currentSlideNum} of {totalSlides}.")
+            systemPrompt.AppendLine()
+        End If
+
+        systemPrompt.AppendLine("RULES:")
+        systemPrompt.AppendLine("1. Process ONLY paragraphs inside [TEXTTOPROCESS], not the context sections.")
+        systemPrompt.AppendLine("2. Use [CONTEXT BEFORE] and [CONTEXT AFTER] to understand meaning, tone, and terminology.")
+        systemPrompt.AppendLine("3. Return each processed paragraph with its [n] marker exactly as shown.")
+        systemPrompt.AppendLine("4. Apply the instruction faithfully to every paragraph. For global operations " &
+                                "(translate, correct, rewrite, shorten, etc.) process ALL paragraphs.")
+        systemPrompt.AppendLine("5. If the instruction explicitly targets a SPECIFIC slide (e.g. 'fix the last slide', " &
+                                "'add content to slide 3') and this is NOT that slide, return every paragraph UNCHANGED " &
+                                "— copy the original text exactly, including any | markers.")
+        systemPrompt.AppendLine("6. Maintain consistent terminology and style with the rest of the presentation.")
+        systemPrompt.AppendLine("7. Return ONLY the [n] processed paragraphs, no explanations.")
+
+        Dim ruleNum As Integer = 8
+        If hasMarkers Then
+            systemPrompt.AppendLine($"{ruleNum}. Some paragraphs contain pipe characters (|) that mark formatting boundaries. " &
+                "IMPORTANT: Preserve these | markers in your output at approximately the same positions " &
+                "relative to the text. The number of | markers in each paragraph must stay EXACTLY the same. " &
+                "Do NOT add or remove any | markers.")
+            ruleNum += 1
+        End If
+
+        ' ─── Batch loop (same structure as APProcessBatches) ───
+        Dim batchIndex As Integer = 0
+        Dim totalBatches As Integer = CInt(Math.Ceiling(processable.Count / CDbl(AP_ParagraphsPerBatch)))
+        Dim currentBatch As Integer = 0
+
+        While batchIndex < processable.Count
+            ct.ThrowIfCancellationRequested()
+
+            currentBatch += 1
+
+            Dim batchStart = batchIndex
+            Dim batchEnd = Math.Min(batchIndex + AP_ParagraphsPerBatch - 1, processable.Count - 1)
+
+            ' Adjust for character limit
+            Dim batchChars As Integer = 0
+            For j = batchStart To batchEnd
+                batchChars += processable(j).FullText.Length
+                If batchChars > AP_MaxCharsPerBatch AndAlso j > batchStart Then
+                    batchEnd = j - 1
+                    Exit For
+                End If
+            Next
+
+            ' Build prompt
+            Dim promptBuilder As New StringBuilder()
+
+            ' Context Before
+            Dim contextBeforeStart = Math.Max(0, batchStart - AP_ContextBefore)
+            If contextBeforeStart < batchStart Then
+                promptBuilder.AppendLine("[CONTEXT BEFORE - for reference only]")
+                For j = contextBeforeStart To batchStart - 1
+                    Dim contextText = If(processable(j).TranslatedText, processable(j).FullText)
+                    If contextText IsNot Nothing Then
+                        contextText = contextText.Replace(AP_RunBoundaryMarker, "")
+                    End If
+                    promptBuilder.AppendLine(contextText)
+                Next
+                promptBuilder.AppendLine()
+            End If
+
+            ' Paragraphs to process — use marker text when available
+            promptBuilder.AppendLine("[TEXTTOPROCESS]")
+            Dim batchNumber = 1
+            For j = batchStart To batchEnd
+                Dim paraText = If(processable(j).MarkerText, processable(j).FullText)
+                promptBuilder.AppendLine("[" & batchNumber.ToString() & "] " & paraText)
+                batchNumber += 1
+            Next
+            promptBuilder.AppendLine("[/TEXTTOPROCESS]")
+            promptBuilder.AppendLine()
+
+            ' Context After
+            Dim contextAfterEnd = Math.Min(processable.Count - 1, batchEnd + AP_ContextAfter)
+            If contextAfterEnd > batchEnd Then
+                promptBuilder.AppendLine("[CONTEXT AFTER - for reference only]")
+                For j = batchEnd + 1 To contextAfterEnd
+                    promptBuilder.AppendLine(processable(j).FullText)
+                Next
+            End If
+
+            ' Call LLM
+            Dim llmResponse = Await LLM(systemPrompt.ToString(), promptBuilder.ToString(),
+                                         UseSecondAPI:=_apUseSecondApi,
+                                         HideSplash:=True, EnsureUI:=False,
+                                         cancellationToken:=ct)
+
+            If String.IsNullOrWhiteSpace(llmResponse) Then
+                ApDashboardLog($"DocProcessor: slide {currentSlideNum} batch {currentBatch} returned empty response", "warn")
+                Return False
+            End If
+
+            APParseResponse(llmResponse, processable, batchStart, batchEnd)
+
+            ' Restore non-breaking spaces
+            For j As Integer = batchStart To batchEnd
+                If processable(j).TranslatedText IsNot Nothing AndAlso nbspRecords.ContainsKey(j) Then
+                    processable(j).TranslatedText = APRestoreNonBreakingSpaces(
+                        processable(j).TranslatedText, nbspRecords(j))
+                End If
+            Next
+
+            batchIndex = batchEnd + 1
+        End While
+
+        Return True
     End Function
 
     ''' <summary>
@@ -2314,5 +2613,125 @@ Partial Public Class ThisAddIn
             Next
         End Using
     End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  NON-BREAKING SPACE PRESERVATION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Scans text for non-breaking space characters and records their surrounding
+    ''' word context so they can be restored after LLM processing.
+    ''' </summary>
+    ''' <param name="text">The original text to scan.</param>
+    ''' <returns>A list of non-breaking space occurrences with context, or Nothing if none found.</returns>
+    Private Shared Function APRecordNonBreakingSpaces(text As String) As List(Of APNonBreakingSpaceInfo)
+        If String.IsNullOrEmpty(text) Then Return Nothing
+
+        Dim hasNbsp As Boolean = False
+        For Each ch As Char In text
+            If AP_NonBreakingSpaceChars.Contains(ch) Then
+                hasNbsp = True
+                Exit For
+            End If
+        Next
+        If Not hasNbsp Then Return Nothing
+
+        Dim results As New List(Of APNonBreakingSpaceInfo)()
+
+        Dim i As Integer = 0
+        While i < text.Length
+            If AP_NonBreakingSpaceChars.Contains(text(i)) Then
+                Dim info As New APNonBreakingSpaceInfo() With {
+                    .SpaceChar = text(i)
+                }
+
+                ' Find word before: scan backward from i-1 to find the token
+                If i > 0 Then
+                    Dim wordEnd As Integer = i - 1
+                    While wordEnd >= 0 AndAlso text(wordEnd) = " "c
+                        wordEnd -= 1
+                    End While
+                    If wordEnd >= 0 Then
+                        Dim wordStart As Integer = wordEnd
+                        While wordStart > 0 AndAlso text(wordStart - 1) <> " "c AndAlso Not AP_NonBreakingSpaceChars.Contains(text(wordStart - 1))
+                            wordStart -= 1
+                        End While
+                        info.WordBefore = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                ' Find word after: scan forward from i+1 to find the token
+                If i < text.Length - 1 Then
+                    Dim wordStart As Integer = i + 1
+                    While wordStart < text.Length AndAlso text(wordStart) = " "c
+                        wordStart += 1
+                    End While
+                    If wordStart < text.Length Then
+                        Dim wordEnd As Integer = wordStart
+                        While wordEnd < text.Length - 1 AndAlso text(wordEnd + 1) <> " "c AndAlso Not AP_NonBreakingSpaceChars.Contains(text(wordEnd + 1))
+                            wordEnd += 1
+                        End While
+                        info.WordAfter = text.Substring(wordStart, wordEnd - wordStart + 1)
+                    End If
+                End If
+
+                results.Add(info)
+            End If
+            i += 1
+        End While
+
+        Return If(results.Count > 0, results, Nothing)
+    End Function
+
+    ''' <summary>
+    ''' Restores non-breaking spaces in text that has been processed by the LLM,
+    ''' using the recorded word context to find where they should be placed.
+    ''' Only restores a non-breaking space when both surrounding words match.
+    ''' </summary>
+    ''' <param name="text">The LLM-processed text (with regular spaces).</param>
+    ''' <param name="nbspInfos">The recorded non-breaking space positions from the original text.</param>
+    ''' <returns>The text with non-breaking spaces restored where context matches.</returns>
+    Private Shared Function APRestoreNonBreakingSpaces(text As String, nbspInfos As List(Of APNonBreakingSpaceInfo)) As String
+        If String.IsNullOrEmpty(text) OrElse nbspInfos Is Nothing OrElse nbspInfos.Count = 0 Then Return text
+
+        Dim replacements As New SortedList(Of Integer, Char)()
+
+        For Each info In nbspInfos
+            If String.IsNullOrEmpty(info.WordBefore) OrElse String.IsNullOrEmpty(info.WordAfter) Then Continue For
+
+            Dim pattern As String = Regex.Escape(info.WordBefore) & "( +)" & Regex.Escape(info.WordAfter)
+            Dim m As Match = Regex.Match(text, pattern, RegexOptions.None)
+
+            While m.Success
+                Dim spaceGroupStart As Integer = m.Groups(1).Index
+                Dim spaceGroupLen As Integer = m.Groups(1).Length
+
+                Dim alreadyClaimed As Boolean = False
+                For spIdx As Integer = spaceGroupStart To spaceGroupStart + spaceGroupLen - 1
+                    If replacements.ContainsKey(spIdx) Then
+                        alreadyClaimed = True
+                        Exit For
+                    End If
+                Next
+
+                If Not alreadyClaimed Then
+                    replacements(spaceGroupStart) = info.SpaceChar
+                    Exit While
+                End If
+
+                m = m.NextMatch()
+            End While
+        Next
+
+        If replacements.Count = 0 Then Return text
+
+        Dim sb As New StringBuilder(text)
+        For i As Integer = replacements.Count - 1 To 0 Step -1
+            Dim pos As Integer = replacements.Keys(i)
+            sb(pos) = replacements.Values(i)
+        Next
+
+        Return sb.ToString()
+    End Function
 
 End Class

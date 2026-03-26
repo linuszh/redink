@@ -44,6 +44,30 @@ Partial Public Class ThisAddIn
 
         If INILoadFail() OrElse Not IsDocumentEditable() Then Return
 
+        ' ── Mode selector: Standard DocCheck or Markup Review ──
+        Dim modeAnswer As System.Int32 = ShowCustomYesNoBox(
+            "Which type of document check would you like to run?" & vbCrLf & vbCrLf &
+            "• Check Requirements — Analyzes the document (or a selection) against a " &
+            "rule set of compliance criteria (from your DocCheck script files). " &
+            "Each rule is checked independently and findings are reported as " &
+            "Word comments or a summary report." & vbCrLf & vbCrLf &
+            "• Markup Review — Compares tracked changes in the document against " &
+            "acceptability constraints defined in a separate playbook (.docx with " &
+            "comments). Evaluates whether each revision is within acceptable bounds, " &
+            "suggests compromise redrafts where needed, and optionally checks " &
+            "whether other clauses undermine the constraints.",
+            "Check Requirements",
+            "Markup Review",
+            AN & " Document Check")
+
+        If modeAnswer = 0 Then
+            Return
+        ElseIf modeAnswer = 2 Then
+            Await RunMarkupReview()
+            Return
+        End If
+        ' modeAnswer = 1 → proceed with standard DocCheck below
+
         ' Expand and normalize the configured paths
         Dim DocCheckPath As System.String = ExpandEnvironmentVariables(INI_DocCheckPath)
         If Not System.String.IsNullOrEmpty(DocCheckPath) AndAlso Not DocCheckPath.EndsWith("\", System.StringComparison.Ordinal) Then
@@ -141,14 +165,29 @@ Partial Public Class ThisAddIn
                 If answer = 1 Then
 
 
-                    DragDropFormLabel = "Document files (.txt, .docx, .pdf) or Powerpoint (.pptx)."
-                    DragDropFormFilter =
-                            "Supported Files (*.txt;*.rtf;*.doc;*.docx;*.pdf;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.pptx)|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.pptx|" &
-                            "Text Files (*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm)|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm|" &
-                            "Rich Text Files (*.rtf)|*.rtf|" &
-                            "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
-                            "PDF Files (*.pdf)|*.pdf|" &
-                            "PowerPoint Files (*.pptx)|*.pptx"
+                    If INI_AllowLegacyDocFiles Then
+                        DragDropFormLabel = "Document files (.txt, .doc, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                        DragDropFormFilter =
+                                "Supported Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                "Rich Text Files (*.rtf)|*.rtf|" &
+                                "Word Documents (*.doc;*.docx)|*.doc;*.docx|" &
+                                "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                "PDF Files (*.pdf)|*.pdf|" &
+                                "PowerPoint Files (*.pptx)|*.pptx|" &
+                                "Email Files (*.msg;*.eml)|*.msg;*.eml"
+                    Else
+                        DragDropFormLabel = "Document files (.txt, .docx, .xlsx, .pdf), Powerpoint (.pptx), email (.msg, .eml)."
+                        DragDropFormFilter =
+                                "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.msg;*.eml;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                "Text Files|*.txt;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.yaml;*.yml|" &
+                                "Rich Text Files (*.rtf)|*.rtf|" &
+                                "Word Documents (*.docx)|*.docx|" &
+                                "Excel Workbooks (*.xlsx)|*.xlsx|" &
+                                "PDF Files (*.pdf)|*.pdf|" &
+                                "PowerPoint Files (*.pptx)|*.pptx|" &
+                                "Email Files (*.msg;*.eml)|*.msg;*.eml"
+                    End If
 
                     Dim FilePath As String = GetFileName()
                     DragDropFormLabel = ""
@@ -241,7 +280,7 @@ Partial Public Class ThisAddIn
             OtherPrompt = ""
             OutputLanguage = INI_Language1
 
-            Dim p0 As SLib.InputParameter = New SLib.InputParameter("Rule Set to use", defaultRuleSetDisplay)
+            Dim p0 As SLib.InputParameter = New SLib.InputParameter("Rule Set to use (playbook)", defaultRuleSetDisplay)
             p0.Options = New System.Collections.Generic.List(Of System.String)(displayOptions)
             Dim p1 As SLib.InputParameter = New SLib.InputParameter("Check as only one clause", checkOnlyOneClause)
             Dim p2 As SLib.InputParameter = New SLib.InputParameter("Add additional context", addAdditionalContext)

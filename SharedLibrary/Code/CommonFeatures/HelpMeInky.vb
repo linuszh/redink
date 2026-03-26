@@ -197,7 +197,6 @@ Namespace SharedLibrary
 
             _mdPipeline = New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
-            UseEmojiAndSmiley().
             UseSoftlineBreakAsHardlineBreak().
             Build()
 
@@ -238,6 +237,9 @@ Namespace SharedLibrary
         Public Sub ShowRaised(Optional owner As IWin32Window = Nothing)
             Dbg("ShowRaised")
             If Me.WindowState = FormWindowState.Minimized Then Me.WindowState = FormWindowState.Normal
+
+            SharedMethods.EnsureVisibleOnScreen(Me)
+
             If Not Me.Visible Then
                 If owner IsNot Nothing Then Me.Show(owner) Else Me.Show()
             End If
@@ -300,6 +302,7 @@ Namespace SharedLibrary
                     Me.Location = New System.Drawing.Point(area.Left + (area.Width - w) \ 2, area.Top + (area.Height - h) \ 2)
                     Me.Size = New System.Drawing.Size(w, h)
                 End If
+                SharedMethods.EnsureVisibleOnScreen(Me)
             Catch ex As Exception
                 Dbg("Restore bounds error: " & ex.Message)
             End Try
@@ -845,7 +848,7 @@ Namespace SharedLibrary
                     Case ".txt", ".md", ".log"
                         Return File.ReadAllText(s, Encoding.UTF8)
                     Case ".docx"
-                        Return ReadDocxWithWordInterop(s)
+                        Return SharedMethods.ReadDocxSandboxed(s)
                     Case ".rtf"
                         Try
                             Return SharedMethods.ReadRtfAsText(s)

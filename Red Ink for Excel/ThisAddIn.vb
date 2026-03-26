@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Excel"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 2.3.2026
+' 26.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -41,6 +41,7 @@ Imports System.Runtime.InteropServices
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
+Imports Microsoft.Office.Tools.Ribbon
 Imports SharedLibrary.SharedLibrary
 
 Module ModuleGetAsyncKeyState
@@ -55,7 +56,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.020326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.260326" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -201,8 +202,34 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+
+        ' Restore the previously selected primary model (if multi-model is configured)
+        If _context.INIloaded Then
+            Try
+                Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                If PrimaryModelManager.GetAvailableModels().Count > 0 Then
+                    ' Try saved selection first; fall back to model 1 if it no longer exists
+                    If Not PrimaryModelManager.SelectModel(_context, saved) Then
+                        PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+                    End If
+                End If
+            Catch
+                ' non-critical
+            End Try
+        End If
+
         AddContextMenu()
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
+
+        ' Initialize model menu buttons on the ribbon
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+            End If
+        Catch
+            ' non-critical
+        End Try
+
     End Sub
 
     ' Bridge to SharedLibrary
@@ -229,6 +256,25 @@ Partial Public Class ThisAddIn
     Private Function ShowPromptSelector(filePath As String, filepathlocal As String, enableMarkup As Boolean, enableBubbles As Boolean) As (String, Boolean, Boolean, Boolean)
         Return SharedMethods.ShowPromptSelector(filePath, filepathlocal, enableMarkup, enableBubbles, _context)
     End Function
+
+
+    Public Shared Sub SelectModel(modelNumber As Integer)
+        Try
+            If PrimaryModelManager.SelectModel(_context, modelNumber) Then
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                    End If
+                Catch
+                    ' non-critical
+                End Try
+            Else
+                SharedMethods.ShowCustomMessageBox($"Model {modelNumber} is not configured.")
+            End If
+        Catch ex As Exception
+            SharedMethods.ShowCustomMessageBox($"Error switching model: {ex.Message}")
+        End Try
+    End Sub
 
 
 End Class

@@ -600,6 +600,137 @@ Namespace SharedLibrary
             Return upperFirst & value.Substring(1)
         End Function
 
+        ''' <summary>
+        ''' Checks whether an ImageGeneration special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <param name="hasObjectCall">
+        ''' Output: <c>True</c> if the ImageGeneration model also has an APICall_Object configured,
+        ''' indicating it supports file/image input (e.g. for image editing).
+        ''' </param>
+        ''' <returns><c>True</c> if an ImageGeneration model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsImageGenerationAvailable(context As SharedContext.ISharedContext,
+                                                           Optional ByRef hasObjectCall As Boolean = False) As Boolean
+            hasObjectCall = False
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "ImageGeneration")
+                If available Then
+                    hasObjectCall = Not String.IsNullOrWhiteSpace(context.INI_APICall_Object_2)
+                End If
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
+        ''' <summary>
+        ''' Checks whether a WebGrounding special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns><c>True</c> if a WebGrounding model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsWebGroundingAvailable(context As SharedContext.ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "WebGrounding")
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
+        ''' <summary>
+        ''' Checks whether a DeepResearch special task model is configured and available.
+        ''' Probes the alternate model file without permanently switching the active model.
+        ''' </summary>
+        ''' <param name="context">Shared context containing model and API configuration.</param>
+        ''' <returns><c>True</c> if a DeepResearch model is available; otherwise <c>False</c>.</returns>
+        Public Shared Function IsDeepResearchAvailable(context As SharedContext.ISharedContext) As Boolean
+            If context Is Nothing Then Return False
+            If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
+            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim available As Boolean = False
+
+            Try
+                available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "DeepResearch")
+            Catch
+            End Try
+
+            ' Restore immediately — we only probed availability
+            If originalConfigLoaded Then
+                RestoreDefaults(context, originalConfig)
+            End If
+            originalConfigLoaded = backupOriginalLoaded
+            ApplyModelConfig(context, backupConfig)
+
+            Return available
+        End Function
+
+        ''' <summary>
+        ''' Ensures a form is visible on at least one active screen.
+        ''' If off-screen (e.g. monitor disconnected), re-centers on the primary screen
+        ''' while respecting <see cref="Form.MinimumSize"/>.
+        ''' </summary>
+        ''' <param name="frm">The form to check and reposition if necessary.</param>
+        Public Shared Sub EnsureVisibleOnScreen(frm As System.Windows.Forms.Form)
+            If frm Is Nothing Then Return
+
+            ' Guard against zero/corrupt size
+            If frm.MinimumSize <> System.Drawing.Size.Empty Then
+                If frm.Width < frm.MinimumSize.Width OrElse frm.Height < frm.MinimumSize.Height Then
+                    frm.Size = New System.Drawing.Size(
+                        Math.Max(frm.MinimumSize.Width, frm.Width),
+                        Math.Max(frm.MinimumSize.Height, frm.Height))
+                End If
+            End If
+
+            Dim isVisible = False
+            For Each scr As Screen In Screen.AllScreens
+                If scr.WorkingArea.IntersectsWith(frm.Bounds) Then
+                    isVisible = True
+                    Exit For
+                End If
+            Next
+
+            If Not isVisible Then
+                Dim area = Screen.PrimaryScreen.WorkingArea
+                frm.Location = New System.Drawing.Point(
+                    area.Left + (area.Width - frm.Width) \ 2,
+                    area.Top + (area.Height - frm.Height) \ 2)
+            End If
+        End Sub
+
     End Class
 
 End Namespace
+

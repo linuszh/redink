@@ -17,6 +17,7 @@
 Option Explicit On
 Option Strict On
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -32,6 +33,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoOCR">Enables OCR while reading PDF files when True.</param>
     ''' <param name="AskUser">Indicates whether PDF processing may prompt the user.</param>
     ''' <returns>A FileReadResult containing the file content and whether a PDF may be incomplete.</returns>
+    ''' 
     Public Async Function GetFileContentEx(Optional ByVal optionalFilePath As String = Nothing,
                                            Optional Silent As Boolean = False,
                                            Optional DoOCR As Boolean = False,
@@ -67,21 +69,52 @@ Partial Public Class ThisAddIn
                 Dim FromFile As String = ""
 
                 Select Case ext
-                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm", ".md",
-                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
+                         ".md", ".yaml", ".yml",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                         FromFile = ReadTextFile(filePath)
                     Case ".rtf"
                         FromFile = ReadRtfAsText(filePath)
-                    Case ".doc", ".docx"
-                        FromFile = ReadWordDocument(filePath)
+                    Case ".doc"
+                        If INI_AllowLegacyDocFiles Then
+                            FromFile = ReadWordDocument(filePath)
+                        Else
+                            FromFile = "Error: File type not supported (disabled for security)."
+                        End If
+                    Case ".docx"
+                        FromFile = ReadDocxSandboxed(filePath)
+                    Case ".xlsx"
+                        FromFile = ReadXlsxSandboxed(filePath)
+                    Case ".pptx"
+                        FromFile = ReadPptxSandboxed(filePath)
                     Case ".pdf"
                         Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
-                    Case ".pptx"
-                        FromFile = GetPresentationJson(filePath)
+                    Case ".eml"
+                        FromFile = ReadEmlSandboxed(filePath)
+                    Case ".msg"
+                        FromFile = ReadMsgSandboxed(filePath)
                     Case Else
-                        FromFile = "Error: File type not supported."
+                        ' Check if this is a binary/media file the model can handle directly
+                        If IsBinaryMediaExtension(ext) Then
+                            Dim taskFlag = TaskFlagForExtension(ext)
+                            If IsBinaryMediaSupported(_context, ext, taskFlag) Then
+                                Try
+                                    FromFile = Await ReadBinaryFileViaLLM(filePath, _context, "", AskUser, taskFlag)
+                                    If String.IsNullOrWhiteSpace(FromFile) Then
+                                        FromFile = ""
+                                    End If
+                                Catch ex As System.Exception
+                                    FromFile = ""
+                                    Debug.WriteLine("Binary media extraction failed for '" & filePath & "': " & ex.Message)
+                                End Try
+                            Else
+                                FromFile = "Error: The file type '" & ext & "' is not supported by your current model configuration."
+                            End If
+                        Else
+                            FromFile = "Error: File type not supported."
+                        End If
                 End Select
 
                 If FromFile.StartsWith("Error") AndAlso Len(FromFile) < 100 AndAlso Not Silent Then
@@ -99,6 +132,7 @@ Partial Public Class ThisAddIn
 
         Return result
     End Function
+
 
     ''' <summary>
     ''' Retrieves textual content from a supported file (backward compatible wrapper).

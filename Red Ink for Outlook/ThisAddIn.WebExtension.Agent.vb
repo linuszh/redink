@@ -24,6 +24,7 @@ Option Strict Off
 Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -44,9 +45,6 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Prefix for chat agent temp directories.</summary>
     Private Const CA_TempPrefix As String = AN2 & "_chatagent_"
-
-    ''' <summary>Maximum file size for chat agent uploads (same as AutoPilot default).</summary>
-    Private Const CA_DefaultMaxAttachmentBytes As Long = 10 * 1024 * 1024
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  FILE MANAGEMENT
@@ -102,8 +100,8 @@ Partial Public Class ThisAddIn
             .TempFilePath = destPath,
             .Extension = fi.Extension.ToLowerInvariant(),
             .SizeBytes = fi.Length,
-            .IsOverSizeLimit = (fi.Length > CA_DefaultMaxAttachmentBytes),
-            .StatusMessage = If(fi.Length > CA_DefaultMaxAttachmentBytes, "Over size limit", "OK"),
+            .IsOverSizeLimit = False,
+            .StatusMessage = "OK",
             .CreatedTime = fi.CreationTimeUtc,
             .LastModifiedTime = fi.LastWriteTimeUtc,
             .OutputFiles = New List(Of String)(),
@@ -176,6 +174,7 @@ Partial Public Class ThisAddIn
         }
 
         _chatAgentActive = True
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
         ' Build tool list: internal tools (excluding summarize_thread) + selected external chat tools
         Dim tools As New List(Of ModelConfig)()

@@ -72,7 +72,6 @@ Namespace SharedLibrary
                 .UsePipeTables() _
                 .UseGridTables() _
                 .UseFootnotes() _
-                .UseEmojiAndSmiley() _
                 .Build()
             Dim document = Markdig.Markdown.Parse(markdownText, pipeline)
 

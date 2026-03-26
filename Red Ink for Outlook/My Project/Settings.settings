@@ -66,13 +66,13 @@
       <Value Profile="(Default)" />
     </Setting>
     <Setting Name="AP_CooldownSeconds" Type="System.Int32" Scope="User">
-      <Value Profile="(Default)">10</Value>
+      <Value Profile="(Default)" />
     </Setting>
     <Setting Name="AP_MaxRepliesPerSession" Type="System.Int32" Scope="User">
-      <Value Profile="(Default)">50</Value>
+      <Value Profile="(Default)" />
     </Setting>
     <Setting Name="AP_MaxAttachmentMB" Type="System.Int32" Scope="User">
-      <Value Profile="(Default)">10</Value>
+      <Value Profile="(Default)" />
     </Setting>
     <Setting Name="AP_FooterText" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
@@ -135,6 +135,27 @@
       <Value Profile="(Default)">0</Value>
     </Setting>
     <Setting Name="InboxBoardIncludeSubfolders" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_UseSecondApi" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_ReprocessLookbackHours" Type="System.Int32" Scope="User">
+      <Value Profile="(Default)">0</Value>
+    </Setting>
+    <Setting Name="AP_EnableWebGrounding" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_EnableVoicemailProcessing" Type="System.Boolean" Scope="User">
+      <Value Profile="(Default)">False</Value>
+    </Setting>
+    <Setting Name="AP_VoicemailSenderAddress" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="AP_VoicemailCallerIdMapPath" Type="System.String" Scope="User">
+      <Value Profile="(Default)" />
+    </Setting>
+    <Setting Name="AP_EnableScheduler" Type="System.Boolean" Scope="User">
       <Value Profile="(Default)">False</Value>
     </Setting>
   </Settings>

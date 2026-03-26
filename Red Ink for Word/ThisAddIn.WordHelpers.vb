@@ -1,13 +1,14 @@
-﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland.
+﻿' Copyright (c) LawDigital Ltd., Switzerland.
 ' All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.WordHelpers.vb
 ' Purpose: Word-centric helper utilities for the add-in, including document and
 '          selection comparison workflows, change extraction/analysis for LLM
-'          summarization, markup/time-span analytics, and various editing helpers
-'          (content control removal, regex search/replace, file import/export utilities).
+'          summarization, markup/time-span analytics, PDF operations (flattening,
+'          splitting, exhibit stamping), comment management, and various editing
+'          helpers (content control removal, regex search/replace, file
+'          import/export utilities).
 '
 ' Architecture:
 ' - Comparison UI (HTML viewer):
@@ -19,8 +20,9 @@
 '           exports it to Filtered HTML (temp folder), and displays it with
 '           `ShowHTMLCustomMessageBox`.
 '         - Provides post-actions (buttons) such as: summarize changes, export to PDF,
-'           copy result to clipboard (with formatting), open result in Word, and run
-'           further "compare selected" operations.
+'           copy result to clipboard (with formatting), open result in Word,
+'           switch comparison direction (⇄), and run further "compare selected"
+'           operations.
 '     - `CompareSelectedTextRanges`:
 '         - Captures two user-selected ranges (non-modal prompts so Word stays usable),
 '           compares via `CompareDocuments` on temporary documents, exports to HTML,
@@ -36,14 +38,40 @@
 '     - `SummarizeDocumentChanges` / `ExtractRevisionsAndCommentsWithMarkup`:
 '         - Summarizes revisions/comments from a selection or whole document with optional
 '           date filtering and comment cutoffs relative to earliest revision.
+'         - Ignores pure formatting revisions for output but uses them for date calculation.
+'
+' - PDF Operations:
+'     - `FlattenPdfToImages` / `FlattenPdfToImageOnly`:
+'         - Rasterizes PDF pages to image-only PDFs, removing text layers.
+'         - Prefers Windows.Data.Pdf (Win10+ built-in renderer) via `FlattenPdfViaWindowsApi`;
+'           falls back to PdfiumViewer when unavailable.
+'         - Requires HAS_WINRT compilation constant (auto-detected from Windows SDK).
+'         - Supports per-page JPEG encoding at configurable DPI, metadata preservation,
+'           recursive directory processing, and progress bar with cancellation.
+'     - `RenderPageViaWindowsPdf` / `RenderAllPagesViaWindowsPdf`:
+'         - Single-page and full-document Windows.Data.Pdf rendering helpers
+'           used by both flattening and exhibit stamping (Stamper.vb).
+'         - Execute on STA threads with timeout protection.
+'     - `SplitPdfByExhibits`:
+'         - Extracts text page-by-page (PdfPig, with optional OCR fallback),
+'           sends to LLM for exhibit boundary detection, and splits via PdfSharp.
+'         - Supports configurable output language for descriptions and user
+'           confirmation of proposed splits.
 '
 ' - Export/IO Helpers:
 '     - `ReadHtmlWithEncodingDetection` detects encoding of Word-generated Filtered HTML
 '       (BOM/meta charset; fallback to Windows-1252), used before displaying in the HTML viewer.
-'     - `ExportComparisonToPdfFromHtml` reopens exported HTML in Word and exports to PDF,
-'       prompting for output path and ensuring unique filenames.
-'     - Additional file conversion helpers (e.g., PDF flattening, content export/import)
-'       live in this file and share the same UI/progress patterns.
+'     - `ExportComparisonToPdfFromHtml` / `ExportComparisonToPdf` reopens exported HTML
+'       in Word and exports to PDF, prompting for output path and ensuring unique filenames.
+'     - `ExportFileContentToText` converts files (PDF, DOCX, TXT, etc.) to plain text,
+'       with optional OCR for PDFs and batch processing support.
+'
+' - Comment Management:
+'     - `NewRemoveRIPrefixFromComments` / `RemoveRIPrefixFromComments`:
+'         - Removes leading "RI: " prefix from Word comments (including threaded replies).
+'         - Optionally removes comment date/time via Open XML post-processing
+'           (`RemoveCommentDateTimesViaOpenXml`) by saving to temp DOCX, stripping
+'           w:date attributes from comments.xml and commentsExtended/Extensible parts.
 '
 ' - Editing Utilities:
 '     - Content control removal helpers (`RemoveContentControlsRespectSelection`,
@@ -52,17 +80,32 @@
 '     - `RegexSearchReplace` provides multi-pattern regex operations with persistent settings.
 '     - `AcceptFormatting` accepts formatting-only revisions with escape-to-cancel UX.
 '     - `CalculateUserMarkupTimeSpan` calculates markup/comment time spans by author with optional date filter.
+'     - `CompareSelectionHalves` splits selected paragraphs into two halves and compares them.
 '
 ' Threading / UX:
 ' - Uses non-modal top-most dialogs for selection capture, enabling the user to interact with Word
 '   while prompts are visible.
 ' - Long-running work uses progress/splash patterns, and asynchronous UI rendering uses STA threads
 '   where required by WinForms/embedded browser controls.
+' - Windows.Data.Pdf calls execute on dedicated STA threads with 2–5 minute timeout protection.
+'
+' Build Configuration (Windows SDK / WinRT):
+' - The HAS_WINRT conditional compilation constant is auto-defined in the .vbproj
+'   when Windows.winmd is found at the expected SDK path.
+' - Currently requires Windows SDK 10.0.26100.0 (see .vbproj for update instructions).
+' - When HAS_WINRT is NOT defined, all Windows.Data.Pdf code is compiled out and
+'   PdfiumViewer is used as fallback (reduced rendering fidelity for complex PDFs).
 '
 ' Dependencies:
 ' - Microsoft Office Interop Word (`Microsoft.Office.Interop.Word`)
 ' - Markdig (Markdown → HTML rendering)
-' - SharedLibrary (`SharedLibrary.SharedMethods`) for dialogs, clipboard helpers, and LLM access
+' - PdfSharp (PDF creation/manipulation)
+' - PdfPig (PDF text extraction / page counting)
+' - PdfiumViewer (PDF rendering fallback when Windows.Data.Pdf unavailable)
+' - Windows.Data.Pdf (Win10+ built-in PDF renderer, via WinRT projection)
+' - DocumentFormat.OpenXml (Open XML post-processing for comment date removal)
+' - SharedLibrary (`SharedLibrary.SharedMethods`) for dialogs, clipboard helpers, LLM access,
+'   progress bar, splash screen, drag & drop forms, and OCR utilities
 ' =============================================================================
 
 Option Explicit On
@@ -1368,29 +1411,410 @@ Partial Public Class ThisAddIn
         ShowCustomMessageBox(summary.ToString().TrimEnd(), AN & " Flatten PDF to Images")
     End Sub
 
+
+
+
+
     ''' <summary>
-    ''' Converts a PDF to an image-only PDF by rasterizing each page.
-    ''' Unlike BurnInPdfToImageOnly, this method does not process annotations and simply
-    ''' renders each page as-is to a rasterized image, removing all text layers.
+    ''' Converts a PDF to an image-only PDF by rasterizing each page via the Windows 10+
+    ''' built-in PDF renderer (Windows.Data.Pdf). This API is maintained by Microsoft via
+    ''' Windows Update, handles all modern PDF features (transparency groups, layered image
+    ''' XObjects, form XObjects, compositing modes), and requires no third-party native DLLs.
+    ''' Falls back to PdfiumViewer if the Windows API is unavailable.
     ''' </summary>
     ''' <param name="inputPath">Input PDF file path</param>
     ''' <param name="outputPath">Output PDF file path</param>
     ''' <param name="dpi">Rasterization DPI (default 200 for balance of size/quality)</param>
     Private Shared Sub FlattenPdfToImageOnly(inputPath As String, outputPath As String, Optional dpi As Integer = 200)
 
-        ' Ensure pdfium.dll is loaded (reuse existing helper from PdfRedactionService)
+        Dim dbg As Action(Of String) = Sub(msg) System.Diagnostics.Debug.WriteLine($"[FlattenPDF] {msg}")
+        dbg($"=== FlattenPdfToImageOnly START === dpi={dpi}")
+        dbg($"Input:  {inputPath}")
+        dbg($"Output: {outputPath}")
+
+        Dim usedWindowsPdf As Boolean = False
+
+#If HAS_WINRT Then
+        If Environment.OSVersion.Version.Major >= 10 Then
+            Try
+                FlattenPdfViaWindowsApi(inputPath, outputPath, dpi)
+                usedWindowsPdf = True
+                dbg("Rendered via Windows.Data.Pdf — all visual elements preserved")
+            Catch ex As Exception
+                dbg($"Windows.Data.Pdf failed: {ex.Message} — falling back to PdfiumViewer")
+                usedWindowsPdf = False
+            End Try
+        Else
+            dbg($"OS version {Environment.OSVersion.Version} — Windows.Data.Pdf not available, using PdfiumViewer")
+        End If
+#End If
+
+        If Not usedWindowsPdf Then
+            dbg("WARNING: PdfiumViewer fallback may not preserve layered image objects with transparency")
+            FlattenPdfToImageOnlyViaPdfium(inputPath, outputPath, dpi)
+        End If
+
+        dbg("=== FlattenPdfToImageOnly END ===")
+    End Sub
+
+    Private Shared Sub FlattenPdfViaWindowsApi(inputPath As String, outputPath As String, dpi As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available (SDK not installed at build time).")
+#Else
+        Dim dbg As Action(Of String) = Sub(msg) System.Diagnostics.Debug.WriteLine($"[FlattenPDF-WinPdf] {msg}")
+
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    FlattenPdfViaWindowsApiCore(inputPath, outputPath, dpi, dbg)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Throw New TimeoutException("Windows.Data.Pdf rendering timed out after 5 minutes.")
+        End If
+
+        If renderException IsNot Nothing Then
+            Throw renderException
+        End If
+#End If
+    End Sub
+
+    Private Shared Sub FlattenPdfViaWindowsApiCore(inputPath As String, outputPath As String,
+                                                    dpi As Integer,
+                                                    dbg As Action(Of String))
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available (SDK not installed at build time).")
+#Else
+        ' Open the PDF via Windows.Data.Pdf
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        dbg($"Opened via Windows.Data.Pdf — {winPdf.PageCount} page(s)")
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+        ' Copy metadata from source
+        Try
+            Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                CopyPdfMetadata(srcDoc, outDoc)
+            End Using
+        Catch
+        End Try
+
+        ' Scale factor: Windows.Data.Pdf renders at 96 DPI by default.
+        Dim scaleFactor As Double = dpi / 96.0
+
+        For pageIndex As UInteger = 0 To CUInt(winPdf.PageCount - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+            Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+            dbg($"Page {pageIndex + 1}: {pageWidthPt:F0}x{pageHeightPt:F0} pts, render {renderWidthPx}x{renderHeightPx} px")
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+                renderStream.Seek(0)
+                Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using ms As New System.IO.MemoryStream()
+                    netStream.CopyTo(ms)
+                    ms.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(ms)
+                        Using jpegMs As New System.IO.MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                            If jpegEncoder IsNot Nothing Then
+                                Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                                encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+
+                            jpegMs.Position = 0
+
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        outDoc.Save(outputPath)
+        outDoc.Close()
+
+        dbg($"Output saved: {New System.IO.FileInfo(outputPath).Length:N0} bytes")
+#End If
+    End Sub
+
+
+    ''' <summary>
+    ''' Renders a single page of a PDF to a JPEG MemoryStream using Windows.Data.Pdf (Win10+).
+    ''' Returns Nothing if the API is unavailable or fails (caller should fall back to PdfiumViewer).
+    ''' </summary>
+    Friend Shared Function RenderPageViaWindowsPdf(inputPath As String, pageIndex As Integer, dpi As Integer) As Tuple(Of MemoryStream, Double, Double)
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        If Environment.OSVersion.Version.Major < 10 Then Return Nothing
+
+        Dim result As Tuple(Of MemoryStream, Double, Double) = Nothing
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    result = RenderPageViaWindowsPdfCore(inputPath, pageIndex, dpi)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(2)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Return Nothing
+        End If
+
+        If renderException IsNot Nothing Then Return Nothing
+        Return result
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Core STA implementation for single-page Windows.Data.Pdf rendering.
+    ''' </summary>
+    Private Shared Function RenderPageViaWindowsPdfCore(inputPath As String, pageIndex As Integer, dpi As Integer) As Tuple(Of MemoryStream, Double, Double)
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        If pageIndex < 0 OrElse pageIndex >= CInt(winPdf.PageCount) Then Return Nothing
+
+        Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(CUInt(pageIndex))
+
+        Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+        Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+        Dim scaleFactor As Double = dpi / 96.0
+        Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+        Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+        Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+            Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+            renderOptions.DestinationWidth = renderWidthPx
+            renderOptions.DestinationHeight = renderHeightPx
+            renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+            page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+            renderStream.Seek(0)
+            Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+            Using pngMs As New MemoryStream()
+                netStream.CopyTo(pngMs)
+                pngMs.Position = 0
+
+                Using bmp As New System.Drawing.Bitmap(pngMs)
+                    Dim jpegMs As New MemoryStream()
+                    Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                    If jpegEncoder IsNot Nothing Then
+                        Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                        encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                            System.Drawing.Imaging.Encoder.Quality, 85L)
+                        bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                    Else
+                        bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                    End If
+                    jpegMs.Position = 0
+
+                    page.Dispose()
+                    Return Tuple.Create(jpegMs, pageWidthPt, pageHeightPt)
+                End Using
+            End Using
+        End Using
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Renders all pages of a PDF to a new image-only PdfSharp document using Windows.Data.Pdf.
+    ''' Returns Nothing if the API is unavailable or fails.
+    ''' </summary>
+    Friend Shared Function RenderAllPagesViaWindowsPdf(inputPath As String, dpi As Integer) As PdfSharp.Pdf.PdfDocument
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        If Environment.OSVersion.Version.Major < 10 Then Return Nothing
+
+        Dim result As PdfSharp.Pdf.PdfDocument = Nothing
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    result = RenderAllPagesViaWindowsPdfCore(inputPath, dpi)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Return Nothing
+        End If
+
+        If renderException IsNot Nothing Then Return Nothing
+        Return result
+#End If
+    End Function
+
+    ''' <summary>
+    ''' Core STA implementation for full-document Windows.Data.Pdf rendering.
+    ''' </summary>
+    Private Shared Function RenderAllPagesViaWindowsPdfCore(inputPath As String, dpi As Integer) As PdfSharp.Pdf.PdfDocument
+#If Not HAS_WINRT Then
+        Return Nothing
+#Else
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+        Dim scaleFactor As Double = dpi / 96.0
+
+        For pageIndex As UInteger = 0 To CUInt(winPdf.PageCount - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+
+            Dim renderWidthPx As UInteger = CUInt(System.Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(System.Math.Round(page.Size.Height * scaleFactor))
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+
+                renderStream.Seek(0)
+                Dim netStream As System.IO.Stream = System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using pngMs As New MemoryStream()
+                    netStream.CopyTo(pngMs)
+                    pngMs.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(pngMs)
+                        Using jpegMs As New MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
+                            If jpegEncoder IsNot Nothing Then
+                                Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
+                                encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, encoderParams)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+
+                            jpegMs.Position = 0
+
+                            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+                            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        Return outDoc
+#End If
+    End Function
+
+
+
+
+    <System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet:=System.Runtime.InteropServices.CharSet.Auto, SetLastError:=True)>
+    Private Shared Function LoadLibrary(lpFileName As String) As IntPtr
+    End Function
+
+    ''' <summary>
+    ''' Rasterizes a PDF to an image-only PDF via PdfiumViewer.
+    ''' Used as fallback if Windows.Data.Pdf is unavailable (pre-Windows 10).
+    ''' </summary>
+    Private Shared Sub FlattenPdfToImageOnlyViaPdfium(inputPath As String, outputPath As String,
+                                                      Optional dpi As Integer = 200,
+                                                      Optional metadataSourcePath As String = Nothing)
+
         PdfRedactionService.EnsurePdfiumLoadedPublic()
 
         Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
             Dim outDoc As New PdfSharp.Pdf.PdfDocument()
 
-            ' Preserve metadata from source PDF
+            Dim metaPath As String = If(String.IsNullOrEmpty(metadataSourcePath), inputPath, metadataSourcePath)
             Try
-                Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(inputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                Using srcDoc As PdfSharp.Pdf.PdfDocument = PdfSharp.Pdf.IO.PdfReader.Open(metaPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
                     CopyPdfMetadata(srcDoc, outDoc)
                 End Using
             Catch
-                ' Ignore metadata copy failures
             End Try
 
             For pageIndex As Integer = 0 To pdf.PageCount - 1
@@ -1398,27 +1822,24 @@ Partial Public Class ThisAddIn
                 Dim widthPx As Integer = CInt(System.Math.Round(sizePt.Width / 72.0 * dpi))
                 Dim heightPx As Integer = CInt(System.Math.Round(sizePt.Height / 72.0 * dpi))
 
-                ' Render with annotations visible, LCD text smoothing, and print quality
                 Dim renderFlags As PdfiumViewer.PdfRenderFlags =
-                PdfiumViewer.PdfRenderFlags.Annotations Or
-                PdfiumViewer.PdfRenderFlags.LcdText Or
-                PdfiumViewer.PdfRenderFlags.ForPrinting
+                    PdfiumViewer.PdfRenderFlags.Annotations Or
+                    PdfiumViewer.PdfRenderFlags.LcdText Or
+                    PdfiumViewer.PdfRenderFlags.ForPrinting
 
                 Using rendered As System.Drawing.Image = pdf.Render(pageIndex, widthPx, heightPx, dpi, dpi, renderFlags)
                     Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
                     outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
                     outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
 
-                    ' Save as JPEG for smaller file size (quality 85 is a good balance)
                     Using ms As New System.IO.MemoryStream()
                         Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = GetJpegEncoder()
                         If jpegEncoder IsNot Nothing Then
                             Dim encoderParams As New System.Drawing.Imaging.EncoderParameters(1)
                             encoderParams.Param(0) = New System.Drawing.Imaging.EncoderParameter(
-                            System.Drawing.Imaging.Encoder.Quality, 85L)
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
                             rendered.Save(ms, jpegEncoder, encoderParams)
                         Else
-                            ' Fallback to PNG if JPEG encoder not available
                             rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
                         End If
 
@@ -1436,6 +1857,8 @@ Partial Public Class ThisAddIn
             outDoc.Close()
         End Using
     End Sub
+
+
 
     ''' <summary>
     ''' Gets the JPEG image encoder for file size optimization.
@@ -1495,15 +1918,12 @@ Partial Public Class ThisAddIn
 
 
 
-
-
-
-
     ''' <summary>
     ''' Prompts the user for a file or directory, reads content using GetFileContent(),
     ''' and saves the extracted text as a .txt file at the same location (or optionally in a subdirectory).
     ''' Shows a progress bar and allows cancellation. If 2+ PDF files are present and OCR is available,
-    ''' prompts user once for OCR preference.
+    ''' prompts user once for OCR preference. Optionally flattens PDFs to image-only before OCR
+    ''' to ensure all visual elements (layered images, transparency groups) are captured.
     ''' </summary>
     Public Async Sub ExportFileContentToText()
         Dim selectedPath As String = ""
@@ -1534,20 +1954,39 @@ Partial Public Class ThisAddIn
             Return
         End If
 
+        ' Build supported extensions list aligned with GetFileContentEx
+        Dim supportedExtensionsList As New List(Of String)({
+            ".txt", ".rtf", ".docx", ".pdf", ".xlsx", ".pptx", ".ini", ".csv", ".log",
+            ".json", ".xml", ".html", ".htm", ".md", ".yaml", ".yml",
+            ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql",
+            ".eml", ".msg",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+            ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm",
+            ".mp4", ".avi", ".mkv", ".mov", ".wmv"
+        })
+
+        ' Conditionally include .doc (legacy Word format — may execute macros via COM)
+        If INI_AllowLegacyDocFiles Then
+            supportedExtensionsList.Add(".doc")
+        End If
+
+        ' Filter out binary/media types the current model can't handle
+        Dim supportedExtensions As String() = supportedExtensionsList.
+            Where(Function(ext) Not IsBinaryMediaExtension(ext) OrElse IsModelCapableForExtension(_context, ext)).
+            ToArray()
+
         ' Collect files to process
         Dim filesToProcess As New List(Of String)()
-        Dim supportedExtensions As String() = {
-            ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
-            ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
-            ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-        }
-
         Dim unsupportedFiles As New List(Of String)()
+        Dim legacyDocFilesSkipped As New List(Of String)()
 
         If isFile Then
             Dim ext As String = IO.Path.GetExtension(selectedPath).ToLowerInvariant()
             If supportedExtensions.Contains(ext) Then
                 filesToProcess.Add(selectedPath)
+            ElseIf ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+                ShowCustomMessageBox($"Legacy .doc files are disabled for security reasons (AllowLegacyDocFiles is off). Save as .docx first.")
+                Return
             Else
                 ShowCustomMessageBox($"File type '{ext}' is not supported for text extraction.")
                 Return
@@ -1572,6 +2011,8 @@ Partial Public Class ThisAddIn
                 Dim ext As String = IO.Path.GetExtension(f).ToLowerInvariant()
                 If supportedExtensions.Contains(ext) Then
                     filesToProcess.Add(f)
+                ElseIf ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+                    legacyDocFilesSkipped.Add(f)
                 Else
                     unsupportedFiles.Add(f)
                 End If
@@ -1579,7 +2020,8 @@ Partial Public Class ThisAddIn
 
             If filesToProcess.Count = 0 Then
                 ShowCustomMessageBox($"No supported files found in the selected directory." &
-                    If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported file(s) were ignored.)", ""))
+                    If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported file(s) were ignored.)", "") &
+                    If(legacyDocFilesSkipped.Count > 0, $" ({legacyDocFilesSkipped.Count} .doc file(s) skipped — AllowLegacyDocFiles is off.)", ""))
                 Return
             End If
 
@@ -1588,6 +2030,7 @@ Partial Public Class ThisAddIn
                 Dim confirmAnswer As Integer = ShowCustomYesNoBox(
                     $"The directory contains {filesToProcess.Count} supported files to process." &
                     If(unsupportedFiles.Count > 0, $" ({unsupportedFiles.Count} unsupported files will be ignored.)", "") &
+                    If(legacyDocFilesSkipped.Count > 0, $" ({legacyDocFilesSkipped.Count} .doc files skipped — disabled for security.)", "") &
                     " Continue?",
                     "Yes, continue", "No, abort")
                 If confirmAnswer <> 1 Then
@@ -1621,6 +2064,7 @@ Partial Public Class ThisAddIn
         ' Determine OCR settings
         Dim doOcr As Boolean = False
         Dim askUserPerFile As Boolean = False
+        Dim flattenBeforeOcr As Boolean = False
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -1640,9 +2084,32 @@ Partial Public Class ThisAddIn
                 askUserPerFile = False
             End If
         ElseIf pdfCount = 1 AndAlso SharedMethods.IsOcrAvailable(_context) Then
-            ' Single PDF - ask per file (default behavior)
-            doOcr = True
-            askUserPerFile = True
+            ' Single PDF - still ask once upfront, but don't interrupt during processing
+            Dim ocrChoice As Integer = ShowCustomYesNoBox(
+                "The PDF may require OCR to extract text from scanned content." & vbCrLf & vbCrLf &
+                "Do you want to enable OCR?",
+                "Yes, enable OCR",
+                "No, skip OCR")
+            If ocrChoice = 0 Then
+                Return ' User aborted
+            End If
+            doOcr = (ocrChoice = 1)
+            askUserPerFile = False ' User already decided — don't interrupt during processing
+        End If
+
+        ' Offer PDF flattening before OCR when OCR is enabled
+        If doOcr AndAlso pdfCount >= 1 Then
+            Dim flattenChoice As Integer = ShowCustomYesNoBox(
+                "Some scanned PDFs contain layered images or transparency groups that OCR may miss." & vbCrLf & vbCrLf &
+                "Would you like to flatten PDFs to image-only format before OCR? " &
+                "This rasterizes each page (like printing to image), ensuring all visual elements are captured." & vbCrLf & vbCrLf &
+                "⚠ This adds processing time (a few seconds per page) but can significantly improve OCR results for complex PDFs.",
+                "Yes, flatten first (recommended for scans)",
+                "No, OCR directly")
+            If flattenChoice = 0 Then
+                Return ' User aborted
+            End If
+            flattenBeforeOcr = (flattenChoice = 1)
         End If
 
         ' Create output subdirectory if needed
@@ -1674,7 +2141,8 @@ Partial Public Class ThisAddIn
         ' Process files
         Dim successCount As Integer = 0
         Dim failedFiles As New List(Of String)()
-        Dim skippedFiles As New List(Of String)()
+        Dim emptyContentFiles As New List(Of String)()
+        Dim flattenedPdfCount As Integer = 0
 
         Try
             For i As Integer = 0 To filesToProcess.Count - 1
@@ -1694,45 +2162,78 @@ Partial Public Class ThisAddIn
                     ' Determine OCR settings for this file
                     Dim isPdf As Boolean = IO.Path.GetExtension(filePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
-                    Dim askForThisFile As Boolean = isPdf AndAlso askUserPerFile
 
-                    ' Read file content
-                    Dim content As String = Await GetFileContent(filePath, True, useOcrForThisFile, askForThisFile)
+                    ' If flattening is requested for PDFs, flatten to temp file first
+                    Dim effectiveFilePath As String = filePath
+                    Dim tempFlattenedPath As String = Nothing
 
-                    If String.IsNullOrWhiteSpace(content) Then
-                        skippedFiles.Add($"{fileName}: Empty content")
-                        Continue For
-                    End If
-
-                    If content.StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso content.Length < 200 Then
-                        failedFiles.Add($"{fileName}: {content}")
-                        Continue For
-                    End If
-
-                    ' Determine output path
-                    Dim outputPath As String
-                    If useSubdirectory Then
-                        ' Preserve relative directory structure if processing subdirectories
-                        If isDirectory Then
-                            Dim relativePath As String = filePath.Substring(selectedPath.Length).TrimStart(IO.Path.DirectorySeparatorChar)
-                            Dim relativeDir As String = IO.Path.GetDirectoryName(relativePath)
-                            If Not String.IsNullOrEmpty(relativeDir) Then
-                                Dim targetDir As String = IO.Path.Combine(outputBaseDir, relativeDir)
-                                If Not IO.Directory.Exists(targetDir) Then
-                                    IO.Directory.CreateDirectory(targetDir)
-                                End If
+                    If isPdf AndAlso flattenBeforeOcr AndAlso useOcrForThisFile Then
+                        Try
+                            ProgressBarModule.GlobalProgressLabel = $"Flattening PDF {i + 1} of {filesToProcess.Count}: {fileName}..."
+                            tempFlattenedPath = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_flatten_{Guid.NewGuid():N}.pdf")
+                            Await System.Threading.Tasks.Task.Run(Sub() FlattenPdfToImageOnly(filePath, tempFlattenedPath, 200))
+                            effectiveFilePath = tempFlattenedPath
+                            flattenedPdfCount += 1
+                            ProgressBarModule.GlobalProgressLabel = $"OCR processing file {i + 1} of {filesToProcess.Count}: {fileName}..."
+                        Catch ex As Exception
+                            ' Flattening failed — fall back to original PDF
+                            effectiveFilePath = filePath
+                            If tempFlattenedPath IsNot Nothing Then
+                                Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
+                                Catch : End Try
                             End If
-                            outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
-                        Else
-                            outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
-                        End If
-                    Else
-                        outputPath = filePath & ".txt"
+                            tempFlattenedPath = Nothing
+                        End Try
                     End If
 
-                    ' Save as text file
-                    IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
-                    successCount += 1
+                    Try
+                        ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
+                        ' preventing the countdown splash from interrupting batch processing.
+                        ' The user has already made all choices upfront (OCR on/off, flatten on/off).
+                        Dim content As String = Await GetFileContent(effectiveFilePath, Silent:=True, DoOCR:=useOcrForThisFile, AskUser:=False)
+
+                        If String.IsNullOrWhiteSpace(content) Then
+                            emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
+                            Continue For
+                        End If
+
+                        If content.StartsWith("Error", StringComparison.OrdinalIgnoreCase) AndAlso content.Length < 200 Then
+                            failedFiles.Add($"{fileName}: {content}")
+                            Continue For
+                        End If
+
+                        ' Determine output path
+                        Dim outputPath As String
+                        If useSubdirectory Then
+                            ' Preserve relative directory structure if processing subdirectories
+                            If isDirectory Then
+                                Dim relativePath As String = filePath.Substring(selectedPath.Length).TrimStart(IO.Path.DirectorySeparatorChar)
+                                Dim relativeDir As String = IO.Path.GetDirectoryName(relativePath)
+                                If Not String.IsNullOrEmpty(relativeDir) Then
+                                    Dim targetDir As String = IO.Path.Combine(outputBaseDir, relativeDir)
+                                    If Not IO.Directory.Exists(targetDir) Then
+                                        IO.Directory.CreateDirectory(targetDir)
+                                    End If
+                                End If
+                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
+                            Else
+                                outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
+                            End If
+                        Else
+                            outputPath = filePath & ".txt"
+                        End If
+
+                        ' Save as text file
+                        IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
+                        successCount += 1
+
+                    Finally
+                        ' Clean up temp flattened PDF
+                        If tempFlattenedPath IsNot Nothing Then
+                            Try : If IO.File.Exists(tempFlattenedPath) Then IO.File.Delete(tempFlattenedPath)
+                            Catch : End Try
+                        End If
+                    End Try
 
                 Catch ex As Exception
                     failedFiles.Add($"{fileName}: {ex.Message}")
@@ -1745,7 +2246,7 @@ Partial Public Class ThisAddIn
         End Try
 
         ' Build summary
-        Dim wasCancelled As Boolean = (successCount + failedFiles.Count + skippedFiles.Count) < filesToProcess.Count
+        Dim wasCancelled As Boolean = (successCount + failedFiles.Count + emptyContentFiles.Count) < filesToProcess.Count
 
         Dim summary As New System.Text.StringBuilder()
 
@@ -1760,12 +2261,53 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Output directory: {outputBaseDir}")
         End If
 
-        If skippedFiles.Count > 0 Then
-            summary.AppendLine($"Skipped (empty content): {skippedFiles.Count} file(s)")
+        If doOcr Then
+            summary.AppendLine($"OCR was enabled for PDF files.")
+            If flattenBeforeOcr Then
+                summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
+            End If
+        End If
+
+        If emptyContentFiles.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"⚠ Files with no extractable content ({emptyContentFiles.Count} file(s)):")
+            For Each f In emptyContentFiles.Take(10)
+                summary.AppendLine($"  • {f}")
+            Next
+            If emptyContentFiles.Count > 10 Then
+                summary.AppendLine($"  ... and {emptyContentFiles.Count - 10} more")
+            End If
+            summary.AppendLine("  (These files were read but returned no text content)")
         End If
 
         If unsupportedFiles.Count > 0 Then
-            summary.AppendLine($"Unsupported file types (ignored): {unsupportedFiles.Count} file(s)")
+            summary.AppendLine()
+            summary.AppendLine($"Skipped due to unsupported file type ({unsupportedFiles.Count} file(s)):")
+            ' Group by extension for readability
+            Dim byExtension = unsupportedFiles.
+                GroupBy(Function(f) IO.Path.GetExtension(f).ToLowerInvariant()).
+                OrderByDescending(Function(g) g.Count())
+            For Each extGroup In byExtension
+                Dim extLabel As String = If(String.IsNullOrEmpty(extGroup.Key), "(no extension)", extGroup.Key)
+                If extGroup.Count() <= 3 Then
+                    For Each f In extGroup
+                        summary.AppendLine($"  • {IO.Path.GetFileName(f)}")
+                    Next
+                Else
+                    summary.AppendLine($"  • {extGroup.Count()} {extLabel} files (e.g., {IO.Path.GetFileName(extGroup.First())})")
+                End If
+            Next
+        End If
+
+        If legacyDocFilesSkipped.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine($"Skipped .doc files ({legacyDocFilesSkipped.Count} — disabled for security):")
+            For Each f In legacyDocFilesSkipped.Take(5)
+                summary.AppendLine($"  • {IO.Path.GetFileName(f)}")
+            Next
+            If legacyDocFilesSkipped.Count > 5 Then
+                summary.AppendLine($"  ... and {legacyDocFilesSkipped.Count - 5} more")
+            End If
         End If
 
         ' Build detailed failure/skip log for clipboard
@@ -1788,9 +2330,9 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
-        If skippedFiles.Count > 0 Then
-            clipboardLog.AppendLine("=== SKIPPED FILES (Empty Content) ===")
-            For Each f In skippedFiles
+        If emptyContentFiles.Count > 0 Then
+            clipboardLog.AppendLine("=== EMPTY CONTENT FILES ===")
+            For Each f In emptyContentFiles
                 clipboardLog.AppendLine(f)
             Next
             clipboardLog.AppendLine()
@@ -1804,8 +2346,16 @@ Partial Public Class ThisAddIn
             clipboardLog.AppendLine()
         End If
 
+        If legacyDocFilesSkipped.Count > 0 Then
+            clipboardLog.AppendLine("=== LEGACY .DOC FILES (Disabled for security) ===")
+            For Each f In legacyDocFilesSkipped
+                clipboardLog.AppendLine(IO.Path.GetFileName(f))
+            Next
+            clipboardLog.AppendLine()
+        End If
+
         ' Copy log to clipboard if there were any issues
-        If failedFiles.Count > 0 OrElse skippedFiles.Count > 0 OrElse unsupportedFiles.Count > 0 Then
+        If failedFiles.Count > 0 OrElse emptyContentFiles.Count > 0 OrElse unsupportedFiles.Count > 0 OrElse legacyDocFilesSkipped.Count > 0 Then
             Dim logText As String = clipboardLog.ToString().TrimEnd()
             SharedMethods.PutInClipboard(logText)
             summary.AppendLine()
@@ -2710,17 +3260,24 @@ Partial Public Class ThisAddIn
     Public Sub CalculateUserMarkupTimeSpan()
 
         Try
-            Dim userName As String
-            Dim docRevisions As Word.Revisions
-            Dim rev As Word.Revision
-            Dim comment As Word.Comment
+            Dim app As Microsoft.Office.Interop.Word.Application = Nothing
+            Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
+
+            Try
+                app = Globals.ThisAddIn.Application
+                doc = app.ActiveDocument
+            Catch
+            End Try
+
+            If app Is Nothing OrElse doc Is Nothing Then
+                ShowCustomMessageBox("No active document found.", AN)
+                Exit Sub
+            End If
+
             Dim firstTimestamp As Date
             Dim lastTimestamp As Date
             Dim found As Boolean
-            Dim userInput As String
-            Dim userNames As New Microsoft.VisualBasic.Collection
-            Dim selRange As Word.Range
-            Dim outputUserNames As String
+            Dim userNames As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
             Dim docRef As String = "in the selected text"
 
             ' Initialize
@@ -2729,21 +3286,36 @@ Partial Public Class ThisAddIn
             lastTimestamp = #1/1/1900#
 
             ' Prompt for user name
-            userName = Globals.ThisAddIn.Application.UserName
-            userInput = ShowCustomInputBox("Please enter the name of the user (leave empty for all users):", "Markup Time Span", True, userName)
+            Dim userName As String = String.Empty
+            Try
+                userName = app.UserName
+            Catch
+            End Try
+
+            Dim userInput As String = ShowCustomInputBox("Please enter the name of the user (leave empty for all users):", "Markup Time Span", True, userName)
+
+            ' ShowCustomInputBox returns "" on Cancel in SimpleInput mode — treat as abort
+            If userInput Is Nothing Then
+                Exit Sub
+            End If
+
             userInput = userInput.Trim()
 
             ' Prompt for earliest date
-            Dim userDateInput As String
             Dim earliestDate As System.DateTime = System.DateTime.MinValue
             Dim earliestDateFiltered As Boolean = False
 
-            userDateInput = ShowCustomInputBox(
+            Dim userDateInput As String = ShowCustomInputBox(
                     "Please enter the earliest date (and time, if you wish) to consider (leave empty for no filter):",
                     "Markup Time Span",
                     True,
                     System.DateTime.Now.AddDays(-2).ToString(System.Globalization.CultureInfo.CurrentCulture)
                 )
+
+            If userDateInput Is Nothing Then
+                Exit Sub
+            End If
+
             userDateInput = userDateInput.Trim()
 
             Dim parsed As System.DateTime
@@ -2763,85 +3335,144 @@ Partial Public Class ThisAddIn
             End If
 
             ' Check selection
-            If Globals.ThisAddIn.Application.Selection Is Nothing OrElse String.IsNullOrWhiteSpace(Globals.ThisAddIn.Application.Selection.Range.Text) Then
-                Globals.ThisAddIn.Application.ActiveDocument.Content.Select()
+            Dim selRange As Word.Range = Nothing
+            Try
+                Dim sel As Word.Selection = app.Selection
+                If sel IsNot Nothing AndAlso sel.Range IsNot Nothing AndAlso sel.Range.Start <> sel.Range.End Then
+                    selRange = sel.Range
+                End If
+            Catch
+            End Try
+
+            If selRange Is Nothing Then
+                Try
+                    doc.Content.Select()
+                    selRange = app.Selection.Range
+                Catch
+                End Try
                 docRef = "in the document"
             End If
-            selRange = Globals.ThisAddIn.Application.Selection.Range
-            docRevisions = selRange.Revisions
+
+            If selRange Is Nothing Then
+                ShowCustomMessageBox("Unable to access the document content.", AN)
+                Exit Sub
+            End If
 
             ' Process revisions
-            For Each rev In docRevisions
-                If (String.IsNullOrEmpty(userInput) OrElse rev.Author.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
-                       AndAlso (Not earliestDateFiltered OrElse rev.Date >= earliestDate) Then
-                    ' Update timestamps
-                    If Not found Then
-                        firstTimestamp = rev.Date
-                        lastTimestamp = rev.Date
-                        found = True
-                    Else
-                        If rev.Date < firstTimestamp Then firstTimestamp = rev.Date
-                        If rev.Date > lastTimestamp Then lastTimestamp = rev.Date
-                    End If
-                    ' Collect user names if processing all
-                    Try
-                        userNames.Add(rev.Author, rev.Author.ToLower())
-                    Catch ex As Exception
-                        ' Ignore duplicates
-                    End Try
+            Try
+                Dim docRevisions As Word.Revisions = selRange.Revisions
+                If docRevisions IsNot Nothing Then
+                    For Each rev As Word.Revision In docRevisions
+                        Try
+                            Dim revAuthor As String = Nothing
+                            Dim revDate As Date
+
+                            Try
+                                revAuthor = rev.Author
+                                revDate = rev.Date
+                            Catch
+                                Continue For
+                            End Try
+
+                            If String.IsNullOrEmpty(revAuthor) Then revAuthor = "(unknown)"
+
+                            If (String.IsNullOrEmpty(userInput) OrElse revAuthor.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
+                                   AndAlso (Not earliestDateFiltered OrElse revDate >= earliestDate) Then
+                                ' Update timestamps
+                                If Not found Then
+                                    firstTimestamp = revDate
+                                    lastTimestamp = revDate
+                                    found = True
+                                Else
+                                    If revDate < firstTimestamp Then firstTimestamp = revDate
+                                    If revDate > lastTimestamp Then lastTimestamp = revDate
+                                End If
+                                ' Collect user names if processing all
+                                If Not userNames.ContainsKey(revAuthor) Then
+                                    userNames(revAuthor) = revAuthor
+                                End If
+                            End If
+                        Catch
+                            ' Skip problematic revision
+                        End Try
+                    Next
                 End If
-            Next
+            Catch
+                ' Revisions collection inaccessible (e.g., protected document)
+            End Try
 
             ' Process comments
-            For Each comment In selRange.Comments
-                If (String.IsNullOrEmpty(userInput) OrElse comment.Author.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
-                       AndAlso (Not earliestDateFiltered OrElse comment.Date >= earliestDate) Then
+            Try
+                Dim comments As Word.Comments = selRange.Comments
+                If comments IsNot Nothing Then
+                    For Each comment As Word.Comment In comments
+                        Try
+                            Dim cmtAuthor As String = Nothing
+                            Dim cmtDate As Date
 
-                    ' Update timestamps
-                    If Not found Then
-                        firstTimestamp = comment.Date
-                        lastTimestamp = comment.Date
-                        found = True
-                    Else
-                        If comment.Date < firstTimestamp Then firstTimestamp = comment.Date
-                        If comment.Date > lastTimestamp Then lastTimestamp = comment.Date
-                    End If
-                    ' Collect user names if processing all
-                    Try
-                        userNames.Add(comment.Author, comment.Author.ToLower())
-                    Catch ex As Exception
-                        ' Ignore duplicates
-                    End Try
+                            Try
+                                cmtAuthor = comment.Author
+                                cmtDate = comment.Date
+                            Catch
+                                Continue For
+                            End Try
+
+                            If String.IsNullOrEmpty(cmtAuthor) Then cmtAuthor = "(unknown)"
+
+                            If (String.IsNullOrEmpty(userInput) OrElse cmtAuthor.Equals(userInput, StringComparison.OrdinalIgnoreCase)) _
+                                   AndAlso (Not earliestDateFiltered OrElse cmtDate >= earliestDate) Then
+
+                                ' Update timestamps
+                                If Not found Then
+                                    firstTimestamp = cmtDate
+                                    lastTimestamp = cmtDate
+                                    found = True
+                                Else
+                                    If cmtDate < firstTimestamp Then firstTimestamp = cmtDate
+                                    If cmtDate > lastTimestamp Then lastTimestamp = cmtDate
+                                End If
+                                ' Collect user names if processing all
+                                If Not userNames.ContainsKey(cmtAuthor) Then
+                                    userNames(cmtAuthor) = cmtAuthor
+                                End If
+                            End If
+                        Catch
+                            ' Skip problematic comment
+                        End Try
+                    Next
                 End If
-            Next
+            Catch
+                ' Comments collection inaccessible
+            End Try
 
             ' Display results
             If found Then
-                Dim timeSpan As String
-                Dim timeDiff As Double
-                timeDiff = DateDiff(DateInterval.Minute, firstTimestamp, lastTimestamp)
-                timeSpan = System.Math.Floor(timeDiff / 1440).ToString() & " days, " &
+                Dim timeDiff As Double = DateDiff(DateInterval.Minute, firstTimestamp, lastTimestamp)
+                If timeDiff < 0 Then timeDiff = System.Math.Abs(timeDiff)
+
+                Dim timeSpan As String = System.Math.Floor(timeDiff / 1440).ToString() & " days, " &
                        ((timeDiff Mod 1440) \ 60).ToString("00") & " hours, " &
                        (timeDiff Mod 60).ToString("00") & " minutes"
 
                 ' Format timestamps without seconds
-                Dim formattedFirstTimestamp As String
-                Dim formattedLastTimestamp As String
-                formattedFirstTimestamp = firstTimestamp.ToString("dd/MM/yyyy HH:mm")
-                formattedLastTimestamp = lastTimestamp.ToString("dd/MM/yyyy HH:mm")
+                Dim formattedFirstTimestamp As String = firstTimestamp.ToString("dd/MM/yyyy HH:mm")
+                Dim formattedLastTimestamp As String = lastTimestamp.ToString("dd/MM/yyyy HH:mm")
+
+                Dim outputUserNames As String
                 If String.IsNullOrEmpty(userInput) Then
                     ' Display all users
-                    Dim user As Object
                     outputUserNames = "Users involved:" & vbCrLf
-                    For Each user In userNames
-                        outputUserNames &= "- " & user.ToString() & vbCrLf
+                    For Each kvp In userNames
+                        outputUserNames &= "- " & kvp.Value & vbCrLf
                     Next
                 Else
                     outputUserNames = "User: " & userInput
                 End If
-                ShowCustomMessageBox(outputUserNames & vbCrLf & If(earliestDateFiltered, "Earliest considered: " & earliestDate.ToString("dd/MM/yyyy HH:mm") & vbCrLf, "") & "First markup/comment: " & formattedFirstTimestamp & vbCrLf &
-    "Last markup/comment: " & formattedLastTimestamp & vbCrLf &
-    "Time span: " & timeSpan)
+                ShowCustomMessageBox(outputUserNames & vbCrLf &
+                    If(earliestDateFiltered, "Earliest considered: " & earliestDate.ToString("dd/MM/yyyy HH:mm") & vbCrLf, "") &
+                    "First markup/comment: " & formattedFirstTimestamp & vbCrLf &
+                    "Last markup/comment: " & formattedLastTimestamp & vbCrLf &
+                    "Time span: " & timeSpan)
             Else
                 If String.IsNullOrEmpty(userInput) Then
                     ShowCustomMessageBox($"No markups or comments found {docRef}.")
@@ -2851,7 +3482,7 @@ Partial Public Class ThisAddIn
             End If
 
         Catch ex As System.Exception
-            MessageBox.Show("Error in CalculateUserMarkupTimeSpan: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+            ShowCustomMessageBox("Error in CalculateUserMarkupTimeSpan: " & ex.Message, AN)
         End Try
     End Sub
 
@@ -2911,10 +3542,12 @@ Partial Public Class ThisAddIn
         Dim text1 As String = Left(firstRange.Text, Len(firstRange.Text) - 1)
         Dim text2 As String = Left(secondRange.Text, Len(secondRange.Text) - 1)
 
-        If INI_MarkupMethodHelper <> 1 Then
-            CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
-        Else
+        If INI_MarkupMethodHelper = 1 Then
             CompareAndInsertComparedoc(text1, text2, secondRange)
+        ElseIf INI_MarkupMethodHelper = 2 Then
+            CompareAndInsertSurgical(text1, text2, secondRange)
+        Else
+            CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
         End If
     End Sub
 
@@ -3938,6 +4571,9 @@ Partial Public Class ThisAddIn
             End Using
         End Using
     End Sub
+
+
+
 
 End Class
 

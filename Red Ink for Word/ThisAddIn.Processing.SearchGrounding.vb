@@ -922,7 +922,7 @@ Partial Public Class ThisAddIn
 
                     Case ".docx"
                         ' Open XML SDK is safe - only reads XML structure, no macro execution
-                        content = ReadDocxSafe(tempFile)
+                        content = ReadDocxSandboxed(tempFile)
 
                     Case ".pptx"
                         ' Open XML SDK is safe - only reads XML, no macro execution
@@ -956,59 +956,6 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             Debug.WriteLine($"[Document] Error extracting document content: {ex.Message}")
             Return False
-        End Try
-    End Function
-
-    ''' <summary>
-    ''' Safely extracts text from a .docx file using Open XML SDK.
-    ''' This method does NOT execute macros or embedded code - it only reads the XML structure.
-    ''' </summary>
-    ''' <param name="filePath">Path to the .docx file.</param>
-    ''' <returns>Extracted plain text content, or empty string on failure.</returns>
-    Private Function ReadDocxSafe(filePath As String) As String
-        Try
-            Using doc = DocumentFormat.OpenXml.Packaging.WordprocessingDocument.Open(filePath, False)
-                If doc.MainDocumentPart Is Nothing OrElse doc.MainDocumentPart.Document Is Nothing Then
-                    Return ""
-                End If
-
-                Dim body = doc.MainDocumentPart.Document.Body
-                If body Is Nothing Then
-                    Return ""
-                End If
-
-                ' Extract text from all paragraphs with proper line breaks
-                Dim sb As New Text.StringBuilder()
-
-                For Each para In body.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Paragraph)()
-                    Dim paraText As String = para.InnerText
-                    If Not String.IsNullOrWhiteSpace(paraText) Then
-                        sb.AppendLine(paraText.Trim())
-                    End If
-                Next
-
-                ' Also extract text from tables
-                For Each table In body.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.Table)()
-                    For Each row In table.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.TableRow)()
-                        Dim cellTexts As New List(Of String)()
-                        For Each cell In row.Descendants(Of DocumentFormat.OpenXml.Wordprocessing.TableCell)()
-                            Dim cellText = cell.InnerText.Trim()
-                            If Not String.IsNullOrWhiteSpace(cellText) Then
-                                cellTexts.Add(cellText)
-                            End If
-                        Next
-                        If cellTexts.Count > 0 Then
-                            sb.AppendLine(String.Join(vbTab, cellTexts))
-                        End If
-                    Next
-                Next
-
-                Return sb.ToString().Trim()
-            End Using
-
-        Catch ex As Exception
-            Debug.WriteLine($"[Document] Error reading .docx with Open XML: {ex.Message}")
-            Return ""
         End Try
     End Function
 

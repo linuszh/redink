@@ -1,6 +1,5 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.AutoPilot.Tools.vb
@@ -27,11 +26,19 @@
 '        `FindAttachment` (original attachments + prior tool outputs).
 '  - Office/PDF processing:
 '      * Word/PPT/Excel processing and generation via Interop/OpenXML helpers.
-'      * PDF extraction/merge/split/watermark/comment flows via PdfPig/PdfSharp and
-'        shared OCR-aware extraction helpers.
+'      * PDF extraction/merge/split/watermark/comment/redact/overlay flows via
+'        PdfPig/PdfSharp and shared OCR-aware extraction helpers.
 '  - Text extraction:
 '      * Reads Office/text/PDF attachments with cache reuse
 '        (`CachedText`, `CachedDocxHint`) to reduce repeated I/O and parsing.
+'  - Web grounding:
+'      * `web_grounding` delegates to the model's native web-search capability
+'        when enabled in the session config (`EnableWebGrounding`).
+'  - Scheduler integration:
+'      * `manage_scheduled_tasks` provides CRUD operations (create, list, get,
+'        update, delete, pause, resume) for the AutoPilot Scheduler via the
+'        `SchedulerCreateTask` / `SchedulerListTasks` / `SchedulerFindTask`
+'        API in `ThisAddIn.AutoPilot.Scheduler.vb`.
 '  - Logging and UX:
 '      * Emits execution traces to tooling context and AutoPilot dashboard
 '        (`context.Log`, `ApDashboardLog`) with concise success/failure summaries.
@@ -73,11 +80,19 @@
 '  - create_excel_spreadsheet
 '  - create_powerpoint
 '  - create_code_file
+'  - extract_data_from_attachments
+'  - redact_pdf
+'  - overlay_pdf
+'  - create_audio_file
+'  - generate_image
+'  - web_grounding
+'  - manage_scheduled_tasks
 '  - report_inability
 '
 ' Notes:
 '  - This file is a partial `ThisAddIn` implementation and depends on:
 '      * AutoPilot state/config from `ThisAddIn.Autopilot.vb`
+'      * Scheduler state/CRUD from `ThisAddIn.AutoPilot.Scheduler.vb`
 '      * Tooling contracts from `ThisAddIn.Tooling.vb`
 '      * SharedLibrary helpers (`SharedMethods`, OCR/PDF/Office extractors)
 ' =============================================================================
@@ -95,24 +110,12 @@ Imports System.Threading.Tasks
 Imports System.Xml
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
-    ''' <summary>
-    ''' Tool name for binary attachment description or transcription.
-    ''' </summary>
-    Private Const AP_Tool_DescribeBinary As String = "describe_binary_attachment"
-
-    ''' <summary>
-    ''' Supported binary extensions that can be passed as FileObject to the LLM.
-    ''' </summary>
-    Private Shared ReadOnly AP_BinaryExtensions As String() = {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif",
-        ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac", ".wma",
-        ".mp4", ".avi", ".mov", ".mkv", ".webm"
-    }
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL NAMES (constants for matching)
@@ -128,6 +131,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CompareWordDocs As String = "compare_word_documents"
     Private Const AP_Tool_ReadWordDocDetails As String = "read_word_document_details"
     Private Const AP_Tool_CreatePdfFromText As String = "create_pdf_from_text"
+    Private Const AP_Tool_DescribeBinary As String = "describe_binary_attachment"
     Private Const AP_Tool_ExtractExcelData As String = "extract_excel_data"
     Private Const AP_Tool_SplitPdf As String = "split_pdf"
     Private Const AP_Tool_AddPdfWatermark As String = "add_pdf_watermark"
@@ -140,7 +144,15 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_CreatePowerPoint As String = "create_powerpoint"
     Private Const AP_Tool_CreateCodeFile As String = "create_code_file"
     Private Const AP_Tool_CommentPdf As String = "comment_pdf_document"
+    Private Const AP_Tool_ExtractDataFromAttachments As String = "extract_data_from_attachments"
+    Private Const AP_Tool_RedactPdf As String = "redact_pdf"
+    Private Const AP_Tool_OverlayPdf As String = "overlay_pdf"
+    Private Const AP_Tool_CreateAudioFile As String = "create_audio_file"
+    Private Const AP_Tool_GenerateImage As String = "generate_image"
+    Private Const AP_Tool_WebGrounding As String = "web_grounding"
+    Private Const AP_Tool_ManageScheduledTasks As String = "manage_scheduled_tasks"
     Private Const AP_Tool_ReportInability As String = "report_inability"
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL REGISTRATION
@@ -171,8 +183,8 @@ Partial Public Class ThisAddIn
                 "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
                 "Wait for the result. Second call: apply the second operation to the output file from the first call (the '_processed' file). " &
                 "Example for 'correct and translate to German': " &
-                "(1) Call process_word_document with instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
-                "(2) Call process_word_document with instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
+                "(1) Call process_word_document with task_type='correct', instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
+                "(2) Call process_word_document with task_type='translate', instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
                 "NEVER combine two distinct operations into a single instruction string. " &
                 "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
                 "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
@@ -189,6 +201,9 @@ Partial Public Class ThisAddIn
                 """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
                 "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
                 "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+                """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
+                """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
+                "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
                 """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
                 "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
                 "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
@@ -232,12 +247,16 @@ Partial Public Class ThisAddIn
             .ToolInstructionsPrompt =
                 AP_Tool_ReadAttachment & ": Reads and returns the text content of one or more supported attachments " &
                 "(DOCX, PDF, TXT, CSV, HTML, XML, JSON, XLSX, XLS, PPTX). " &
+                "Embedded mail files (.msg, .eml) are automatically unpacked — their body text and nested attachments " &
+                "are extracted recursively and appear as separate attachments that you can reference by name. " &
                 "Use attachment_name for a single file or attachment_names for batch reading.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ReadAttachment & """," &
                 """description"":""Reads and returns the text content of one or more attachment files. " &
                 "Supports Word documents (.docx), PDFs (.pdf), Excel spreadsheets (.xlsx, .xls), " &
                 "PowerPoint presentations (.pptx), and text-based files (.txt, .csv, .html, .xml, .json, .md, .log). " &
+                "Embedded mail files (.msg, .eml) are automatically unpacked at intake — their text content " &
+                "and nested attachments appear as separate files in the attachment list. " &
                 "For Word documents, also reports if comments or tracked changes are present.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of a single attachment to read""}," &
@@ -482,12 +501,20 @@ Partial Public Class ThisAddIn
                 "that contain real (selectable/searchable) text and preserves layout, tables, and formatting. " &
                 "If the conversion result indicates the PDF is scanned/image-only (no extractable text), THEN " &
                 "fall back to extract_pdf_text (which supports OCR) to obtain the text, and use create_word_document " &
-                "to produce a .docx from that text.",
+                "to produce a .docx from that text. " &
+                "ALTERNATIVE APPROACH — USER-REQUESTED OCR PIPELINE: If the user explicitly asks to OCR the PDF first, " &
+                "or asks to 'rasterize and OCR' the PDF before converting to Word, use this pipeline instead: " &
+                "(1) Call extract_pdf_text on the PDF — this will rasterize each page and run OCR via the LLM to extract text. " &
+                "(2) Call create_word_document with the OCR-extracted text to produce a .docx. " &
+                "This OCR pipeline is useful for scanned documents, image-heavy PDFs, or when Word's built-in conversion " &
+                "produces poor results. However, it does NOT preserve the original layout/formatting — it produces a " &
+                "clean text-based document. The standard Word-based conversion (this tool) remains the default.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_PdfToWord & """," &
                 """description"":""Converts a PDF attachment to a Word document (.docx) using Word's built-in PDF reflow. " &
                 "Use this as the PRIMARY method for PDF-to-Word conversion. Works well for text-based PDFs with layout preservation. " &
-                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document.""," &
+                "If the result indicates the PDF is scanned/image-only, fall back to extract_pdf_text (OCR) + create_word_document. " &
+                "ALTERNATIVE: If the user explicitly requests OCR-based conversion, use extract_pdf_text (rasterize+OCR) followed by create_word_document instead.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to convert""}," &
                 """output_filename"":{""type"":""string"",""description"":""Filename for the output .docx (default: derived from PDF name)""}" &
@@ -539,7 +566,7 @@ Partial Public Class ThisAddIn
                 "Also supports formulas, multiple sheets, conditional formatting, charts, VBA macros, and more. " &
                 "STYLING RULES (apply to EVERY spreadsheet unless user explicitly asks for plain output): " &
                 "1. HEADER ROW: bg_color '#4472C4', font_color '#FFFFFF', bold, font_size 12, h_align 'center', border 'all-thin'. " &
-                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows. " &
+                                "2. DATA ROWS: border 'all-thin' on ALL cells, alternating bg_color '#D9E2F3' on even rows, font_color '#000000' (black) — NEVER use '#FFFFFF' on data rows. " &
                 "3. COLUMN WIDTHS: MUST set for every column. Short labels 12-15, names/descriptions 25-35, numbers/dates 12-18. " &
                 "4. ROW HEIGHTS: header row 28. " &
                 "5. NUMBER FORMATS: '#,##0.00' for currency, '0%' for percent, 'dd/mm/yyyy' for dates, '#,##0' for integers. " &
@@ -625,10 +652,14 @@ Partial Public Class ThisAddIn
                 "Provide slide data as a JSON array of slide objects. Each slide object has: " &
                 "'title' (string, the slide title), 'body' (string, the main content — use newlines for bullet points), " &
                 "and optionally 'notes' (string, speaker notes for that slide). " &
-                "The first slide is typically used as a title slide with a short subtitle in 'body'.",
+                "The first slide is typically used as a title slide with a short subtitle in 'body'. " &
+                "TEMPLATE SUPPORT: If the user provides a .pptx attachment to use as a template (or references an existing presentation), " &
+                "pass its filename as 'template_attachment_name'. New slides will be appended to the template using its slide master/layouts. " &
+                "When using a template, the existing slides are preserved and new slides are added at the end.",
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_CreatePowerPoint & """," &
                 """description"":""Creates a new PowerPoint presentation (.pptx) with slides. Each slide has a title, body text (use newlines for bullets), and optional speaker notes. " &
+                "Supports using an existing .pptx as template via template_attachment_name — existing slides are kept, new slides appended. " &
                 "Use when the user asks to create a presentation, slide deck, or pitch deck.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """slides"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
@@ -637,7 +668,9 @@ Partial Public Class ThisAddIn
                 """notes"":{""type"":""string"",""description"":""Optional speaker notes for this slide""}" &
                 "}},""description"":""Array of slide objects defining the presentation""}," &
                 """file_name"":{""type"":""string"",""description"":""Desired filename without extension (default: 'Presentation')""}," &
-                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}" &
+                """title"":{""type"":""string"",""description"":""Presentation title metadata (default: derived from first slide title)""}," &
+                """template_attachment_name"":{""type"":""string"",""description"":""Filename of an existing .pptx attachment to use as template. " &
+                "Existing slides are preserved, new slides are appended using the template's slide masters and layouts.""}" &
                 "},""required"":[""slides""]}}"
         })
 
@@ -698,7 +731,398 @@ Partial Public Class ThisAddIn
                 "},""required"":[""instruction""]}}"
         })
 
+
+        ' ── extract_data_from_attachments ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractDataFromAttachments,
+            .ModelDescription = "Extract structured data from attachments into a table (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_ExtractDataFromAttachments & ": Extracts structured/tabular data from one or more attachments " &
+                "(PDF, Word, Excel, text files, or files from a .zip archive) using AI-driven fact extraction. " &
+                "You MUST provide an 'instruction' describing WHAT to extract (e.g. 'Extract invoice number, date, vendor name, and total amount'). " &
+                "You SHOULD provide a 'schema' defining the output columns using the format 'ColumnName:type;ColumnName:type' " &
+                "where type is one of: text, date, datetime, number, other. Example: 'Invoice Number:text;Date:date;Vendor:text;Amount:number'. " &
+                "If no schema is provided, the AI will infer one automatically. " &
+                "The tool processes each file individually with the AI, then merges and returns the combined result as a JSON table. " &
+                "After receiving the result, YOU decide the best output format based on the user's request: " &
+                "- Use create_excel_spreadsheet to produce a formatted .xlsx file " &
+                "- Use create_word_document to produce a formatted .docx report " &
+                "- Include the data directly in your reply as a formatted text table " &
+                "- Or any other appropriate presentation. " &
+                "This tool ONLY extracts and returns the structured data — it does NOT create any files.",
+                .ToolDefinition =
+                "{""name"":""" & AP_Tool_ExtractDataFromAttachments & """," &
+                """description"":""Extracts structured/tabular data from one or more attachments using AI-driven fact extraction. " &
+                "Returns a JSON object with 'schema' (column definitions) and 'rows' (extracted data). " &
+                "Supports PDF, Word, Excel, text files, and files unpacked from .zip archives. " &
+                "You MUST then decide how to present the result (create_excel_spreadsheet, create_word_document, or inline table).""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """instruction"":{""type"":""string"",""description"":""Natural-language instruction describing what data to extract. " &
+                "Be specific about the fields/facts to capture. Example: 'Extract party names, contract date, governing law, and termination clauses from each document.'""}," &
+                """schema"":{""type"":""string"",""description"":""Optional but recommended: column definitions in 'Name:type;Name:type' format. " &
+                "Types: text, date, datetime, number, other. Append * to mark the sort column. " &
+                "Example: 'Invoice No:text;Date:date*;Vendor:text;Amount:number;Notes:text'. " &
+                "If omitted, the AI infers the schema automatically.""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of attachments to extract data from. " &
+                "If empty or omitted, processes all readable attachments (PDF, DOCX, XLSX, TXT, CSV, etc.).""}," &
+                """output_language"":{""type"":""string"",""description"":""Language for extracted column names and textual values (e.g. 'English', 'German', 'French'). " &
+                "Use the language the user expects the output in. If omitted, uses the language of the user's email.""}," &
+                """sort_column"":{""type"":""integer"",""description"":""Optional: 1-based column index to sort by. Use 0 or omit for no sorting.""}," &
+                """sort_direction"":{""type"":""string"",""enum"":[""ASC"",""DESC""],""description"":""Sort direction (default: ASC)""}," &
+                """date_columns"":{""type"":""string"",""description"":""Optional: comma-separated 1-based column indices that contain dates, for normalization. Example: '2,5'""}" &
+                "},""required"":[""instruction""]}}"
+        })
+
+        ' ── redact_pdf ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_RedactPdf,
+            .ModelDescription = "Redact PDF Document (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_RedactPdf & ": Redacts a PDF document by identifying text that matches the given instruction " &
+                "and placing redaction boxes over it. Uses AI to analyze the PDF text and determine what should be redacted. " &
+                "Operates in three modes controlled by the 'mode' parameter: " &
+                "(1) 'prepare' (default): Creates removable red annotation boxes over identified text. " &
+                "The user can review and adjust these in a PDF viewer before finalizing. " &
+                "(2) 'finalize': Takes a previously prepared PDF (with redaction annotation boxes) and burns " &
+                "them into permanent black rectangles by rasterizing each page. No AI analysis is performed. " &
+                "(3) 'prepare_and_finalize': Performs both steps in one call — identifies text, places boxes, " &
+                "and immediately burns them in as permanent black redactions. " &
+                "IMPORTANT: When mode is 'prepare' or 'prepare_and_finalize', an 'instruction' is REQUIRED " &
+                "describing what to redact (e.g. 'Redact all personal names and addresses', " &
+                "'Redact financial information', 'Redact everything except party names and dates'). " &
+                "When mode is 'finalize', no instruction is needed — it just burns in existing annotations. " &
+                "The 'include_reason_codes' parameter adds brief labels (e.g. 'name', 'address') to each " &
+                "redaction box, which are visible as white text inside the black box after finalization.",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_RedactPdf & """," &
+                """description"":""Redacts a PDF by identifying text with AI and placing redaction boxes, " &
+                "or finalizes existing redaction boxes into permanent black rectangles. " &
+                "Modes: 'prepare' (removable red boxes), 'finalize' (burn in existing boxes), " &
+                "'prepare_and_finalize' (identify + burn in one step). " &
+                "Requires 'instruction' for prepare modes (e.g. 'Redact all personal data').""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to redact""}," &
+                """instruction"":{""type"":""string"",""description"":""What to redact — required for 'prepare' and 'prepare_and_finalize' modes. " &
+                "Examples: 'Redact all personal names, addresses, and phone numbers', " &
+                "'Redact financial data including account numbers and amounts', " &
+                "'Redact everything except the contract parties and effective dates'""}," &
+                """mode"":{""type"":""string"",""enum"":[""prepare"",""finalize"",""prepare_and_finalize""]," &
+                """description"":""Operation mode. 'prepare' = AI-driven removable boxes (default). " &
+                "'finalize' = burn in existing annotation boxes. " &
+                "'prepare_and_finalize' = AI-driven + immediate burn-in.""}," &
+                """include_reason_codes"":{""type"":""boolean"",""description"":""Include brief reason labels (e.g. 'name', 'address') in each redaction box. Default: false.""}," &
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output PDF (default: derived from input with '_redacted' or '_final' suffix)""}" &
+                "},""required"":[""attachment_name""]}}"
+        })
+
+        ' ── overlay_pdf ──
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_OverlayPdf,
+            .ModelDescription = "Overlay text and images on PDF pages (built-in)",
+            .ToolInstructionsPrompt =
+                AP_Tool_OverlayPdf & ": Places text labels and/or images at precise positions on PDF pages. " &
+                "Use this when the user wants to add a logo, stamp, header, footer, badge, label, signature image, " &
+                "or any positioned content onto a PDF. Supports per-element page targeting (single page, page range, or all pages), " &
+                "font family/size/style/color, rotation, opacity, and image scaling. " &
+                "Coordinates use PDF points (1 pt = 1/72 inch). A4 page = 595 × 842 pt. Letter = 612 × 792 pt. " &
+                "Origin (0,0) is the TOP-LEFT corner of the page. " &
+                "For images, reference an existing attachment by name via 'image_attachment_name'. " &
+                "Text elements and image elements can be freely mixed in the same call. " &
+                "The tool draws elements in array order (later elements overlay earlier ones).",
+            .ToolDefinition =
+                "{""name"":""" & AP_Tool_OverlayPdf & """," &
+                """description"":""Places text labels and/or images at precise positions on PDF pages. " &
+                "Coordinates are in PDF points (1/72 inch). Origin (0,0) = top-left. A4 = 595×842 pt, Letter = 612×792 pt. " &
+                "Elements are drawn in array order. Use for logos, stamps, headers, footers, labels, signatures, badges, etc.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """attachment_name"":{""type"":""string"",""description"":""Filename of the PDF attachment to overlay onto""}," &
+                """elements"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
+                """type"":{""type"":""string"",""enum"":[""text"",""image""],""description"":""Element type: 'text' for a text label, 'image' for an image file""}," &
+                """pages"":{""type"":""string"",""description"":""Target pages: 'all' for every page, '1' for page 1 only, '1,3,5' for specific pages, '2-5' for a range. Default: 'all'""}," &
+                """x"":{""type"":""number"",""description"":""X position in points from the left edge of the page""}," &
+                """y"":{""type"":""number"",""description"":""Y position in points from the top edge of the page""}," &
+                """text"":{""type"":""string"",""description"":""(text only) The text string to render. Supports \\n for line breaks.""}," &
+                """font_family"":{""type"":""string"",""description"":""(text only) Font family name, e.g. 'Arial', 'Times New Roman', 'Calibri'. Default: 'Arial'""}," &
+                """font_size"":{""type"":""number"",""description"":""(text only) Font size in points. Default: 12""}," &
+                """bold"":{""type"":""boolean"",""description"":""(text only) Bold text. Default: false""}," &
+                """italic"":{""type"":""boolean"",""description"":""(text only) Italic text. Default: false""}," &
+                """font_color"":{""type"":""string"",""description"":""(text only) Hex RGB color, e.g. '#FF0000' for red, '#000000' for black. Default: '#000000'""}," &
+                """h_align"":{""type"":""string"",""enum"":[""left"",""center"",""right""],""description"":""(text only) Horizontal alignment relative to x position. 'left' = x is left edge, 'center' = x is center point, 'right' = x is right edge. Default: 'left'""}," &
+                """max_width"":{""type"":""number"",""description"":""(text only) Maximum width in points for text bounding box. Text is clipped or wrapped beyond this. Default: no limit""}," &
+                """image_attachment_name"":{""type"":""string"",""description"":""(image only) Filename of the image attachment to place (PNG, JPG, BMP, GIF, TIFF, WEBP)""}," &
+                """width"":{""type"":""number"",""description"":""(image only) Width in points to scale the image to""}," &
+                """height"":{""type"":""number"",""description"":""(image only) Height in points to scale the image to""}," &
+                """rotation"":{""type"":""number"",""description"":""Rotation angle in degrees (clockwise). Default: 0""}," &
+                """opacity"":{""type"":""number"",""description"":""Opacity from 0.0 (fully transparent) to 1.0 (fully opaque). Default: 1.0""}" &
+                "}}," &
+                """description"":""Array of overlay elements (text and/or image) to place on the PDF""}," &
+                """output_filename"":{""type"":""string"",""description"":""Filename for the output PDF (default: '<original>_overlay.pdf')""}" &
+                "},""required"":[""attachment_name"",""elements""]}}"
+        })
+
+        ' ── create_audio_file ──
+        AB_DetectTTSEngines()
+        If AB_googleAvailable OrElse AB_openAIAvailable Then
+            Dim engineHint As String = ""
+            If AB_googleAvailable AndAlso AB_openAIAvailable Then
+                engineHint = " Both Google and OpenAI TTS engines are available. " &
+                    "For non-English text (German, French, etc.), prefer engine='google' for native-sounding pronunciation. " &
+                    "For English text, prefer engine='openai' for natural-sounding voices. " &
+                    "If the user explicitly requests an engine, honour their choice."
+            ElseIf AB_googleAvailable Then
+                engineHint = " Only Google TTS is available."
+            Else
+                engineHint = " Only OpenAI TTS is available."
+            End If
+
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
+                .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
+                    "Supports two modes: " &
+                    "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
+                    "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
+                    "(2) 'audiobook' — reads the text paragraph by paragraph with alternating voices for variety. " &
+                    "Use this when the user wants a straightforward narration or audio version of a document. " &
+                    "The text parameter accepts the full text to convert. For document attachments, first use " &
+                    "read_attachment to extract the text, then pass the extracted text to this tool. " &
+                    "If the user specifies a particular voice (e.g., 'use the voice alloy'), pass it as voice_a or voice_b. " &
+                    "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
+                    "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
+                    "IMPORTANT: The 'language' parameter MUST match the language of the text content (e.g. 'de-DE' for German, 'fr-FR' for French). " &
+                    "This is critical for Google TTS to select the correct voice and for proper pronunciation." &
+                    engineHint &
+                    " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
+                    "Output is an MP3 file attached to the reply.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_CreateAudioFile & """," &
+                    """description"":""Generates an MP3 audio file from text using text-to-speech. " &
+                    "Supports 'podcast' mode (two-speaker dialogue generated by LLM) and 'audiobook' mode " &
+                    "(paragraph-by-paragraph narration with alternating voices). " &
+                    "For document attachments, first extract text using read_attachment, then pass it here. " &
+                    "CRITICAL: Set 'language' to match the text language (e.g. 'de-DE' for German). " &
+                    "For non-English text, set engine='google' for native pronunciation.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """text"":{""type"":""string"",""description"":""The full text content to convert to audio. " &
+                    "For large documents, pass the complete extracted text.""}," &
+                    """mode"":{""type"":""string"",""enum"":[""podcast"",""audiobook""]," &
+                    """description"":""Audio generation mode. 'podcast' = LLM-generated two-speaker dialogue. " &
+                    "'audiobook' = direct paragraph-by-paragraph narration. Default: 'audiobook'""}," &
+                    """language"":{""type"":""string"",""description"":""Language code for TTS (e.g., 'en-US', 'de-DE', 'fr-FR', 'en', 'de'). " &
+                    "MUST match the language of the text content. This is critical for correct pronunciation. Default: 'en-US'""}," &
+                    """engine"":{""type"":""string"",""enum"":[""google"",""openai"",""auto""]," &
+                    """description"":""TTS engine to use. 'google' = Google Cloud TTS (best for non-English languages). " &
+                    "'openai' = OpenAI TTS (best for English). 'auto' = automatically select based on language. Default: 'auto'""}," &
+                    """voice_a"":{""type"":""string"",""description"":""Primary voice name (host in podcast mode, narrator A in audiobook). " &
+                    "If omitted, a default voice is used.""}," &
+                    """voice_b"":{""type"":""string"",""description"":""Secondary voice name (guest in podcast mode, narrator B in audiobook). " &
+                    "If omitted, a default voice is used.""}," &
+                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). " &
+                    "Ignored in audiobook mode. Default: '5 minutes'""}," &
+                    """instructions"":{""type"":""string"",""description"":""Specific instructions for the podcast script generation (e.g., 'Focus on the financial details', 'Be humorous', 'Explain for a child'). Optional.""}," &
+                    """context"":{""type"":""string"",""description"":""Additional context or background info to help generating the podcast script. Optional.""}," &
+                    """output_filename"":{""type"":""string"",""description"":""Filename for the output MP3 file (default: 'audiobook.mp3')""}" &
+                    "},""required"":[""text""]}}"
+            })
+        End If
+
+        ' ── generate_image ──
+        ' Only register if an ImageGeneration special task model is configured
+        Dim imgModelHasObjectCall As Boolean = False
+        Dim imgModelAvailable As Boolean = IsImageGenerationAvailable(_context, imgModelHasObjectCall)
+
+        If imgModelAvailable Then
+            Dim imageEditHint As String = ""
+            Dim imageEditParam As String = ""
+            If imgModelHasObjectCall Then
+                imageEditHint = " Supports image editing/modification: if the user provides a reference image " &
+                    "(e.g. an attached photo to modify, a logo to restyle, a sketch to refine), pass its filename " &
+                    "as 'image_attachment_name'. The reference image is sent alongside the description to the model. " &
+                    "Only use this when the user explicitly wants to modify, edit, or base the generation on an existing image."
+                imageEditParam = """image_attachment_name"":{""type"":""string"",""description"":""Optional: filename of an existing image attachment to use as reference for editing or modification. " &
+                    "The model will use this image as a base and apply the changes described in 'description'. " &
+                    "Only use when the user wants to modify, restyle, or build upon an existing image.""},"
+            End If
+
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_GenerateImage,
+                .ModelDescription = "Generate Image (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_GenerateImage & ": Generates an image from a text description using an image generation model. " &
+                    "Use this when the user asks you to create, generate, draw, design, or produce an image, picture, illustration, " &
+                    "diagram, logo, icon, or any visual content. " &
+                    "The 'description' parameter should contain ONLY the image description — do NOT wrap it in any system prompt " &
+                    "or additional instructions. Pass the user's visual intent directly as the description. " &
+                    "The generated image is saved as a file and attached to the reply. " &
+                    "You can optionally specify a filename for the output image." &
+                    imageEditHint,
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_GenerateImage & """," &
+                    """description"":""Generates an image from a text description using an AI image generation model. " &
+                    "Use when the user wants to create, generate, draw, or design any visual content (image, illustration, diagram, logo, etc.). " &
+                    "Pass the image description directly — no wrapping prompt needed." &
+                    If(imgModelHasObjectCall, " Also supports editing/modifying an existing image when image_attachment_name is provided.", "") & """," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """description"":{""type"":""string"",""description"":""A clear, detailed description of the image to generate. " &
+                    "Pass the user's visual intent directly. Do not add system instructions or prompt wrappers.""}," &
+                    imageEditParam &
+                    """output_filename"":{""type"":""string"",""description"":""Optional filename for the output image (default: auto-generated). " &
+                    "Do not include an extension — the format is determined by the model.""}" &
+                    "},""required"":[""description""]}}"
+            })
+        End If
+
+        ' ── web_grounding ──
+        ' Register if:
+        '   (a) AutoPilot session with web grounding enabled, OR
+        '   (b) Chat agent session (always offer web grounding if models are configured)
+        Dim enableWebGrounding As Boolean = False
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableWebGrounding Then
+            enableWebGrounding = True
+        ElseIf _chatAgentActive Then
+            ' Chat agent mode: always enable web grounding if models are available
+            enableWebGrounding = True
+        End If
+
+        If enableWebGrounding Then
+            Dim webGroundingAvailable As Boolean = IsWebGroundingAvailable(_context)
+            Dim deepResearchAvailable As Boolean = IsDeepResearchAvailable(_context)
+
+            If webGroundingAvailable OrElse deepResearchAvailable Then
+                Dim modeEnum As String
+                Dim modeDescription As String
+                Dim modeInstructions As String
+
+                If webGroundingAvailable AndAlso deepResearchAvailable Then
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard"",""deep_research""]," &
+                        """description"":""'standard' for quick factual lookups, current events, verifying claims, or finding specific information. " &
+                        "'deep_research' for complex multi-faceted questions requiring comprehensive analysis, comparison of multiple sources, " &
+                        "or in-depth investigation. deep_research returns an extensive report. Default: 'standard'""},"
+                    modeDescription = "Supports two modes: 'standard' for quick lookups and 'deep_research' for comprehensive investigation that returns an extensive report."
+                    modeInstructions = "Choose mode='standard' for quick factual queries and mode='deep_research' for complex, multi-faceted questions " &
+                        "requiring thorough analysis from multiple sources. deep_research produces a detailed, structured report with multiple sections."
+                ElseIf webGroundingAvailable Then
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard""]," &
+                        """description"":""Only 'standard' mode is available. Used for factual lookups and current information. Default: 'standard'""},"
+                    modeDescription = "Uses the web grounding model for factual lookups and current information."
+                    modeInstructions = "Only 'standard' mode is available."
+                Else
+                    modeEnum = """mode"":{""type"":""string"",""enum"":[""deep_research""]," &
+                        """description"":""Only 'deep_research' mode is available. Used for comprehensive, multi-source investigation. Returns an extensive report. Default: 'deep_research'""},"
+                    modeDescription = "Uses the deep research model for comprehensive, multi-source investigation that returns an extensive report."
+                    modeInstructions = "Only 'deep_research' mode is available. It produces a detailed, structured report with multiple sections."
+                End If
+
+                tools.Add(New ModelConfig() With {
+                    .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WebGrounding,
+                    .ModelDescription = "Web Grounding / Deep Research (built-in)",
+                    .ToolInstructionsPrompt =
+                        AP_Tool_WebGrounding & ": Searches the internet using a web-grounding AI model to retrieve current, factual, " &
+                        "or verifiable information. The model ALWAYS searches the internet — it never answers from memory alone. " &
+                        "Results ALWAYS include citations with source URLs. " &
+                        "Use this when the user's question requires up-to-date data, fact-checking, " &
+                        "research, or information you are not confident about. " &
+                        modeInstructions & " " &
+                        "The 'query' parameter should contain a clear, focused search question or topic. " &
+                        "PRIVACY CONSTRAINT: The query is sent to an external AI model with web access. " &
+                        "You MUST NOT include any personal data, confidential information, private names, " &
+                        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
+                        "account numbers, or any other non-public information in the query. " &
+                        "Only well-known public figures, public institutions, published legislation, " &
+                        "and other clearly public information may appear in the query. " &
+                        "RESPONSE HANDLING — MANDATORY SOURCE CITATION RULES: " &
+                        "The tool returns the raw JSON response from the grounding model. " &
+                        "You MUST extract and present the COMPLETE answer text from the response. Do NOT summarize or shorten it. " &
+                        "For deep_research results, the response contains an extensive report — include it in FULL. " &
+                        "CRITICAL — SOURCES ARE MANDATORY: " &
+                        "Your reply MUST contain a clearly labeled 'Sources' or 'References' section at the end. " &
+                        "You MUST extract ALL citations, sources, and grounding metadata from the JSON " &
+                        "(look for keys such as 'citations', 'citationSources', 'citationMetadata', 'groundingMetadata', " &
+                        "'groundingSupports', 'groundingChunks', 'webSearchQueries', 'searchEntryPoint', 'sources', 'uri', 'url', 'title'). " &
+                        "Every single source URL found in the response MUST appear as a clickable Markdown link in your reply: [Title](URL) or [URL](URL) if no title. " &
+                        "If the response contains inline citation markers (e.g. [1], [2]), keep them AND provide the numbered source list. " &
+                        "FAILURE TO INCLUDE SOURCES IS A CRITICAL ERROR. If you cannot find any URLs in the response JSON, " &
+                        "explicitly state: 'No source URLs were returned by the search engine.' " &
+                        "NEVER omit sources that are present in the response. NEVER invent or fabricate URLs that are not in the response. " &
+                        "A reply without a Sources section when the tool returned URLs is INVALID and MUST be corrected.",
+                    .ToolDefinition =
+                        "{""name"":""" & AP_Tool_WebGrounding & """," &
+                        """description"":""Searches the internet using a web-grounding AI model. The model ALWAYS performs a live internet search " &
+                        "and ALWAYS returns citations with source URLs. Returns the full JSON response including " &
+                        "the answer text and all grounding sources/citations. " &
+                        modeDescription & " " &
+                        "IMPORTANT: When processing the result, you MUST include the complete answer AND all source URLs as clickable links " &
+                        "in a dedicated 'Sources' section. A reply without sources when the tool returned URLs is invalid. " &
+                        "For deep_research mode, include the full extensive report without summarizing. " &
+                        "PRIVACY: The query is sent to an external model. MUST NOT contain personal data, confidential information, or non-public details.""," &
+                        """parameters"":{""type"":""object"",""properties"":{" &
+                        """query"":{""type"":""string"",""description"":""The search question or topic. Must be clear and focused. " &
+                        "MUST NOT contain personal data, confidential information, or any non-public details.""}," &
+                        modeEnum &
+                        """context"":{""type"":""string"",""description"":""Optional additional context to help the grounding model understand the query better. " &
+                        "Same privacy constraints apply — no personal or confidential data.""}" &
+                        "},""required"":[""query""]}}"
+                })
+            End If
+        End If
+
+        ' ── manage_scheduled_tasks ──
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageScheduledTasks,
+                .ModelDescription = "Manage Scheduled Tasks (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_ManageScheduledTasks & ": Manages the AutoPilot task scheduler. " &
+                    "Users can schedule tasks to be executed automatically at specific times (one-time or recurring) " &
+                    "with results delivered by e-mail. Supports creating, listing, querying, updating, and deleting scheduled tasks. " &
+                    "The user gives natural-language scheduling instructions like 'every Monday at 8am', " &
+                    "'every first Sunday of the month at 10:00', 'three times starting tomorrow at 14:00 every 2 days', " &
+                    "'between now and end of October every second day at 09:00'. " &
+                    "You MUST translate these into structured fields: " &
+                    "- schedule_description: the human-readable schedule text as stated by the user " &
+                    "- rrule: an iCalendar RRULE string (e.g. FREQ=WEEKLY;INTERVAL=1;BYDAY=MO or FREQ=MONTHLY;INTERVAL=1;BYDAY=1SU or FREQ=DAILY;INTERVAL=2) " &
+                    "- time_of_day_local: the local time in HH:mm format (e.g. '08:00', '14:30') " &
+                    "- next_due_utc: the ISO 8601 UTC timestamp of the FIRST execution " &
+                    "- end_date_utc: the ISO 8601 UTC end date if specified (otherwise omit) " &
+                    "- remaining_occurrences: number of times to execute if count-limited (e.g. 'three times' → 3), otherwise 0 for unlimited " &
+                    "When the user says 'every Monday at 8am' and today is Wednesday, the next_due_utc should be next Monday at 08:00 local time converted to UTC. " &
+                    "The machine timezone offset is used for UTC conversion (current local time: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm") & ", " &
+                    "UTC offset: " & DateTimeOffset.Now.Offset.ToString() & "). " &
+                    "For the 'list' action, return ALL tasks including their IDs, instructions, schedules, and status. " &
+                    "For 'delete' or 'update', match by task ID prefix or instruction text. " &
+                    "The deliver_to field is the e-mail address(es) for result delivery. " &
+                    "When invoked from an e-mail, use the sender's address as deliver_to unless the user specifies otherwise. " &
+                    "Tasks can reference attached files — use store_attachment_names to copy the current e-mail's attachments " &
+                    "into the task's permanent storage for use during execution.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_ManageScheduledTasks & """," &
+                    """description"":""Manages the AutoPilot task scheduler. Supports creating, listing, querying, updating, and deleting " &
+                    "scheduled tasks that execute automatically and deliver results by e-mail. " &
+                    "Translate natural-language schedules into structured rrule/time_of_day_local/next_due_utc fields.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """action"":{""type"":""string"",""enum"":[""create"",""list"",""get"",""update"",""delete""]," &
+                    """description"":""The operation to perform""}," &
+                    """task_id"":{""type"":""string"",""description"":""Task ID (or prefix) for get/update/delete actions""}," &
+                    """instruction"":{""type"":""string"",""description"":""The task instruction/prompt to execute (for create/update)""}," &
+                    """subject"":{""type"":""string"",""description"":""Subject line for the result e-mail (for create/update)""}," &
+                    """deliver_to"":{""type"":""array"",""items"":{""type"":""string""},""description"":""E-mail addresses for result delivery (for create/update)""}," &
+                    """schedule_description"":{""type"":""string"",""description"":""Human-readable schedule description (e.g. 'every Monday at 08:00')""}," &
+                    """rrule"":{""type"":""string"",""description"":""iCalendar RRULE string (e.g. 'FREQ=WEEKLY;INTERVAL=1;BYDAY=MO'). Empty for one-time tasks.""}," &
+                    """time_of_day_local"":{""type"":""string"",""description"":""Local time of execution in HH:mm format (e.g. '08:00')""}," &
+                    """next_due_utc"":{""type"":""string"",""description"":""ISO 8601 UTC timestamp for the first/next execution (e.g. '2026-03-30T06:00:00Z')""}," &
+                    """end_date_utc"":{""type"":""string"",""description"":""ISO 8601 UTC end date for recurrence (omit for no end date)""}," &
+                    """remaining_occurrences"":{""type"":""integer"",""description"":""Number of remaining executions for count-limited tasks (0 = unlimited)""}," &
+                    """status"":{""type"":""string"",""enum"":[""active"",""paused""],""description"":""Task status (for update)""}," &
+                    """store_attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of current e-mail attachments to copy into the task's permanent storage""}," &
+                    """status_filter"":{""type"":""string"",""description"":""Filter for list action (e.g. 'active', 'completed', 'paused'). Omit to list all.""}" &
+                    "},""required"":[""action""]}}"
+            })
+        End If
+
+
         ' ── report_inability ──
+
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ReportInability,
             .ToolPriority = 9999,
@@ -789,6 +1213,20 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateCodeFile
                 Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ExtractDataFromAttachments
+                Return Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+            Case AP_Tool_RedactPdf
+                Return Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+            Case AP_Tool_OverlayPdf
+                Return Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CreateAudioFile
+                Return Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+            Case AP_Tool_GenerateImage
+                Return Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+            Case AP_Tool_WebGrounding
+                Return Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ManageScheduledTasks
+                Return Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -917,7 +1355,140 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Reads text from a single attachment, using cache when available.
     ''' </summary>
+    ''' 
+    ''' <summary>
+    ''' Reads text from a single attachment, using cache when available.
+    ''' Prefers sandboxed (COM-free) readers for Office formats and mail files.
+    ''' </summary>
+    ''' <summary>
+    ''' Reads text from a single attachment, using cache when available.
+    ''' Prefers sandboxed (COM-free) readers for OpenXML and mail formats.
+    ''' Respects <see cref="INI_AllowLegacyDocFiles"/> for .doc files.
+    ''' </summary>
     Private Async Function ReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
+        ' Return cache if available
+        If att.CachedText IsNot Nothing Then Return att.CachedText
+
+        If att.TempFilePath Is Nothing OrElse Not File.Exists(att.TempFilePath) Then Return Nothing
+
+        Dim text As String = Nothing
+        Dim extracted As Boolean = False
+
+        ' ── Sandboxed readers first (no COM interop) ──
+        Dim ext = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
+        Try
+            Select Case ext
+                Case ".docx"
+                    text = SharedMethods.ReadDocxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".xlsx"
+                    text = SharedMethods.ReadXlsxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".pptx"
+                    text = SharedMethods.ReadPptxSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".eml"
+                    text = SharedMethods.ReadEmlSandboxed(att.TempFilePath)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".msg"
+                    text = SharedMethods.ReadMsgSandboxed(att.TempFilePath,
+                        Function(msgPath As String, tmpDir As String, ByRef nested As List(Of String)) As String
+                            nested = New List(Of String)()
+                            Try
+                                Dim ns = Application.GetNamespace("MAPI")
+                                Dim sharedItem = ns.OpenSharedItem(msgPath)
+                                Dim mi = TryCast(sharedItem, Microsoft.Office.Interop.Outlook.MailItem)
+                                If mi IsNot Nothing Then
+                                    Dim bodyResult = BuildEmbeddedMailText(mi)
+                                    ' Save nested attachments for recursive reading
+                                    Try
+                                        For j As Integer = 1 To mi.Attachments.Count
+                                            Dim nestedAtt = mi.Attachments(j)
+                                            Try
+                                                If nestedAtt.Type = Microsoft.Office.Interop.Outlook.OlAttachmentType.olEmbeddeditem Then
+                                                    Dim nestedName = If(nestedAtt.FileName, $"embedded_{j}.msg")
+                                                    If Not nestedName.EndsWith(".msg", StringComparison.OrdinalIgnoreCase) Then
+                                                        nestedName = Path.GetFileNameWithoutExtension(nestedName) & ".msg"
+                                                    End If
+                                                    Dim nestedPath = Path.Combine(tmpDir, nestedName)
+                                                    nestedAtt.SaveAsFile(nestedPath)
+                                                    nested.Add(nestedPath)
+                                                Else
+                                                    Dim nestedFileName = nestedAtt.FileName
+                                                    If Not String.IsNullOrWhiteSpace(nestedFileName) Then
+                                                        Dim nestedPath = Path.Combine(tmpDir, nestedFileName)
+                                                        Dim nc = 1
+                                                        While File.Exists(nestedPath)
+                                                            nestedPath = Path.Combine(tmpDir,
+                                                                Path.GetFileNameWithoutExtension(nestedFileName) & $"_{nc}" &
+                                                                Path.GetExtension(nestedFileName))
+                                                            nc += 1
+                                                        End While
+                                                        nestedAtt.SaveAsFile(nestedPath)
+                                                        nested.Add(nestedPath)
+                                                    End If
+                                                End If
+                                            Catch
+                                            End Try
+                                        Next
+                                    Catch
+                                    End Try
+                                    Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(mi) : Catch : End Try
+                                    Return bodyResult
+                                End If
+                                If sharedItem IsNot Nothing Then Try : System.Runtime.InteropServices.Marshal.ReleaseComObject(sharedItem) : Catch : End Try
+                            Catch
+                            End Try
+                            Return Nothing
+                        End Function)
+                    extracted = Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error")
+                Case ".doc"
+                    If Not INI_AllowLegacyDocFiles Then
+                        text = "Error: .doc format disabled for security."
+                        extracted = False
+                    End If
+                    ' Fall through to COM-based TryExtractOfficeText below
+            End Select
+        Catch
+        End Try
+
+        ' ── Fallback: Office COM interop for .doc, .xls, .ppt, .rtf (legacy formats) ──
+        If Not extracted AndAlso ext <> ".doc" OrElse (ext = ".doc" AndAlso INI_AllowLegacyDocFiles) Then
+            Try
+                Dim label As String = Nothing
+                extracted = TryExtractOfficeText(att.TempFilePath, text, label)
+            Catch
+            End Try
+        End If
+
+        ' ── Fallback: text-like files ──
+        If Not extracted Then
+            Try
+                Dim label As String = Nothing
+                extracted = TryExtractTextLike(att.TempFilePath, text, label)
+            Catch
+            End Try
+        End If
+
+        ' ── Fallback: PDF ──
+        If Not extracted AndAlso ext = ".pdf" Then
+            Try
+                text = Await SharedMethods.ReadPdfAsText(att.TempFilePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=False, AskUser:=False)
+                extracted = Not String.IsNullOrWhiteSpace(text)
+            Catch
+            End Try
+        End If
+
+        If extracted AndAlso Not String.IsNullOrWhiteSpace(text) Then
+            att.CachedText = text
+            Return text
+        End If
+
+        Return Nothing
+    End Function
+
+
+    Private Async Function oldReadSingleAttachmentText(att As AutoPilotAttachmentInfo, context As ToolExecutionContext) As Task(Of String)
         ' Return cache if available
         If att.CachedText IsNot Nothing Then Return att.CachedText
 
@@ -1281,7 +1852,22 @@ Partial Public Class ThisAddIn
 
             Dim presTitle = GetArgString(toolCall.Arguments, "title")
 
-            context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)")
+            ' ── Template support ──
+            Dim templateName = GetArgString(toolCall.Arguments, "template_attachment_name")
+            Dim templatePath As String = Nothing
+            If Not String.IsNullOrWhiteSpace(templateName) Then
+                Dim templateAtt = FindAttachment(templateName)
+                If templateAtt IsNot Nothing AndAlso templateAtt.TempFilePath IsNot Nothing AndAlso
+                   File.Exists(templateAtt.TempFilePath) Then
+                    templatePath = templateAtt.TempFilePath
+                    ApDashboardLog($"📊 Using template: {templateName}", "step")
+                Else
+                    ApDashboardLog($"⚠ Template '{templateName}' not found, creating from scratch", "warn")
+                End If
+            End If
+
+            context.Log($"Creating PowerPoint presentation: {fileName} ({slidesArray.Count} slides)" &
+                        If(templatePath IsNot Nothing, $" from template: {templateName}", ""))
             ApDashboardLog($"📊 Creating PowerPoint: {fileName}", "step")
 
             ' ppLayoutText = 2, ppLayoutTitleOnly = 11, ppLayoutBlank = 12, ppLayoutTitle = 1
@@ -1304,7 +1890,12 @@ Partial Public Class ThisAddIn
                                                        weOwnApp = True
                                                    End Try
 
-                                                   pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
+                                                   If templatePath IsNot Nothing Then
+                                                       ' Open the template as a new presentation (copy semantics)
+                                                       pres = app.Presentations.Open(templatePath, ReadOnly:=0, Untitled:=-1, WithWindow:=0)
+                                                   Else
+                                                       pres = app.Presentations.Add(0) ' 0 = WithWindow:=False
+                                                   End If
 
                                                    ' Set presentation title metadata if provided
                                                    If Not String.IsNullOrWhiteSpace(presTitle) Then
@@ -1314,7 +1905,10 @@ Partial Public Class ThisAddIn
                                                        End Try
                                                    End If
 
-                                                   Dim slideIndex As Integer = 0
+                                                   ' Determine starting index: append after existing slides when using template
+                                                   Dim existingSlideCount As Integer = CInt(pres.Slides.Count)
+                                                   Dim slideIndex As Integer = existingSlideCount
+
                                                    For Each slideObj As JObject In slidesArray
                                                        slideIndex += 1
 
@@ -1322,8 +1916,14 @@ Partial Public Class ThisAddIn
                                                        Dim body = slideObj.Value(Of String)("body")
                                                        Dim notes = slideObj.Value(Of String)("notes")
 
-                                                       ' First slide uses title layout, rest use text layout
-                                                       Dim layoutType As Integer = If(slideIndex = 1, ppLayoutTitle, ppLayoutText)
+                                                       ' First NEW slide uses title layout only if there are no existing slides,
+                                                       ' otherwise use text layout for all new slides
+                                                       Dim layoutType As Integer
+                                                       If existingSlideCount = 0 AndAlso slideIndex = 1 Then
+                                                           layoutType = ppLayoutTitle
+                                                       Else
+                                                           layoutType = ppLayoutText
+                                                       End If
 
                                                        Dim sld As Object = Nothing
                                                        Try
@@ -1382,18 +1982,20 @@ Partial Public Class ThisAddIn
 
                                                            ' Set speaker notes
                                                            If Not String.IsNullOrWhiteSpace(notes) Then
+                                                               Dim notesPage As Object = Nothing
+                                                               Dim notesShapes As Object = Nothing
                                                                Try
-                                                                   Dim notesPage As Object = sld.NotesPage
-                                                                   Dim notesShapes As Object = notesPage.Shapes
+                                                                   notesPage = sld.NotesPage
+                                                                   notesShapes = notesPage.Shapes
                                                                    Dim nCount As Integer = System.Convert.ToInt32(notesShapes.Count,
-                                                                       Globalization.CultureInfo.InvariantCulture)
+                                                                        Globalization.CultureInfo.InvariantCulture)
                                                                    ' Find the body placeholder in notes (type 2 = ppPlaceholderBody)
                                                                    For k As Integer = 1 To nCount
                                                                        Dim nShp As Object = notesShapes(k)
                                                                        Try
                                                                            Dim phType As Integer = System.Convert.ToInt32(
-                                                                               nShp.PlaceholderFormat.Type,
-                                                                               Globalization.CultureInfo.InvariantCulture)
+                                                                                nShp.PlaceholderFormat.Type,
+                                                                                Globalization.CultureInfo.InvariantCulture)
                                                                            If phType = 2 Then ' ppPlaceholderBody
                                                                                nShp.TextFrame.TextRange.Text = notes
                                                                                Exit For
@@ -1405,6 +2007,15 @@ Partial Public Class ThisAddIn
                                                                        End Try
                                                                    Next
                                                                Catch
+                                                               Finally
+                                                                   If notesShapes IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(notesShapes)
+                                                                       Catch : End Try
+                                                                   End If
+                                                                   If notesPage IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(notesPage)
+                                                                       Catch : End Try
+                                                                   End If
                                                                End Try
                                                            End If
                                                        Finally
@@ -1449,8 +2060,9 @@ Partial Public Class ThisAddIn
                     _apCurrentAttachments(0).OutputFiles.Add(outputPath)
                 End If
 
+                Dim templateNote = If(templatePath IsNot Nothing, $", based on template '{templateName}'", "")
                 response.Success = True
-                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} slides, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                response.Response = $"PowerPoint presentation created: {fileName} ({slidesArray.Count} new slides{templateNote}, {New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
                 ApDashboardLog($"✓ PowerPoint created: {fileName}", "info")
             Else
                 response.Success = False
@@ -1606,68 +2218,109 @@ Partial Public Class ThisAddIn
                                                    ' ── Create worksheets ──
                                                    ' Excel starts with 1 sheet by default; add more as needed
                                                    While wb.Sheets.Count < sheetDefs.Count
-                                                       wb.Sheets.Add(After:=wb.Sheets(wb.Sheets.Count))
+                                                       Dim lastSheet As Object = wb.Sheets(wb.Sheets.Count)
+                                                       wb.Sheets.Add(After:=lastSheet)
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(lastSheet) : Catch : End Try
                                                    End While
 
                                                    ' Remove extra default sheets
                                                    While wb.Sheets.Count > sheetDefs.Count
-                                                       CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet).Delete()
+                                                       Dim delSheet As Microsoft.Office.Interop.Excel.Worksheet =
+                                                           CType(wb.Sheets(wb.Sheets.Count), Microsoft.Office.Interop.Excel.Worksheet)
+                                                       delSheet.Delete()
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(delSheet) : Catch : End Try
                                                    End While
 
                                                    For sheetIdx = 0 To sheetDefs.Count - 1
-                                                       Dim ws = CType(wb.Sheets(sheetIdx + 1), Microsoft.Office.Interop.Excel.Worksheet)
-                                                       Dim sheetDef = sheetDefs(sheetIdx)
-                                                       ws.Name = sheetDef.SheetName
+                                                       Dim ws As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+                                                       Try
+                                                           ws = CType(wb.Sheets(sheetIdx + 1), Microsoft.Office.Interop.Excel.Worksheet)
+                                                           Dim sheetDef = sheetDefs(sheetIdx)
+                                                           ws.Name = sheetDef.SheetName
 
-                                                       ' ── Apply cells ──
-                                                       ApplyExcelCells(ws, sheetDef.Cells)
+                                                           ' ── Apply cells ──
+                                                           ApplyExcelCells(ws, sheetDef.Cells)
 
-                                                       ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
-                                                       If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
-                                                           ApplyColumnWidths(ws, columnWidths)
-                                                       End If
+                                                           ' ── Column widths (apply per-sheet for first sheet, or if multi-sheet) ──
+                                                           If sheetIdx = 0 AndAlso columnWidths IsNot Nothing Then
+                                                               ApplyColumnWidths(ws, columnWidths)
+                                                           End If
 
-                                                       ' ── Row heights ──
-                                                       If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
-                                                           ApplyRowHeights(ws, rowHeights)
-                                                       End If
+                                                           ' ── Row heights ──
+                                                           If sheetIdx = 0 AndAlso rowHeights IsNot Nothing Then
+                                                               ApplyRowHeights(ws, rowHeights)
+                                                           End If
 
-                                                       ' ── Merge ranges ──
-                                                       If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
-                                                           For Each mr In mergeRanges
-                                                               Try : ws.Range(mr).Merge() : Catch : End Try
-                                                           Next
-                                                       End If
+                                                           ' ── Merge ranges ──
+                                                           If sheetIdx = 0 AndAlso mergeRanges IsNot Nothing Then
+                                                               For Each mr In mergeRanges
+                                                                   Dim mrRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                                   Try
+                                                                       mrRange = ws.Range(mr)
+                                                                       mrRange.Merge()
+                                                                   Catch
+                                                                   Finally
+                                                                       If mrRange IsNot Nothing Then
+                                                                           Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(mrRange) : Catch : End Try
+                                                                       End If
+                                                                   End Try
+                                                               Next
+                                                           End If
 
-                                                       ' ── Freeze pane ──
-                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
-                                                           Try
-                                                               ws.Activate()
-                                                               ws.Range(freezePane).Select()
-                                                               excelApp.ActiveWindow.FreezePanes = True
-                                                           Catch
-                                                           End Try
-                                                       End If
+                                                           ' ── Freeze pane ──
+                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(freezePane) Then
+                                                               Dim fpRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                               Dim activeWin As Microsoft.Office.Interop.Excel.Window = Nothing
+                                                               Try
+                                                                   ws.Activate()
+                                                                   fpRange = ws.Range(freezePane)
+                                                                   fpRange.Select()
+                                                                   activeWin = excelApp.ActiveWindow
+                                                                   activeWin.FreezePanes = True
+                                                               Catch
+                                                               Finally
+                                                                   If activeWin IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(activeWin) : Catch : End Try
+                                                                   End If
+                                                                   If fpRange IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(fpRange) : Catch : End Try
+                                                                   End If
+                                                               End Try
+                                                           End If
 
-                                                       ' ── Auto-filter ──
-                                                       If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
-                                                           Try : ws.Range(autoFilter).AutoFilter() : Catch : End Try
-                                                       End If
+                                                           ' ── Auto-filter ──
+                                                           If sheetIdx = 0 AndAlso Not String.IsNullOrWhiteSpace(autoFilter) Then
+                                                               Dim afRange As Microsoft.Office.Interop.Excel.Range = Nothing
+                                                               Try
+                                                                   afRange = ws.Range(autoFilter)
+                                                                   afRange.AutoFilter()
+                                                               Catch
+                                                               Finally
+                                                                   If afRange IsNot Nothing Then
+                                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(afRange) : Catch : End Try
+                                                                   End If
+                                                               End Try
+                                                           End If
 
-                                                       ' ── Data validations ──
-                                                       If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
-                                                           ApplyDataValidations(ws, dataValidations)
-                                                       End If
+                                                           ' ── Data validations ──
+                                                           If sheetIdx = 0 AndAlso dataValidations IsNot Nothing Then
+                                                               ApplyDataValidations(ws, dataValidations)
+                                                           End If
 
-                                                       ' ── Conditional formatting ──
-                                                       If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
-                                                           ApplyConditionalFormats(ws, conditionalFormats)
-                                                       End If
+                                                           ' ── Conditional formatting ──
+                                                           If sheetIdx = 0 AndAlso conditionalFormats IsNot Nothing Then
+                                                               ApplyConditionalFormats(ws, conditionalFormats)
+                                                           End If
 
-                                                       ' ── Print setup ──
-                                                       If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
-                                                           ApplyPrintSetup(ws, printSetup)
-                                                       End If
+                                                           ' ── Print setup ──
+                                                           If sheetIdx = 0 AndAlso printSetup IsNot Nothing Then
+                                                               ApplyPrintSetup(ws, printSetup)
+                                                           End If
+                                                       Finally
+                                                           If ws IsNot Nothing Then
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(ws) : Catch : End Try
+                                                           End If
+                                                       End Try
                                                    Next
 
                                                    ' ── Charts (can target any sheet) ──
@@ -1830,102 +2483,152 @@ Partial Public Class ThisAddIn
                 Continue For
             End Try
 
-            ' ── Number format (apply before value so formatting takes effect) ──
-            Dim numFmt = cellObj.Value(Of String)("number_format")
-            If Not String.IsNullOrWhiteSpace(numFmt) Then
-                Try : cell.NumberFormat = numFmt : Catch : End Try
-            End If
+            Try
+                ' ── Number format (apply before value so formatting takes effect) ──
+                Dim numFmt = cellObj.Value(Of String)("number_format")
+                If Not String.IsNullOrWhiteSpace(numFmt) Then
+                    Try : cell.NumberFormat = numFmt : Catch : End Try
+                End If
 
-            ' ── Formula or value ──
-            Dim formula = cellObj.Value(Of String)("formula")
-            If Not String.IsNullOrWhiteSpace(formula) Then
-                Try
-                    cell.Formula2 = formula
-                Catch
-                    Try : cell.Formula = formula
-                    Catch ex2 As Exception
-                        Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                ' ── Formula or value ──
+                Dim formula = cellObj.Value(Of String)("formula")
+                If Not String.IsNullOrWhiteSpace(formula) Then
+                    Try
+                        cell.Formula2 = formula
+                    Catch
+                        Try : cell.Formula = formula
+                        Catch ex2 As Exception
+                            Debug.WriteLine($"Formula error at {addr}: {ex2.Message}")
+                        End Try
                     End Try
-                End Try
-            Else
-                Dim valToken = cellObj("value")
-                If valToken IsNot Nothing Then
-                    Dim valStr = valToken.ToString()
-                    Dim numVal As Double
-                    If Double.TryParse(valStr, Globalization.NumberStyles.Any,
-                                      Globalization.CultureInfo.InvariantCulture, numVal) Then
-                        cell.Value2 = numVal
-                    Else
-                        cell.Value2 = valStr
+                Else
+                    Dim valToken = cellObj("value")
+                    If valToken IsNot Nothing Then
+                        Dim valStr = valToken.ToString()
+                        Dim numVal As Double
+                        If Double.TryParse(valStr, Globalization.NumberStyles.Any,
+                                          Globalization.CultureInfo.InvariantCulture, numVal) Then
+                            cell.Value2 = numVal
+                        Else
+                            cell.Value2 = valStr
+                        End If
                     End If
                 End If
-            End If
 
-            ' ── Font styles ──
-            If GetJBool(cellObj, "bold") Then Try : cell.Font.Bold = True : Catch : End Try
-            If GetJBool(cellObj, "italic") Then Try : cell.Font.Italic = True : Catch : End Try
-            If GetJBool(cellObj, "underline") Then Try : cell.Font.Underline = Microsoft.Office.Interop.Excel.XlUnderlineStyle.xlUnderlineStyleSingle : Catch : End Try
-            If GetJBool(cellObj, "strikethrough") Then Try : cell.Font.Strikethrough = True : Catch : End Try
+                ' ── Font styles ──
+                If GetJBool(cellObj, "bold") Then Try : cell.Font.Bold = True : Catch : End Try
+                If GetJBool(cellObj, "italic") Then Try : cell.Font.Italic = True : Catch : End Try
+                If GetJBool(cellObj, "underline") Then Try : cell.Font.Underline = Microsoft.Office.Interop.Excel.XlUnderlineStyle.xlUnderlineStyleSingle : Catch : End Try
+                If GetJBool(cellObj, "strikethrough") Then Try : cell.Font.Strikethrough = True : Catch : End Try
 
-            Dim fontName = cellObj.Value(Of String)("font_name")
-            If Not String.IsNullOrWhiteSpace(fontName) Then Try : cell.Font.Name = fontName : Catch : End Try
+                Dim fontName = cellObj.Value(Of String)("font_name")
+                If Not String.IsNullOrWhiteSpace(fontName) Then Try : cell.Font.Name = fontName : Catch : End Try
 
-            Dim fontSizeToken = cellObj("font_size")
-            If fontSizeToken IsNot Nothing Then
-                Dim fs As Double
-                If Double.TryParse(fontSizeToken.ToString(), Globalization.NumberStyles.Any,
-                                  Globalization.CultureInfo.InvariantCulture, fs) AndAlso fs > 0 Then
-                    Try : cell.Font.Size = fs : Catch : End Try
+                Dim fontSizeToken = cellObj("font_size")
+                If fontSizeToken IsNot Nothing Then
+                    Dim fs As Double
+                    If Double.TryParse(fontSizeToken.ToString(), Globalization.NumberStyles.Any,
+                                      Globalization.CultureInfo.InvariantCulture, fs) AndAlso fs > 0 Then
+                        Try : cell.Font.Size = fs : Catch : End Try
+                    End If
                 End If
-            End If
 
-            ' ── Font color ──
-            Dim fontColor = ParseHexColor(cellObj.Value(Of String)("font_color"))
-            If fontColor.HasValue Then Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                ' ── Font color and background color ──
+                Dim fontColorHex = cellObj.Value(Of String)("font_color")
+                Dim bgColorHex = cellObj.Value(Of String)("bg_color")
+                Dim fontColor = ParseHexColor(fontColorHex)
+                Dim bgColor = ParseHexColor(bgColorHex)
 
-            ' ── Background color ──
-            Dim bgColor = ParseHexColor(cellObj.Value(Of String)("bg_color"))
-            If bgColor.HasValue Then
-                Try
-                    cell.Interior.Color = bgColor.Value
-                    cell.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
-                Catch
-                End Try
-            End If
+                ' Safety guard: prevent white (or near-white) font on white/no background.
+                ' LLMs sometimes copy the header's #FFFFFF font_color to data rows that have
+                ' no bg_color or a light bg_color, resulting in invisible white-on-white text.
+                If fontColor.HasValue Then
+                    Dim isWhiteFont = False
+                    If Not String.IsNullOrWhiteSpace(fontColorHex) Then
+                        Dim trimHex = fontColorHex.TrimStart("#"c).ToUpperInvariant()
+                        isWhiteFont = (trimHex = "FFFFFF")
+                    End If
 
-            ' ── Alignment ──
-            Dim hAlign = cellObj.Value(Of String)("h_align")
-            If Not String.IsNullOrWhiteSpace(hAlign) Then
-                Try
-                    Select Case hAlign.ToLowerInvariant()
-                        Case "left" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignLeft
-                        Case "center" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignCenter
-                        Case "right" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignRight
-                    End Select
-                Catch
-                End Try
-            End If
+                    If isWhiteFont Then
+                        ' Only allow white font when there is a sufficiently dark background
+                        Dim hasDarkBg = False
+                        If bgColor.HasValue AndAlso Not String.IsNullOrWhiteSpace(bgColorHex) Then
+                            Dim bgHex = bgColorHex.TrimStart("#"c).ToUpperInvariant()
+                            ' Consider the background "dark enough" if it's not white/near-white
+                            ' Simple check: if any channel is below 0xC0, the bg is dark enough
+                            If bgHex.Length = 6 Then
+                                Try
+                                    Dim rr = System.Convert.ToInt32(bgHex.Substring(0, 2), 16)
+                                    Dim gg = System.Convert.ToInt32(bgHex.Substring(2, 2), 16)
+                                    Dim bb = System.Convert.ToInt32(bgHex.Substring(4, 2), 16)
+                                    If rr < &HC0 OrElse gg < &HC0 OrElse bb < &HC0 Then
+                                        hasDarkBg = True
+                                    End If
+                                Catch
+                                End Try
+                            End If
+                        End If
 
-            Dim vAlign = cellObj.Value(Of String)("v_align")
-            If Not String.IsNullOrWhiteSpace(vAlign) Then
-                Try
-                    Select Case vAlign.ToLowerInvariant()
-                        Case "top" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignTop
-                        Case "center" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignCenter
-                        Case "bottom" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignBottom
-                    End Select
-                Catch
-                End Try
-            End If
+                        If hasDarkBg Then
+                            ' White font on dark background is fine
+                            Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                        Else
+                            ' White font on white/no background → override to black
+                            Debug.WriteLine($"[Excel] Safety: overriding white font to black at {addr} (no dark background)")
+                            Try : cell.Font.Color = ParseHexColor("#000000").Value : Catch : End Try
+                        End If
+                    Else
+                        Try : cell.Font.Color = fontColor.Value : Catch : End Try
+                    End If
+                End If
 
-            If GetJBool(cellObj, "wrap_text") Then Try : cell.WrapText = True : Catch : End Try
+                ' ── Background color ──
+                If bgColor.HasValue Then
+                    Try
+                        cell.Interior.Color = bgColor.Value
+                        cell.Interior.Pattern = Microsoft.Office.Interop.Excel.XlPattern.xlPatternSolid
+                    Catch
+                    End Try
+                End If
 
-            ' ── Borders ──
-            Dim borderStyle = cellObj.Value(Of String)("border")
-            If Not String.IsNullOrWhiteSpace(borderStyle) Then
-                Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
-                ApplyBorderStyle(cell, borderStyle, borderColor)
-            End If
+                ' ── Alignment ──
+                Dim hAlign = cellObj.Value(Of String)("h_align")
+                If Not String.IsNullOrWhiteSpace(hAlign) Then
+                    Try
+                        Select Case hAlign.ToLowerInvariant()
+                            Case "left" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignLeft
+                            Case "center" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignCenter
+                            Case "right" : cell.HorizontalAlignment = Microsoft.Office.Interop.Excel.XlHAlign.xlHAlignRight
+                        End Select
+                    Catch
+                    End Try
+                End If
+
+                Dim vAlign = cellObj.Value(Of String)("v_align")
+                If Not String.IsNullOrWhiteSpace(vAlign) Then
+                    Try
+                        Select Case vAlign.ToLowerInvariant()
+                            Case "top" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignTop
+                            Case "center" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignCenter
+                            Case "bottom" : cell.VerticalAlignment = Microsoft.Office.Interop.Excel.XlVAlign.xlVAlignBottom
+                        End Select
+                    Catch
+                    End Try
+                End If
+
+                If GetJBool(cellObj, "wrap_text") Then Try : cell.WrapText = True : Catch : End Try
+
+                ' ── Borders ──
+                Dim borderStyle = cellObj.Value(Of String)("border")
+                If Not String.IsNullOrWhiteSpace(borderStyle) Then
+                    Dim borderColor = ParseHexColor(cellObj.Value(Of String)("border_color"))
+                    ApplyBorderStyle(cell, borderStyle, borderColor)
+                End If
+            Finally
+                If cell IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cell) : Catch : End Try
+                End If
+            End Try
         Next
     End Sub
 
@@ -2000,10 +2703,15 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyColumnWidths(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                           widths As Dictionary(Of String, Double))
         For Each kv In widths
+            Dim colRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
-                Dim colRange = ws.Columns(kv.Key & ":" & kv.Key)
+                colRange = ws.Columns(kv.Key & ":" & kv.Key)
                 colRange.ColumnWidth = kv.Value
             Catch
+            Finally
+                If colRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(colRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2014,9 +2722,15 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyRowHeights(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                         heights As Dictionary(Of Integer, Double))
         For Each kv In heights
+            Dim rowRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
-                ws.Rows(kv.Key).RowHeight = kv.Value
+                rowRange = ws.Rows(kv.Key)
+                rowRange.RowHeight = kv.Value
             Catch
+            Finally
+                If rowRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(rowRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2027,11 +2741,12 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyDataValidations(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                               validations As List(Of JObject))
         For Each dvObj In validations
+            Dim dvRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim rangeName = dvObj.Value(Of String)("range")
                 If String.IsNullOrWhiteSpace(rangeName) Then Continue For
 
-                Dim dvRange = ws.Range(rangeName)
+                dvRange = ws.Range(rangeName)
                 dvRange.Validation.Delete() ' Clear existing validation
 
                 Dim dvType = If(dvObj.Value(Of String)("type"), "list").ToLowerInvariant()
@@ -2065,13 +2780,8 @@ Partial Public Class ThisAddIn
                 End Select
 
                 If dvType = "list" Then
-                    ' For list validation, formula1 is the comma-separated list.
-                    ' LLMs sometimes wrap individual items in quotes (e.g., "Yes","No","Maybe")
-                    ' which causes the first dropdown item to start with " and the last to end with ".
-                    ' Strip any such quoting to get clean values for Excel.
                     Dim cleanedFormula1 = formula1
                     If Not String.IsNullOrWhiteSpace(cleanedFormula1) Then
-                        ' Remove quotes wrapping individual items: "Yes","No" → Yes,No
                         Dim parts = cleanedFormula1.Split(","c)
                         For i = 0 To parts.Length - 1
                             parts(i) = parts(i).Trim().Trim(""""c).Trim("'"c)
@@ -2116,6 +2826,10 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Data validation error: {ex.Message}")
+            Finally
+                If dvRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(dvRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2126,11 +2840,12 @@ Partial Public Class ThisAddIn
     Private Shared Sub ApplyConditionalFormats(ws As Microsoft.Office.Interop.Excel.Worksheet,
                                                 formats As List(Of JObject))
         For Each cfObj In formats
+            Dim cfRange As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim rangeName = cfObj.Value(Of String)("range")
                 If String.IsNullOrWhiteSpace(rangeName) Then Continue For
 
-                Dim cfRange = ws.Range(rangeName)
+                cfRange = ws.Range(rangeName)
                 Dim cfType = If(cfObj.Value(Of String)("type"), "cell_value").ToLowerInvariant()
                 Dim operatorStr = If(cfObj.Value(Of String)("operator"), "greater_than").ToLowerInvariant()
                 Dim formula1 = cfObj.Value(Of String)("formula1")
@@ -2176,7 +2891,6 @@ Partial Public Class ThisAddIn
                         fc = CType(cfRange.FormatConditions.AddUniqueValues(),
                             Microsoft.Office.Interop.Excel.UniqueValues)
                         CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).DupeUnique = Microsoft.Office.Interop.Excel.XlDupeUnique.xlDuplicate
-                        ' UniqueValues doesn't have the same format interface; apply formatting directly
                         Dim fmtBgColor = ParseHexColor(cfObj.Value(Of String)("format_bg_color"))
                         If fmtBgColor.HasValue Then
                             Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Interior.Color = fmtBgColor.Value : Catch : End Try
@@ -2185,7 +2899,7 @@ Partial Public Class ThisAddIn
                         If fmtFontColor.HasValue Then
                             Try : CType(fc, Microsoft.Office.Interop.Excel.UniqueValues).Font.Color = fmtFontColor.Value : Catch : End Try
                         End If
-                        Continue For ' Skip standard formatting below
+                        Continue For
 
                     Case "unique"
                         fc = CType(cfRange.FormatConditions.AddUniqueValues(),
@@ -2198,7 +2912,7 @@ Partial Public Class ThisAddIn
                         Continue For
 
                     Case "color_scale"
-                        cfRange.FormatConditions.AddColorScale(ColorScaleType:=3) ' 3-color scale
+                        cfRange.FormatConditions.AddColorScale(ColorScaleType:=3)
                         Continue For
 
                     Case "data_bar"
@@ -2246,6 +2960,10 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Conditional format error: {ex.Message}")
+            Finally
+                If cfRange IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(cfRange) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2257,6 +2975,12 @@ Partial Public Class ThisAddIn
                                     charts As List(Of JObject),
                                     sheetDefs As List(Of (SheetName As String, Cells As JArray)))
         For Each chartObj In charts
+            Dim targetWs As Microsoft.Office.Interop.Excel.Worksheet = Nothing
+            Dim posCell As Microsoft.Office.Interop.Excel.Range = Nothing
+            Dim chartObjects As Microsoft.Office.Interop.Excel.ChartObjects = Nothing
+            Dim chartObject As Microsoft.Office.Interop.Excel.ChartObject = Nothing
+            Dim chart As Microsoft.Office.Interop.Excel.Chart = Nothing
+            Dim dataRangeObj As Microsoft.Office.Interop.Excel.Range = Nothing
             Try
                 Dim chartType = If(chartObj.Value(Of String)("type"), "column").ToLowerInvariant()
                 Dim dataRange = chartObj.Value(Of String)("data_range")
@@ -2267,7 +2991,6 @@ Partial Public Class ThisAddIn
                 If String.IsNullOrWhiteSpace(dataRange) Then Continue For
 
                 ' Determine target worksheet
-                Dim targetWs As Microsoft.Office.Interop.Excel.Worksheet
                 If Not String.IsNullOrWhiteSpace(chartSheetName) Then
                     Try
                         targetWs = CType(wb.Sheets(chartSheetName), Microsoft.Office.Interop.Excel.Worksheet)
@@ -2287,7 +3010,7 @@ Partial Public Class ThisAddIn
                 If hToken IsNot Nothing Then Double.TryParse(hToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartHeight)
 
                 ' Get position from cell
-                Dim posCell = targetWs.Range(position)
+                posCell = targetWs.Range(position)
                 Dim posLeft As Double = CDbl(posCell.Left)
                 Dim posTop As Double = CDbl(posCell.Top)
 
@@ -2305,11 +3028,12 @@ Partial Public Class ThisAddIn
                 End Select
 
                 ' Add chart as embedded ChartObject
-                Dim chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
-                Dim chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
-                Dim chart = chartObject.Chart
+                chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
+                chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
+                chart = chartObject.Chart
 
-                chart.SetSourceData(targetWs.Range(dataRange))
+                dataRangeObj = targetWs.Range(dataRange)
+                chart.SetSourceData(dataRangeObj)
                 chart.ChartType = xlChartType
 
                 If Not String.IsNullOrWhiteSpace(chartTitle) Then
@@ -2319,6 +3043,25 @@ Partial Public Class ThisAddIn
 
             Catch ex As Exception
                 Debug.WriteLine($"Chart creation error: {ex.Message}")
+            Finally
+                If dataRangeObj IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(dataRangeObj) : Catch : End Try
+                End If
+                If chart IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chart) : Catch : End Try
+                End If
+                If chartObject IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartObject) : Catch : End Try
+                End If
+                If chartObjects IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(chartObjects) : Catch : End Try
+                End If
+                If posCell IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(posCell) : Catch : End Try
+                End If
+                If targetWs IsNot Nothing Then
+                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(targetWs) : Catch : End Try
+                End If
             End Try
         Next
     End Sub
@@ -2467,12 +3210,17 @@ Partial Public Class ThisAddIn
                                                    Debug.WriteLine($"CreateWordDoc error: {ex.Message}")
                                                    Return False
                                                Finally
-                                                   Try : If doc IsNot Nothing Then doc.Close(False)
-                                                   Catch : End Try
+                                                   If doc IsNot Nothing Then
+                                                       Try : doc.Close(False) : Catch : End Try
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                   End If
                                                    Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
                                                    Catch : End Try
                                                    If weCreated AndAlso wordApp IsNot Nothing Then
                                                        Try : wordApp.Quit(False) : Catch : End Try
+                                                   End If
+                                                   If wordApp IsNot Nothing Then
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                    End If
                                                End Try
                                            End Function)
@@ -2710,10 +3458,15 @@ Partial Public Class ThisAddIn
                                                            End If
                                                            Return sb.ToString()
                                                        Finally
-                                                           Try : If doc IsNot Nothing Then doc.Close(False)
-                                                           Catch : End Try
-                                                           If weCreated AndAlso wordApp IsNot Nothing Then
-                                                               Try : wordApp.Quit(False) : Catch : End Try
+                                                           If doc IsNot Nothing Then
+                                                               Try : doc.Close(False) : Catch : End Try
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                           End If
+                                                           If wordApp IsNot Nothing Then
+                                                               If weCreated Then
+                                                                   Try : wordApp.Quit(False) : Catch : End Try
+                                                               End If
+                                                               Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                            End If
                                                        End Try
                                                    End Function)
@@ -2769,6 +3522,10 @@ Partial Public Class ThisAddIn
             Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
             Dim sheetNames = GetArgStringArray(toolCall.Arguments, "sheet_names")
 
+            ' Parse task_type: "translate", "correct", or "other" (default)
+            Dim taskType = If(GetArgString(toolCall.Arguments, "task_type"), "other").Trim().ToLowerInvariant()
+            Dim useOfflineDocs As Boolean = (taskType = "translate" OrElse taskType = "correct")
+
             Dim toProcess As List(Of AutoPilotAttachmentInfo)
             If targetNames.Count > 0 Then
                 ' Resolve each requested name via FindAttachment (supports output files)
@@ -2802,7 +3559,7 @@ Partial Public Class ThisAddIn
             Dim resultMessages As New List(Of String)()
 
             For Each att In toProcess
-                context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction}")
+                context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction} (task_type={taskType})")
 
                 Dim inputPath = att.TempFilePath
                 Dim ext = att.Extension.ToLowerInvariant()
@@ -2822,7 +3579,7 @@ Partial Public Class ThisAddIn
 
                 ' Pass sheet filter only for Excel files
                 Dim sheetFilter As List(Of String) = If(isXlsx AndAlso sheetNames.Count > 0, sheetNames, Nothing)
-                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter)
+                Dim success = Await ProcessDocumentForAutoPilot(inputPath, outputPath, instruction, ct, sheetFilter, useOfflineDocs)
 
                 If success Then
                     ' Register output on the original attachment (not on a transient object)
@@ -2873,7 +3630,6 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
-
     ''' <summary>
     ''' Creates a Word tracked-changes comparison document from an original and revised file.
     ''' </summary>
@@ -2914,10 +3670,13 @@ Partial Public Class ThisAddIn
 
             compareDoc.SaveAs2(comparePath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
             compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
             compareDoc = Nothing
             processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(processedDoc) : Catch : End Try
             processedDoc = Nothing
             originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges)
+            Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
             originalDoc = Nothing
             wordApp.ScreenUpdating = wasScreenUpdating
             Return True
@@ -2926,14 +3685,27 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"CreateWordCompareDocumentForAutoPilot error: {ex.Message}")
             Return False
         Finally
-            If compareDoc IsNot Nothing Then Try : compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If processedDoc IsNot Nothing Then Try : processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If originalDoc IsNot Nothing Then Try : originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
-            If wordApp IsNot Nothing Then Try : wordApp.ScreenUpdating = True : Catch : End Try
-            If weCreatedWordApp AndAlso wordApp IsNot Nothing Then Try : wordApp.Quit(False) : Catch : End Try
+            If compareDoc IsNot Nothing Then
+                Try : compareDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(compareDoc) : Catch : End Try
+            End If
+            If processedDoc IsNot Nothing Then
+                Try : processedDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(processedDoc) : Catch : End Try
+            End If
+            If originalDoc IsNot Nothing Then
+                Try : originalDoc.Close(Microsoft.Office.Interop.Word.WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(originalDoc) : Catch : End Try
+            End If
+            If wordApp IsNot Nothing Then
+                Try : wordApp.ScreenUpdating = True : Catch : End Try
+                If weCreatedWordApp Then
+                    Try : wordApp.Quit(False) : Catch : End Try
+                End If
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
+            End If
         End Try
     End Function
-
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: extract_pdf_text
@@ -3051,7 +3823,7 @@ Partial Public Class ThisAddIn
             End If
 
             Dim ext As String = Path.GetExtension(att.TempFilePath).ToLowerInvariant()
-            If Not AP_BinaryExtensions.Contains(ext) Then
+            If Not IsBinaryMediaExtension(ext) Then
                 response.Success = False
                 response.Response = $"The file format '{ext}' is not supported for binary analysis. " &
                     "Supported formats include images (.png, .jpg, .gif, .webp, .tiff), " &
@@ -3269,7 +4041,17 @@ Partial Public Class ThisAddIn
                 Dim sizeStr = If(att.SizeBytes > 0, $"{att.SizeBytes / 1024:F0} KB", "unknown size")
                 Dim statusStr = If(att.IsOverSizeLimit, " [OVER SIZE LIMIT]",
                                If(att.TempFilePath IsNot Nothing, " [available for processing]", " [not available]"))
-                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}){statusStr}")
+                Dim pdfStr As String = ""
+                If att.PageCount > 0 Then
+                    pdfStr = $", {att.PageCount} page(s)"
+                    If Not String.IsNullOrWhiteSpace(att.PageOrientation) Then
+                        pdfStr &= $", {att.PageOrientation}"
+                    End If
+                    If Not String.IsNullOrWhiteSpace(att.PageSize) Then
+                        pdfStr &= $", {att.PageSize}"
+                    End If
+                End If
+                sb.AppendLine($"  {i + 1}. {att.OriginalFileName} ({att.Extension}, {sizeStr}{pdfStr}){statusStr}")
             Next
 
             ' List output files produced by earlier tool calls
@@ -3982,49 +4764,113 @@ Partial Public Class ThisAddIn
             ' Ensure font resolver is configured before any XFont usage
             EnsureApPdfSharpFontResolver()
 
-            ' Write to a temp file first, then move to final path to avoid lock conflicts
-            Dim tempOutputPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+            Dim inputSize As Long = New FileInfo(att.TempFilePath).Length
+            Dim rasterizeWarning As String = Nothing
 
-            Try
-                ' Copy source to temp output
-                File.Copy(att.TempFilePath, tempOutputPath, True)
-                Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempOutputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
-                    Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
-                    Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
-                        PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
+            ' Check for encryption — encrypted PDFs may silently produce invisible overlays
+            Dim isEncrypted = APOverlayIsPdfEncrypted(att.TempFilePath)
 
-                    For Each page In doc.Pages
-                        Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+            Dim directSuccess As Boolean = False
+
+            If Not isEncrypted Then
+                ' Try direct PdfSharp overlay first
+                Dim tempOutputPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+                Try
+                    File.Copy(att.TempFilePath, tempOutputPath, True)
+                    Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempOutputPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                        Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
+                        Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
+                            PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
+
+                        For Each page In doc.Pages
+                            Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                                Dim state = gfx.Save()
+                                gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
+                                gfx.RotateTransform(-45)
+                                Dim size = gfx.MeasureString(watermarkText, wmFont)
+                                gfx.DrawString(watermarkText, wmFont, wmBrush,
+                                               New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
+                                               PdfSharp.Drawing.XStringFormats.Center)
+                                gfx.Restore(state)
+                            End Using
+                        Next
+                        doc.Save(tempOutputPath)
+                    End Using
+
+                    ' Verify output grew (watermark adds data)
+                    Dim outputSize = New FileInfo(tempOutputPath).Length
+                    If outputSize > inputSize Then
+                        If File.Exists(outputPath) Then File.Delete(outputPath)
+                        File.Move(tempOutputPath, outputPath)
+                        directSuccess = True
+                    End If
+                Catch
+                    directSuccess = False
+                Finally
+                    Try : If File.Exists(tempOutputPath) Then File.Delete(tempOutputPath)
+                    Catch : End Try
+                End Try
+
+                ' Verify page count matches if direct succeeded
+                If directSuccess Then
+                    Dim pageWarning = APOverlayVerifyPageCount(att.TempFilePath, outputPath)
+                    If pageWarning IsNot Nothing Then
+                        ' Page count mismatch — discard and fall back to rasterize
+                        Try : If File.Exists(outputPath) Then File.Delete(outputPath)
+                        Catch : End Try
+                        directSuccess = False
+                    End If
+                End If
+            End If
+
+            ' Fallback: rasterize all pages, then apply watermark on clean rasterized pages
+            If Not directSuccess Then
+                context.Log($"Direct watermark failed or PDF is encrypted — falling back to rasterize for: {fileName}")
+                ApDashboardLog($"⚠ Rasterize fallback for watermark: {fileName}", "warn")
+
+                Try
+                    APOverlayViaRasterize(att.TempFilePath, outputPath,
+                        Sub(gfx As PdfSharp.Drawing.XGraphics, pageW As Double, pageH As Double, pageIdx As Integer)
+                            Dim wmFont = New PdfSharp.Drawing.XFont("Arial", 60, PdfSharp.Drawing.XFontStyleEx.Bold)
+                            Dim wmBrush = New PdfSharp.Drawing.XSolidBrush(
+                                PdfSharp.Drawing.XColor.FromArgb(80, 180, 180, 180))
                             Dim state = gfx.Save()
-
-                            ' Move origin to center of page
-                            gfx.TranslateTransform(page.Width.Point / 2, page.Height.Point / 2)
+                            gfx.TranslateTransform(pageW / 2, pageH / 2)
                             gfx.RotateTransform(-45)
-
-                            ' Measure and draw the watermark text centered
                             Dim size = gfx.MeasureString(watermarkText, wmFont)
                             gfx.DrawString(watermarkText, wmFont, wmBrush,
                                            New PdfSharp.Drawing.XRect(-size.Width / 2, -size.Height / 2, size.Width, size.Height),
                                            PdfSharp.Drawing.XStringFormats.Center)
-
                             gfx.Restore(state)
-                        End Using
-                    Next
-                    doc.Save(tempOutputPath)
-                End Using
+                        End Sub)
 
-                ' All handles released — safe to move
-                If File.Exists(outputPath) Then File.Delete(outputPath)
-                File.Move(tempOutputPath, outputPath)
-            Finally
-                ' Clean up temp file on any failure
-                Try : If File.Exists(tempOutputPath) Then File.Delete(tempOutputPath)
-                Catch : End Try
-            End Try
+                    rasterizeWarning = If(isEncrypted,
+                        "PDF is encrypted or restricted — was rasterized to ensure watermark visibility (text no longer selectable).",
+                        "PDF could not be watermarked directly — was rasterized instead (text no longer selectable).")
+                Catch rasterEx As Exception
+                    Dim msg = rasterEx.Message
+                    If String.IsNullOrWhiteSpace(msg) OrElse
+                       msg.Equals("No error", StringComparison.OrdinalIgnoreCase) OrElse
+                       msg.Equals("No error.", StringComparison.OrdinalIgnoreCase) Then
+                        msg = "PDF appears to be encrypted or corrupt and could not be processed"
+                    End If
+                    response.Success = False
+                    response.ErrorMessage = msg
+                    response.Response = $"Error adding watermark: {msg}"
+                    Return response
+                End Try
+            End If
+
+            ' Validate output
+            APOverlayValidateOutput(att.TempFilePath, outputPath)
 
             att.OutputFiles.Add(outputPath)
             response.Success = True
-            response.Response = $"Watermark '{watermarkText}' added to {outputName}."
+            Dim resultMsg = $"Watermark '{watermarkText}' added to {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB)."
+            If Not String.IsNullOrWhiteSpace(rasterizeWarning) Then
+                resultMsg &= $" Note: {rasterizeWarning}"
+            End If
+            response.Response = resultMsg
             ApDashboardLog($"✓ Watermark added: {outputName}", "info")
 
         Catch ex As Exception
@@ -4035,6 +4881,7 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: word_to_pdf
@@ -4091,12 +4938,17 @@ Partial Public Class ThisAddIn
                                                    Debug.WriteLine($"WordToPdf error: {ex.Message}")
                                                    Return False
                                                Finally
-                                                   Try : If doc IsNot Nothing Then doc.Close(False)
-                                                   Catch : End Try
+                                                   If doc IsNot Nothing Then
+                                                       Try : doc.Close(False) : Catch : End Try
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                   End If
                                                    Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
                                                    Catch : End Try
                                                    If weCreated AndAlso wordApp IsNot Nothing Then
                                                        Try : wordApp.Quit(False) : Catch : End Try
+                                                   End If
+                                                   If wordApp IsNot Nothing Then
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                    End If
                                                End Try
                                            End Function)
@@ -4115,6 +4967,361 @@ Partial Public Class ThisAddIn
             response.Success = False
             response.ErrorMessage = ex.Message
             response.Response = $"Error converting to PDF: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: generate_image
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Generates an image by switching to the ImageGeneration special task model,
+    ''' calling the LLM with the user's description (no predefined prompt), and
+    ''' saving the result to the per-mail temp directory for attachment.
+    ''' The LLM/HandleObject pipeline decodes the image from the JSON response
+    ''' and saves it via <see cref="ImageDecoder.DecodeAndSaveImage"/>.
+    ''' </summary>
+    Private Async Function ExecuteGenerateImageTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim description = GetArgString(toolCall.Arguments, "description")
+            If String.IsNullOrWhiteSpace(description) Then
+                response.Success = False
+                response.Response = "Missing required parameter: description"
+                Return response
+            End If
+
+            Dim outputFileName = GetArgString(toolCall.Arguments, "output_filename")
+
+            context.Log($"Generating image: {If(description.Length > 120, description.Substring(0, 120) & "...", description)}")
+            ApDashboardLog("🎨 Generating image...", "step")
+
+            ' ── Switch to ImageGeneration model ──
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                response.Success = False
+                response.Response = "No alternate model configuration file is configured. Image generation requires an ImageGeneration model."
+                Return response
+            End If
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(_context)
+            Dim previousUseSecondApi As Boolean = _apUseSecondApi
+            Dim modelSwitched As Boolean = False
+
+            Try
+                modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, "ImageGeneration")
+            Catch
+            End Try
+
+            If Not modelSwitched Then
+                response.Success = False
+                response.Response = "No ImageGeneration model is configured in the alternate models file. Cannot generate images."
+                Return response
+            End If
+
+            Try
+                _apUseSecondApi = True
+
+                ' ── Resolve optional reference image for editing ──
+                Dim referenceImagePath As String = Nothing
+                Dim refImageName = GetArgString(toolCall.Arguments, "image_attachment_name")
+                If Not String.IsNullOrWhiteSpace(refImageName) Then
+                    Dim refAtt = FindAttachment(refImageName)
+                    If refAtt IsNot Nothing AndAlso refAtt.TempFilePath IsNot Nothing AndAlso
+                       File.Exists(refAtt.TempFilePath) Then
+                        referenceImagePath = refAtt.TempFilePath
+                        context.Log($"Using reference image for editing: {refImageName}")
+                        ApDashboardLog($"🖼 Reference image: {refImageName}", "step")
+                    Else
+                        context.Log($"Reference image '{refImageName}' not found — generating from scratch")
+                        ApDashboardLog($"⚠ Reference image '{refImageName}' not found, generating from scratch", "warn")
+                    End If
+                End If
+
+                ' ── Call LLM with just the description — no system prompt wrapping ──
+                ' The binaryOutputDirectory directs ImageDecoder.DecodeAndSaveImage
+                ' to save the image into the per-mail temp directory.
+                Dim llmResult = Await LLM(
+                    "", description,
+                    UseSecondAPI:=True,
+                    HideSplash:=True,
+                    EnsureUI:=False,
+                    cancellationToken:=ct,
+                    binaryOutputDirectory:=_apCurrentTempDir,
+                    FileObject:=If(referenceImagePath, ""))
+
+                ' ── Locate the saved image file ──
+                ' ImageDecoder.DecodeAndSaveImage returns the path in the LLM response
+                ' as "Image saved to: <path>". We also scan the temp dir for new image files.
+                Dim savedImagePath As String = Nothing
+
+                ' Strategy 1: Parse the "Image saved to:" path from the LLM result
+                If Not String.IsNullOrWhiteSpace(llmResult) Then
+                    Dim imgMatch = System.Text.RegularExpressions.Regex.Match(
+                        llmResult, "Image saved to:\s*(.+?)(?:\r?\n|$)")
+                    If imgMatch.Success Then
+                        Dim candidate = imgMatch.Groups(1).Value.Trim().Replace("\\", "\")
+                        If File.Exists(candidate) Then
+                            savedImagePath = candidate
+                        End If
+                    End If
+                End If
+
+                ' Strategy 2: Scan temp dir for the newest AI_Image_* file
+                If savedImagePath Is Nothing AndAlso Directory.Exists(_apCurrentTempDir) Then
+                    Dim imageFiles = Directory.GetFiles(_apCurrentTempDir, "AI_Image_*.*")
+                    If imageFiles.Length > 0 Then
+                        savedImagePath = imageFiles.OrderByDescending(Function(f) File.GetCreationTimeUtc(f)).First()
+                    End If
+                End If
+
+                If savedImagePath Is Nothing OrElse Not File.Exists(savedImagePath) Then
+                    response.Success = False
+                    response.Response = "The image generation model did not return a valid image. " &
+                        "The model may not support image output, or the response format is not recognized."
+                    ApDashboardLog("⚠ Image generation: no image found in response", "warn")
+                    Return response
+                End If
+
+                ' ── Optionally rename the file to the user's requested filename ──
+                If Not String.IsNullOrWhiteSpace(outputFileName) Then
+                    ' Sanitize
+                    For Each c In Path.GetInvalidFileNameChars()
+                        outputFileName = outputFileName.Replace(c, "_"c)
+                    Next
+                    ' Preserve the original extension from the generated file
+                    Dim ext = Path.GetExtension(savedImagePath)
+                    If Not outputFileName.EndsWith(ext, StringComparison.OrdinalIgnoreCase) Then
+                        outputFileName &= ext
+                    End If
+                    Dim renamedPath = Path.Combine(_apCurrentTempDir, outputFileName)
+                    ' Handle collision
+                    Dim counter = 1
+                    While File.Exists(renamedPath)
+                        Dim baseName = Path.GetFileNameWithoutExtension(outputFileName)
+                        renamedPath = Path.Combine(_apCurrentTempDir, baseName & $"_{counter}" & ext)
+                        counter += 1
+                    End While
+                    Try
+                        File.Move(savedImagePath, renamedPath)
+                        savedImagePath = renamedPath
+                    Catch
+                        ' Keep original name on move failure
+                    End Try
+                End If
+
+                ' ── Register as output file for attachment to reply ──
+                If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
+                    _apCurrentAttachments(0).OutputFiles.Add(savedImagePath)
+                End If
+
+                Dim finalFileName = Path.GetFileName(savedImagePath)
+                Dim sizeKb = New FileInfo(savedImagePath).Length / 1024
+
+                response.Success = True
+                response.Response = $"Image generated: {finalFileName} ({sizeKb:F0} KB). The file will be attached to the reply."
+                ApDashboardLog($"✓ Image generated: {finalFileName} ({sizeKb:F0} KB)", "info")
+
+            Finally
+                ' ── Restore the original model configuration ──
+                _apUseSecondApi = previousUseSecondApi
+                If backupConfig IsNot Nothing Then
+                    RestoreDefaults(_context, backupConfig)
+                End If
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error generating image: {ex.Message}"
+            ApDashboardLog($"⚠ Image generation error: {ex.Message}", "warn")
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: web_grounding
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Executes a web grounding or deep research query by switching to the
+    ''' appropriate special task model, calling the LLM with INI_Response_2="JSON"
+    ''' to receive the full JSON response (including grounding metadata/citations),
+    ''' and returning the raw JSON to the tooling model for interpretation.
+    ''' </summary>
+    Private Async Function ExecuteWebGroundingTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim query = GetArgString(toolCall.Arguments, "query")
+            If String.IsNullOrWhiteSpace(query) Then
+                response.Success = False
+                response.Response = "Missing required parameter: query"
+                Return response
+            End If
+
+            Dim mode = If(GetArgString(toolCall.Arguments, "mode"), "standard").Trim().ToLowerInvariant()
+            Dim additionalContext = GetArgString(toolCall.Arguments, "context")
+
+            ' Determine which special task model to use
+            Dim taskKey As String
+            Dim modeLabel As String
+            If mode = "deep_research" Then
+                taskKey = "DeepResearch"
+                modeLabel = "deep research"
+            Else
+                taskKey = "WebGrounding"
+                modeLabel = "web grounding"
+            End If
+
+            Dim queryPreview = If(query.Length > 120, query.Substring(0, 120) & "...", query)
+            context.Log($"Web grounding ({modeLabel}): {queryPreview}")
+            ApDashboardLog($"🌐 {If(mode = "deep_research", "Deep research", "Web grounding")}...", "step")
+
+            ' ── Switch to the appropriate special task model ──
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                response.Success = False
+                response.Response = "No alternate model configuration file is configured. Web grounding requires a configured model."
+                Return response
+            End If
+
+            Dim backupConfig As ModelConfig = GetCurrentConfig(_context)
+            Dim previousUseSecondApi As Boolean = _apUseSecondApi
+            Dim previousResponse2 As String = INI_Response_2
+            Dim modelSwitched As Boolean = False
+
+            Try
+                modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, taskKey)
+            Catch
+            End Try
+
+            ' If the requested mode isn't available, try the other one as fallback
+            If Not modelSwitched Then
+                Dim fallbackKey = If(taskKey = "WebGrounding", "DeepResearch", "WebGrounding")
+                Try
+                    modelSwitched = GetSpecialTaskModel(_context, INI_AlternateModelPath, fallbackKey)
+                    If modelSwitched Then
+                        modeLabel = If(fallbackKey = "DeepResearch", "deep research", "web grounding")
+                        ApDashboardLog($"⚠ {taskKey} model not available, using {fallbackKey} instead", "warn")
+                    End If
+                Catch
+                End Try
+            End If
+
+            If Not modelSwitched Then
+                response.Success = False
+                response.Response = $"No {taskKey} or fallback model is configured in the alternate models file. Cannot perform web grounding."
+                Return response
+            End If
+
+            Try
+                _apUseSecondApi = True
+                ' Set response mode to JSON so LLM() returns the full raw JSON response
+                ' including grounding metadata, citations, and sources
+                INI_Response_2 = "JSON"
+
+                ' ── Build the system prompt ──
+                ' Force the model to ALWAYS use its web search capability and cite sources.
+                ' Without this, grounding models may decide they already know the answer
+                ' and skip searching, returning responses without citations.
+                Dim systemPrompt As String
+                If mode = "deep_research" Then
+                    systemPrompt =
+                        "You are a deep research assistant. You MUST use your internet search and web grounding " &
+                        "capabilities to thoroughly research the user's query. ALWAYS search the internet — " &
+                        "even if you believe you already know the answer. Your knowledge may be outdated or incomplete. " &
+                        "Produce a comprehensive, well-structured research report with the following requirements: " &
+                        "1. Search broadly across multiple sources to gather diverse perspectives. " &
+                        "2. Organize your findings into clear sections with headings. " &
+                        "3. Provide detailed analysis, not just summaries — include key facts, figures, dates, and context. " &
+                        "4. Compare and contrast information from different sources where relevant. " &
+                        "5. Note any conflicting information or areas of uncertainty. " &
+                        "6. ALWAYS cite your sources with complete URLs. Every factual claim must have a citation. " &
+                        "7. Include a 'Sources' section at the end listing all referenced URLs. " &
+                        "8. Aim for thoroughness — a deep research report should be extensive and detailed, " &
+                        "not a brief summary. Cover the topic comprehensively. " &
+                        "NEVER provide an answer without searching the internet first. " &
+                        "NEVER omit citations. If you cannot find sources, explicitly state that."
+                Else
+                    systemPrompt =
+                        "You are a web research assistant. You MUST use your internet search and web grounding " &
+                        "capabilities to answer the user's query. ALWAYS search the internet — even if you believe " &
+                        "you already know the answer. Your knowledge may be outdated or incomplete. " &
+                        "Requirements: " &
+                        "1. ALWAYS search the web before answering. " &
+                        "2. Provide a clear, accurate answer based on what you find. " &
+                        "3. ALWAYS cite your sources with complete URLs for every factual claim. " &
+                        "4. Include a 'Sources' section at the end listing all referenced URLs. " &
+                        "NEVER provide an answer without searching the internet first. " &
+                        "NEVER omit citations. If you cannot find sources, explicitly state that."
+                End If
+
+                ' Build the user prompt
+                Dim userPrompt As String = query
+                If Not String.IsNullOrWhiteSpace(additionalContext) Then
+                    userPrompt = query & vbCrLf & vbCrLf & "Additional context: " & additionalContext
+                End If
+
+                ' Call LLM with the system prompt that forces web search + citations
+                Dim llmResult = Await LLM(
+                    systemPrompt, userPrompt,
+                    UseSecondAPI:=True,
+                    HideSplash:=True,
+                    EnsureUI:=False,
+                    cancellationToken:=ct)
+
+                If String.IsNullOrWhiteSpace(llmResult) Then
+                    response.Success = False
+                    response.Response = $"The {modeLabel} model returned an empty response. The query may have been blocked or the model may be unavailable."
+                    ApDashboardLog($"⚠ Web grounding: empty response", "warn")
+                    Return response
+                End If
+
+                ' Return the full JSON response to the tooling model — it will parse the
+                ' answer text and any grounding sources/citations on its own
+                response.Success = True
+                response.Response = llmResult
+
+                Dim resultLen = llmResult.Length
+                ApDashboardLog($"✓ Web grounding ({modeLabel}): {resultLen:N0} chars returned", "info")
+
+            Finally
+                ' ── Restore the original model configuration ──
+                _apUseSecondApi = previousUseSecondApi
+                INI_Response_2 = previousResponse2
+                If backupConfig IsNot Nothing Then
+                    RestoreDefaults(_context, backupConfig)
+                End If
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during web grounding: {ex.Message}"
+            ApDashboardLog($"⚠ Web grounding error: {ex.Message}", "warn")
         End Try
 
         Return response
@@ -4168,6 +5375,7 @@ Partial Public Class ThisAddIn
                                         Dim prevAutoSec As Microsoft.Office.Core.MsoAutomationSecurity =
                                             Microsoft.Office.Core.MsoAutomationSecurity.msoAutomationSecurityByUI
                                         Dim prevFileConverters As Object = Nothing
+                                        Dim prevScreenUpdating As Boolean = True
                                         Try
                                             Try
                                                 wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
@@ -4180,6 +5388,7 @@ Partial Public Class ThisAddIn
                                             ' Capture current state BEFORE modifying
                                             prevAlerts = wordApp.DisplayAlerts
                                             prevAutoSec = wordApp.AutomationSecurity
+                                            Try : prevScreenUpdating = wordApp.ScreenUpdating : Catch : End Try
 
                                             ' Suppress all alerts and macro execution
                                             wordApp.DisplayAlerts = Microsoft.Office.Interop.Word.WdAlertLevel.wdAlertsNone
@@ -4212,12 +5421,19 @@ Partial Public Class ThisAddIn
                                             Debug.WriteLine($"PdfToWord error: {ex.Message}")
                                             Return False
                                         Finally
-                                            Try : If doc IsNot Nothing Then doc.Close(False)
+                                            ' Close the document and release its COM reference
+                                            Try
+                                                If doc IsNot Nothing Then
+                                                    Try : doc.Close(False) : Catch : End Try
+                                                    Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
+                                                    doc = Nothing
+                                                End If
                                             Catch : End Try
+                                            ' Restore Word application state
                                             Try
                                                 If wordApp IsNot Nothing Then
                                                     wordApp.DisplayAlerts = prevAlerts
-                                                    wordApp.ScreenUpdating = True
+                                                    wordApp.ScreenUpdating = prevScreenUpdating
                                                     wordApp.AutomationSecurity = prevAutoSec
                                                     Try
                                                         If prevFileConverters IsNot Nothing Then
@@ -4227,8 +5443,13 @@ Partial Public Class ThisAddIn
                                                     End Try
                                                 End If
                                             Catch : End Try
+                                            ' Quit only if we created this instance, then release COM reference
                                             If weCreated AndAlso wordApp IsNot Nothing Then
                                                 Try : wordApp.Quit(False) : Catch : End Try
+                                            End If
+                                            If wordApp IsNot Nothing Then
+                                                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
+                                                wordApp = Nothing
                                             End If
                                         End Try
                                     End Function)
@@ -4303,7 +5524,7 @@ Partial Public Class ThisAddIn
             Else
                 toSearch = _apCurrentAttachments?.Where(
                     Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
-                                Not AP_BinaryExtensions.Contains(a.Extension)).ToList()
+                                Not IsBinaryMediaExtension(a.Extension)).ToList()
             End If
 
             If toSearch Is Nothing OrElse toSearch.Count = 0 Then
@@ -4514,6 +5735,142 @@ Partial Public Class ThisAddIn
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: redact_pdf
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteRedactPdfTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim fileName = GetArgString(toolCall.Arguments, "attachment_name")
+            If String.IsNullOrWhiteSpace(fileName) Then
+                response.Success = False
+                response.Response = "Missing required parameter: attachment_name"
+                Return response
+            End If
+
+            Dim att = FindAttachment(fileName)
+            If att Is Nothing Then
+                response.Success = False
+                response.Response = $"Attachment '{fileName}' not found."
+                Return response
+            End If
+
+            If Not att.TempFilePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = $"'{fileName}' is not a PDF file."
+                Return response
+            End If
+
+            Dim instruction = GetArgString(toolCall.Arguments, "instruction")
+            Dim mode = If(GetArgString(toolCall.Arguments, "mode"), "prepare").Trim().ToLowerInvariant()
+            Dim includeReasonCodes = GetArgBool(toolCall.Arguments, "include_reason_codes", False)
+            Dim outputName = GetArgString(toolCall.Arguments, "output_filename")
+
+            ' Validate mode
+            If mode <> "prepare" AndAlso mode <> "finalize" AndAlso mode <> "prepare_and_finalize" Then
+                mode = "prepare"
+            End If
+
+            ' Instruction required for prepare modes
+            If (mode = "prepare" OrElse mode = "prepare_and_finalize") AndAlso String.IsNullOrWhiteSpace(instruction) Then
+                response.Success = False
+                response.Response = "Missing required parameter: 'instruction' is required for prepare and prepare_and_finalize modes."
+                Return response
+            End If
+
+            ' Determine output filename
+            Dim baseName = Path.GetFileNameWithoutExtension(att.OriginalFileName)
+            Dim suffix = If(mode = "finalize", "_final",
+                         If(mode = "prepare_and_finalize", "_redacted_final", "_redacted"))
+
+            If String.IsNullOrWhiteSpace(outputName) Then
+                outputName = baseName & suffix & ".pdf"
+            End If
+            If Not outputName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                outputName &= ".pdf"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                outputName = baseName & suffix & $"_{counter}.pdf"
+                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                counter += 1
+            End While
+
+            context.Log($"PDF redaction ({mode}): {fileName}" &
+                        If(Not String.IsNullOrWhiteSpace(instruction), $" — {instruction}", ""))
+            ApDashboardLog($"🔒 PDF redaction ({mode}): {fileName}", "step")
+
+            EnsureApPdfSharpFontResolver()
+
+            If mode = "finalize" Then
+                ' Finalize-only: burn in existing annotations
+                Await Task.Run(Sub() APRedactFinalizeOnly(att.TempFilePath, outputPath, includeReasonCodes, 300))
+
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                response.Response = $"PDF finalized (annotations burned in): {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). " &
+                    "All redaction boxes are now permanent black rectangles."
+                ApDashboardLog($"✓ PDF finalized: {outputName}", "info")
+
+            Else
+                ' Prepare (with optional finalize)
+                Dim finalize As Boolean = (mode = "prepare_and_finalize")
+                Dim result = Await APRedactPdf(att.TempFilePath, outputPath, instruction,
+                                                finalize, includeReasonCodes, ct)
+
+                If result Is Nothing Then
+                    response.Success = False
+                    response.Response = $"Redaction failed for '{fileName}'. The PDF may contain no extractable text " &
+                        "(run OCR first), the AI may have returned an empty/unparseable response, or no matching " &
+                        "text was found for the identified redactions. You may want to retry."
+                    ApDashboardLog($"⚠ Redaction failed for: {fileName}", "warn")
+                    Return response
+                End If
+
+                If result = "no_redactions" Then
+                    response.Success = True
+                    response.Response = $"The AI found nothing to redact in '{fileName}' based on the instruction: '{instruction}'."
+                    ApDashboardLog($"ℹ No redactions found in: {fileName}", "info")
+                    Return response
+                End If
+
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                Dim sizeKb = If(File.Exists(outputPath), $" ({New FileInfo(outputPath).Length / 1024:F0} KB)", "")
+                response.Response = $"PDF redacted: {result} Output: {outputName}{sizeKb}."
+                If Not finalize Then
+                    response.Response &= " Note: redaction boxes are currently removable annotations. " &
+                        "Call this tool again with mode='finalize' on the output file to make them permanent."
+                End If
+                ApDashboardLog($"✓ PDF redacted: {outputName}", "info")
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during PDF redaction: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  HELPER: Ensure PdfSharp font resolver is configured
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4683,6 +6040,278 @@ Partial Public Class ThisAddIn
     End Class
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: extract_data_from_attachments
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Extracts structured/tabular data from one or more attachments using the
+    ''' <see cref="SharedLibrary.FactExtractionService.RunFactExtractionAsync"/> pipeline.
+    ''' Returns schema + rows as JSON for downstream tool-chaining (create_excel, create_word, etc.).
+    ''' </summary>
+    Private Async Function ExecuteExtractDataFromAttachmentsTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim instruction = GetArgString(toolCall.Arguments, "instruction")
+            If String.IsNullOrWhiteSpace(instruction) Then
+                response.Success = False
+                response.Response = "Missing required parameter: instruction"
+                Return response
+            End If
+
+            Dim schemaSpec = GetArgString(toolCall.Arguments, "schema")
+            Dim targetNames = GetArgStringArray(toolCall.Arguments, "attachment_names")
+            Dim sortColumn = GetArgInt(toolCall.Arguments, "sort_column", 0)
+            Dim sortDirection = If(GetArgString(toolCall.Arguments, "sort_direction"), "ASC").Trim().ToUpperInvariant()
+            If sortDirection <> "ASC" AndAlso sortDirection <> "DESC" Then sortDirection = "ASC"
+            Dim dateColumnsText = If(GetArgString(toolCall.Arguments, "date_columns"), "")
+
+            ' ── Resolve attachments to process ──
+            Dim toProcess As List(Of AutoPilotAttachmentInfo)
+            If targetNames.Count > 0 Then
+                toProcess = New List(Of AutoPilotAttachmentInfo)()
+                For Each name In targetNames
+                    Dim att = FindAttachment(name)
+                    If att IsNot Nothing AndAlso Not att.IsOverSizeLimit AndAlso att.TempFilePath IsNot Nothing Then
+                        toProcess.Add(att)
+                    End If
+                Next
+            Else
+                ' Process all readable non-binary attachments, plus binary media if the model supports them
+                toProcess = _apCurrentAttachments?.Where(
+                    Function(a) Not a.IsOverSizeLimit AndAlso a.TempFilePath IsNot Nothing AndAlso
+                                (Not IsBinaryMediaExtension(a.Extension) OrElse
+                                 SharedMethods.IsBinaryMediaSupported(_context, a.Extension,
+                                     SharedMethods.TaskFlagForExtension(a.Extension)))).ToList()
+            End If
+
+            If toProcess Is Nothing OrElse toProcess.Count = 0 Then
+                response.Success = False
+                response.Response = "No processable attachments found for data extraction."
+                Return response
+            End If
+
+            context.Log($"Extracting structured data from {toProcess.Count} file(s): {instruction}")
+            ApDashboardLog($"📊 Fact extraction: {toProcess.Count} file(s)", "step")
+
+            ' ── Parse optional fixed schema ──
+            Dim fixedSchema As System.Collections.Generic.List(Of FactExtractionService.ExtractionSchemaColumn) = Nothing
+            If Not String.IsNullOrWhiteSpace(schemaSpec) Then
+                fixedSchema = FactExtractionService.ParseUserSchemaSpec(schemaSpec)
+                ' Detect sort column from * marker if not explicitly set
+                If (fixedSchema IsNot Nothing AndAlso fixedSchema.Count > 0) AndAlso sortColumn = 0 Then
+                    sortColumn = FactExtractionService.DetectSortColumnFromSpec(schemaSpec)
+                End If
+            End If
+
+            ' ── Parse date columns ──
+            Dim dateCols As New System.Collections.Generic.List(Of Integer)
+            For Each part In dateColumnsText.Split(New Char() {","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim n As Integer
+                If Integer.TryParse(part.Trim(), n) AndAlso n > 0 Then dateCols.Add(n)
+            Next
+
+            ' ── Build file path list from resolved attachments ──
+            Dim filePaths As New List(Of String)()
+            For Each att In toProcess
+                filePaths.Add(att.TempFilePath)
+            Next
+
+            ' ── Set up the extraction instruction for InterpolateAtRuntime ──
+            Dim savedOtherPrompt = OtherPrompt
+            Dim savedOutputLanguage = OutputLanguage
+            Try
+                OtherPrompt = instruction
+
+                ' Let the LLM decide the output language; fall back to the user's primary language
+                Dim requestedLanguage = GetArgString(toolCall.Arguments, "output_language")
+                OutputLanguage = If(Not String.IsNullOrWhiteSpace(requestedLanguage), requestedLanguage.Trim(), INI_Language1)
+
+                Dim useSecondApi As Boolean = (_apConfig IsNot Nothing AndAlso _apConfig.UseSecondApi)
+                Dim cancelled As Boolean = False
+
+                ' ── Adapt GetFileContent for the service ──
+                ' RunFactExtractionAsync expects Func(Of String, Boolean, Boolean, Boolean, Task(Of String))
+                ' Parameters: (path, silent, doOcr, askUser)
+                ' We bridge to the Outlook text extraction pipeline (ReadSingleAttachmentText cache + fallbacks)
+                Dim getFileContentFunc As Func(Of String, Boolean, Boolean, Boolean, Task(Of String)) =
+                    Async Function(filePath As String, silent As Boolean, doOcr As Boolean, askUser As Boolean) As Task(Of String)
+                        ' First, try to find the file in the current attachments by path and reuse cached text
+                        Dim matchedAtt = toProcess.FirstOrDefault(
+                            Function(a) a.TempFilePath IsNot Nothing AndAlso
+                                        a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase))
+                        If matchedAtt IsNot Nothing Then
+                            Dim cachedText = Await ReadSingleAttachmentText(matchedAtt, context)
+                            If Not String.IsNullOrWhiteSpace(cachedText) Then Return cachedText
+                        End If
+
+                        ' Fallback: try extraction methods directly on path
+                        Dim text As String = Nothing
+                        Dim label As String = Nothing
+                        Try
+                            If TryExtractOfficeText(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                        Catch : End Try
+                        Try
+                            Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
+                            If ext = ".xlsx" OrElse ext = ".xls" Then
+                                text = ExtractExcelText(filePath)
+                                If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
+                            ElseIf ext = ".pptx" Then
+                                text = ExtractPowerPointText(filePath)
+                                If Not String.IsNullOrWhiteSpace(text) AndAlso Not text.StartsWith("Error") Then Return text
+                            End If
+                        Catch : End Try
+                        Try
+                            If TryExtractTextLike(filePath, text, label) AndAlso Not String.IsNullOrWhiteSpace(text) Then Return text
+                        Catch : End Try
+                        If Path.GetExtension(filePath).ToLowerInvariant() = ".pdf" Then
+                            Try
+                                text = Await SharedMethods.ReadPdfAsText(filePath, ReturnErrorInsteadOfEmpty:=True, DoOCR:=doOcr, AskUser:=False)
+                                If Not String.IsNullOrWhiteSpace(text) Then Return text
+                            Catch : End Try
+                        End If
+                        Return ""
+                    End Function
+
+                ' ── Adapt LLM function for the service ──
+                ' RunFactExtractionAsync expects Func(Of String, String, String, String, Integer, Boolean, Boolean, Task(Of String))
+                Dim llmFunc As Func(Of String, String, String, String, Integer, Boolean, Boolean, Task(Of String)) =
+                    Async Function(sysPrompt As String, userText As String, model As String, temp As String,
+                                   timeout As Integer, useSecond As Boolean, hideSplash As Boolean) As Task(Of String)
+                        Return Await ThisAddIn.LLM(sysPrompt, userText, model, temp, timeout, useSecond, True, cancellationToken:=ct)
+                    End Function
+
+                ' ── Run the extraction ──
+                Dim result = Await FactExtractionService.RunFactExtractionAsync(
+                    filePaths,
+                    instruction,
+                    dateCols,
+                    sortColumn,
+                    sortDirection,
+                    False,          ' doOcr — we already extracted text above
+                    useSecondApi,
+                    _apCurrentTempDir,
+                    AddressOf InterpolateAtRuntime,
+                    llmFunc,
+                    getFileContentFunc,
+                    _context,
+                    fixedSchema,
+                    Nothing,        ' clampFrom
+                    Nothing,        ' clampTo
+                    Sub(cur, total, label)
+                        ApDashboardLog($"  📊 [{cur}/{total}] {label}", "step")
+                    End Sub,
+                    0,              ' mergeDateColumn
+                    False,          ' mergeRowsViaLlm
+                    Nothing,        ' mergeInstruction
+                    Function() cancelled OrElse ct.IsCancellationRequested,
+                    llmWithFileFunc:=Async Function(sys, usr, mdl, tmp, tmo, use2nd, hide, fileObj)
+                                         Return Await ThisAddIn.LLM(sys, usr, mdl, tmp, tmo, use2nd, True, cancellationToken:=ct, FileObject:=fileObj)
+                                     End Function)
+
+                If result Is Nothing OrElse result.Rows.Count = 0 Then
+                    Dim errMsg = "No data could be extracted from the provided file(s)."
+                    If result IsNot Nothing AndAlso result.Errors.Count > 0 Then
+                        errMsg &= " Errors: " & String.Join("; ", result.Errors.Take(5))
+                    End If
+                    If result IsNot Nothing AndAlso result.FailedFileNames.Count > 0 Then
+                        errMsg &= " Failed files: " & String.Join(", ", result.FailedFileNames)
+                    End If
+                    response.Success = False
+                    response.Response = errMsg
+                    ApDashboardLog($"⚠ Fact extraction returned no data", "warn")
+                    Return response
+                End If
+
+                ' ── Format result as JSON for the LLM ──
+                Dim jResult As New JObject()
+
+                ' Schema array
+                Dim jSchema As New JArray()
+                For Each col In result.Schema
+                    jSchema.Add(New JObject From {
+                        {"name", col.Name},
+                        {"type", col.Type}
+                    })
+                Next
+                jResult("schema") = jSchema
+
+                ' Rows as array of arrays
+                Dim jRows As New JArray()
+                For Each row In result.Rows
+                    Dim jRow As New JArray()
+                    For Each cellVal In row.Values
+                        jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
+                    Next
+                    jRows.Add(jRow)
+                Next
+                jResult("rows") = jRows
+
+                ' Metadata
+                jResult("total_rows") = result.Rows.Count
+                jResult("total_columns") = result.Schema.Count
+                jResult("files_processed") = result.ProcessedFiles
+                jResult("files_failed") = result.FailedFiles
+                If result.FailedFileNames.Count > 0 Then
+                    jResult("failed_files") = New JArray(result.FailedFileNames.ToArray())
+                End If
+                If result.Errors.Count > 0 Then
+                    jResult("errors") = New JArray(result.Errors.Take(10).ToArray())
+                End If
+
+                Dim jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
+
+                ' Truncate if extremely large to stay within LLM context limits
+                If jsonString.Length > 200000 Then
+                    ' Rebuild with fewer rows
+                    Dim maxRows = Math.Max(1, CInt(result.Rows.Count * (200000.0 / jsonString.Length)))
+                    Dim jRowsTruncated As New JArray()
+                    For i = 0 To Math.Min(maxRows - 1, result.Rows.Count - 1)
+                        Dim jRow As New JArray()
+                        For Each cellVal In result.Rows(i).Values
+                            jRow.Add(If(cellVal Is Nothing, "", cellVal.ToString()))
+                        Next
+                        jRowsTruncated.Add(jRow)
+                    Next
+                    jResult("rows") = jRowsTruncated
+                    jResult("total_rows") = result.Rows.Count
+                    jResult("rows_returned") = jRowsTruncated.Count
+                    jResult("truncated") = True
+                    jsonString = jResult.ToString(Newtonsoft.Json.Formatting.None)
+                End If
+
+                response.Success = True
+                response.Response = jsonString
+
+                Dim schemaNames = String.Join(", ", result.Schema.Select(Function(c) c.Name))
+                ApDashboardLog($"✓ Fact extraction: {result.Rows.Count} rows, {result.Schema.Count} columns ({schemaNames}), {result.ProcessedFiles} file(s)", "info")
+
+            Finally
+                OtherPrompt = savedOtherPrompt
+                OutputLanguage = savedOutputLanguage
+            End Try
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error extracting data from attachments: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: report_inability
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4773,6 +6402,1205 @@ Partial Public Class ThisAddIn
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  MANAGE_SCHEDULED_TASKS TOOL EXECUTOR
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Executes the manage_scheduled_tasks tool call.</summary>
+    Private Async Function ExecuteManageScheduledTasksTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName,
+            .Timestamp = DateTime.Now
+        }
+
+        Try
+            Dim args = toolCall.Arguments
+            If args Is Nothing Then
+                response.Success = False
+                response.ErrorMessage = "No arguments provided"
+                response.Response = "Error: No arguments provided."
+                Return response
+            End If
+
+            Dim action As String = ""
+            If args.ContainsKey("action") Then action = args("action")?.ToString()?.Trim()?.ToLowerInvariant()
+
+            Select Case action
+                Case "create"
+                    Dim task As New ScheduledTask()
+                    task.Id = Guid.NewGuid().ToString("N")
+                    task.CreatedUtc = DateTime.UtcNow
+
+                    If args.ContainsKey("instruction") Then task.Instruction = args("instruction")?.ToString()
+                    If args.ContainsKey("subject") Then task.Subject = args("subject")?.ToString()
+                    If args.ContainsKey("schedule_description") Then task.ScheduleDescription = args("schedule_description")?.ToString()
+                    If args.ContainsKey("rrule") Then task.Rrule = args("rrule")?.ToString()
+                    If args.ContainsKey("time_of_day_local") Then task.TimeOfDayLocal = args("time_of_day_local")?.ToString()
+
+                    ' Parse next_due_utc
+                    If args.ContainsKey("next_due_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.NextDueUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+
+                    ' Fallback: if the LLM did not provide next_due_utc, compute it from
+                    ' the RRULE and time_of_day_local so the task fires at the correct time
+                    ' rather than immediately.
+                    If task.NextDueUtc = DateTime.MaxValue Then
+                        task.NextDueUtc = ComputeFirstDueUtc(task.Rrule, task.TimeOfDayLocal)
+                    End If
+
+                    ' Parse end_date_utc
+                    If args.ContainsKey("end_date_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.EndDateUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+
+                    ' Parse remaining_occurrences
+                    If args.ContainsKey("remaining_occurrences") Then
+                        Dim occ As Integer
+                        If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
+                    End If
+
+                    ' Parse deliver_to
+                    If args.ContainsKey("deliver_to") Then
+                        Dim deliverObj = args("deliver_to")
+                        If TypeOf deliverObj Is JArray Then
+                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        ElseIf TypeOf deliverObj Is String Then
+                            task.DeliverTo = CStr(deliverObj).Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries).
+                                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    ' Fallback: use sender address from current mail
+                    If task.DeliverTo.Count = 0 AndAlso _apCurrentMailInfo IsNot Nothing Then
+                        If Not String.IsNullOrWhiteSpace(_apCurrentMailInfo.SenderEmail) Then
+                            task.DeliverTo.Add(_apCurrentMailInfo.SenderEmail)
+                        End If
+                    End If
+
+                    task.CreatedBy = If(task.DeliverTo.FirstOrDefault(), "")
+
+                    ' Store attachments from current mail if requested
+                    Dim storeNames As List(Of String) = Nothing
+                    If args.ContainsKey("store_attachment_names") Then
+                        Dim storeObj = args("store_attachment_names")
+                        If TypeOf storeObj Is JArray Then
+                            storeNames = DirectCast(storeObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    Dim taskId = SchedulerCreateTask(task)
+
+                    ' Store requested attachments
+                    If storeNames IsNot Nothing AndAlso storeNames.Count > 0 AndAlso _apCurrentAttachments IsNot Nothing Then
+                        For Each name In storeNames
+                            Dim att = _apCurrentAttachments.FirstOrDefault(
+                                Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                            If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
+                                SchedulerStoreAttachment(taskId, att.TempFilePath)
+                            End If
+                        Next
+                    End If
+
+                    response.Success = True
+                    Dim apWarning = ""
+                    If Not _apActive Then
+                        apWarning = vbCrLf & "⚠ AutoPilot is not currently running. " &
+                            "This task will be executed once AutoPilot is started."
+                    End If
+                    response.Response = $"Task created successfully." & vbCrLf &
+                        $"Task ID: {taskId}" & vbCrLf &
+                        $"Instruction: {Truncate(task.Instruction, 100)}" & vbCrLf &
+                        $"Schedule: {If(task.ScheduleDescription, "one-time")}" & vbCrLf &
+                        $"Next execution: {task.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)" & vbCrLf &
+                        $"Deliver to: {String.Join(", ", task.DeliverTo)}" &
+                        If(task.AttachmentFiles.Count > 0, vbCrLf & $"Stored attachments: {String.Join(", ", task.AttachmentFiles)}", "") &
+                        apWarning
+
+                Case "list"
+                    Dim statusFilter As String = Nothing
+                    If args.ContainsKey("status_filter") Then statusFilter = args("status_filter")?.ToString()
+                    Dim tasks = SchedulerListTasks(statusFilter)
+                    response.Success = True
+                    response.Response = FormatTaskListForDisplay(tasks)
+
+                Case "get"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'get' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                    Else
+                        response.Success = True
+                        response.Response = FormatTaskListForDisplay(New List(Of ScheduledTask) From {task})
+                    End If
+
+                Case "update"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'update' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                        Return response
+                    End If
+
+                    ' Apply updates
+                    If args.ContainsKey("instruction") Then task.Instruction = args("instruction")?.ToString()
+                    If args.ContainsKey("subject") Then task.Subject = args("subject")?.ToString()
+                    If args.ContainsKey("schedule_description") Then task.ScheduleDescription = args("schedule_description")?.ToString()
+                    If args.ContainsKey("rrule") Then task.Rrule = args("rrule")?.ToString()
+                    If args.ContainsKey("time_of_day_local") Then task.TimeOfDayLocal = args("time_of_day_local")?.ToString()
+                    If args.ContainsKey("status") Then task.Status = args("status")?.ToString()
+
+                    If args.ContainsKey("next_due_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("next_due_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.NextDueUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+                    If args.ContainsKey("end_date_utc") Then
+                        Dim parsed As DateTime
+                        If DateTime.TryParse(args("end_date_utc")?.ToString(), Nothing,
+                                             Globalization.DateTimeStyles.AdjustToUniversal Or Globalization.DateTimeStyles.AssumeUniversal, parsed) Then
+                            task.EndDateUtc = parsed.ToUniversalTime()
+                        End If
+                    End If
+                    If args.ContainsKey("remaining_occurrences") Then
+                        Dim occ As Integer
+                        If Integer.TryParse(args("remaining_occurrences")?.ToString(), occ) Then task.RemainingOccurrences = occ
+                    End If
+                    If args.ContainsKey("deliver_to") Then
+                        Dim deliverObj = args("deliver_to")
+                        If TypeOf deliverObj Is JArray Then
+                            task.DeliverTo = DirectCast(deliverObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    ' Store new attachments from current mail if requested
+                    Dim storeNames As List(Of String) = Nothing
+                    If args.ContainsKey("store_attachment_names") Then
+                        Dim storeObj = args("store_attachment_names")
+                        If TypeOf storeObj Is JArray Then
+                            storeNames = DirectCast(storeObj, JArray).Select(Function(t) t.ToString().Trim()).
+                                Where(Function(s) s.Length > 0).ToList()
+                        End If
+                    End If
+
+                    If SchedulerUpdateTask(task) Then
+                        ' Store attachments after the update succeeds
+                        Dim storedCount = 0
+                        If storeNames IsNot Nothing AndAlso storeNames.Count > 0 AndAlso _apCurrentAttachments IsNot Nothing Then
+                            For Each name In storeNames
+                                Dim att = _apCurrentAttachments.FirstOrDefault(
+                                    Function(a) a.OriginalFileName.Equals(name, StringComparison.OrdinalIgnoreCase))
+                                If att IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
+                                    If SchedulerStoreAttachment(task.Id, att.TempFilePath) Then storedCount += 1
+                                End If
+                            Next
+                        End If
+
+                        response.Success = True
+                        response.Response = $"Task {taskId} updated successfully." &
+                            If(storedCount > 0, vbCrLf & $"Stored {storedCount} new attachment(s).", "") & vbCrLf &
+                            FormatTaskListForDisplay(New List(Of ScheduledTask) From {task})
+                    Else
+                        response.Success = False
+                        response.Response = $"Failed to update task {taskId}."
+                    End If
+
+                Case "delete"
+                    Dim taskId As String = ""
+                    If args.ContainsKey("task_id") Then taskId = args("task_id")?.ToString()
+                    If String.IsNullOrWhiteSpace(taskId) Then
+                        response.Success = False
+                        response.Response = "Error: task_id is required for the 'delete' action."
+                        Return response
+                    End If
+                    Dim task = SchedulerFindTask(taskId)
+                    If task Is Nothing Then
+                        response.Success = False
+                        response.Response = $"No task found matching '{taskId}'."
+                        Return response
+                    End If
+
+                    If SchedulerDeleteTask(task.Id) Then
+                        response.Success = True
+                        response.Response = $"Task {task.Id.Substring(0, Math.Min(8, task.Id.Length))}... deleted successfully."
+                    Else
+                        response.Success = False
+                        response.Response = $"Failed to delete task."
+                    End If
+
+                Case Else
+                    response.Success = False
+                    response.Response = $"Unknown action: '{action}'. Supported: create, list, get, update, delete."
+            End Select
+
+        Catch ex As OperationCanceledException
+            Throw
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Scheduler error: {ex.Message}"
+            context.Log($"Scheduler tool error: {ex.Message}", "error")
+        End Try
+
+        Return response
+    End Function
+
+    ''' <summary>
+    ''' Computes the first NextDueUtc for a newly created task based on its RRULE
+    ''' and time-of-day. If the computed time today has already passed, advances to
+    ''' the next occurrence. Falls back to UtcNow only if no schedule can be derived.
+    ''' </summary>
+    Private Shared Function ComputeFirstDueUtc(rrule As String, timeOfDayLocal As String) As DateTime
+        Try
+            ' If we have a time-of-day, try scheduling for that time today or tomorrow
+            If Not String.IsNullOrWhiteSpace(timeOfDayLocal) Then
+                Dim parsed As DateTime
+                If DateTime.TryParse(timeOfDayLocal, parsed) Then
+                    Dim todayAtTime = DateTime.Today.Add(parsed.TimeOfDay)
+
+                    ' If that time is still in the future today, use it
+                    If todayAtTime > DateTime.Now Then
+                        Return todayAtTime.ToUniversalTime()
+                    End If
+
+                    ' Time already passed today — compute next occurrence from now
+                    If Not String.IsNullOrWhiteSpace(rrule) Then
+                        Dim nextUtc = ComputeNextOccurrence(rrule, todayAtTime.ToUniversalTime(), timeOfDayLocal)
+                        If nextUtc IsNot Nothing Then Return nextUtc.Value
+                    End If
+
+                    ' No RRULE or couldn't compute — use tomorrow at that time
+                    Return todayAtTime.AddDays(1).ToUniversalTime()
+                End If
+            End If
+
+            ' No time-of-day but has RRULE — compute next from now
+            If Not String.IsNullOrWhiteSpace(rrule) Then
+                Dim nextUtc = ComputeNextOccurrence(rrule, DateTime.UtcNow, timeOfDayLocal)
+                If nextUtc IsNot Nothing Then Return nextUtc.Value
+            End If
+
+            ' No schedule info at all — execute immediately
+            Return DateTime.UtcNow
+
+        Catch
+            Return DateTime.UtcNow
+        End Try
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: overlay_pdf
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteOverlayPdfTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim fileName = GetArgString(toolCall.Arguments, "attachment_name")
+            If String.IsNullOrWhiteSpace(fileName) Then
+                response.Success = False
+                response.Response = "Missing required parameter: attachment_name"
+                Return response
+            End If
+
+            Dim att = FindAttachment(fileName)
+            If att Is Nothing Then
+                response.Success = False
+                response.Response = $"Attachment '{fileName}' not found."
+                Return response
+            End If
+
+            If Not att.TempFilePath.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                response.Success = False
+                response.Response = $"'{fileName}' is not a PDF file."
+                Return response
+            End If
+
+            ' Parse elements array
+            Dim elementsArray As JArray = Nothing
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("elements") Then
+                Dim elemObj = toolCall.Arguments("elements")
+                If TypeOf elemObj Is JArray Then elementsArray = DirectCast(elemObj, JArray)
+            End If
+
+            If elementsArray Is Nothing OrElse elementsArray.Count = 0 Then
+                response.Success = False
+                response.Response = "Missing required parameter: elements (must be a non-empty array)"
+                Return response
+            End If
+
+            ' Determine output filename
+            Dim outputName = GetArgString(toolCall.Arguments, "output_filename")
+            If String.IsNullOrWhiteSpace(outputName) Then
+                outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & "_overlay.pdf"
+            End If
+            If Not outputName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase) Then
+                outputName &= ".pdf"
+            End If
+
+            Dim outputPath = Path.Combine(_apCurrentTempDir, outputName)
+
+            ' Prevent filename collision
+            Dim counter = 1
+            While File.Exists(outputPath)
+                outputName = Path.GetFileNameWithoutExtension(att.OriginalFileName) & $"_overlay_{counter}.pdf"
+                outputPath = Path.Combine(_apCurrentTempDir, outputName)
+                counter += 1
+            End While
+
+            context.Log($"Overlaying {elementsArray.Count} element(s) on: {fileName}")
+            ApDashboardLog($"🖌 Overlaying {elementsArray.Count} element(s) on: {fileName}", "step")
+
+            EnsureApPdfSharpFontResolver()
+
+            ' Pre-resolve all image attachments to avoid repeated lookups
+            Dim imageCache As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            For Each elemObj As JObject In elementsArray
+                Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
+                If elemType = "image" Then
+                    Dim imgName = elemObj.Value(Of String)("image_attachment_name")
+                    If Not String.IsNullOrWhiteSpace(imgName) AndAlso Not imageCache.ContainsKey(imgName) Then
+                        Dim imgAtt = FindAttachment(imgName)
+                        If imgAtt IsNot Nothing AndAlso imgAtt.TempFilePath IsNot Nothing AndAlso File.Exists(imgAtt.TempFilePath) Then
+                            imageCache(imgName) = imgAtt.TempFilePath
+                        End If
+                    End If
+                End If
+            Next
+
+            Dim inputSize As Long = New FileInfo(att.TempFilePath).Length
+            Dim rasterizeWarning As String = Nothing
+            Dim textCount = 0
+            Dim imageCount = 0
+
+            ' Check for encryption — encrypted PDFs may silently produce invisible overlays
+            Dim isEncrypted = APOverlayIsPdfEncrypted(att.TempFilePath)
+
+            Dim directSuccess As Boolean = False
+
+            If Not isEncrypted Then
+                ' ── Try direct PdfSharp overlay first ──
+                Dim tempWorkPath = outputPath & ".tmp_" & Guid.NewGuid().ToString("N") & ".pdf"
+                Dim directTextCount = 0
+                Dim directImageCount = 0
+
+                Try
+                    File.Copy(att.TempFilePath, tempWorkPath, True)
+
+                    Using doc = PdfSharp.Pdf.IO.PdfReader.Open(tempWorkPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.Modify)
+                        Dim totalPages = doc.PageCount
+
+                        APOverlayDrawElements(doc, totalPages, elementsArray, imageCache, context,
+                                              directTextCount, directImageCount)
+
+                        doc.Save(tempWorkPath)
+                    End Using
+
+                    ' Verify output grew (overlay adds image/text data)
+                    Dim outputSize = New FileInfo(tempWorkPath).Length
+                    If outputSize > inputSize Then
+                        If File.Exists(outputPath) Then File.Delete(outputPath)
+                        File.Move(tempWorkPath, outputPath)
+                        directSuccess = True
+                        textCount = directTextCount
+                        imageCount = directImageCount
+                    End If
+                Catch
+                    directSuccess = False
+                Finally
+                    Try : If File.Exists(tempWorkPath) Then File.Delete(tempWorkPath)
+                    Catch : End Try
+                End Try
+
+                ' Verify page count matches if direct succeeded
+                If directSuccess Then
+                    Dim pageWarning = APOverlayVerifyPageCount(att.TempFilePath, outputPath)
+                    If pageWarning IsNot Nothing Then
+                        ' Page count mismatch — discard and fall back to rasterize
+                        Try : If File.Exists(outputPath) Then File.Delete(outputPath)
+                        Catch : End Try
+                        directSuccess = False
+                    End If
+                End If
+            End If
+
+            ' ── Fallback: rasterize affected pages, then re-apply overlay ──
+            If Not directSuccess Then
+                context.Log($"Direct overlay failed or PDF is encrypted — falling back to rasterize for: {fileName}")
+                ApDashboardLog($"⚠ Rasterize fallback for overlay: {fileName}", "warn")
+
+                textCount = 0
+                imageCount = 0
+
+                Try
+                    ' Build a lookup: which page indices need overlay elements?
+                    ' We rasterize ALL pages (to handle encrypted PDFs where even non-overlaid
+                    ' pages can't be copied via PdfSharp Import mode), then draw elements on
+                    ' the appropriate pages.
+                    APOverlayViaRasterizeWithElements(att.TempFilePath, outputPath, elementsArray,
+                                                      imageCache, context, textCount, imageCount)
+
+                    rasterizeWarning = If(isEncrypted,
+                        "PDF is encrypted or restricted — was rasterized to ensure overlay visibility (text no longer selectable).",
+                        "PDF could not be overlaid directly — was rasterized instead (text no longer selectable).")
+                Catch rasterEx As Exception
+                    Dim msg = rasterEx.Message
+                    If String.IsNullOrWhiteSpace(msg) OrElse
+                       msg.Equals("No error", StringComparison.OrdinalIgnoreCase) OrElse
+                       msg.Equals("No error.", StringComparison.OrdinalIgnoreCase) Then
+                        msg = "PDF appears to be encrypted or corrupt and could not be processed"
+                    End If
+                    response.Success = False
+                    response.ErrorMessage = msg
+                    response.Response = $"Error overlaying PDF: {msg}"
+                    Return response
+                End Try
+            End If
+
+            ' Validate output
+            APOverlayValidateOutput(att.TempFilePath, outputPath)
+
+            If File.Exists(outputPath) Then
+                att.OutputFiles.Add(outputPath)
+                response.Success = True
+                Dim resultMsg = $"PDF overlay complete: {textCount} text element(s) and {imageCount} image element(s) placed. " &
+                    $"Output: {outputName} ({New FileInfo(outputPath).Length / 1024:F0} KB). The file will be attached to the reply."
+                If Not String.IsNullOrWhiteSpace(rasterizeWarning) Then
+                    resultMsg &= $" Note: {rasterizeWarning}"
+                End If
+                response.Response = resultMsg
+                ApDashboardLog($"✓ PDF overlay: {outputName} ({textCount} text, {imageCount} image)", "info")
+            Else
+                response.Success = False
+                response.Response = "Failed to create overlaid PDF."
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error overlaying PDF: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  OVERLAY PDF HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Parses a page specification string into a list of 0-based page indices.
+    ''' Supports: "all", "1", "1,3,5", "2-5", "1,3-5,8".
+    ''' </summary>
+    Private Shared Function ResolvePageIndices(pagesSpec As String, totalPages As Integer) As List(Of Integer)
+        Dim result As New List(Of Integer)()
+        If String.IsNullOrWhiteSpace(pagesSpec) OrElse pagesSpec = "all" Then
+            For i = 0 To totalPages - 1
+                result.Add(i)
+            Next
+            Return result
+        End If
+
+        ' Split on commas, then handle each token
+        For Each token In pagesSpec.Split(","c)
+            Dim trimmed = token.Trim()
+            If String.IsNullOrEmpty(trimmed) Then Continue For
+
+            Dim dashIdx = trimmed.IndexOf("-"c)
+            If dashIdx > 0 Then
+                ' Range: "2-5"
+                Dim startStr = trimmed.Substring(0, dashIdx).Trim()
+                Dim endStr = trimmed.Substring(dashIdx + 1).Trim()
+                Dim startPage As Integer
+                Dim endPage As Integer
+                If Integer.TryParse(startStr, startPage) AndAlso Integer.TryParse(endStr, endPage) Then
+                    startPage = Math.Max(1, startPage)
+                    endPage = Math.Min(totalPages, endPage)
+                    For i = startPage To endPage
+                        If Not result.Contains(i - 1) Then result.Add(i - 1)
+                    Next
+                End If
+            Else
+                ' Single page: "3"
+                Dim pageNum As Integer
+                If Integer.TryParse(trimmed, pageNum) AndAlso pageNum >= 1 AndAlso pageNum <= totalPages Then
+                    If Not result.Contains(pageNum - 1) Then result.Add(pageNum - 1)
+                End If
+            End If
+        Next
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Reads a Double value from a JObject token with a fallback default.
+    ''' </summary>
+    Private Shared Function GetJDouble(obj As JObject, key As String, defaultVal As Double) As Double
+        Dim token = obj(key)
+        If token Is Nothing Then Return defaultVal
+        Dim result As Double
+        If Double.TryParse(token.ToString(), Globalization.NumberStyles.Any,
+                          Globalization.CultureInfo.InvariantCulture, result) Then
+            Return result
+        End If
+        Return defaultVal
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  PDF OVERLAY/WATERMARK HARDENING HELPERS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Checks whether a PDF file is encrypted by inspecting PdfSharp's SecurityHandler
+    ''' and falling back to a chunked byte-level scan for the /Encrypt marker.
+    ''' Mirrors ExhibitStampService.IsPdfEncrypted from the Word add-in.
+    ''' </summary>
+    Private Shared Function APOverlayIsPdfEncrypted(pdfPath As String) As Boolean
+        ' Method 1: Try PdfSharp — check SecurityHandler
+        Try
+            Using doc As PdfSharp.Pdf.PdfDocument =
+                    PdfSharp.Pdf.IO.PdfReader.Open(pdfPath, PdfSharp.Pdf.IO.PdfDocumentOpenMode.InformationOnly)
+                If doc.SecurityHandler IsNot Nothing Then
+                    Return True
+                End If
+            End Using
+        Catch
+            ' PdfSharp couldn't open it at all — likely encrypted with a user password.
+            ' Fall through to byte-level scan.
+        End Try
+
+        ' Method 2: Byte-level scan for /Encrypt marker (chunked for large files)
+        Try
+            Const chunkSize As Integer = 65536
+            Dim overlap As Integer = 7 ' Length of "/Encrypt" minus 1
+
+            Using fs As New FileStream(pdfPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite)
+                Dim buffer(chunkSize + overlap - 1) As Byte
+                Dim carryOver As Integer = 0
+
+                While True
+                    Dim bytesRead As Integer = fs.Read(buffer, carryOver, chunkSize)
+                    If bytesRead = 0 Then Exit While
+
+                    Dim totalInBuffer As Integer = carryOver + bytesRead
+                    Dim text As String = System.Text.Encoding.ASCII.GetString(buffer, 0, totalInBuffer)
+                    If text.IndexOf("/Encrypt", StringComparison.Ordinal) >= 0 Then
+                        Return True
+                    End If
+
+                    ' Keep the last few bytes for overlap into next chunk
+                    If totalInBuffer > overlap Then
+                        Array.Copy(buffer, totalInBuffer - overlap, buffer, 0, overlap)
+                        carryOver = overlap
+                    Else
+                        carryOver = totalInBuffer
+                    End If
+                End While
+            End Using
+
+            Return False
+        Catch
+            Return True ' Can't read → assume encrypted
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Counts pages in a PDF file using PdfPig (read-only, handles most PDF types).
+    ''' Returns -1 if the file cannot be read.
+    ''' </summary>
+    Private Shared Function APOverlayGetPdfPageCount(pdfPath As String) As Integer
+        Try
+            Using doc As UglyToad.PdfPig.PdfDocument = UglyToad.PdfPig.PdfDocument.Open(pdfPath)
+                Return doc.NumberOfPages
+            End Using
+        Catch
+            Return -1
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Compares the page count of an original PDF with its output.
+    ''' Returns a warning string if they differ, or Nothing if they match.
+    ''' </summary>
+    Private Shared Function APOverlayVerifyPageCount(originalPath As String, outputPath As String) As String
+        Dim origPages = APOverlayGetPdfPageCount(originalPath)
+        Dim outPages = APOverlayGetPdfPageCount(outputPath)
+
+        If origPages = -1 OrElse outPages = -1 Then
+            Return $"Could not verify page count (original={If(origPages = -1, "unreadable", origPages.ToString())}, output={If(outPages = -1, "unreadable", outPages.ToString())})."
+        End If
+
+        If origPages <> outPages Then
+            Return $"PAGE COUNT MISMATCH: original has {origPages} page(s) but output has {outPages} page(s)."
+        End If
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Validates that an output PDF file exists, is non-empty, and readable.
+    ''' Throws <see cref="InvalidOperationException"/> on failure.
+    ''' </summary>
+    Private Shared Sub APOverlayValidateOutput(inputPath As String, outputPath As String)
+        If Not File.Exists(outputPath) Then
+            Throw New InvalidOperationException(
+                "Output file was not created — the source PDF may be encrypted or corrupt.")
+        End If
+
+        Dim outputSize As Long = New FileInfo(outputPath).Length
+        If outputSize = 0 Then
+            Try : File.Delete(outputPath) : Catch : End Try
+            Throw New InvalidOperationException(
+                "Output file is empty — the source PDF may be encrypted or corrupt.")
+        End If
+
+        Dim pageCount = APOverlayGetPdfPageCount(outputPath)
+        If pageCount = 0 Then
+            Try : File.Delete(outputPath) : Catch : End Try
+            Throw New InvalidOperationException(
+                "Output PDF contains no pages — the source PDF may be encrypted or corrupt.")
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Draws overlay elements (text and image) onto PdfSharp document pages.
+    ''' Shared by both the direct overlay path and the rasterize fallback.
+    ''' </summary>
+    Private Sub APOverlayDrawElements(
+            doc As PdfSharp.Pdf.PdfDocument,
+            totalPages As Integer,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        For Each elemObj As JObject In elementsArray
+            Dim elemType = If(elemObj.Value(Of String)("type"), "text").ToLowerInvariant()
+            Dim pagesSpec = If(elemObj.Value(Of String)("pages"), "all").Trim().ToLowerInvariant()
+            Dim x As Double = GetJDouble(elemObj, "x", 0)
+            Dim y As Double = GetJDouble(elemObj, "y", 0)
+            Dim rotation As Double = GetJDouble(elemObj, "rotation", 0)
+            Dim opacity As Double = GetJDouble(elemObj, "opacity", 1.0)
+
+            ' Resolve target page indices (0-based)
+            Dim pageIndices = ResolvePageIndices(pagesSpec, totalPages)
+            If pageIndices.Count = 0 Then Continue For
+
+            For Each pageIdx In pageIndices
+                If pageIdx < 0 OrElse pageIdx >= totalPages Then Continue For
+                Dim page = doc.Pages(pageIdx)
+
+                Using gfx = PdfSharp.Drawing.XGraphics.FromPdfPage(page, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                    If elemType = "text" Then
+                        ' ── TEXT ELEMENT ──
+                        Dim text = If(elemObj.Value(Of String)("text"), "")
+                        If String.IsNullOrEmpty(text) Then Continue For
+
+                        ' Handle \n escape sequences for multi-line text
+                        text = text.Replace("\\n", vbLf).Replace("\n", vbLf)
+
+                        Dim fontFamily = If(elemObj.Value(Of String)("font_family"), "Arial")
+                        Dim fontSize As Double = GetJDouble(elemObj, "font_size", 12)
+                        Dim isBold = GetJBool(elemObj, "bold")
+                        Dim isItalic = GetJBool(elemObj, "italic")
+                        Dim hAlign = If(elemObj.Value(Of String)("h_align"), "left").ToLowerInvariant()
+                        Dim maxWidth As Double = GetJDouble(elemObj, "max_width", 0)
+                        Dim fontColorHex = If(elemObj.Value(Of String)("font_color"), "#000000")
+
+                        ' Build font style
+                        Dim fontStyle As PdfSharp.Drawing.XFontStyleEx = PdfSharp.Drawing.XFontStyleEx.Regular
+                        If isBold AndAlso isItalic Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.BoldItalic
+                        ElseIf isBold Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.Bold
+                        ElseIf isItalic Then
+                            fontStyle = PdfSharp.Drawing.XFontStyleEx.Italic
+                        End If
+
+                        Dim font = New PdfSharp.Drawing.XFont(fontFamily, fontSize, fontStyle)
+
+                        ' Parse color
+                        Dim brush As PdfSharp.Drawing.XBrush = PdfSharp.Drawing.XBrushes.Black
+                        Try
+                            Dim colorHex = fontColorHex.TrimStart("#"c)
+                            If colorHex.Length = 6 Then
+                                Dim r = System.Convert.ToInt32(colorHex.Substring(0, 2), 16)
+                                Dim g = System.Convert.ToInt32(colorHex.Substring(2, 2), 16)
+                                Dim b = System.Convert.ToInt32(colorHex.Substring(4, 2), 16)
+                                Dim alphaInt = CInt(Math.Round(Math.Max(0, Math.Min(1, opacity)) * 255))
+                                brush = New PdfSharp.Drawing.XSolidBrush(
+                                    PdfSharp.Drawing.XColor.FromArgb(alphaInt, r, g, b))
+                            End If
+                        Catch
+                        End Try
+
+                        ' Determine string format for alignment
+                        Dim xFormat As New PdfSharp.Drawing.XStringFormat()
+                        xFormat.LineAlignment = PdfSharp.Drawing.XLineAlignment.Near
+                        Select Case hAlign
+                            Case "center" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Center
+                            Case "right" : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Far
+                            Case Else : xFormat.Alignment = PdfSharp.Drawing.XStringAlignment.Near
+                        End Select
+
+                        ' Apply rotation if specified
+                        Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                        If rotation <> 0 Then
+                            state = gfx.Save()
+                            gfx.TranslateTransform(x, y)
+                            gfx.RotateTransform(rotation)
+                            gfx.TranslateTransform(-x, -y)
+                        End If
+
+                        ' Handle multi-line text
+                        Dim lines = text.Split({vbLf}, StringSplitOptions.None)
+                        Dim lineHeight = fontSize * 1.25
+                        Dim currentY = y
+
+                        For Each line In lines
+                            If maxWidth > 0 Then
+                                Dim rect As New PdfSharp.Drawing.XRect(x, currentY, maxWidth, lineHeight)
+                                gfx.DrawString(line, font, brush, rect, xFormat)
+                            Else
+                                Dim drawPoint As New PdfSharp.Drawing.XPoint(x, currentY)
+                                gfx.DrawString(line, font, brush, drawPoint, xFormat)
+                            End If
+                            currentY += lineHeight
+                        Next
+
+                        If state IsNot Nothing Then gfx.Restore(state)
+                        textCount += 1
+
+                    ElseIf elemType = "image" Then
+                        ' ── IMAGE ELEMENT ──
+                        Dim imgName = elemObj.Value(Of String)("image_attachment_name")
+                        If String.IsNullOrWhiteSpace(imgName) Then Continue For
+
+                        Dim imgPath As String = Nothing
+                        If Not imageCache.TryGetValue(imgName, imgPath) OrElse
+                           String.IsNullOrEmpty(imgPath) OrElse Not File.Exists(imgPath) Then
+                            context.Log($"Image attachment not found: {imgName}")
+                            Continue For
+                        End If
+
+                        Dim imgWidth As Double = GetJDouble(elemObj, "width", 0)
+                        Dim imgHeight As Double = GetJDouble(elemObj, "height", 0)
+
+                        ' Load image via stream to support all formats
+                        Using imgStream As New FileStream(imgPath, FileMode.Open, FileAccess.Read, FileShare.Read)
+                            Using xImg = PdfSharp.Drawing.XImage.FromStream(imgStream)
+                                ' Default to native size if not specified
+                                If imgWidth <= 0 AndAlso imgHeight <= 0 Then
+                                    imgWidth = xImg.PointWidth
+                                    imgHeight = xImg.PointHeight
+                                ElseIf imgWidth > 0 AndAlso imgHeight <= 0 Then
+                                    ' Scale proportionally
+                                    imgHeight = xImg.PointHeight * (imgWidth / xImg.PointWidth)
+                                ElseIf imgHeight > 0 AndAlso imgWidth <= 0 Then
+                                    imgWidth = xImg.PointWidth * (imgHeight / xImg.PointHeight)
+                                End If
+
+                                ' Apply rotation if specified
+                                Dim state As PdfSharp.Drawing.XGraphicsState = Nothing
+                                If rotation <> 0 Then
+                                    state = gfx.Save()
+                                    Dim cx = x + imgWidth / 2
+                                    Dim cy = y + imgHeight / 2
+                                    gfx.TranslateTransform(cx, cy)
+                                    gfx.RotateTransform(rotation)
+                                    gfx.TranslateTransform(-cx, -cy)
+                                End If
+
+                                gfx.DrawImage(xImg, x, y, imgWidth, imgHeight)
+
+                                If state IsNot Nothing Then gfx.Restore(state)
+                                imageCount += 1
+                            End Using
+                        End Using
+                    End If
+                End Using
+            Next
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Rasterize fallback for watermark: renders every page via PdfiumViewer, then
+    ''' invokes a callback to draw the watermark on each rasterized page.
+    ''' CRITICAL: PdfiumViewer types must NOT appear in the calling method's signature
+    ''' to avoid JIT resolution before pdfium.dll is loaded.
+    ''' </summary>
+    Private Shared Sub APOverlayViaRasterize(
+            inputPath As String,
+            outputPath As String,
+            drawCallback As Action(Of PdfSharp.Drawing.XGraphics, Double, Double, Integer))
+
+        APRedactEnsurePdfiumLoaded()
+        EnsureApPdfSharpFontResolver()
+        APOverlayViaRasterizeCore(inputPath, outputPath, drawCallback)
+    End Sub
+
+    ''' <summary>
+    ''' Core rasterize implementation for watermark, separated to ensure pdfium.dll
+    ''' is loaded before PdfiumViewer types are JIT-resolved.
+    ''' </summary>
+    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
+    Private Shared Sub APOverlayViaRasterizeCore(
+            inputPath As String,
+            outputPath As String,
+            drawCallback As Action(Of PdfSharp.Drawing.XGraphics, Double, Double, Integer))
+
+        Const renderDpi As Integer = 200
+
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            If pdf.PageCount = 0 Then
+                Throw New InvalidOperationException("The PDF contains no pages.")
+            End If
+
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+
+            Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
+
+            For pageIndex As Integer = 0 To pdf.PageCount - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * renderDpi))
+                Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * renderDpi))
+
+                ' Declare outPage OUTSIDE the Using rendered block so it stays in scope
+                Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                Using rendered As System.Drawing.Image =
+                    pdf.Render(pageIndex, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
+
+                    ' Draw rasterized page image
+                    Using ms As New MemoryStream()
+                        Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                        For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                            If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                        Next
+                        If jpegEncoder IsNot Nothing Then
+                            Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                            ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
+                            rendered.Save(ms, jpegEncoder, ep)
+                        Else
+                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        End If
+
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+
+                ' Draw overlay content on top of the rasterized page
+                Using gfx As PdfSharp.Drawing.XGraphics =
+                    PdfSharp.Drawing.XGraphics.FromPdfPage(outPage, PdfSharp.Drawing.XGraphicsPdfPageOptions.Append)
+                    drawCallback(gfx, outPage.Width.Point, outPage.Height.Point, pageIndex)
+                End Using
+            Next
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
+    End Sub
+    Private Sub APOverlayViaRasterizeWithElements(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        EnsureApPdfSharpFontResolver()
+
+        Dim usedWindowsPdf As Boolean = False
+
+#If HAS_WINRT Then
+        If Environment.OSVersion.Version.Major >= 10 Then
+            Try
+                APOverlayViaRasterizeWithElementsWindowsPdf(inputPath, outputPath, elementsArray,
+                                                             imageCache, context, textCount, imageCount)
+                usedWindowsPdf = True
+            Catch ex As Exception
+                Debug.WriteLine($"APOverlayViaRasterizeWithElements: Windows.Data.Pdf failed: {ex.Message} — falling back to PdfiumViewer")
+                usedWindowsPdf = False
+            End Try
+        End If
+#End If
+
+        If Not usedWindowsPdf Then
+            APRedactEnsurePdfiumLoaded()
+            APOverlayViaRasterizeWithElementsCore(inputPath, outputPath, elementsArray,
+                                                   imageCache, context, textCount, imageCount)
+        End If
+    End Sub
+
+    Private Sub APOverlayViaRasterizeWithElementsWindowsPdf(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Dim tc As Integer = 0
+        Dim ic As Integer = 0
+        Dim renderException As Exception = Nothing
+
+        Dim staThread As New System.Threading.Thread(
+            Sub()
+                Try
+                    APOverlayViaRasterizeWithElementsWindowsPdfCore(
+                        inputPath, outputPath, elementsArray, imageCache, context, tc, ic)
+                Catch ex As Exception
+                    renderException = ex
+                End Try
+            End Sub)
+
+        staThread.SetApartmentState(System.Threading.ApartmentState.STA)
+        staThread.IsBackground = True
+        staThread.Start()
+
+        If Not staThread.Join(TimeSpan.FromMinutes(5)) Then
+            Try : staThread.Abort() : Catch : End Try
+            Throw New TimeoutException("Windows.Data.Pdf rendering timed out after 5 minutes.")
+        End If
+
+        textCount = tc
+        imageCount = ic
+
+        If renderException IsNot Nothing Then
+            Throw renderException
+        End If
+#End If
+    End Sub
+
+    Private Sub APOverlayViaRasterizeWithElementsWindowsPdfCore(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+#If Not HAS_WINRT Then
+        Throw New PlatformNotSupportedException("Windows.Data.Pdf is not available.")
+#Else
+        Const renderDpi As Integer = 200
+
+        Dim storageFile As Windows.Storage.StorageFile =
+            Windows.Storage.StorageFile.GetFileFromPathAsync(inputPath).GetAwaiter().GetResult()
+        Dim winPdf As Windows.Data.Pdf.PdfDocument =
+            Windows.Data.Pdf.PdfDocument.LoadFromFileAsync(storageFile).GetAwaiter().GetResult()
+
+        If winPdf.PageCount = 0 Then
+            Throw New InvalidOperationException("The PDF contains no pages.")
+        End If
+
+        Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+        Dim totalPages As Integer = CInt(winPdf.PageCount)
+        Dim scaleFactor As Double = renderDpi / 96.0
+
+        ' Rasterize all pages
+        For pageIndex As UInteger = 0 To CUInt(totalPages - 1)
+            Dim page As Windows.Data.Pdf.PdfPage = winPdf.GetPage(pageIndex)
+
+            Dim pageWidthPt As Double = page.Size.Width * 72.0 / 96.0
+            Dim pageHeightPt As Double = page.Size.Height * 72.0 / 96.0
+            Dim renderWidthPx As UInteger = CUInt(Math.Round(page.Size.Width * scaleFactor))
+            Dim renderHeightPx As UInteger = CUInt(Math.Round(page.Size.Height * scaleFactor))
+
+            Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+            outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(pageWidthPt)
+            outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(pageHeightPt)
+
+            Using renderStream As New Windows.Storage.Streams.InMemoryRandomAccessStream()
+                Dim renderOptions As New Windows.Data.Pdf.PdfPageRenderOptions()
+                renderOptions.DestinationWidth = renderWidthPx
+                renderOptions.DestinationHeight = renderHeightPx
+                renderOptions.BitmapEncoderId = Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId
+
+                page.RenderToStreamAsync(renderStream, renderOptions).GetAwaiter().GetResult()
+                renderStream.Seek(0)
+
+                Dim netStream As System.IO.Stream =
+                    System.IO.WindowsRuntimeStreamExtensions.AsStreamForRead(renderStream)
+
+                Using pngMs As New MemoryStream()
+                    netStream.CopyTo(pngMs)
+                    pngMs.Position = 0
+
+                    Using bmp As New System.Drawing.Bitmap(pngMs)
+                        Using jpegMs As New MemoryStream()
+                            Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                            For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                                If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                            Next
+                            If jpegEncoder IsNot Nothing Then
+                                Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                                ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                    System.Drawing.Imaging.Encoder.Quality, 85L)
+                                bmp.Save(jpegMs, jpegEncoder, ep)
+                            Else
+                                bmp.Save(jpegMs, System.Drawing.Imaging.ImageFormat.Png)
+                            End If
+                            jpegMs.Position = 0
+
+                            Using xgfx As PdfSharp.Drawing.XGraphics =
+                                PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                                Using ximg As PdfSharp.Drawing.XImage =
+                                    PdfSharp.Drawing.XImage.FromStream(jpegMs)
+                                    xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                                End Using
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            End Using
+
+            page.Dispose()
+        Next
+
+        ' Draw overlay elements on the rasterized pages
+        APOverlayDrawElements(outDoc, totalPages, elementsArray, imageCache, context,
+                              textCount, imageCount)
+
+        outDoc.Save(outputPath)
+        outDoc.Close()
+#End If
+    End Sub
+
+    ''' <summary>
+    ''' Core rasterize + overlay implementation, separated to ensure pdfium.dll
+    ''' is loaded before PdfiumViewer types are JIT-resolved.
+    ''' </summary>
+    <Runtime.CompilerServices.MethodImpl(Runtime.CompilerServices.MethodImplOptions.NoInlining)>
+    Private Sub APOverlayViaRasterizeWithElementsCore(
+            inputPath As String,
+            outputPath As String,
+            elementsArray As JArray,
+            imageCache As Dictionary(Of String, String),
+            context As ToolExecutionContext,
+            ByRef textCount As Integer,
+            ByRef imageCount As Integer)
+
+        Const renderDpi As Integer = 200
+
+        Using pdf As PdfiumViewer.PdfDocument = PdfiumViewer.PdfDocument.Load(inputPath)
+            If pdf.PageCount = 0 Then
+                Throw New InvalidOperationException("The PDF contains no pages.")
+            End If
+
+            Dim outDoc As New PdfSharp.Pdf.PdfDocument()
+            Dim totalPages = pdf.PageCount
+
+            Dim renderFlags As PdfiumViewer.PdfRenderFlags =
+                PdfiumViewer.PdfRenderFlags.Annotations Or
+                PdfiumViewer.PdfRenderFlags.LcdText Or
+                PdfiumViewer.PdfRenderFlags.ForPrinting
+
+            ' Rasterize all pages first
+            For pageIndex As Integer = 0 To totalPages - 1
+                Dim sizePt As System.Drawing.SizeF = pdf.PageSizes(pageIndex)
+                Dim widthPx As Integer = CInt(Math.Round(sizePt.Width / 72.0 * renderDpi))
+                Dim heightPx As Integer = CInt(Math.Round(sizePt.Height / 72.0 * renderDpi))
+
+                ' Declare outPage OUTSIDE the Using rendered block so it stays in scope
+                Dim outPage As PdfSharp.Pdf.PdfPage = outDoc.AddPage()
+                outPage.Width = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Width)
+                outPage.Height = PdfSharp.Drawing.XUnit.FromPoint(sizePt.Height)
+
+                Using rendered As System.Drawing.Image =
+                    pdf.Render(pageIndex, widthPx, heightPx, renderDpi, renderDpi, renderFlags)
+
+                    Using ms As New MemoryStream()
+                        Dim jpegEncoder As System.Drawing.Imaging.ImageCodecInfo = Nothing
+                        For Each codec In System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                            If codec.MimeType = "image/jpeg" Then jpegEncoder = codec : Exit For
+                        Next
+                        If jpegEncoder IsNot Nothing Then
+                            Dim ep As New System.Drawing.Imaging.EncoderParameters(1)
+                            ep.Param(0) = New System.Drawing.Imaging.EncoderParameter(
+                                System.Drawing.Imaging.Encoder.Quality, 85L)
+                            rendered.Save(ms, jpegEncoder, ep)
+                        Else
+                            rendered.Save(ms, System.Drawing.Imaging.ImageFormat.Png)
+                        End If
+
+                        ms.Position = 0
+                        Using xgfx As PdfSharp.Drawing.XGraphics = PdfSharp.Drawing.XGraphics.FromPdfPage(outPage)
+                            Using ximg As PdfSharp.Drawing.XImage = PdfSharp.Drawing.XImage.FromStream(ms)
+                                xgfx.DrawImage(ximg, 0, 0, outPage.Width.Point, outPage.Height.Point)
+                            End Using
+                        End Using
+                    End Using
+                End Using
+            Next
+
+            ' Now draw overlay elements on the rasterized pages
+            APOverlayDrawElements(outDoc, totalPages, elementsArray, imageCache, context,
+                                  textCount, imageCount)
+
+            outDoc.Save(outputPath)
+            outDoc.Close()
+        End Using
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL IDENTIFICATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -4800,6 +7628,13 @@ Partial Public Class ThisAddIn
                  AP_Tool_CreatePowerPoint,
                  AP_Tool_CreateCodeFile,
                  AP_Tool_CommentPdf,
+                 AP_Tool_ExtractDataFromAttachments,
+                 AP_Tool_RedactPdf,
+                 AP_Tool_OverlayPdf,
+                 AP_Tool_CreateAudioFile,
+                 AP_Tool_GenerateImage,
+                 AP_Tool_WebGrounding,
+                 AP_Tool_ManageScheduledTasks,
                  AP_Tool_ReportInability
                 Return True
             Case Else

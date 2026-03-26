@@ -35,6 +35,8 @@
 '     - chkPermitCommands:    Allow LLM to execute write operations
 '     - chkEnableTooling:     Enable tool calling loop (when model supports tools)
 '     - chkShowToolingLog:    Show/hide the tooling log window during tool runs
+'     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
+'     - Set from INI_ToolingLogWindow on first session load; not persisted
 '     - chkStayOnTop:         Toggle always-on-top window behavior
 '     - chkConvertMarkdown:   Apply Markdown formatting to inserted text
 '
@@ -87,6 +89,22 @@
 '     - Passed to ExecuteToolingLoop via hideLogWindow:=Not chkShowToolingLog.Checked
 '     - Persisted to My.Settings.ChatShowToolingLog
 '
+'   • ToolTrigger "(t)" - One-Shot Tooling Model:
+'     - Users can type "(t)" anywhere in their prompt to invoke a one-shot tooling request.
+'     - The "(t)" token is always stripped from the prompt before it is sent to the LLM.
+'     - On detection, btnSend_Click loads the model marked ToolDefaultModel=True from the
+'       alternate models INI via GetSpecialTaskModel, without permanently altering context.
+'     - The ToolDefaultModel config is captured (snapshot), the global context is immediately
+'       restored, and the snapshot is applied temporarily only for the ExecuteToolingLoop call.
+'     - If no tools are currently selected, the tool selection dialog is shown (forceDialog).
+'     - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
+'       tools selected. Each failure reports an error to chat and restores the original prompt
+'       (prefixed with "(t)") into txtUserInput so the user can resend without retyping.
+'     - Availability is checked at form load via IsToolDefaultModelAvailable() (reads INI without
+'       applying). When available, lblInstructions includes "(t)" usage hint.
+'     - The one-shot model is never persisted — after the request completes, subsequent messages
+'       use whatever model was previously active (primary/secondary/alternate).
+'
 ' Bot Command Execution (Optional)
 '   Pattern: [#verb: @@argument1@@ §§argument2§§ #]
 '
@@ -136,9 +154,9 @@
 '
 '   • User Preferences:
 '     - IncludeDocument, IncludeSelection, DoCommands
-'     - ChatEnableTooling, ChatShowToolingLog
+'     - ChatEnableTooling (persisted), ChatShowToolingLog (session-only, from INI)
 '     - NotAlwaysOnTop, ConvertMarkdownInChat
-'     - All persisted via My.Settings
+'     - All persisted via My.Settings except ChatShowToolingLog
 '
 ' Safety & COM Interop
 '   • Word View Management:
@@ -235,6 +253,8 @@ Public Class frmAIChat
     ''' <summary>Abbreviated name prefixed to comment replies (e.g., "RI: Reply text").</summary>
     Const AN6 As String = "RI"
 
+    Const ToolTrigger As String = "(t)"
+
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
     ''' Acts as temporary marker to prevent infinite loops when searching for replaced text.
@@ -309,6 +329,12 @@ Public Class frmAIChat
     ''' </summary>
     Private _selectedToolsForChat As List(Of ModelConfig) = Nothing
 
+    ''' <summary>
+    ''' Guards first-time initialization of the tooling log checkbox from INI_ToolingLogWindow.
+    ''' After the first call to UpdateToolingControlsState, mid-session user toggles are preserved.
+    ''' </summary>
+    Private _toolingControlsInitialized As Boolean = False
+
     ' =========================================================================
     ' UI Controls - Buttons
     ' =========================================================================
@@ -341,6 +367,81 @@ Public Class frmAIChat
     ''' </summary>
     Private WithEvents btnTools As New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
 
+
+    ' =========================================================================
+    ' ToolTrigger (t) Support - ToolDefaultModel
+    ' =========================================================================
+
+    ''' <summary>
+    ''' Checks whether a "ToolDefaultModel" entry exists in the alternate models INI
+    ''' without applying it to the shared context. Used for UI hints and pre-validation.
+    ''' </summary>
+    ''' <returns>True if a model with ToolDefaultModel=True is defined; otherwise False.</returns>
+    Private Function IsToolDefaultModelAvailable() As Boolean
+        Try
+            Dim iniPath As String = _context.INI_AlternateModelPath
+            If String.IsNullOrWhiteSpace(iniPath) Then Return False
+
+            iniPath = SharedMethods.ExpandEnvironmentVariables(iniPath)
+            If Not System.IO.File.Exists(iniPath) Then Return False
+
+            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+                "true", "yes", "wahr", "ja", "on", "1"
+            }
+
+            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each rawLine In System.IO.File.ReadAllLines(iniPath)
+                Dim line = rawLine.Trim()
+                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
+                    Continue For
+                End If
+
+                ' Section header
+                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
+                    ' Check previous section before clearing
+                    If currentDict.ContainsKey("ToolDefaultModel") Then
+                        Dim raw As String = currentDict("ToolDefaultModel")
+                        If raw IsNot Nothing Then
+                            Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
+                            Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
+                            raw = raw.Trim()
+                            If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
+                                raw = raw.Substring(1, raw.Length - 2).Trim()
+                            End If
+                            If truthy.Contains(raw.ToLowerInvariant()) Then Return True
+                        End If
+                    End If
+                    currentDict.Clear()
+                    Continue For
+                End If
+
+                ' Parse key=value
+                Dim tokens = line.Split(New Char() {"="c}, 2)
+                If tokens.Length = 2 Then
+                    currentDict(tokens(0).Trim()) = tokens(1).Trim()
+                End If
+            Next
+
+            ' Check final section
+            If currentDict.ContainsKey("ToolDefaultModel") Then
+                Dim raw As String = currentDict("ToolDefaultModel")
+                If raw IsNot Nothing Then
+                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
+                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
+                    raw = raw.Trim()
+                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
+                        raw = raw.Substring(1, raw.Length - 2).Trim()
+                    End If
+                    If truthy.Contains(raw.ToLowerInvariant()) Then Return True
+                End If
+            End If
+
+            Return False
+        Catch
+            Return False
+        End Try
+    End Function
 
     ' =========================================================================
     ' UI Controls - Checkboxes
@@ -395,11 +496,14 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' When checked, shows the tooling log window during tool execution.
+    ''' Not persisted — set from INI_ToolingLogWindow on first session load,
+    ''' then preserves user's mid-session toggle. Respected by (t) trigger
+    ''' even when the checkbox is disabled (non-tooling model).
     ''' </summary>
     Private WithEvents chkShowToolingLog As New System.Windows.Forms.CheckBox() With {
     .Text = "Tooling log",
     .AutoSize = True,
-    .Checked = My.Settings.ChatShowToolingLog
+    .Checked = False
 }
 
     ''' <summary>
@@ -464,6 +568,19 @@ Public Class frmAIChat
         .Height = 40
     }
 
+    ''' <summary>
+    ''' SplitContainer separating the chat history (Panel1) from the user input (Panel2).
+    ''' The splitter bar allows the user to resize the input area by dragging.
+    ''' </summary>
+    Private WithEvents splitChat As New SplitContainer() With {
+        .Dock = DockStyle.Fill,
+        .Orientation = Orientation.Horizontal,
+        .FixedPanel = FixedPanel.Panel2,
+        .SplitterWidth = 6,
+        .Panel2MinSize = 40,
+        .Panel1MinSize = 100
+    }
+
     ' =========================================================================
     ' Private Fields - Application State
     ' =========================================================================
@@ -493,8 +610,9 @@ Public Class frmAIChat
 
     ''' <summary>
     ''' Initializes the chat form with shared context and constructs the UI layout.
-    ''' Creates a TableLayoutPanel with 5 rows: instructions label, chat history,
-    ''' user input, checkboxes panel, and buttons panel.
+    ''' Creates a TableLayoutPanel with 4 rows: instructions label, split chat/input area,
+    ''' checkboxes panel, and buttons panel. The chat history and user input are separated
+    ''' by a draggable splitter so the user can resize the input area.
     ''' </summary>
     ''' <param name="context">Shared context providing INI settings and LLM configuration</param>
     Public Sub New(context As ISharedContext)
@@ -506,11 +624,13 @@ Public Class frmAIChat
         ' Configure text controls for multiline input
         txtChatHistory.Multiline = True
         txtUserInput.Multiline = True
+        txtUserInput.ScrollBars = ScrollBars.Vertical
+        txtUserInput.WordWrap = True
 
-        ' Create main layout container (5 rows, 1 column)
+        ' Create main layout container (4 rows, 1 column)
         Dim mainLayout As New TableLayoutPanel() With {
             .ColumnCount = 1,
-            .RowCount = 5,
+            .RowCount = 4,
             .Dock = DockStyle.Fill,
             .AutoSize = False,
             .Padding = New Padding(10)
@@ -525,13 +645,11 @@ Public Class frmAIChat
 
         ' Define row sizing behavior:
         ' Row 0 (instructions): Auto-size to content
-        ' Row 1 (chat history): Fill remaining space (100%)
-        ' Row 2 (user input): Auto-size to content
-        ' Row 3 (checkboxes): Auto-size to content
-        ' Row 4 (buttons): Auto-size to content
+        ' Row 1 (split container with chat + input): Fill remaining space (100%)
+        ' Row 2 (checkboxes): Auto-size to content
+        ' Row 3 (buttons): Auto-size to content
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
-        mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
         mainLayout.RowStyles.Add(New RowStyle(SizeType.AutoSize))
 
@@ -541,12 +659,17 @@ Public Class frmAIChat
         txtChatHistory.Dock = DockStyle.Fill
         txtUserInput.Dock = DockStyle.Fill
 
+        ' Configure the SplitContainer panels
+        ' Panel1 = chat history (top), Panel2 = user input (bottom, resizable via splitter)
+        splitChat.Panel1.Controls.Add(txtChatHistory)
+        splitChat.Panel2.Controls.Add(txtUserInput)
+        splitChat.SplitterDistance = 300 ' Default: generous space for chat history
+
         ' Add controls to layout (column 0, respective rows)
         mainLayout.Controls.Add(lblInstructions, 0, 0)
-        mainLayout.Controls.Add(txtChatHistory, 0, 1)
-        mainLayout.Controls.Add(txtUserInput, 0, 2)
-        mainLayout.Controls.Add(pnlCheckboxes, 0, 3)
-        mainLayout.Controls.Add(pnlButtons, 0, 4)
+        mainLayout.Controls.Add(splitChat, 0, 1)
+        mainLayout.Controls.Add(pnlCheckboxes, 0, 2)
+        mainLayout.Controls.Add(pnlButtons, 0, 3)
 
         ' Initialize HTML chat UI (WebBrowser control overlay)
         InitChatHtmlUI(mainLayout)
@@ -600,13 +723,6 @@ Public Class frmAIChat
             hasExistingChat = True
         End If
 
-        Try
-            If My.Settings.ChatShowToolingLog = False AndAlso _context.INI_ToolingLogWindow Then
-                chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
-            End If
-        Catch
-        End Try
-
         ' Configure form appearance
         Me.Font = New System.Drawing.Font("Segoe UI", 9)
         Me.FormBorderStyle = FormBorderStyle.Sizable
@@ -621,12 +737,29 @@ Public Class frmAIChat
         Else
             Me.StartPosition = FormStartPosition.CenterScreen
         End If
+        SharedMethods.EnsureVisibleOnScreen(Me)
+
+        ' Set input panel to double the original designer height (63px × 2 = 126px)
+        Try
+            Dim desiredInputHeight As Integer = 126
+            Dim newDistance As Integer = splitChat.Height - desiredInputHeight - splitChat.SplitterWidth
+            If newDistance >= splitChat.Panel1MinSize Then
+                splitChat.SplitterDistance = newDistance
+            End If
+        Catch
+            ' Layout not ready yet; keep default SplitterDistance
+        End Try
 
         ' Attach input keydown handler (Enter to send, Shift+Enter for newline)
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
 
         ' Configure instructions label
-        lblInstructions.Text = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
+        ' Configure instructions label
+        Dim baseInstructions As String = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
+        If IsToolDefaultModelAvailable() Then
+            baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
+        End If
+        lblInstructions.Text = baseInstructions
         lblInstructions.AutoSize = True
         lblInstructions.Height = 50
         lblInstructions.Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
@@ -802,6 +935,21 @@ Public Class frmAIChat
         Dim errorOccurred As Boolean = False
         Dim errorMessage As String = ""
 
+        ' ──────────────────────────────────────────────────────────────
+        ' STEP 0: Detect and strip ToolTrigger "(t)" from user prompt
+        ' ──────────────────────────────────────────────────────────────
+        Dim toolTriggerDetected As Boolean = False
+        If userPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            toolTriggerDetected = True
+            userPrompt = userPrompt.Replace(ToolTrigger, "").Trim()
+
+            ' If the prompt is now empty after stripping, restore for user to fix
+            If String.IsNullOrWhiteSpace(userPrompt) Then
+                txtUserInput.Text = userPrompt
+                Return
+            End If
+        End If
+
         Try
             ' ──────────────────────────────────────────────────────────────
             ' STEP 1: Build System Prompt with Conditional Capabilities
@@ -939,7 +1087,67 @@ Public Class frmAIChat
             Dim useTooling As Boolean = False
             Dim currentConfig As ModelConfig = Nothing
 
-            If chkEnableTooling.Checked Then
+            ' One-shot ToolDefaultModel config used when (t) trigger is active
+            Dim toolTriggerConfig As ModelConfig = Nothing
+
+            If toolTriggerDetected Then
+                ' ── (t) trigger: load ToolDefaultModel for this single request ──
+                ' Snapshot current config, call GetSpecialTaskModel to apply it,
+                ' capture the applied config, then immediately restore original.
+                If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
+                    ' No alternate model INI configured at all
+                    Await UpdateUIAsync(Sub()
+                                            ReportCommandExecutionError(
+                                                $"The {ToolTrigger} trigger requires an alternate model configuration file, but none is configured.")
+                                            txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                        End Sub)
+                    Return
+                End If
+
+                Dim preToolConfig As ModelConfig = SharedMethods.GetCurrentConfig(_context)
+                Dim found As Boolean = SharedMethods.GetSpecialTaskModel(
+                    _context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+                If found Then
+                    ' Capture the just-applied ToolDefaultModel config
+                    toolTriggerConfig = SharedMethods.GetCurrentConfig(_context)
+
+                    ' Immediately restore original config so global context stays pristine
+                    If SharedMethods.originalConfigLoaded Then
+                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
+                    End If
+                    SharedMethods.originalConfigLoaded = False
+
+                    ' Verify that the ToolDefaultModel actually supports tooling
+                    If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
+                        Await UpdateUIAsync(Sub()
+                                                ReportCommandExecutionError(
+                                                    $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                                                txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                            End Sub)
+                        Return
+                    End If
+
+                    ' Force tooling on for this request
+                    useTooling = True
+                    currentConfig = toolTriggerConfig
+                Else
+                    ' Restore original config (GetSpecialTaskModel may have partially modified state)
+                    If SharedMethods.originalConfigLoaded Then
+                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
+                    End If
+                    SharedMethods.originalConfigLoaded = False
+
+                    ' Report error and allow user to resend
+                    Await UpdateUIAsync(Sub()
+                                            ReportCommandExecutionError(
+                                                $"The {ToolTrigger} trigger was used, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                                            txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                        End Sub)
+                    Return
+                End If
+            ElseIf chkEnableTooling.Checked Then
+                ' ── Standard tooling path (checkbox-based) ──
                 ' Get effective model config
                 If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
                     currentConfig = _alternateModelConfig
@@ -958,15 +1166,26 @@ Public Class frmAIChat
                     Dim wasTopMost As Boolean = Me.TopMost
                     Try
                         Me.TopMost = False
-                        ' Show tool selection dialog
-                        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=False)
+                        ' Show tool selection dialog (forceDialog when triggered by (t) to ensure user picks tools)
+                        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
+                            forceDialog:=toolTriggerDetected)
                     Finally
                         Me.TopMost = wasTopMost
                     End Try
 
                     ' If user cancelled or no tools selected, fall back to regular LLM
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                        useTooling = False
+                        If toolTriggerDetected Then
+                            ' For (t) trigger, tooling is mandatory — restore prompt and abort
+                            Await UpdateUIAsync(Sub()
+                                                    ReportCommandExecutionError(
+                                                        $"The {ToolTrigger} trigger requires {Globals.ThisAddIn.ToolFriendlyName.ToLower} to be selected. Please select at least one tool and try again.")
+                                                    txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                                End Sub)
+                            Return
+                        Else
+                            useTooling = False
+                        End If
                     End If
                 End If
             End If
@@ -992,15 +1211,21 @@ Public Class frmAIChat
 
 
             If useTooling AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
-                ' Apply alternate model config temporarily if selected
+                ' Apply model config temporarily for the tooling call
                 Dim backupConfig As ModelConfig = Nothing
-                Dim appliedAlternate As Boolean = False
+                Dim appliedOverride As Boolean = False
 
                 Try
-                    If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                    If toolTriggerDetected AndAlso toolTriggerConfig IsNot Nothing Then
+                        ' (t) trigger: apply the one-shot ToolDefaultModel config
+                        backupConfig = SharedMethods.GetCurrentConfig(_context)
+                        SharedMethods.ApplyModelConfig(_context, toolTriggerConfig)
+                        appliedOverride = True
+                    ElseIf _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                        ' Standard alternate model
                         backupConfig = SharedMethods.GetCurrentConfig(_context)
                         SharedMethods.ApplyModelConfig(_context, _alternateModelConfig)
-                        appliedAlternate = True
+                        appliedOverride = True
                     End If
 
                     ' Call ExecuteToolingLoop with the same fullPrompt as non-tooling calls
@@ -1010,12 +1235,12 @@ Public Class frmAIChat
                         SystemPrompt,
                         userPrompt,
                         _selectedToolsForChat,
-                        _useSecondApi,
+                        If(toolTriggerDetected, True, _useSecondApi),
                         fullPromptOverride:=fullPrompt.ToString(),
                         hideSplash:=True,
                         hideLogWindow:=Not chkShowToolingLog.Checked)
                 Finally
-                    If appliedAlternate AndAlso backupConfig IsNot Nothing Then
+                    If appliedOverride AndAlso backupConfig IsNot Nothing Then
                         SharedMethods.RestoreDefaults(_context, backupConfig)
                     End If
                 End Try
@@ -1370,12 +1595,15 @@ Public Class frmAIChat
 
 
     ''' <summary>
-    ''' Handles chkShowToolingLog checkbox change. Persists preference for showing tooling log window.
+    ''' Handles chkShowToolingLog checkbox change. Session-only; not persisted.
+    ''' The checked state is consumed by ExecuteToolingLoop (hideLogWindow parameter)
+    ''' and by the (t) trigger path, even when the checkbox is disabled.
     ''' </summary>
     Private Sub chkShowToolingLog_CheckedChanged(sender As Object, e As EventArgs)
-        My.Settings.ChatShowToolingLog = chkShowToolingLog.Checked
-        My.Settings.Save()
+        ' No persistence — checkbox state lives only for the current session.
+        ' Value is read at call time via: hideLogWindow:=Not chkShowToolingLog.Checked
     End Sub
+
 
     ''' <summary>
     ''' Handles chkConvertMarkdown checkbox click. Persists preference for Markdown formatting.
@@ -1542,6 +1770,8 @@ Public Class frmAIChat
     ''' <remarks>
     ''' Disables tooling when the effective model (primary/secondary/alternate) does not advertise tool support.
     ''' When tooling is disabled, cached tool selection (_selectedToolsForChat) is cleared.
+    ''' On first call, sets chkShowToolingLog from INI_ToolingLogWindow; subsequent calls preserve the user's toggle.
+    ''' The checkbox remains set (but disabled) on non-tooling models so the (t) trigger can still honour it.
     ''' </remarks>
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
@@ -1557,14 +1787,23 @@ Public Class frmAIChat
 
         chkEnableTooling.Enabled = supportsTooling
         btnTools.Enabled = supportsTooling
-        chkShowToolingLog.Enabled = supportsTooling AndAlso chkEnableTooling.Checked
+
+        ' Log checkbox is only enabled when the current model actually supports tooling
+        ' (not merely because a ToolDefaultModel exists — (t) uses it transiently)
+        chkShowToolingLog.Enabled = supportsTooling
 
         If Not supportsTooling Then
             chkEnableTooling.Checked = False
-            chkShowToolingLog.Checked = False
             _selectedToolsForChat = Nothing
         End If
+
+        ' Only set checkbox from INI on first initialization; preserve user's mid-session toggle afterward
+        If Not _toolingControlsInitialized Then
+            chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
+            _toolingControlsInitialized = True
+        End If
     End Sub
+
 
     ' =========================================================================
     ' Model Switching
@@ -3850,7 +4089,6 @@ Partial Public Class frmAIChat
     Private ReadOnly _mdPipeline As MarkdownPipeline =
         New MarkdownPipelineBuilder().
             UseAdvancedExtensions().
-            UseEmojiAndSmiley().
             UseSoftlineBreakAsHardlineBreak().
             Build()
 
@@ -3966,19 +4204,19 @@ Partial Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Initializes WebBrowser control and adds to host TableLayoutPanel.
+    ''' Initializes WebBrowser control and adds to the SplitContainer's Panel1.
     ''' Called from constructor after txtChatHistory placement.
     ''' </summary>
-    ''' <param name="host">TableLayoutPanel containing chat controls</param>
+    ''' <param name="host">TableLayoutPanel containing chat controls (unused but kept for API compat)</param>
     ''' <remarks>
-    ''' Hides txtChatHistory (plain text fallback), adds wbChat to row 1,
+    ''' Hides txtChatHistory (plain text fallback), adds wbChat to Panel1 of splitChat,
     ''' sets up BrowserBridge for JavaScript interaction, and wires event handlers.
     ''' </remarks>
     Public Sub InitChatHtmlUI(host As TableLayoutPanel)
         If host Is Nothing Then Return
 
         txtChatHistory.Visible = False
-        host.Controls.Add(wbChat, 0, 1)
+        splitChat.Panel1.Controls.Add(wbChat)
         wbChat.BringToFront()
 
         ' Expose COM bridge for JavaScript interaction

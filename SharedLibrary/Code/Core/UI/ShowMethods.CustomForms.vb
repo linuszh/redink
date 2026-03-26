@@ -107,24 +107,67 @@ Namespace SharedLibrary
 
             Dim selectedOption As String = "ESC"
 
-            ' Configure the form and DPI support.
+            ' Screen working area (accounts for taskbar, DPI, etc.).
+            Dim wa As System.Drawing.Rectangle = System.Windows.Forms.Screen.FromPoint(System.Windows.Forms.Cursor.Position).WorkingArea
+
+            ' Sizing constants.
+            Const MIN_WIDTH As Integer = 450
+            Const MIN_HEIGHT As Integer = 240
+            Const SIDE_PADDING As Integer = 20
+            Const LIST_CHROME As Integer = 35 ' scrollbar + borders (approx)
+
+            ' Configure the form: resizable, DPI-aware.
             Dim inputForm As New System.Windows.Forms.Form() With {
         .Text = title,
-        .FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog,
+        .FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable,
         .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
         .MinimizeBox = False,
         .MaximizeBox = False,
         .ShowInTaskbar = False,
         .KeyPreview = True,
         .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font,
-        .ClientSize = New System.Drawing.Size(450, 320),
-        .MinimumSize = New System.Drawing.Size(450, 240)
+        .MinimumSize = New System.Drawing.Size(MIN_WIDTH, MIN_HEIGHT)
     }
-            inputForm.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+            inputForm.Font = standardFont
 
             ' Use logo as icon.
             Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             inputForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+
+            ' --- Measure content to determine optimal width ---
+            Dim optionsList As String() = options.ToArray()
+            Dim maxScreenWidth As Integer = CInt(wa.Width * 0.9)
+
+            Dim measuredContentWidth As Integer = MIN_WIDTH
+            Using g As System.Drawing.Graphics = inputForm.CreateGraphics()
+                Dim maxItemTextWidth As Integer = 0
+                For Each item As String In optionsList
+                    Dim w As Integer = System.Windows.Forms.TextRenderer.MeasureText(
+                        g,
+                        item,
+                        standardFont,
+                        New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
+                        System.Windows.Forms.TextFormatFlags.SingleLine
+                    ).Width
+                    If w > maxItemTextWidth Then maxItemTextWidth = w
+                Next
+
+                Dim promptWidth As Integer = System.Windows.Forms.TextRenderer.MeasureText(
+                    g,
+                    prompt,
+                    standardFont,
+                    New System.Drawing.Size(Integer.MaxValue, Integer.MaxValue),
+                    System.Windows.Forms.TextFormatFlags.SingleLine
+                ).Width
+
+                Dim neededClientWidth As Integer =
+                    Math.Max(promptWidth + 2 * SIDE_PADDING, maxItemTextWidth + LIST_CHROME + 2 * SIDE_PADDING)
+
+                measuredContentWidth = Math.Max(MIN_WIDTH, Math.Min(maxScreenWidth, neededClientWidth))
+            End Using
+
+            inputForm.ClientSize = New System.Drawing.Size(measuredContentWidth, 320)
 
             ' Main layout: prompt, ListBox, buttons.
             Dim layout As New System.Windows.Forms.TableLayoutPanel() With {
@@ -158,8 +201,38 @@ Namespace SharedLibrary
         .Dock = System.Windows.Forms.DockStyle.Fill,
         .SelectionMode = System.Windows.Forms.SelectionMode.One
     }
-            listBoxOptions.Items.AddRange(options.ToArray())
+            listBoxOptions.Items.AddRange(optionsList)
             listPanel.Controls.Add(listBoxOptions)
+
+            ' Tooltip for truncated items.
+            Dim listToolTip As New System.Windows.Forms.ToolTip() With {.ShowAlways = True}
+            Dim lastToolTipIndex As Integer = -1
+
+            AddHandler listBoxOptions.MouseMove,
+                Sub(sender As Object, e As System.Windows.Forms.MouseEventArgs)
+                    Dim idx As Integer = listBoxOptions.IndexFromPoint(e.Location)
+                    If idx <> lastToolTipIndex Then
+                        lastToolTipIndex = idx
+                        If idx >= 0 AndAlso idx < listBoxOptions.Items.Count Then
+                            Dim itemText As String = CStr(listBoxOptions.Items(idx))
+                            Dim itemWidth As Integer = System.Windows.Forms.TextRenderer.MeasureText(itemText, listBoxOptions.Font).Width
+                            Dim usableWidth As Integer = listBoxOptions.ClientSize.Width
+                            If itemWidth > usableWidth Then
+                                listToolTip.SetToolTip(listBoxOptions, itemText)
+                            Else
+                                listToolTip.SetToolTip(listBoxOptions, Nothing)
+                            End If
+                        Else
+                            listToolTip.SetToolTip(listBoxOptions, Nothing)
+                        End If
+                    End If
+                End Sub
+
+            AddHandler listBoxOptions.MouseLeave,
+                Sub(sender As Object, e As System.EventArgs)
+                    lastToolTipIndex = -1
+                    listToolTip.SetToolTip(listBoxOptions, Nothing)
+                End Sub
 
             ' Left-aligned buttons with spacing.
             Dim panelButtons As New System.Windows.Forms.FlowLayoutPanel() With {
@@ -229,6 +302,13 @@ Namespace SharedLibrary
                                                   e.Handled = True
                                               End If
                                           End Sub
+
+            ' Resize handler: keep label wrapping sensible.
+            AddHandler inputForm.Resize,
+                Sub()
+                    Dim available As Integer = Math.Max(200, inputForm.ClientSize.Width - 40)
+                    labelPrompt.MaximumSize = New System.Drawing.Size(available, 0)
+                End Sub
 
             ' Show dialog.
             inputForm.TopMost = True

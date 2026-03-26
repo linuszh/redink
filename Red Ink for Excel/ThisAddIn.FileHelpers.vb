@@ -10,16 +10,18 @@
 ' - This file contributes to the partial class ThisAddIn.
 ' - Relies on external helper methods (e.g., RemoveCR, ShowCustomMessageBox,
 '   ExpandEnvironmentVariables, ReadTextFile, ReadRtfAsText, ReadWordDocument,
-'   ReadPdfAsText) from SharedLibrary.SharedLibrary.SharedMethods.
+'   ReadPdfAsText, ReadBinaryFileViaLLM) from SharedLibrary.SharedLibrary.SharedMethods.
 ' - Uses a modal DragDropForm UI to capture a user-selected file path.
 ' - Validates file existence before returning or processing.
 ' - Asynchronous content loading for PDF to allow OCR and user interaction flags.
 ' - File type dispatch via Select Case on extension for text extraction.
+' - Binary/media files (images, audio, video) are sent to the LLM as binary objects.
 ' =============================================================================
 
 Option Strict On
 Option Explicit On
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -68,10 +70,11 @@ Partial Public Class ThisAddIn
     ''' <param name="DoOCR">Enables OCR while reading PDF files when True.</param>
     ''' <param name="AskUser">Indicates whether PDF processing may prompt the user.</param>
     ''' <returns>A FileReadResult containing the file content and whether a PDF may be incomplete.</returns>
+    ''' 
     Public Async Function GetFileContentEx(Optional ByVal optionalFilePath As String = Nothing,
-                                           Optional Silent As Boolean = False,
-                                           Optional DoOCR As Boolean = False,
-                                           Optional AskUser As Boolean = True) As Task(Of FileReadResult)
+                                            Optional Silent As Boolean = False,
+                                            Optional DoOCR As Boolean = False,
+                                            Optional AskUser As Boolean = True) As Task(Of FileReadResult)
         Dim result As New FileReadResult()
         Dim filePath As String = ""
 
@@ -103,18 +106,52 @@ Partial Public Class ThisAddIn
                 Dim FromFile As String = ""
 
                 Select Case ext
-                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm"
+                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
+                         ".md", ".yaml", ".yml",
+                         ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
                         FromFile = ReadTextFile(filePath)
                     Case ".rtf"
                         FromFile = ReadRtfAsText(filePath)
-                    Case ".doc", ".docx"
-                        FromFile = ReadWordDocument(filePath)
+                    Case ".doc"
+                        If INI_AllowLegacyDocFiles Then
+                            FromFile = ReadWordDocument(filePath)
+                        Else
+                            FromFile = "Error: File type not supported (disabled for security)."
+                        End If
+                    Case ".docx"
+                        FromFile = ReadDocxSandboxed(filePath)
+                    Case ".xlsx"
+                        FromFile = ReadXlsxSandboxed(filePath)
+                    Case ".pptx"
+                        FromFile = ReadPptxSandboxed(filePath)
                     Case ".pdf"
                         Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
+                    Case ".eml"
+                        FromFile = ReadEmlSandboxed(filePath)
+                    Case ".msg"
+                        FromFile = ReadMsgSandboxed(filePath)
                     Case Else
-                        FromFile = "Error: File type not supported."
+                        ' Check if this is a binary/media file the model can handle directly
+                        If IsBinaryMediaExtension(ext) Then
+                            Dim taskFlag = TaskFlagForExtension(ext)
+                            If IsBinaryMediaSupported(_context, ext, taskFlag) Then
+                                Try
+                                    FromFile = Await ReadBinaryFileViaLLM(filePath, _context, "", AskUser, taskFlag)
+                                    If String.IsNullOrWhiteSpace(FromFile) Then
+                                        FromFile = ""
+                                    End If
+                                Catch ex As System.Exception
+                                    FromFile = ""
+                                    Debug.WriteLine("Binary media extraction failed for '" & filePath & "': " & ex.Message)
+                                End Try
+                            Else
+                                FromFile = "Error: The file type '" & ext & "' is not supported by your current model configuration."
+                            End If
+                        Else
+                            FromFile = "Error: File type not supported."
+                        End If
                 End Select
 
                 If FromFile.StartsWith("Error") AndAlso Len(FromFile) < 100 AndAlso Not Silent Then
@@ -137,9 +174,9 @@ Partial Public Class ThisAddIn
     ''' Retrieves textual content from a supported file (backward compatible wrapper).
     ''' </summary>
     Public Async Function GetFileContent(Optional ByVal optionalFilePath As String = Nothing,
-                                         Optional Silent As Boolean = False,
-                                         Optional DoOCR As Boolean = False,
-                                         Optional AskUser As Boolean = True) As Task(Of String)
+                                          Optional Silent As Boolean = False,
+                                          Optional DoOCR As Boolean = False,
+                                          Optional AskUser As Boolean = True) As Task(Of String)
         Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser)
         Return result.Content
     End Function

@@ -81,128 +81,215 @@ Public Class Ribbon1
         Return True
     End Function
 
+
+    ' =========================================================================
+    ' Model Selection
+    ' =========================================================================
+
+    Public Sub UpdateModelsMenu()
+        Try
+            Dim available = PrimaryModelManager.GetAvailableModels()
+            Dim current = PrimaryModelManager.GetCurrentModelNumber()
+
+            ' Hide the entire model menu if there are fewer than 2 models
+            Menu4.Visible = (available.Count > 1)
+
+            For i = 1 To 10
+                Dim btn = GetModelButton(i)
+                If btn Is Nothing Then Continue For
+
+                If available.Contains(i) Then
+                    btn.Visible = True
+                    Dim label = PrimaryModelManager.GetModelDisplayName(i)
+                    btn.Label = If(i = current, $"{label} (active)", label)
+                Else
+                    btn.Visible = False
+                End If
+            Next
+        Catch
+            ' non-critical
+        End Try
+    End Sub
+
+    Private Function GetModelButton(i As Integer) As RibbonButton
+        Select Case i
+            Case 1 : Return RI_Model1
+            Case 2 : Return RI_Model2
+            Case 3 : Return RI_Model3
+            Case 4 : Return RI_Model4
+            Case 5 : Return RI_Model5
+            Case 6 : Return RI_Model6
+            Case 7 : Return RI_Model7
+            Case 8 : Return RI_Model8
+            Case 9 : Return RI_Model9
+            Case 10 : Return RI_Model10
+        End Select
+        Return Nothing
+    End Function
+
+    Private Sub RI_Model1_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model1.Click
+        ThisAddIn.SelectModel(1)
+    End Sub
+
+    Private Sub RI_Model2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model2.Click
+        ThisAddIn.SelectModel(2)
+    End Sub
+
+    Private Sub RI_Model3_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model3.Click
+        ThisAddIn.SelectModel(3)
+    End Sub
+
+    Private Sub RI_Model4_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model4.Click
+        ThisAddIn.SelectModel(4)
+    End Sub
+
+    Private Sub RI_Model5_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model5.Click
+        ThisAddIn.SelectModel(5)
+    End Sub
+
+    Private Sub RI_Model6_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model6.Click
+        ThisAddIn.SelectModel(6)
+    End Sub
+
+    Private Sub RI_Model7_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model7.Click
+        ThisAddIn.SelectModel(7)
+    End Sub
+
+    Private Sub RI_Model8_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model8.Click
+        ThisAddIn.SelectModel(8)
+    End Sub
+
+    Private Sub RI_Model9_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model9.Click
+        ThisAddIn.SelectModel(9)
+    End Sub
+
+    Private Sub RI_Model10_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Model10.Click
+        ThisAddIn.SelectModel(10)
+    End Sub
+
+
     Public Async Function RI_Correct_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Correct.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Correct_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Correct_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.Correct()
     End Function
 
     Public Async Function RI_Shorten_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Shorten.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Shorten_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Shorten_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.Shorten()
     End Function
 
     Public Async Function RI_PrimLang_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Primlang.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_PrimLang_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "PrimLang_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.InLanguage1()
     End Function
 
     Public Async Function RI_PrimLang2_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_PrimLang2.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_PrimLang2_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "PrimLang2_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.InLanguage1()
     End Function
 
     Public Async Function RI_SecLang_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_SecLang.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_SecLang_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "SecLang_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.InLanguage2()
     End Function
 
     Public Async Function RI_Improve_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Improve.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Improve_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Improve_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.Improve()
     End Function
 
     Public Async Function RI_FreestyleNM_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_FreestyleNM.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FreestyleNM_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "FreestyleNM_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.FreestyleNM()
     End Function
 
     Public Async Function RI_FreestyleNM2_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_FreestyleNM2.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FreestyleNM2_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "FreestyleNM_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.FreestyleNM()
     End Function
 
     Public Async Function RI_Anonymize_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Anonymize.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Anonymize_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Anonymize_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.Anonymize()
     End Function
 
     Public Sub RI_AdjustHeight_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_AdjustHeight.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_AdjustHeight_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AdjustHeight_Excel invoked")
         Globals.ThisAddIn.AdjustHeight()
     End Sub
 
     Public Sub RI_AdjustLegacyNotes_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_AdjustLegacyNotes.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_AdjustLegacyNotes_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AdjustLegacyNotes_Excel invoked")
         Globals.ThisAddIn.AdjustLegacyNotes()
     End Sub
 
     Private Async Function RI_Translate_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_Translate.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Translate_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Translate_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.InOther()
     End Function
 
     Private Async Function RI_TranslateF_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_TranslateF.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_TranslateF_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Translate_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.InOtherFormulas()
     End Function
 
     Private Sub Settings_Click(sender As Object, e As RibbonControlEventArgs) Handles Settings.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Settings_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Settings_Excel invoked")
         Globals.ThisAddIn.ShowSettings()
     End Sub
 
     Private Async Function RI_FreestyleAM_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_FreestyleAM.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_FreestyleAM_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "FreestyleAM_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.FreestyleAM()
     End Function
 
     Private Async Function RI_SwitchParty_Click(sender As Object, e As RibbonControlEventArgs) As Threading.Tasks.Task Handles RI_SwitchParty.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_SwitchParty_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "SwitchParty_Excel invoked")
         Dim Result As Boolean = Await Globals.ThisAddIn.SwitchParty()
     End Function
 
     Private Sub RI_Regex_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Regex.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Regex_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Regex_Excel invoked")
         Globals.ThisAddIn.RegexSearchReplace()
     End Sub
 
     Private Sub RI_Undo_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Undo.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Undo_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Undo_Excel invoked")
         Globals.ThisAddIn.UndoAction()
     End Sub
 
     Public Sub RI_Chat_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Chat.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Chat_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Chat_Excel invoked")
         Globals.ThisAddIn.ShowChatForm()
     End Sub
 
     Public Sub RI_Chat2_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Chat2.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Chat2_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Chat_Excel invoked")
         Globals.ThisAddIn.ShowChatForm()
     End Sub
 
     Private Sub RI_CSVAnalyze_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_CSVAnalyze.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_CSVAnalyze_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "CSVAnalyze_Excel invoked")
         Globals.ThisAddIn.AnalyzeCsvWithLLM()
     End Sub
 
     Private Sub RI_HelpMe_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_HelpMe.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_HelpMe_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "HelpMe_Excel invoked")
         Globals.ThisAddIn.HelpMeInky()
     End Sub
 
     Private Sub RI_Extractor_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Extractor.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Extractor_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Extractor_Excel invoked")
         Globals.ThisAddIn.FactExtraction()
     End Sub
 
     Private Sub RI_Renamer_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_Renamer.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_Renamer_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "Renamer_Excel invoked")
         Globals.ThisAddIn.RenameDocumentsWithAi()
     End Sub
 
     Private Sub RI_RIRemove_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_RIRemove.Click
-        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RI_RIRemove_Click invoked")
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RIRemove_Excel invoked")
         Globals.ThisAddIn.RemoveRIPrefixFromComments()
     End Sub
 End Class

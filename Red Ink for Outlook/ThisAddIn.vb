@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 2.3.2026
+' 26.3.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -57,8 +57,9 @@ Partial Public Class ThisAddIn
     Public Const AN2 As String = "red_ink"
     Public Const AN5 As String = "RI"
     Public Const AN6 As String = "Inky"
+    Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.020326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.260324" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -82,21 +83,31 @@ Partial Public Class ThisAddIn
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
+    Private Const ToolTrigger As String = "(t)"
 
     Private Const ESC_KEY As Integer = &H1B
 
     Private Const SecondAPICode As String = "(2nd)"
 
     ' Variables that are available to InterpolateAtRuntime
-
     Public TranslateLanguage As String = ""
     Public SourceLanguage As String = ""
+    Public OutputLanguage As String = ""
     Public OtherPrompt As String = ""
     Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
     Public Username As String = ""
     Public MyStyleInsert As String = ""
     Public ShortenLength, SummaryLength As Long
     Public DateTimeNow As String
+    Public WebGrounding As String = ""
+
+    Public HostName As String = ""
+    Public GuestName As String = ""
+    Public TargetAudience As String = ""
+    Public Duration As String = ""
+    Public Language As String = ""
+    Public DialogueContext As String = ""
+    Public ExtraInstructions As String = ""
 
     Public InspectorOpened As Boolean = False
 
@@ -321,9 +332,17 @@ Partial Public Class ThisAddIn
             mainThreadControl.CreateControl()
             StartListenerWatchdog()
             StartupHttpListener()
+
         Catch ex As System.Exception
             ' Handling errors gracefully
         End Try
+
+        ' AutoPilot auto-start: attempt after all other startup tasks have completed
+        Try
+            TryAutoStartAutoPilot()
+        Catch
+        End Try
+
     End Sub
 
     ''' <summary>

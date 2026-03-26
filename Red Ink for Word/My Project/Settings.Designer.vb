@@ -1075,13 +1075,445 @@ Namespace My
         
         <Global.System.Configuration.UserScopedSettingAttribute(),  _
          Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
-         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
-        Public Property ChatShowToolingLog() As Boolean
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property TableComplete_LastInstructions() As String
             Get
-                Return CType(Me("ChatShowToolingLog"),Boolean)
+                Return CType(Me("TableComplete_LastInstructions"),String)
             End Get
             Set
-                Me("ChatShowToolingLog") = value
+                Me("TableComplete_LastInstructions") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_CrossClause() As Boolean
+            Get
+                Return CType(Me("MR_CrossClause"),Boolean)
+            End Get
+            Set
+                Me("MR_CrossClause") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_Bubbles() As Boolean
+            Get
+                Return CType(Me("MR_Bubbles"),Boolean)
+            End Get
+            Set
+                Me("MR_Bubbles") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_MarkdownBubbles() As Boolean
+            Get
+                Return CType(Me("MR_MarkdownBubbles"),Boolean)
+            End Get
+            Set
+                Me("MR_MarkdownBubbles") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_Truncation() As Boolean
+            Get
+                Return CType(Me("MR_Truncation"),Boolean)
+            End Get
+            Set
+                Me("MR_Truncation") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property MR_MaxChars() As Integer
+            Get
+                Return CType(Me("MR_MaxChars"),Integer)
+            End Get
+            Set
+                Me("MR_MaxChars") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_UseSecondModel() As Boolean
+            Get
+                Return CType(Me("MR_UseSecondModel"),Boolean)
+            End Get
+            Set
+                Me("MR_UseSecondModel") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property MR_OtherInstructions() As String
+            Get
+                Return CType(Me("MR_OtherInstructions"),String)
+            End Get
+            Set
+                Me("MR_OtherInstructions") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property MR_HasSaved() As Boolean
+            Get
+                Return CType(Me("MR_HasSaved"),Boolean)
+            End Get
+            Set
+                Me("MR_HasSaved") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property MR_Language() As String
+            Get
+                Return CType(Me("MR_Language"),String)
+            End Get
+            Set
+                Me("MR_Language") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_ImagePath() As String
+            Get
+                Return CType(Me("Stamp_ImagePath"),String)
+            End Get
+            Set
+                Me("Stamp_ImagePath") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_TopOffset() As Double
+            Get
+                Return CType(Me("Stamp_TopOffset"),Double)
+            End Get
+            Set
+                Me("Stamp_TopOffset") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_RightOffset() As Double
+            Get
+                Return CType(Me("Stamp_RightOffset"),Double)
+            End Get
+            Set
+                Me("Stamp_RightOffset") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_Width() As Double
+            Get
+                Return CType(Me("Stamp_Width"),Double)
+            End Get
+            Set
+                Me("Stamp_Width") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_TextTopOffset() As Double
+            Get
+                Return CType(Me("Stamp_TextTopOffset"),Double)
+            End Get
+            Set
+                Me("Stamp_TextTopOffset") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_TextRightOffset() As Double
+            Get
+                Return CType(Me("Stamp_TextRightOffset"),Double)
+            End Get
+            Set
+                Me("Stamp_TextRightOffset") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property Stamp_TextSize() As Double
+            Get
+                Return CType(Me("Stamp_TextSize"),Double)
+            End Get
+            Set
+                Me("Stamp_TextSize") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_Prefix() As String
+            Get
+                Return CType(Me("Stamp_Prefix"),String)
+            End Get
+            Set
+                Me("Stamp_Prefix") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_Suffix() As String
+            Get
+                Return CType(Me("Stamp_Suffix"),String)
+            End Get
+            Set
+                Me("Stamp_Suffix") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Stamp_UseLLM() As Boolean
+            Get
+                Return CType(Me("Stamp_UseLLM"),Boolean)
+            End Get
+            Set
+                Me("Stamp_UseLLM") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_OutputSubdir() As String
+            Get
+                Return CType(Me("Stamp_OutputSubdir"),String)
+            End Get
+            Set
+                Me("Stamp_OutputSubdir") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_OutputExtension() As String
+            Get
+                Return CType(Me("Stamp_OutputExtension"),String)
+            End Get
+            Set
+                Me("Stamp_OutputExtension") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Stamp_Regex() As String
+            Get
+                Return CType(Me("Stamp_Regex"),String)
+            End Get
+            Set
+                Me("Stamp_Regex") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastImageGenPrompt() As String
+            Get
+                Return CType(Me("LastImageGenPrompt"),String)
+            End Get
+            Set
+                Me("LastImageGenPrompt") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_ManualInstruction() As String
+            Get
+                Return CType(Me("Tabular_ManualInstruction"),String)
+            End Get
+            Set
+                Me("Tabular_ManualInstruction") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_ManualSchema() As String
+            Get
+                Return CType(Me("Tabular_ManualSchema"),String)
+            End Get
+            Set
+                Me("Tabular_ManualSchema") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateColumns() As String
+            Get
+                Return CType(Me("Tabular_DateColumns"),String)
+            End Get
+            Set
+                Me("Tabular_DateColumns") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_SortColumn() As String
+            Get
+                Return CType(Me("Tabular_SortColumn"),String)
+            End Get
+            Set
+                Me("Tabular_SortColumn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("ASC")>  _
+        Public Property Tabular_SortDirection() As String
+            Get
+                Return CType(Me("Tabular_SortDirection"),String)
+            End Get
+            Set
+                Me("Tabular_SortDirection") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Tabular_DoOcr() As Boolean
+            Get
+                Return CType(Me("Tabular_DoOcr"),Boolean)
+            End Get
+            Set
+                Me("Tabular_DoOcr") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateClampFrom() As String
+            Get
+                Return CType(Me("Tabular_DateClampFrom"),String)
+            End Get
+            Set
+                Me("Tabular_DateClampFrom") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateClampTo() As String
+            Get
+                Return CType(Me("Tabular_DateClampTo"),String)
+            End Get
+            Set
+                Me("Tabular_DateClampTo") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_OutputLanguage() As String
+            Get
+                Return CType(Me("Tabular_OutputLanguage"),String)
+            End Get
+            Set
+                Me("Tabular_OutputLanguage") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_DateOutputFormat() As String
+            Get
+                Return CType(Me("Tabular_DateOutputFormat"),String)
+            End Get
+            Set
+                Me("Tabular_DateOutputFormat") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Tabular_MergeEnable() As Boolean
+            Get
+                Return CType(Me("Tabular_MergeEnable"),Boolean)
+            End Get
+            Set
+                Me("Tabular_MergeEnable") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_MergeDateColumn() As String
+            Get
+                Return CType(Me("Tabular_MergeDateColumn"),String)
+            End Get
+            Set
+                Me("Tabular_MergeDateColumn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property Tabular_MergeInstruction() As String
+            Get
+                Return CType(Me("Tabular_MergeInstruction"),String)
+            End Get
+            Set
+                Me("Tabular_MergeInstruction") = value
             End Set
         End Property
     End Class

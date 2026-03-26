@@ -1,0 +1,1404 @@
+﻿' Part of "Red Ink for Outlook"
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ThisAddIn.AutoPilot.Scheduler.vb
+' Purpose:
+'   AutoPilot Scheduler — manages a persistent list of scheduled tasks stored
+'   in a JSON file alongside the redink.ini configuration file. Tasks are
+'   created, queried, updated, and deleted via natural language commands
+'   processed by the LLM through the manage_scheduled_tasks internal tool.
+'
+' Architecture:
+'  - Storage:
+'      * Tasks are persisted in autopilot_schedule.json in the same directory
+'        as the main redink.ini file.
+'      * The file is re-read on every access and re-written on every mutation,
+'        so manual edits take immediate effect.
+'      * Per-task file attachments are stored in a subdirectory under
+'        schedule_tasks\{taskId}\ relative to the JSON file.
+'  - Scheduling:
+'      * Each task has a nextDueUtc field. A periodic timer checks for due tasks.
+'      * Recurrence is expressed as an iCalendar-style RRULE string, resolved by
+'        a lightweight evaluator that covers weekly, monthly, daily, and
+'        count-limited patterns.
+'      * The LLM translates natural language schedule descriptions into the
+'        structured schedule fields when creating or updating a task.
+'  - Execution:
+'      * Due tasks are processed through the same LLM + tooling pipeline as
+'        regular AutoPilot mails. The instruction text is sent as user prompt,
+'        any stored attachments are loaded, and the result (text + generated
+'        files) is delivered by e-mail to the task's deliverTo addresses.
+'  - Catch-up:
+'      * On AutoPilot start, any task with nextDueUtc in the past and
+'        lastExecutedUtc < nextDueUtc is executed immediately.
+'  - Security:
+'      * Task management is restricted to senders who pass AutoPilot filter rules
+'        (whitelisted or approval-required senders).
+'      * Local Chat access requires INI_AutoPilotSchedulerLocalChat = True.
+'
+' Threading:
+'  - File I/O is synchronous (single-process, no locking needed).
+'  - Timer callback uses SemaphoreSlim to prevent overlapping executions.
+'  - Outlook COM access is marshaled to UI thread via SwitchToUi.
+' =============================================================================
+
+Option Explicit On
+Option Strict Off
+
+Imports System.Diagnostics
+Imports System.IO
+Imports System.Runtime.InteropServices
+Imports System.Text
+Imports System.Threading
+Imports System.Threading.Tasks
+Imports System.Windows.Forms
+Imports Microsoft.Office.Interop.Outlook
+Imports Newtonsoft.Json
+Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
+Imports SharedLibrary.SharedLibrary
+Imports SharedLibrary.SharedLibrary.SharedMethods
+
+Partial Public Class ThisAddIn
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  SCHEDULER CONSTANTS
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private AP_ScheduleFileName As String = AN4 & "autopilot_schedule.json"
+    Private Const AP_ScheduleAttachmentDir As String = "schedule_tasks"
+    Private Const AP_ScheduleWorkspaceSubdir As String = "workspace"
+    Private Const AP_ScheduleWorkspaceMaxBytes As Long = 100 * 1024 * 1024  ' 100 MB per task
+    Private Const AP_SchedulerCheckIntervalSeconds As Integer = 30
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  SCHEDULER STATE
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private _apSchedulerTimer As System.Threading.Timer = Nothing
+    Private _apSchedulerCheckRunning As Integer = 0
+
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  DATA MODEL
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Represents a single scheduled task persisted to JSON.</summary>
+    Public Class ScheduledTask
+        ''' <summary>Unique identifier (GUID).</summary>
+        Public Property Id As String = ""
+
+        ''' <summary>The instruction / task description to execute.</summary>
+        Public Property Instruction As String = ""
+
+        ''' <summary>E-mail addresses to deliver the result to.</summary>
+        Public Property DeliverTo As New List(Of String)()
+
+        ''' <summary>Human-readable schedule description (e.g. "every Monday at 08:00").</summary>
+        Public Property ScheduleDescription As String = ""
+
+        ''' <summary>iCalendar-style RRULE string for recurrence (empty = one-shot).</summary>
+        Public Property Rrule As String = ""
+
+        ''' <summary>Local time-of-day for execution (HH:mm). Used together with RRULE.</summary>
+        Public Property TimeOfDayLocal As String = ""
+
+        ''' <summary>UTC timestamp for the next scheduled execution.</summary>
+        Public Property NextDueUtc As DateTime = DateTime.MaxValue
+
+        ''' <summary>UTC timestamp of the last successful execution (Nothing/MinValue if never).</summary>
+        Public Property LastExecutedUtc As DateTime = DateTime.MinValue
+
+        ''' <summary>UTC end date for the recurrence (Nothing/MaxValue = no end).</summary>
+        Public Property EndDateUtc As DateTime = DateTime.MaxValue
+
+        ''' <summary>Remaining occurrences (0 = unlimited, -1 = exhausted).</summary>
+        Public Property RemainingOccurrences As Integer = 0
+
+        ''' <summary>Relative path to the task's attachment subdirectory.</summary>
+        Public Property AttachmentDir As String = ""
+
+        ''' <summary>Filenames stored in the attachment directory (original input files).</summary>
+        Public Property AttachmentFiles As New List(Of String)()
+
+        ''' <summary>Filenames stored in the workspace directory (persisted across executions).</summary>
+        Public Property WorkspaceFiles As New List(Of String)()
+
+        ''' <summary>UTC timestamp when the task was created.</summary>
+        Public Property CreatedUtc As DateTime = DateTime.UtcNow
+
+        ''' <summary>E-mail address of the user who created the task.</summary>
+        Public Property CreatedBy As String = ""
+
+        ''' <summary>Task status: "active", "paused", "completed", "failed".</summary>
+        Public Property Status As String = "active"
+
+        ''' <summary>Brief summary of the last execution result.</summary>
+        Public Property LastResult As String = Nothing
+
+        ''' <summary>Subject line for the result e-mail.</summary>
+        Public Property Subject As String = ""
+    End Class
+
+    ''' <summary>Root object for the schedule JSON file.</summary>
+    Private Class ScheduleFile
+        Public Property Tasks As New List(Of ScheduledTask)()
+    End Class
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  FILE I/O — always re-read / re-write for live manual editing support
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Returns the full path to the scheduler JSON file.</summary>
+    Private Function GetScheduleFilePath() As String
+        Dim iniPath = GetDefaultINIPath(_context.RDV)
+        Dim iniDir = Path.GetDirectoryName(iniPath)
+        Return Path.Combine(iniDir, AP_ScheduleFileName)
+    End Function
+
+    ''' <summary>Returns the base directory for task attachment subdirectories.</summary>
+    Private Function GetScheduleAttachmentBaseDir() As String
+        Return Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), AP_ScheduleAttachmentDir)
+    End Function
+
+    ''' <summary>Returns the full path to the workspace directory for a given task.</summary>
+    Private Function GetTaskWorkspaceDir(taskId As String) As String
+        Return Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()),
+                            AP_ScheduleAttachmentDir, taskId, AP_ScheduleWorkspaceSubdir)
+    End Function
+
+    ''' <summary>Returns the full path to the input (attachment) directory for a given task.</summary>
+    Private Function GetTaskInputDir(taskId As String) As String
+        Return Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()),
+                            AP_ScheduleAttachmentDir, taskId)
+    End Function
+
+    ''' <summary>Reads and deserializes the schedule file. Returns empty schedule if file missing or corrupt.</summary>
+    Private Function ReadScheduleFile() As ScheduleFile
+        Try
+            Dim filePath = GetScheduleFilePath()
+            If Not File.Exists(filePath) Then Return New ScheduleFile()
+            Dim json = File.ReadAllText(filePath, Encoding.UTF8)
+            If String.IsNullOrWhiteSpace(json) Then Return New ScheduleFile()
+            Dim sf = JsonConvert.DeserializeObject(Of ScheduleFile)(json)
+            Return If(sf, New ScheduleFile())
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 ERROR reading schedule file: {ex.Message}", "error")
+            Return New ScheduleFile()
+        End Try
+    End Function
+
+    ''' <summary>Serializes and writes the schedule file atomically (write-to-temp then move).</summary>
+    Private Sub WriteScheduleFile(schedule As ScheduleFile)
+        Try
+            Dim filePath = GetScheduleFilePath()
+            Dim dir = Path.GetDirectoryName(filePath)
+            If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
+
+            Dim json = JsonConvert.SerializeObject(schedule, Formatting.Indented)
+            Dim tempPath = filePath & ".tmp"
+            File.WriteAllText(tempPath, json, Encoding.UTF8)
+
+            ' Atomic replace
+            If File.Exists(filePath) Then File.Delete(filePath)
+            File.Move(tempPath, filePath)
+
+            ApDashboardLog($"📅 Schedule saved to: {filePath} ({schedule.Tasks.Count} task(s))", "step")
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 ERROR writing schedule file: {ex.Message}", "error")
+        End Try
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TASK CRUD (called by the manage_scheduled_tasks tool executor)
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Creates a new scheduled task and persists it.</summary>
+    Friend Function SchedulerCreateTask(task As ScheduledTask) As String
+        If String.IsNullOrWhiteSpace(task.Id) Then task.Id = Guid.NewGuid().ToString("N")
+        If task.CreatedUtc = DateTime.MinValue Then task.CreatedUtc = DateTime.UtcNow
+        If String.IsNullOrWhiteSpace(task.Status) Then task.Status = "active"
+        If String.IsNullOrWhiteSpace(task.Subject) Then task.Subject = "Scheduled Task Result"
+
+        ' Create attachment directory if files are referenced
+        If task.AttachmentFiles IsNot Nothing AndAlso task.AttachmentFiles.Count > 0 Then
+            task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
+            Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+            If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
+        End If
+
+        Dim schedule = ReadScheduleFile()
+        schedule.Tasks.Add(task)
+        WriteScheduleFile(schedule)
+
+        ApDashboardLog($"📅 Scheduler: Created task {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}"" next due: {task.NextDueUtc:yyyy-MM-dd HH:mm} UTC", "info")
+        RefreshSchedulerDashboard()
+        Return task.Id
+    End Function
+
+    ''' <summary>Lists all tasks, optionally filtered by status.</summary>
+    Friend Function SchedulerListTasks(Optional statusFilter As String = Nothing) As List(Of ScheduledTask)
+        Dim schedule = ReadScheduleFile()
+        If String.IsNullOrWhiteSpace(statusFilter) Then Return schedule.Tasks
+        Return schedule.Tasks.Where(Function(t) t.Status.Equals(statusFilter, StringComparison.OrdinalIgnoreCase)).ToList()
+    End Function
+
+    ''' <summary>Finds a task by ID or by instruction substring match.</summary>
+    Friend Function SchedulerFindTask(idOrQuery As String) As ScheduledTask
+        Dim schedule = ReadScheduleFile()
+        ' Try exact ID match first
+        Dim byId = schedule.Tasks.FirstOrDefault(
+            Function(t) t.Id.Equals(idOrQuery, StringComparison.OrdinalIgnoreCase) OrElse
+                         t.Id.StartsWith(idOrQuery, StringComparison.OrdinalIgnoreCase))
+        If byId IsNot Nothing Then Return byId
+
+        ' Fuzzy match on instruction text
+        Return schedule.Tasks.FirstOrDefault(
+            Function(t) t.Instruction.IndexOf(idOrQuery, StringComparison.OrdinalIgnoreCase) >= 0)
+    End Function
+
+    ''' <summary>Updates an existing task (replaces the task with matching ID).</summary>
+    Friend Function SchedulerUpdateTask(updated As ScheduledTask) As Boolean
+        Dim schedule = ReadScheduleFile()
+        Dim idx = schedule.Tasks.FindIndex(Function(t) t.Id.Equals(updated.Id, StringComparison.OrdinalIgnoreCase))
+        If idx < 0 Then Return False
+        schedule.Tasks(idx) = updated
+        WriteScheduleFile(schedule)
+        ApDashboardLog($"📅 Scheduler: Updated task {updated.Id.Substring(0, 8)}...", "info")
+        RefreshSchedulerDashboard()
+        Return True
+    End Function
+
+    ''' <summary>Deletes a task by ID. Also removes its attachment directory.</summary>
+    Friend Function SchedulerDeleteTask(taskId As String) As Boolean
+        Dim schedule = ReadScheduleFile()
+        Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+        If task Is Nothing Then Return False
+
+        schedule.Tasks.Remove(task)
+        WriteScheduleFile(schedule)
+
+        ' Clean up attachment directory
+        If Not String.IsNullOrWhiteSpace(task.AttachmentDir) Then
+            Try
+                Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+                If Directory.Exists(fullDir) Then Directory.Delete(fullDir, recursive:=True)
+            Catch
+            End Try
+        End If
+
+        ApDashboardLog($"📅 Scheduler: Deleted task {taskId.Substring(0, Math.Min(8, taskId.Length))}...", "info")
+        RefreshSchedulerDashboard()
+        Return True
+    End Function
+
+    ''' <summary>Stores an attachment file for a task from the current AutoPilot temp directory.</summary>
+    Friend Function SchedulerStoreAttachment(taskId As String, sourceFilePath As String) As Boolean
+        Try
+            Dim schedule = ReadScheduleFile()
+            Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+            If task Is Nothing Then Return False
+
+            If String.IsNullOrWhiteSpace(task.AttachmentDir) Then
+                task.AttachmentDir = Path.Combine(AP_ScheduleAttachmentDir, task.Id)
+            End If
+
+            Dim fullDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+            If Not Directory.Exists(fullDir) Then Directory.CreateDirectory(fullDir)
+
+            Dim destName = Path.GetFileName(sourceFilePath)
+            Dim destPath = Path.Combine(fullDir, destName)
+            File.Copy(sourceFilePath, destPath, overwrite:=True)
+
+            If Not task.AttachmentFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
+                task.AttachmentFiles.Add(destName)
+            End If
+
+            WriteScheduleFile(schedule)
+            Return True
+        Catch ex As System.Exception
+            Debug.WriteLine($"[Scheduler] Error storing attachment: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+
+    ''' <summary>
+    ''' Persists a file from the execution temp directory into the task's workspace.
+    ''' Enforces a per-task size quota. If the quota would be exceeded, the oldest
+    ''' workspace files are pruned until the new file fits.
+    ''' </summary>
+    Friend Function SchedulerStoreWorkspaceFile(taskId As String, sourceFilePath As String) As Boolean
+        Try
+            Dim schedule = ReadScheduleFile()
+            Dim task = schedule.Tasks.FirstOrDefault(Function(t) t.Id.Equals(taskId, StringComparison.OrdinalIgnoreCase))
+            If task Is Nothing Then Return False
+
+            Dim wsDir = GetTaskWorkspaceDir(taskId)
+            If Not Directory.Exists(wsDir) Then Directory.CreateDirectory(wsDir)
+
+            Dim destName = Path.GetFileName(sourceFilePath)
+            Dim destPath = Path.Combine(wsDir, destName)
+            Dim newFileSize As Long = New FileInfo(sourceFilePath).Length
+
+            ' Enforce workspace quota — prune oldest files until we fit
+            EnforceWorkspaceQuota(wsDir, newFileSize)
+
+            File.Copy(sourceFilePath, destPath, overwrite:=True)
+
+            If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
+            If Not task.WorkspaceFiles.Contains(destName, StringComparer.OrdinalIgnoreCase) Then
+                task.WorkspaceFiles.Add(destName)
+            End If
+
+            WriteScheduleFile(schedule)
+            ApDashboardLog($"📅 Workspace: stored '{destName}' for task {taskId.Substring(0, 8)}...", "step")
+            Return True
+        Catch ex As System.Exception
+            Debug.WriteLine($"[Scheduler] Error storing workspace file: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Removes the oldest files in the workspace directory until there is room for
+    ''' <paramref name="requiredBytes"/> additional bytes within the quota.
+    ''' </summary>
+    Private Shared Sub EnforceWorkspaceQuota(wsDir As String, requiredBytes As Long)
+        If Not Directory.Exists(wsDir) Then Return
+        Try
+            Dim files = New DirectoryInfo(wsDir).GetFiles().OrderBy(Function(f) f.LastWriteTimeUtc).ToList()
+            Dim currentSize As Long = files.Sum(Function(f) f.Length)
+
+            While currentSize + requiredBytes > AP_ScheduleWorkspaceMaxBytes AndAlso files.Count > 0
+                Dim oldest = files(0)
+                currentSize -= oldest.Length
+                oldest.Delete()
+                files.RemoveAt(0)
+            End While
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Scans the schedule_tasks base directory and deletes any subdirectory whose
+    ''' name does not match an existing task ID. Called on scheduler start-up to
+    ''' remove orphaned data from manually deleted tasks.
+    ''' </summary>
+    Friend Sub SchedulerPurgeOrphanDirectories()
+        Try
+            Dim baseDir = GetScheduleAttachmentBaseDir()
+            If Not Directory.Exists(baseDir) Then Return
+
+            Dim schedule = ReadScheduleFile()
+            Dim activeIds As New HashSet(Of String)(
+                schedule.Tasks.Select(Function(t) t.Id),
+                StringComparer.OrdinalIgnoreCase)
+
+            Dim purgedCount = 0
+            For Each subDir In Directory.GetDirectories(baseDir)
+                Dim dirName = Path.GetFileName(subDir)
+                If Not activeIds.Contains(dirName) Then
+                    Try
+                        Directory.Delete(subDir, recursive:=True)
+                        purgedCount += 1
+                    Catch
+                    End Try
+                End If
+            Next
+
+            If purgedCount > 0 Then
+                ApDashboardLog($"📅 Scheduler: purged {purgedCount} orphan task director(ies).", "info")
+            End If
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Orphan purge error: {ex.Message}", "warn")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Synchronizes the task's WorkspaceFiles list with what is actually on disk.
+    ''' Removes stale entries and adds any files found on disk but not in the list.
+    ''' </summary>
+    Private Sub SyncWorkspaceFileList(task As ScheduledTask)
+        Dim wsDir = GetTaskWorkspaceDir(task.Id)
+        If task.WorkspaceFiles Is Nothing Then task.WorkspaceFiles = New List(Of String)()
+
+        If Not Directory.Exists(wsDir) Then
+            task.WorkspaceFiles.Clear()
+            Return
+        End If
+
+        Dim onDisk As New HashSet(Of String)(
+            Directory.GetFiles(wsDir).Select(Function(f) Path.GetFileName(f)),
+            StringComparer.OrdinalIgnoreCase)
+
+        ' Remove entries that no longer exist on disk
+        task.WorkspaceFiles.RemoveAll(Function(f) Not onDisk.Contains(f))
+
+        ' Add any files on disk not yet tracked
+        For Each f In onDisk
+            If Not task.WorkspaceFiles.Contains(f, StringComparer.OrdinalIgnoreCase) Then
+                task.WorkspaceFiles.Add(f)
+            End If
+        Next
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  SCHEDULER TIMER — periodic check for due tasks
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Starts the scheduler timer. Called from StartAutoPilotWithConfig when scheduler is enabled.</summary>
+    Friend Sub StartSchedulerTimer()
+        _apSchedulerTimer?.Dispose()
+        _apSchedulerTimer = New System.Threading.Timer(
+            AddressOf SchedulerTimerCallback,
+            Nothing,
+            dueTime:=TimeSpan.FromSeconds(5),
+            period:=TimeSpan.FromSeconds(AP_SchedulerCheckIntervalSeconds))
+        ApDashboardLog("📅 Scheduler timer started.", "info")
+    End Sub
+
+    ''' <summary>Stops the scheduler timer. Called from StopAutoPilot.</summary>
+    Friend Sub StopSchedulerTimer()
+        Try : _apSchedulerTimer?.Dispose() : Catch : End Try
+        _apSchedulerTimer = Nothing
+    End Sub
+
+    ''' <summary>Timer callback that checks for and executes due tasks.</summary>
+    Private Async Sub SchedulerTimerCallback(state As Object)
+        If Not _apActive Then Return
+        If Interlocked.CompareExchange(_apSchedulerCheckRunning, 1, 0) <> 0 Then Return
+
+        Try
+            Dim ct = _apCts?.Token
+            If ct Is Nothing OrElse ct.Value.IsCancellationRequested Then Return
+            Await CheckAndExecuteDueTasks(ct.Value)
+        Catch ex As OperationCanceledException
+            ' Expected during shutdown
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Scheduler timer error: {ex.Message}", "warn")
+        Finally
+            Interlocked.Exchange(_apSchedulerCheckRunning, 0)
+        End Try
+    End Sub
+
+    ''' <summary>Performs catch-up on AutoPilot start — executes any overdue tasks.</summary>
+    Friend Sub SchedulerCatchUp()
+        Try
+            ' Purge orphan directories from manually deleted tasks
+            SchedulerPurgeOrphanDirectories()
+
+            Dim schedule = ReadScheduleFile()
+            Dim now = DateTime.UtcNow
+            Dim overdueCount = 0
+
+            For Each task In schedule.Tasks
+                If task.Status <> "active" Then Continue For
+                If task.NextDueUtc <= now AndAlso task.LastExecutedUtc < task.NextDueUtc Then
+                    overdueCount += 1
+                End If
+            Next
+
+            If overdueCount > 0 Then
+                ApDashboardLog($"📅 Scheduler: {overdueCount} overdue task(s) found — will execute on next timer cycle.", "info")
+            Else
+                Dim activeCount = schedule.Tasks.Where(Function(t) t.Status = "active").Count()
+                ApDashboardLog($"📅 Scheduler: {activeCount} active task(s), none overdue.", "info")
+            End If
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Scheduler catch-up error: {ex.Message}", "warn")
+        End Try
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TASK EXECUTION
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Checks for due tasks and executes them sequentially.</summary>
+    Private Async Function CheckAndExecuteDueTasks(ct As CancellationToken) As Task
+        Dim schedule = ReadScheduleFile()
+        Dim now = DateTime.UtcNow
+
+        For Each task In schedule.Tasks.ToList()
+            ct.ThrowIfCancellationRequested()
+            If task.Status <> "active" Then Continue For
+            If task.NextDueUtc > now Then Continue For
+            If task.LastExecutedUtc >= task.NextDueUtc Then Continue For
+
+            ' This task is due — execute it
+            ApDashboardLog($"📅 Executing scheduled task: {task.Id.Substring(0, 8)}... — ""{Truncate(task.Instruction, 60)}""", "info")
+
+            Try
+                Await ExecuteScheduledTask(task, ct)
+
+                ' Mark as executed and advance schedule
+                task.LastExecutedUtc = DateTime.UtcNow
+                task.LastResult = "Completed successfully at " & DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss UTC")
+
+                AdvanceTaskSchedule(task)
+                SchedulerUpdateTask(task)
+
+                ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... completed. Next due: {If(task.Status = "completed", "(none — completed)", task.NextDueUtc.ToString("yyyy-MM-dd HH:mm UTC"))}", "info")
+
+            Catch ex As OperationCanceledException
+                Throw
+            Catch ex As System.Exception
+                task.LastResult = $"Failed at {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss UTC}: {ex.Message}"
+                ApDashboardLog($"📅 Task {task.Id.Substring(0, 8)}... FAILED: {ex.Message}", "error")
+                ' Do NOT advance schedule on failure — will retry on next cycle
+                SchedulerUpdateTask(task)
+            End Try
+        Next
+    End Function
+
+    ''' <summary>
+    ''' Executes a single scheduled task: sends instruction to LLM with tooling,
+    ''' collects result, persists workspace files, and delivers result by e-mail.
+    ''' </summary>
+    Private Async Function ExecuteScheduledTask(task As ScheduledTask, ct As CancellationToken) As Task
+        Dim tempDir As String = Nothing
+        Dim previousMaxToolIterations = MaxToolIterations
+
+        Try
+            ' Create isolated temp directory
+            tempDir = Path.Combine(Path.GetTempPath(), AP_TempPrefix & "sched_" & Guid.NewGuid().ToString("N"))
+            Directory.CreateDirectory(tempDir)
+
+            ' ── Load input (original) attachments into temp dir ──
+            Dim attachments As New List(Of AutoPilotAttachmentInfo)()
+            Dim inputFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            If Not String.IsNullOrWhiteSpace(task.AttachmentDir) Then
+                Dim fullAttDir = Path.Combine(Path.GetDirectoryName(GetScheduleFilePath()), task.AttachmentDir)
+                If Directory.Exists(fullAttDir) Then
+                    ' Only load files directly in the task dir (not workspace subdir)
+                    For Each filePath In Directory.GetFiles(fullAttDir)
+                        Dim destPath = Path.Combine(tempDir, Path.GetFileName(filePath))
+                        File.Copy(filePath, destPath, overwrite:=True)
+                        inputFileNames.Add(Path.GetFileName(filePath))
+                        attachments.Add(New AutoPilotAttachmentInfo() With {
+                            .OriginalFileName = Path.GetFileName(filePath),
+                            .TempFilePath = destPath,
+                            .Extension = Path.GetExtension(filePath).ToLowerInvariant(),
+                            .SizeBytes = New FileInfo(destPath).Length,
+                            .IsOverSizeLimit = False,
+                            .StatusMessage = "OK"
+                        })
+                    Next
+                End If
+            End If
+
+            ' ── Load workspace files into temp dir ──
+            Dim workspaceFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim wsDir = GetTaskWorkspaceDir(task.Id)
+            If Directory.Exists(wsDir) Then
+                For Each filePath In Directory.GetFiles(wsDir)
+                    Dim fileName = Path.GetFileName(filePath)
+                    ' Avoid collision with input files — workspace files get a prefix
+                    Dim destName = fileName
+                    If inputFileNames.Contains(fileName) Then
+                        destName = "ws_" & fileName
+                    End If
+                    Dim destPath = Path.Combine(tempDir, destName)
+                    File.Copy(filePath, destPath, overwrite:=True)
+                    workspaceFileNames.Add(destName)
+                    attachments.Add(New AutoPilotAttachmentInfo() With {
+                        .OriginalFileName = destName,
+                        .TempFilePath = destPath,
+                        .Extension = Path.GetExtension(filePath).ToLowerInvariant(),
+                        .SizeBytes = New FileInfo(destPath).Length,
+                        .IsOverSizeLimit = False,
+                        .StatusMessage = "OK (workspace)"
+                    })
+                Next
+            End If
+
+            ' Set transient state so internal tools can access attachments
+            _apCurrentTempDir = tempDir
+            _apCurrentAttachments = attachments
+            _apCurrentMailInfo = New AutoPilotMailInfo() With {
+                .EntryID = "scheduler_" & task.Id,
+                .Subject = If(task.Subject, "Scheduled Task"),
+                .SenderName = "Scheduler",
+                .SenderEmail = If(task.CreatedBy, ""),
+                .ReceivedTime = DateTime.Now,
+                .Body = task.Instruction
+            }
+            _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
+            MaxToolIterations = AP_MaxToolIterations
+
+            ' Build prompts — tell the LLM it is executing a scheduled task
+            Dim userPrompt As New StringBuilder()
+            userPrompt.AppendLine("[SCHEDULED TASK EXECUTION]")
+            userPrompt.AppendLine($"You are executing a previously scheduled recurring task (ID: {task.Id.Substring(0, 8)}...).")
+            userPrompt.AppendLine($"Schedule: {If(task.ScheduleDescription, "one-time")}")
+            userPrompt.AppendLine($"This task is ALREADY scheduled and recurring — do NOT call manage_scheduled_tasks to create, update, or re-schedule it.")
+            userPrompt.AppendLine("Just perform the work described below and return the result.")
+            If task.LastExecutedUtc > DateTime.MinValue Then
+                userPrompt.AppendLine($"Last executed: {task.LastExecutedUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)")
+            End If
+            userPrompt.AppendLine()
+
+            ' Always explain workspace semantics — critical for recurring tasks
+            Dim isRecurring = Not String.IsNullOrWhiteSpace(task.Rrule)
+            If isRecurring Then
+                Dim nowLocal = DateTime.Now
+                userPrompt.AppendLine("[WORKSPACE — PERSISTENT FILE STORAGE]")
+                userPrompt.AppendLine("This is a RECURRING task. You have a persistent workspace that survives between executions.")
+                userPrompt.AppendLine()
+                userPrompt.AppendLine("MANDATORY RULES — follow these in EVERY execution:")
+                userPrompt.AppendLine("1. ALWAYS save a new snapshot file using create_code_file in EVERY execution — not just the first one.")
+                userPrompt.AppendLine("2. ALWAYS use TIMESTAMPED filenames so each run creates a UNIQUE file (e.g. snapshot_" & nowLocal.ToString("yyyy-MM-dd_HHmm") & ".txt).")
+                userPrompt.AppendLine("   Never reuse or overwrite a previous filename — the history of files IS the change history.")
+                userPrompt.AppendLine("3. To retrieve web content, call retrieve_web_content, then IMMEDIATELY save the result with create_code_file.")
+                userPrompt.AppendLine("4. Do NOT skip saving just because nothing changed — future runs need this file to compare against.")
+                userPrompt.AppendLine("5. If prior workspace files exist, read the MOST RECENT one with read_attachment and compare to the new data.")
+                userPrompt.AppendLine("6. Report only substantive changes in your response. If nothing changed: brief confirmation.")
+                userPrompt.AppendLine($"7. Current local time: {nowLocal:yyyy-MM-dd HH:mm}. Use this for the timestamp in the new filename.")
+                userPrompt.AppendLine()
+                userPrompt.AppendLine("EXECUTION ORDER: retrieve_web_content → create_code_file (save new snapshot) → read_attachment (read prior snapshot) → compare → respond.")
+                If workspaceFileNames.Count > 0 Then
+                    userPrompt.AppendLine()
+                    userPrompt.AppendLine($"Workspace files from prior runs: {String.Join(", ", workspaceFileNames.OrderBy(Function(s) s))}")
+                Else
+                    userPrompt.AppendLine()
+                    userPrompt.AppendLine("This is the FIRST execution — no prior workspace files exist yet. Create the initial snapshot.")
+                End If
+                userPrompt.AppendLine("[/WORKSPACE]")
+                userPrompt.AppendLine()
+            End If
+
+            userPrompt.AppendLine("[TASK INSTRUCTION]")
+            userPrompt.AppendLine(task.Instruction)
+            userPrompt.AppendLine("[/TASK INSTRUCTION]")
+
+            If inputFileNames.Count > 0 Then
+                userPrompt.AppendLine()
+                userPrompt.AppendLine($"Input files: {String.Join(", ", inputFileNames)}")
+            End If
+            If workspaceFileNames.Count > 0 Then
+                userPrompt.AppendLine()
+                userPrompt.AppendLine($"Files from prior executions (workspace): {String.Join(", ", workspaceFileNames)}")
+                userPrompt.AppendLine("You can read these with read_attachment and compare them to new data. " &
+                    "To persist new files for future runs, create them with create_code_file or other file-creation tools — " &
+                    "they will be automatically saved to the workspace.")
+            End If
+
+            Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+            ' Re-apply base model config
+            If _apBaseModelConfig IsNot Nothing Then ApplyModelConfig(_context, _apBaseModelConfig)
+
+            ' Execute with tooling
+            Dim response As String
+            Dim modelCanCallTools As Boolean = _apBaseModelConfig IsNot Nothing AndAlso ModelSupportsTooling(_apBaseModelConfig)
+
+            If modelCanCallTools AndAlso _apSelectedTools IsNot Nothing AndAlso _apSelectedTools.Count > 0 Then
+                ' Filter out manage_scheduled_tasks — the LLM must not create/modify
+                ' tasks while executing inside a scheduled task
+                Dim schedulerTools = _apSelectedTools.Where(
+                    Function(t) Not t.ToolName.Equals(AP_ToolPrefix & AP_Tool_ManageScheduledTasks,
+                                                       StringComparison.OrdinalIgnoreCase)).ToList()
+
+                response = Await ExecuteToolingLoop(
+                    systemPrompt, userPrompt.ToString(),
+                    schedulerTools, _apUseSecondApi,
+                    hideSplash:=True, hideLogWindow:=True,
+                    cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+            Else
+                Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
+                response = Await LLM(effectiveSystemPrompt, userPrompt.ToString(),
+                                     UseSecondAPI:=_apUseSecondApi,
+                                     HideSplash:=True, EnsureUI:=False,
+                                     cancellationToken:=ct,
+                                     binaryOutputDirectory:=tempDir)
+            End If
+
+            If String.IsNullOrWhiteSpace(response) Then
+                Throw New InvalidOperationException("LLM returned empty response for scheduled task")
+            End If
+
+            ' Collect result attachments
+            Dim resultAttachments = CollectResultAttachments(tempDir, attachments)
+            Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)
+
+            ' ── Persist new tool outputs to workspace ──
+            If resultAttachments IsNot Nothing AndAlso resultAttachments.Count > 0 Then
+                PersistResultsToWorkspace(task.Id, tempDir, resultAttachments, inputFileNames, workspaceFileNames)
+                ' Re-sync the workspace file list
+                SyncWorkspaceFileList(task)
+            End If
+
+            ' Send result e-mail
+            Await SwitchToUi(Sub() SendScheduledTaskResult(task, response, resultAttachments, sourcesHtml))
+
+            Interlocked.Increment(_apSessionReplyCount)
+            RecordLastProcessedTime()
+
+        Finally
+            _apCurrentTempDir = Nothing
+            _apCurrentAttachments = Nothing
+            _apCurrentMailInfo = Nothing
+            _apCurrentToolCallLog = Nothing
+            MaxToolIterations = previousMaxToolIterations
+            ClearAttachmentCaches()
+
+            Try
+                If tempDir IsNot Nothing AndAlso Directory.Exists(tempDir) Then
+                    Directory.Delete(tempDir, recursive:=True)
+                End If
+            Catch
+            End Try
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Copies new tool-generated files from the temp directory into the task's
+    ''' persistent workspace. Files that were original input or already in workspace
+    ''' are skipped (only genuinely new outputs are persisted).
+    ''' </summary>
+    Private Sub PersistResultsToWorkspace(taskId As String,
+                                           tempDir As String,
+                                           resultAttachments As List(Of String),
+                                           inputFileNames As HashSet(Of String),
+                                           workspaceFileNames As HashSet(Of String))
+        Try
+            For Each resultPath In resultAttachments
+                If Not File.Exists(resultPath) Then Continue For
+                Dim fileName = Path.GetFileName(resultPath)
+
+                ' Skip files that are original input attachments (they already live
+                ' in the task's attachment directory and should not be duplicated)
+                If inputFileNames.Contains(fileName) Then Continue For
+
+                ' Skip files that were loaded from workspace (avoid re-copying unchanged files;
+                ' if a tool modified the file in-place, the overwrite in Copy handles it)
+                ' We DO want to update workspace files that were modified, so we only skip
+                ' files whose name AND size match what was loaded.
+
+                SchedulerStoreWorkspaceFile(taskId, resultPath)
+            Next
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 Error persisting workspace files: {ex.Message}", "warn")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Sends the result of a scheduled task as a new e-mail to the task's deliverTo addresses.
+    ''' Must be called on the UI thread.
+    ''' </summary>
+    Private Sub SendScheduledTaskResult(task As ScheduledTask,
+                                         responseText As String,
+                                         resultAttachments As List(Of String),
+                                         sourcesHtml As String)
+        Dim newMail As MailItem = Nothing
+        Try
+            newMail = Application.CreateItem(OlItemType.olMailItem)
+            newMail.To = String.Join("; ", task.DeliverTo)
+            newMail.Subject = If(Not String.IsNullOrWhiteSpace(task.Subject),
+                                 $"{AN6} Scheduled Task: {task.Subject}",
+                                 $"{AN6} Scheduled Task Result")
+            newMail.BodyFormat = OlBodyFormat.olFormatHTML
+
+            ' Build HTML body
+            Dim htmlBody = ConvertResponseToHtml(responseText)
+
+            ' Add schedule info header
+            Dim schedNote = $"<div style='font-size:9pt;color:#888888;font-style:italic;margin-bottom:12px;'>" &
+                            $"Scheduled task executed at {DateTime.Now:yyyy-MM-dd HH:mm} — " &
+                            $"Schedule: {System.Net.WebUtility.HtmlEncode(If(task.ScheduleDescription, "one-time"))}</div>"
+            htmlBody = schedNote & htmlBody
+
+            ' Append sources
+            If Not String.IsNullOrWhiteSpace(sourcesHtml) Then
+                htmlBody &= sourcesHtml
+            End If
+
+            htmlBody &= BuildAutoPilotFooter()
+            newMail.HTMLBody = htmlBody
+
+            ' Add result attachments
+            If resultAttachments IsNot Nothing Then
+                For Each attachPath In resultAttachments
+                    If File.Exists(attachPath) Then
+                        newMail.Attachments.Add(attachPath, OlAttachmentType.olByValue, , Path.GetFileName(attachPath))
+                    End If
+                Next
+            End If
+
+            ' Tag as AutoPilot reply for loop prevention
+            Try
+                newMail.PropertyAccessor.SetProperty(AP_LoopHeaderProperty, AP_LoopHeaderValue)
+            Catch : End Try
+            Try : newMail.Categories = AP_CategoryName : Catch : End Try
+
+            ' Use the same sending account as the monitored mailbox
+            If _apConfig IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_apConfig.MonitoredMailbox) Then
+                Try
+                    Dim ns = Application.GetNamespace("MAPI")
+                    For i As Integer = 1 To ns.Accounts.Count
+                        If ns.Accounts(i).SmtpAddress.Equals(_apConfig.MonitoredMailbox, StringComparison.OrdinalIgnoreCase) Then
+                            newMail.SendUsingAccount = ns.Accounts(i)
+                            Exit For
+                        End If
+                    Next
+                Catch
+                End Try
+            End If
+
+            newMail.Send()
+            Try : MoveLastSentToInkyReplies() : Catch : End Try
+            ApDashboardLog($"📅 Result e-mail sent to: {String.Join(", ", task.DeliverTo)}", "info")
+
+        Catch ex As System.Exception
+            ApDashboardLog($"📅 ERROR sending scheduled task result: {ex.Message}", "error")
+        Finally
+            If newMail IsNot Nothing Then Try : Marshal.ReleaseComObject(newMail) : Catch : End Try
+        End Try
+    End Sub
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  RECURRENCE — advance nextDueUtc after execution
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>
+    ''' Advances a task's NextDueUtc based on its recurrence rule.
+    ''' If the task has no recurrence or has reached its limit, marks it as completed.
+    ''' </summary>
+    Private Sub AdvanceTaskSchedule(task As ScheduledTask)
+        ' Decrement remaining occurrences if count-limited
+        If task.RemainingOccurrences > 0 Then
+            task.RemainingOccurrences -= 1
+            If task.RemainingOccurrences <= 0 Then
+                task.Status = "completed"
+                task.NextDueUtc = DateTime.MaxValue
+                Return
+            End If
+        End If
+
+        ' No RRULE means one-shot
+        If String.IsNullOrWhiteSpace(task.Rrule) Then
+            task.Status = "completed"
+            task.NextDueUtc = DateTime.MaxValue
+            Return
+        End If
+
+        ' Parse RRULE and compute next occurrence
+        Dim nextUtc = ComputeNextOccurrence(task.Rrule, task.NextDueUtc, task.TimeOfDayLocal)
+        If nextUtc Is Nothing OrElse nextUtc.Value >= task.EndDateUtc Then
+            task.Status = "completed"
+            task.NextDueUtc = DateTime.MaxValue
+            Return
+        End If
+
+        task.NextDueUtc = nextUtc.Value
+    End Sub
+
+    ''' <summary>
+    ''' Lightweight RRULE evaluator. Supports:
+    '''   FREQ=DAILY;INTERVAL=n
+    '''   FREQ=WEEKLY;INTERVAL=n;BYDAY=MO,TU,...
+    '''   FREQ=MONTHLY;INTERVAL=n;BYMONTHDAY=d
+    '''   FREQ=MONTHLY;INTERVAL=n;BYDAY=1SU,2MO,...  (nth weekday)
+    ''' </summary>
+    Private Shared Function ComputeNextOccurrence(rrule As String, currentDueUtc As DateTime, timeOfDayLocal As String) As DateTime?
+        Try
+            Dim parts As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+            For Each part In rrule.Split(";"c)
+                Dim kv = part.Split("="c)
+                If kv.Length = 2 Then parts(kv(0).Trim()) = kv(1).Trim()
+            Next
+
+            Dim freq As String = ""
+            parts.TryGetValue("FREQ", freq)
+
+            Dim interval As Integer = 1
+            If parts.ContainsKey("INTERVAL") Then Integer.TryParse(parts("INTERVAL"), interval)
+            If interval < 1 Then interval = 1
+
+            ' Resolve time-of-day in local timezone
+            Dim currentLocal = currentDueUtc.ToLocalTime()
+            Dim tod As TimeSpan = currentLocal.TimeOfDay
+            If Not String.IsNullOrWhiteSpace(timeOfDayLocal) Then
+                Dim parsed As DateTime
+                If DateTime.TryParse(timeOfDayLocal, parsed) Then
+                    tod = parsed.TimeOfDay
+                End If
+            End If
+
+            Dim nextLocal As DateTime
+
+            Select Case freq.ToUpperInvariant()
+                Case "MINUTELY"
+                    nextLocal = currentLocal.AddMinutes(interval)
+
+                Case "HOURLY"
+                    nextLocal = currentLocal.AddHours(interval)
+
+                Case "DAILY"
+                    nextLocal = currentLocal.Date.AddDays(interval).Add(tod)
+
+                Case "WEEKLY"
+                    Dim byDay As String = ""
+                    parts.TryGetValue("BYDAY", byDay)
+
+                    If String.IsNullOrWhiteSpace(byDay) Then
+                        ' Simple weekly recurrence
+                        nextLocal = currentLocal.Date.AddDays(7 * interval).Add(tod)
+                    Else
+                        ' Find next matching day of week
+                        Dim targetDays = ParseByDay(byDay)
+                        nextLocal = FindNextMatchingDay(currentLocal.Date, targetDays, interval, tod)
+                    End If
+
+                Case "MONTHLY"
+                    Dim byMonthDay As String = ""
+                    Dim byDayMonthly As String = ""
+                    parts.TryGetValue("BYMONTHDAY", byMonthDay)
+                    parts.TryGetValue("BYDAY", byDayMonthly)
+
+                    If Not String.IsNullOrWhiteSpace(byMonthDay) Then
+                        Dim day As Integer
+                        If Integer.TryParse(byMonthDay, day) Then
+                            Dim nextMonth = currentLocal.Date.AddMonths(interval)
+                            Dim daysInMonth = DateTime.DaysInMonth(nextMonth.Year, nextMonth.Month)
+                            day = Math.Min(day, daysInMonth)
+                            nextLocal = New DateTime(nextMonth.Year, nextMonth.Month, day).Add(tod)
+                        Else
+                            Return Nothing
+                        End If
+                    ElseIf Not String.IsNullOrWhiteSpace(byDayMonthly) Then
+                        ' e.g. "1SU" = first Sunday, "2MO" = second Monday
+                        nextLocal = FindNthWeekdayInMonth(currentLocal.Date.AddMonths(interval), byDayMonthly, tod)
+                    Else
+                        nextLocal = currentLocal.Date.AddMonths(interval).Add(tod)
+                    End If
+
+                Case Else
+                    Return Nothing
+            End Select
+
+            ' If the computed next time is still in the past (e.g. catch-up),
+            ' keep advancing until we reach the future
+            Dim nowLocal = DateTime.Now
+            Dim safetyCounter = 0
+            While nextLocal <= nowLocal AndAlso safetyCounter < 1000
+                Select Case freq.ToUpperInvariant()
+                    Case "MINUTELY" : nextLocal = nextLocal.AddMinutes(interval)
+                    Case "HOURLY" : nextLocal = nextLocal.AddHours(interval)
+                    Case "DAILY" : nextLocal = nextLocal.AddDays(interval)
+                    Case "WEEKLY" : nextLocal = nextLocal.AddDays(7 * interval)
+                    Case "MONTHLY" : nextLocal = nextLocal.AddMonths(interval)
+                    Case Else : Return Nothing
+                End Select
+                safetyCounter += 1
+            End While
+
+            Return nextLocal.ToUniversalTime()
+
+        Catch ex As System.Exception
+            Debug.WriteLine($"[Scheduler] RRULE parse error: {ex.Message}")
+            Return Nothing
+        End Try
+    End Function
+
+    ''' <summary>Parses BYDAY values like "MO,TU,WE" into DayOfWeek list.</summary>
+    Private Shared Function ParseByDay(byDay As String) As List(Of DayOfWeek)
+        Dim result As New List(Of DayOfWeek)()
+        For Each token In byDay.Split(","c)
+            Dim t = token.Trim().ToUpperInvariant()
+            ' Strip numeric prefix (e.g. "1SU" → "SU") for simple day matching
+            If t.Length > 2 Then t = t.Substring(t.Length - 2)
+            Select Case t
+                Case "MO" : result.Add(DayOfWeek.Monday)
+                Case "TU" : result.Add(DayOfWeek.Tuesday)
+                Case "WE" : result.Add(DayOfWeek.Wednesday)
+                Case "TH" : result.Add(DayOfWeek.Thursday)
+                Case "FR" : result.Add(DayOfWeek.Friday)
+                Case "SA" : result.Add(DayOfWeek.Saturday)
+                Case "SU" : result.Add(DayOfWeek.Sunday)
+            End Select
+        Next
+        Return result
+    End Function
+
+    ''' <summary>Finds the next date matching one of the target days, with week interval.</summary>
+    Private Shared Function FindNextMatchingDay(fromDate As DateTime, targetDays As List(Of DayOfWeek),
+                                                 weekInterval As Integer, tod As TimeSpan) As DateTime
+        ' Start from next day after fromDate
+        Dim candidate = fromDate.AddDays(1)
+        Dim endSearch = fromDate.AddDays(7 * weekInterval + 7)
+        While candidate <= endSearch
+            If targetDays.Contains(candidate.DayOfWeek) Then
+                Return candidate.Add(tod)
+            End If
+            candidate = candidate.AddDays(1)
+        End While
+        ' Fallback: just add the interval in weeks
+        Return fromDate.AddDays(7 * weekInterval).Add(tod)
+    End Function
+
+    ''' <summary>
+    ''' Finds the nth weekday in a given month. E.g. "1SU" = first Sunday.
+    ''' </summary>
+    Private Shared Function FindNthWeekdayInMonth(monthStart As DateTime, byDaySpec As String, tod As TimeSpan) As DateTime
+        Dim spec = byDaySpec.Trim().ToUpperInvariant()
+        Dim nth As Integer = 1
+        Dim dayStr As String = spec
+
+        ' Parse leading digit(s)
+        If spec.Length > 2 AndAlso Char.IsDigit(spec(0)) Then
+            nth = Integer.Parse(spec.Substring(0, spec.Length - 2))
+            dayStr = spec.Substring(spec.Length - 2)
+        End If
+
+        Dim targetDay As DayOfWeek
+        Select Case dayStr
+            Case "MO" : targetDay = DayOfWeek.Monday
+            Case "TU" : targetDay = DayOfWeek.Tuesday
+            Case "WE" : targetDay = DayOfWeek.Wednesday
+            Case "TH" : targetDay = DayOfWeek.Thursday
+            Case "FR" : targetDay = DayOfWeek.Friday
+            Case "SA" : targetDay = DayOfWeek.Saturday
+            Case "SU" : targetDay = DayOfWeek.Sunday
+            Case Else : Return monthStart.Add(tod)
+        End Select
+
+        Dim d = New DateTime(monthStart.Year, monthStart.Month, 1)
+        Dim count = 0
+        While d.Month = monthStart.Month
+            If d.DayOfWeek = targetDay Then
+                count += 1
+                If count = nth Then Return d.Add(tod)
+            End If
+            d = d.AddDays(1)
+        End While
+
+        ' Fallback to last occurrence if nth exceeds available
+        Return New DateTime(monthStart.Year, monthStart.Month, DateTime.DaysInMonth(monthStart.Year, monthStart.Month)).Add(tod)
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  HELPER
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    ''' <summary>Truncates a string to the given max length with ellipsis.</summary>
+    Private Shared Function Truncate(s As String, maxLen As Integer) As String
+        If String.IsNullOrEmpty(s) Then Return ""
+        If s.Length <= maxLen Then Return s
+        Return s.Substring(0, maxLen - 3) & "..."
+    End Function
+
+    ''' <summary>
+    ''' Formats the task list into a human-readable text summary for the LLM to return.
+    ''' </summary>
+    Friend Function FormatTaskListForDisplay(tasks As List(Of ScheduledTask)) As String
+        If tasks Is Nothing OrElse tasks.Count = 0 Then Return "No scheduled tasks found."
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"=== Scheduled Tasks ({tasks.Count}) ===")
+        sb.AppendLine()
+
+        For Each t In tasks.OrderBy(Function(x) x.NextDueUtc)
+            Dim shortId = If(t.Id.Length > 8, t.Id.Substring(0, 8), t.Id)
+            sb.AppendLine($"ID: {shortId}...")
+            sb.AppendLine($"  Instruction: {Truncate(t.Instruction, 120)}")
+            sb.AppendLine($"  Schedule: {If(t.ScheduleDescription, "(not set)")}")
+            sb.AppendLine($"  Deliver to: {String.Join(", ", t.DeliverTo)}")
+            sb.AppendLine($"  Status: {t.Status}")
+            If t.NextDueUtc < DateTime.MaxValue Then
+                sb.AppendLine($"  Next due: {t.NextDueUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)")
+            End If
+            If t.LastExecutedUtc > DateTime.MinValue Then
+                sb.AppendLine($"  Last executed: {t.LastExecutedUtc.ToLocalTime():yyyy-MM-dd HH:mm} (local)")
+            End If
+            If t.AttachmentFiles IsNot Nothing AndAlso t.AttachmentFiles.Count > 0 Then
+                sb.AppendLine($"  Input files: {String.Join(", ", t.AttachmentFiles)}")
+            End If
+            If t.WorkspaceFiles IsNot Nothing AndAlso t.WorkspaceFiles.Count > 0 Then
+                sb.AppendLine($"  Workspace files: {String.Join(", ", t.WorkspaceFiles)}")
+            End If
+            If Not String.IsNullOrWhiteSpace(t.LastResult) Then
+                sb.AppendLine($"  Last result: {Truncate(t.LastResult, 100)}")
+            End If
+            If Not String.IsNullOrWhiteSpace(t.Rrule) Then
+                sb.AppendLine($"  RRULE: {t.Rrule}")
+            End If
+            If t.RemainingOccurrences > 0 Then
+                sb.AppendLine($"  Remaining: {t.RemainingOccurrences} occurrence(s)")
+            End If
+            sb.AppendLine()
+        Next
+
+        Return sb.ToString().TrimEnd()
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  SCHEDULER DASHBOARD — standalone form with DataGridView
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private _apSchedulerDashboard As Form = Nothing
+
+    ''' <summary>Shows the scheduler dashboard. Creates it if not yet open.</summary>
+    Friend Sub ShowSchedulerDashboard()
+        If _apSchedulerDashboard IsNot Nothing AndAlso Not _apSchedulerDashboard.IsDisposed Then
+            RefreshSchedulerDashboard()
+            _apSchedulerDashboard.Show()
+            _apSchedulerDashboard.BringToFront()
+            Return
+        End If
+
+        _apSchedulerDashboard = CreateSchedulerDashboardForm()
+        RefreshSchedulerDashboard()
+        _apSchedulerDashboard.Show()
+    End Sub
+
+    ''' <summary>Creates the scheduler dashboard form with a DataGridView and action buttons.</summary>
+    Private Function CreateSchedulerDashboardForm() As Form
+        Dim frm As New Form() With {
+            .Text = $"{AN6} AutoPilot — Scheduled Tasks",
+            .Width = 900,
+            .Height = 450,
+            .StartPosition = FormStartPosition.CenterScreen,
+            .FormBorderStyle = FormBorderStyle.Sizable,
+            .MinimumSize = New Drawing.Size(700, 300),
+            .TopMost = False,
+            .MaximizeBox = True,
+            .MinimizeBox = True,
+            .ShowInTaskbar = True,
+            .AutoScaleMode = AutoScaleMode.Font,
+            .Font = New Drawing.Font("Segoe UI", 9.0F, Drawing.FontStyle.Regular, Drawing.GraphicsUnit.Point)
+        }
+
+        Try
+            frm.Icon = Drawing.Icon.FromHandle(
+                (New Drawing.Bitmap(GetLogoBitmap(LogoType.Standard))).GetHicon())
+        Catch
+        End Try
+
+        Dim mainPanel As New TableLayoutPanel() With {
+            .Dock = DockStyle.Fill, .ColumnCount = 1, .RowCount = 2, .Padding = New Padding(8)
+        }
+        mainPanel.RowStyles.Add(New RowStyle(SizeType.Percent, 100.0F))
+        mainPanel.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+
+        Dim dgv As New DataGridView() With {
+            .Dock = DockStyle.Fill,
+            .Name = "dgvTasks",
+            .ReadOnly = True,
+            .AllowUserToAddRows = False,
+            .AllowUserToDeleteRows = False,
+            .AllowUserToResizeRows = False,
+            .SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+            .MultiSelect = False,
+            .RowHeadersVisible = False,
+            .AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+            .BackgroundColor = Drawing.SystemColors.Window,
+            .BorderStyle = BorderStyle.None,
+            .ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.AutoSize,
+            .DefaultCellStyle = New DataGridViewCellStyle() With {
+                .Font = New Drawing.Font("Segoe UI", 8.5F),
+                .WrapMode = DataGridViewTriState.False
+            },
+            .AlternatingRowsDefaultCellStyle = New DataGridViewCellStyle() With {
+                .BackColor = Drawing.Color.FromArgb(245, 245, 250)
+            }
+        }
+
+        dgv.Columns.Add("colId", "ID")
+        dgv.Columns.Add("colInstruction", "Instruction")
+        dgv.Columns.Add("colSchedule", "Schedule")
+        dgv.Columns.Add("colStatus", "Status")
+        dgv.Columns.Add("colNextDue", "Next Due")
+        dgv.Columns.Add("colLastExec", "Last Executed")
+        dgv.Columns.Add("colDeliverTo", "Deliver To")
+        dgv.Columns.Add("colLastResult", "Last Result")
+
+        dgv.Columns("colId").FillWeight = 8
+        dgv.Columns("colInstruction").FillWeight = 25
+        dgv.Columns("colSchedule").FillWeight = 13
+        dgv.Columns("colStatus").FillWeight = 7
+        dgv.Columns("colNextDue").FillWeight = 12
+        dgv.Columns("colLastExec").FillWeight = 12
+        dgv.Columns("colDeliverTo").FillWeight = 13
+        dgv.Columns("colLastResult").FillWeight = 15
+
+        mainPanel.Controls.Add(dgv, 0, 0)
+
+        ' Button panel
+        Dim buttonPanel As New FlowLayoutPanel() With {
+            .Dock = DockStyle.Fill, .FlowDirection = FlowDirection.RightToLeft,
+            .AutoSize = True, .Padding = New Padding(0, 4, 0, 0)
+        }
+
+        Dim btnRefresh As New Button() With {
+            .Text = "Refresh", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)
+        }
+        AddHandler btnRefresh.Click, Sub(s, e) RefreshSchedulerDashboard()
+
+        Dim btnDelete As New Button() With {
+            .Text = "Delete Selected", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)
+        }
+        AddHandler btnDelete.Click, Sub(s, e) DeleteSelectedSchedulerTask(dgv)
+
+        Dim btnPause As New Button() With {
+            .Text = "Pause/Resume", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)
+        }
+        AddHandler btnPause.Click, Sub(s, e) TogglePauseSelectedTask(dgv)
+
+        Dim btnClose As New Button() With {
+            .Text = "Close", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)
+        }
+        AddHandler btnClose.Click, Sub(s, e) frm.Hide()
+
+        Dim btnOpenFile As New Button() With {
+            .Text = "Open JSON", .AutoSize = True, .Padding = New Padding(10, 5, 10, 5)
+        }
+        AddHandler btnOpenFile.Click, Sub(s, e)
+                                          Try
+                                              Dim schedPath = GetScheduleFilePath()
+                                              If Not File.Exists(schedPath) Then
+                                                  ShowCustomMessageBox("Schedule file does not exist yet.")
+                                                  Return
+                                              End If
+                                              ShowTextFileEditor(schedPath, $"{AN6} AutoPilot — Schedule File:", ForceJson:=True, _context:=_context)
+                                              RefreshSchedulerDashboard()
+                                          Catch ex As System.Exception
+                                              ShowCustomMessageBox($"Cannot open file: {ex.Message}")
+                                          End Try
+                                      End Sub
+
+        buttonPanel.Controls.Add(btnClose)
+        buttonPanel.Controls.Add(btnRefresh)
+        buttonPanel.Controls.Add(btnDelete)
+        buttonPanel.Controls.Add(btnPause)
+        buttonPanel.Controls.Add(btnOpenFile)
+        mainPanel.Controls.Add(buttonPanel, 0, 1)
+
+        frm.Controls.Add(mainPanel)
+
+        ' Hide instead of closing
+        AddHandler frm.FormClosing, Sub(s As Object, e As FormClosingEventArgs)
+                                        If e.CloseReason = CloseReason.UserClosing Then
+                                            e.Cancel = True
+                                            frm.Hide()
+                                        End If
+                                    End Sub
+
+        Return frm
+    End Function
+
+    ''' <summary>Refreshes the scheduler dashboard DataGridView with current task data.</summary>
+    Friend Sub RefreshSchedulerDashboard()
+        If _apSchedulerDashboard Is Nothing OrElse _apSchedulerDashboard.IsDisposed Then Return
+
+        Dim dgv = _apSchedulerDashboard.Controls.Find("dgvTasks", True).
+                    OfType(Of DataGridView)().FirstOrDefault()
+        If dgv Is Nothing Then Return
+
+        If dgv.InvokeRequired Then
+            dgv.BeginInvoke(New MethodInvoker(Sub() RefreshSchedulerDashboardCore(dgv)))
+        Else
+            RefreshSchedulerDashboardCore(dgv)
+        End If
+    End Sub
+
+    ''' <summary>Core logic for populating the scheduler DataGridView. Must run on the UI thread.</summary>
+    Private Sub RefreshSchedulerDashboardCore(dgv As DataGridView)
+        dgv.Rows.Clear()
+        Dim tasks = ReadScheduleFile().Tasks.OrderBy(Function(t) t.NextDueUtc).ToList()
+
+        For Each t In tasks
+            Dim shortId = If(t.Id.Length > 8, t.Id.Substring(0, 8), t.Id)
+            Dim nextDue = If(t.NextDueUtc < DateTime.MaxValue,
+                             t.NextDueUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), "—")
+            Dim lastExec = If(t.LastExecutedUtc > DateTime.MinValue,
+                              t.LastExecutedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), "—")
+            Dim deliver = String.Join(", ", t.DeliverTo)
+            Dim lastResult = If(t.LastResult, "—")
+            If lastResult.Length > 80 Then lastResult = lastResult.Substring(0, 77) & "..."
+
+            Dim rowIdx = dgv.Rows.Add(
+                shortId,
+                Truncate(t.Instruction, 80),
+                If(t.ScheduleDescription, "one-time"),
+                t.Status,
+                nextDue,
+                lastExec,
+                deliver,
+                lastResult)
+
+            ' Color-code status
+            Dim row = dgv.Rows(rowIdx)
+            Select Case t.Status.ToLowerInvariant()
+                Case "active"
+                    row.Cells("colStatus").Style.ForeColor = Drawing.Color.DarkGreen
+                Case "paused"
+                    row.Cells("colStatus").Style.ForeColor = Drawing.Color.DarkOrange
+                Case "completed"
+                    row.Cells("colStatus").Style.ForeColor = Drawing.Color.Gray
+                Case "failed"
+                    row.Cells("colStatus").Style.ForeColor = Drawing.Color.DarkRed
+            End Select
+
+            ' Store full task ID in Tag for delete/pause operations
+            row.Tag = t.Id
+        Next
+    End Sub
+
+    ''' <summary>Deletes the selected task from the scheduler dashboard.</summary>
+    Private Sub DeleteSelectedSchedulerTask(dgv As DataGridView)
+        If dgv.SelectedRows.Count = 0 Then Return
+        Dim taskId = TryCast(dgv.SelectedRows(0).Tag, String)
+        If String.IsNullOrWhiteSpace(taskId) Then Return
+
+        Dim confirm = ShowCustomYesNoBox(
+            $"Delete scheduled task {taskId.Substring(0, Math.Min(8, taskId.Length))}...?",
+            "Delete", "Cancel",
+            header:=$"{AN6} Scheduler")
+        If confirm <> 1 Then Return
+
+        If SchedulerDeleteTask(taskId) Then
+            RefreshSchedulerDashboard()
+        Else
+            ShowCustomMessageBox("Failed to delete task.")
+        End If
+    End Sub
+
+    ''' <summary>Toggles the status of the selected task between active and paused.</summary>
+    Private Sub TogglePauseSelectedTask(dgv As DataGridView)
+        If dgv.SelectedRows.Count = 0 Then Return
+        Dim taskId = TryCast(dgv.SelectedRows(0).Tag, String)
+        If String.IsNullOrWhiteSpace(taskId) Then Return
+
+        Dim task = SchedulerFindTask(taskId)
+        If task Is Nothing Then Return
+
+        Select Case task.Status.ToLowerInvariant()
+            Case "active" : task.Status = "paused"
+            Case "paused" : task.Status = "active"
+            Case Else
+                ShowCustomMessageBox($"Task status is '{task.Status}' — cannot pause/resume.")
+                Return
+        End Select
+
+        If SchedulerUpdateTask(task) Then
+            RefreshSchedulerDashboard()
+            ApDashboardLog($"📅 Task {taskId.Substring(0, 8)}... status changed to: {task.Status}", "info")
+        End If
+    End Sub
+
+    ''' <summary>Disposes the scheduler dashboard form.</summary>
+    Friend Sub CloseSchedulerDashboard()
+        Try
+            If _apSchedulerDashboard IsNot Nothing AndAlso Not _apSchedulerDashboard.IsDisposed Then
+                _apSchedulerDashboard.Close()
+                _apSchedulerDashboard.Dispose()
+            End If
+        Catch
+        End Try
+        _apSchedulerDashboard = Nothing
+    End Sub
+
+End Class

@@ -578,17 +578,31 @@ Partial Public Class ThisAddIn
         Try
             Dim parent As MAPIFolder = TryCast(mi.Parent, MAPIFolder)
             If parent IsNot Nothing Then
-                entry.SourceFolderPath = parent.FolderPath
+                entry.SourceFolderPath = DecodeFolderPath(parent.FolderPath)
             End If
         Catch
         End Try
 
         Return entry
+
     End Function
 
 #End Region
 
 #Region "MailMover Folder Enumeration"
+
+    ''' <summary>
+    ''' Decodes percent-encoded characters in Outlook MAPI folder paths
+    ''' (e.g. %2F → /, %20 → space, %25 → %).
+    ''' </summary>
+    Private Shared Function DecodeFolderPath(path As String) As String
+        If String.IsNullOrEmpty(path) Then Return path
+        Try
+            Return Uri.UnescapeDataString(path)
+        Catch
+            Return path
+        End Try
+    End Function
 
     ''' <summary>
     ''' Collects all mailbox folders from the given store.
@@ -610,11 +624,11 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>
-    ''' Recursively enumerates folders and appends their folder paths.
+    ''' Recursively enumerates folders and appends their decoded folder paths.
     ''' </summary>
     Private Sub EnumerateFolders(parentFolder As MAPIFolder, folders As List(Of String))
         Try
-            folders.Add(parentFolder.FolderPath)
+            folders.Add(DecodeFolderPath(parentFolder.FolderPath))
             Dim subFolders As Outlook.Folders = parentFolder.Folders
             For Each subFolder As MAPIFolder In subFolders
                 EnumerateFolders(subFolder, folders)
@@ -625,11 +639,13 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Finds a folder by full folder path in the given store.
+    ''' Decodes both the input path and each subfolder name to handle percent-encoded characters.
     ''' </summary>
     Private Function FindFolderByPath(ns As Outlook.NameSpace, folderPath As String, store As Outlook.Store) As MAPIFolder
         If String.IsNullOrWhiteSpace(folderPath) Then Return Nothing
         Try
-            Dim parts As String() = folderPath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
+            Dim decodedPath As String = DecodeFolderPath(folderPath)
+            Dim parts As String() = decodedPath.Split(New Char() {"\"c}, StringSplitOptions.RemoveEmptyEntries)
             If parts.Length < 1 Then Return Nothing
 
             If store Is Nothing Then store = ns.DefaultStore
@@ -640,7 +656,7 @@ Partial Public Class ThisAddIn
                 Dim found As Boolean = False
                 Dim subFolders As Outlook.Folders = current.Folders
                 For Each sub_ As MAPIFolder In subFolders
-                    If String.Equals(sub_.Name, partName, StringComparison.OrdinalIgnoreCase) Then
+                    If String.Equals(DecodeFolderPath(sub_.Name), partName, StringComparison.OrdinalIgnoreCase) Then
                         current = sub_
                         found = True
                         Exit For

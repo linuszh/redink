@@ -549,6 +549,27 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_AutoPilotAutoStart As Boolean
+        Get
+            Return _context.INI_AutoPilotAutoStart
+        End Get
+        Set(value As Boolean)
+            _context.INI_AutoPilotAutoStart = value
+        End Set
+    End Property
+
+
+    Public Shared Property INI_AutoPilotSchedulerLocalChat As Boolean
+        Get
+            Return _context.INI_AutoPilotSchedulerLocalChat
+        End Get
+        Set(value As Boolean)
+            _context.INI_AutoPilotSchedulerLocalChat = value
+        End Set
+    End Property
+
+
+
     Public Shared Property INI_UsageRestrictions As String
         Get
             Return _context.INI_UsageRestrictions
@@ -951,6 +972,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_JustifyMarkup As String
+        Get
+            Return _context.SP_JustifyMarkup
+        End Get
+        Set(value As String)
+            _context.SP_JustifyMarkup = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_MailReply As String
         Get
             Return _context.SP_MailReply
@@ -1047,6 +1078,16 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_Extract = value
+        End Set
+    End Property
+
+
+    Public Shared Property SP_ExtractBuilder As String
+        Get
+            Return _context.SP_ExtractBuilder
+        End Get
+        Set(value As String)
+            _context.SP_ExtractBuilder = value
         End Set
     End Property
 
@@ -1187,6 +1228,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_NoMarkdown As String
+        Get
+            Return _context.SP_Add_NoMarkdown
+        End Get
+        Set(value As String)
+            _context.SP_Add_NoMarkdown = value
+        End Set
+    End Property
+
+
     Public Shared Property SP_Add_Bubbles As String
         Get
             Return _context.SP_Add_Bubbles
@@ -1267,6 +1318,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_Add_Chart = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Add_Chart_App As String
+        Get
+            Return _context.SP_Add_Chart_App
+        End Get
+        Set(value As String)
+            _context.SP_Add_Chart_App = value
         End Set
     End Property
 
@@ -1365,6 +1425,34 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.SP_SplitPDF = value
+        End Set
+    End Property
+
+    Public Shared Property SP_ExhibitNumber As String
+        Get
+            Return _context.SP_ExhibitNumber
+        End Get
+        Set(value As String)
+            _context.SP_ExhibitNumber = value
+        End Set
+    End Property
+
+
+    Public Shared Property SP_MarkupReview_Compliance As String
+        Get
+            Return _context.SP_MarkupReview_Compliance
+        End Get
+        Set(value As String)
+            _context.SP_MarkupReview_Compliance = value
+        End Set
+    End Property
+
+    Public Shared Property SP_MarkupReview_CrossClause As String
+        Get
+            Return _context.SP_MarkupReview_CrossClause
+        End Get
+        Set(value As String)
+            _context.SP_MarkupReview_CrossClause = value
         End Set
     End Property
 
@@ -1738,6 +1826,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Boolean)
             _context.INI_ForceDrawioLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AllowLegacyDocFiles As Boolean
+        Get
+            Return _context.INI_AllowLegacyDocFiles
+        End Get
+        Set(value As Boolean)
+            _context.INI_AllowLegacyDocFiles = value
         End Set
     End Property
 

@@ -77,6 +77,17 @@ Partial Class Ribbon1
         Me.RI_RIRemove = Me.Factory.CreateRibbonButton
         Me.RI_Chat = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
+        Me.Menu4 = Me.Factory.CreateRibbonMenu
+        Me.RI_Model1 = Me.Factory.CreateRibbonButton
+        Me.RI_Model2 = Me.Factory.CreateRibbonButton
+        Me.RI_Model3 = Me.Factory.CreateRibbonButton
+        Me.RI_Model4 = Me.Factory.CreateRibbonButton
+        Me.RI_Model5 = Me.Factory.CreateRibbonButton
+        Me.RI_Model6 = Me.Factory.CreateRibbonButton
+        Me.RI_Model7 = Me.Factory.CreateRibbonButton
+        Me.RI_Model8 = Me.Factory.CreateRibbonButton
+        Me.RI_Model9 = Me.Factory.CreateRibbonButton
+        Me.RI_Model10 = Me.Factory.CreateRibbonButton
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
@@ -121,6 +132,7 @@ Partial Class Ribbon1
         Me.Menu1.Items.Add(Me.Menu2)
         Me.Menu1.Items.Add(Me.RI_Chat)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
+        Me.Menu1.Items.Add(Me.Menu4)
         Me.Menu1.Items.Add(Me.Settings)
         Me.Menu1.Label = "Task"
         Me.Menu1.Name = "Menu1"
@@ -324,6 +336,105 @@ Partial Class Ribbon1
         Me.RI_HelpMe.ScreenTip = "This will call up a chatbot that answers your questions about Red Ink"
         Me.RI_HelpMe.ShowImage = True
         '
+        'Menu4
+        '
+        Me.Menu4.Items.Add(Me.RI_Model1)
+        Me.Menu4.Items.Add(Me.RI_Model2)
+        Me.Menu4.Items.Add(Me.RI_Model3)
+        Me.Menu4.Items.Add(Me.RI_Model4)
+        Me.Menu4.Items.Add(Me.RI_Model5)
+        Me.Menu4.Items.Add(Me.RI_Model6)
+        Me.Menu4.Items.Add(Me.RI_Model7)
+        Me.Menu4.Items.Add(Me.RI_Model8)
+        Me.Menu4.Items.Add(Me.RI_Model9)
+        Me.Menu4.Items.Add(Me.RI_Model10)
+        Me.Menu4.Label = "Switch Model"
+        Me.Menu4.Name = "Menu4"
+        Me.Menu4.OfficeImageId = "DatabaseEncodeDecode"
+        Me.Menu4.ScreenTip = "Switch your primary model to your other predefined models"
+        Me.Menu4.ShowImage = True
+        Me.Menu4.Visible = False
+        '
+        'RI_Model1
+        '
+        Me.RI_Model1.Label = "Model 1"
+        Me.RI_Model1.Name = "RI_Model1"
+        Me.RI_Model1.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model1.ShowImage = True
+        Me.RI_Model1.Visible = False
+        '
+        'RI_Model2
+        '
+        Me.RI_Model2.Label = "Model 2"
+        Me.RI_Model2.Name = "RI_Model2"
+        Me.RI_Model2.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model2.ShowImage = True
+        Me.RI_Model2.Visible = False
+        '
+        'RI_Model3
+        '
+        Me.RI_Model3.Label = "Model 3"
+        Me.RI_Model3.Name = "RI_Model3"
+        Me.RI_Model3.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model3.ShowImage = True
+        Me.RI_Model3.Visible = False
+        '
+        'RI_Model4
+        '
+        Me.RI_Model4.Label = "Model 4"
+        Me.RI_Model4.Name = "RI_Model4"
+        Me.RI_Model4.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model4.ShowImage = True
+        Me.RI_Model4.Visible = False
+        '
+        'RI_Model5
+        '
+        Me.RI_Model5.Label = "Model 5"
+        Me.RI_Model5.Name = "RI_Model5"
+        Me.RI_Model5.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model5.ShowImage = True
+        Me.RI_Model5.Visible = False
+        '
+        'RI_Model6
+        '
+        Me.RI_Model6.Label = "Model 6"
+        Me.RI_Model6.Name = "RI_Model6"
+        Me.RI_Model6.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model6.ShowImage = True
+        Me.RI_Model6.Visible = False
+        '
+        'RI_Model7
+        '
+        Me.RI_Model7.Label = "Model 7"
+        Me.RI_Model7.Name = "RI_Model7"
+        Me.RI_Model7.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model7.ShowImage = True
+        Me.RI_Model7.Visible = False
+        '
+        'RI_Model8
+        '
+        Me.RI_Model8.Label = "Model 8"
+        Me.RI_Model8.Name = "RI_Model8"
+        Me.RI_Model8.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model8.ShowImage = True
+        Me.RI_Model8.Visible = False
+        '
+        'RI_Model9
+        '
+        Me.RI_Model9.Label = "Model 9"
+        Me.RI_Model9.Name = "RI_Model9"
+        Me.RI_Model9.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model9.ShowImage = True
+        Me.RI_Model9.Visible = False
+        '
+        'RI_Model10
+        '
+        Me.RI_Model10.Label = "Model 10"
+        Me.RI_Model10.Name = "RI_Model10"
+        Me.RI_Model10.OfficeImageId = "DatabaseInsert"
+        Me.RI_Model10.ShowImage = True
+        Me.RI_Model10.Visible = False
+        '
         'Settings
         '
         Me.Settings.Label = "Settings"
@@ -465,6 +576,17 @@ Partial Class Ribbon1
     Friend WithEvents Menu3 As RibbonMenu
     Friend WithEvents RI_Renamer As RibbonButton
     Friend WithEvents RI_RIRemove As RibbonButton
+    Friend WithEvents Menu4 As RibbonMenu
+    Friend WithEvents RI_Model1 As RibbonButton
+    Friend WithEvents RI_Model2 As RibbonButton
+    Friend WithEvents RI_Model3 As RibbonButton
+    Friend WithEvents RI_Model4 As RibbonButton
+    Friend WithEvents RI_Model5 As RibbonButton
+    Friend WithEvents RI_Model6 As RibbonButton
+    Friend WithEvents RI_Model7 As RibbonButton
+    Friend WithEvents RI_Model8 As RibbonButton
+    Friend WithEvents RI_Model9 As RibbonButton
+    Friend WithEvents RI_Model10 As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

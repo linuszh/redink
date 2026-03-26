@@ -10,13 +10,22 @@
 ' Architecture:
 '  - Dialog flow collects model selection, mailbox, filters, subject trigger,
 '    whitelist, rate limits, and tool selection (when supported).
+'  - Additional session options:
+'      * EnableWebGrounding — tells the model about its native web-search capability.
+'      * EnableScheduler — activates the AutoPilot Task Scheduler for recurring tasks.
+'      * EnableVoicemailProcessing — transcribes and processes incoming voicemails
+'        (requires VoicemailSenderAddress and VoicemailCallerIdMapPath).
+'      * ReprocessLookbackHours — re-proposes already-processed mails in catch-up.
+'      * IsUnattended — auto-start mode (skips catch-up preview, auto-approves replies).
 '  - Settings are persisted to My.Settings and loaded as defaults for subsequent runs.
 '  - Filter rule parsing is shared between the dialog and settings loader.
 ' =============================================================================
 
+
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Text.RegularExpressions
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
@@ -66,6 +75,53 @@ Partial Public Class ThisAddIn
 
         ''' <summary>Custom footer text appended to every AutoPilot reply.</summary>
         Public Property FooterText As String = ""
+
+        ''' <summary>
+        ''' When True, the session was auto-started (timer expired) without explicit user interaction.
+        ''' Unattended mode skips the catch-up preview dialog (auto-selects all) and auto-approves
+        ''' replies for non-whitelisted senders instead of blocking with an approval dialog.
+        ''' </summary>
+        Public Property IsUnattended As Boolean = False
+
+        ''' <summary>
+        ''' Number of hours to look back and re-propose already-processed mails for reprocessing.
+        ''' 0 = disabled (only unprocessed mails are proposed in catch-up).
+        ''' When > 0, mails within this window that match filters are shown in the catch-up dialog
+        ''' even if they were already processed, allowing the operator to select them for reprocessing.
+        ''' </summary>
+        Public Property ReprocessLookbackHours As Integer = 0
+
+        ''' <summary>
+        ''' When True, the system prompt tells the model it has built-in web search / grounding capability.
+        ''' Only meaningful when the model natively supports web search (e.g. Gemini with grounding).
+        ''' </summary>
+        Public Property EnableWebGrounding As Boolean = False
+
+        ''' <summary>
+        ''' When True, incoming voicemails (audio attachments from the registered voicemail sender)
+        ''' are transcribed and processed as instructions. Requires binary input support.
+        ''' </summary>
+        Public Property EnableVoicemailProcessing As Boolean = False
+
+        ''' <summary>
+        ''' SMTP address of the voicemail system (e.g. noreply@combox.swisscom.ch).
+        ''' Only mails from this sender with audio attachments are treated as voicemails.
+        ''' </summary>
+        Public Property VoicemailSenderAddress As String = ""
+
+        ''' <summary>
+        ''' Path to a CSV file mapping caller IDs (phone numbers) to e-mail addresses.
+        ''' Format: phone,email[,displayname]  (displayname is optional)
+        ''' </summary>
+        Public Property VoicemailCallerIdMapPath As String = ""
+
+        ''' <summary>
+        ''' When True, the AutoPilot Scheduler is enabled — tasks can be created, managed,
+        ''' and executed automatically on schedule with results delivered by e-mail.
+        ''' </summary>
+        Public Property EnableScheduler As Boolean = False
+
+
     End Class
 
     ''' <summary>
@@ -250,40 +306,109 @@ Partial Public Class ThisAddIn
         config.RequireApprovalForNonWhitelisted = True
 
         ' ── Step 5: Rate limits ──
-        Dim params(2) As InputParameter
-        params(0) = New InputParameter() With {
+        Dim paramsList As New List(Of InputParameter)()
+        paramsList.Add(New InputParameter() With {
             .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
-        }
-        params(1) = New InputParameter() With {
-            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession})",
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
-        }
-        params(2) = New InputParameter() With {
+        })
+        paramsList.Add(New InputParameter() With {
             .Name = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
-        }
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Reprocess lookback (hours, 0 = only new mails)",
+            .Value = saved.ReprocessLookbackHours.ToString()
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Add web grounding (if models are configured)",
+            .Value = saved.EnableWebGrounding
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Enable task scheduler (create && run scheduled tasks)",
+            .Value = saved.EnableScheduler
+        })
+
+        ' ── Voicemail processing (only if audio transcription is available) ──
+        Dim audioTranscriptionAvailable As Boolean = IsAudioTranscriptionAvailable(_context)
+        Dim pVoicemail As InputParameter = Nothing
+        Dim pVoicemailSender As InputParameter = Nothing
+        Dim pVoicemailMapPath As InputParameter = Nothing
+        If audioTranscriptionAvailable Then
+            pVoicemail = New InputParameter() With {
+                .Name = "Process voicemails (transcribe & respond)",
+                .Value = saved.EnableVoicemailProcessing
+            }
+            paramsList.Add(pVoicemail)
+            pVoicemailSender = New InputParameter() With {
+                .Name = "Voicemail sender address (e.g. noreply@combox.swisscom.ch)",
+                .Value = If(saved.VoicemailSenderAddress, "")
+            }
+            paramsList.Add(pVoicemailSender)
+            pVoicemailMapPath = New InputParameter() With {
+                .Name = "Caller ID → Email map file (CSV path)",
+                .Value = If(saved.VoicemailCallerIdMapPath, "")
+            }
+            paramsList.Add(pVoicemailMapPath)
+        End If
+
+        Dim params = paramsList.ToArray()
 
         Dim limitsOk = ShowCustomVariableInputForm(
-            "Configure rate limits and restrictions:",
-            $"{AN6} AutoPilot — Limits",
+            "Configure rate limits, restrictions, and optional features:",
+            $"{AN6} AutoPilot — Limits & Features",
             params)
 
         If Not limitsOk Then Return Nothing
 
         Dim cooldown As Integer
-        If Integer.TryParse(params(0).Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
+        If Integer.TryParse(paramsList(0).Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
             config.CooldownSeconds = cooldown
         End If
 
         Dim maxReplies As Integer
-        If Integer.TryParse(params(1).Value?.ToString(), maxReplies) AndAlso maxReplies > 0 Then
+        If Integer.TryParse(paramsList(1).Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
             config.MaxRepliesPerSession = maxReplies
         End If
 
         Dim maxMb As Integer
-        If Integer.TryParse(params(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
+        If Integer.TryParse(paramsList(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
             config.MaxAttachmentBytes = CLng(maxMb) * 1024 * 1024
+        End If
+
+        Dim reprocessHours As Integer
+        If Integer.TryParse(paramsList(3).Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
+            config.ReprocessLookbackHours = reprocessHours
+        End If
+
+        ' Web grounding checkbox
+        config.EnableWebGrounding = CBool(If(paramsList(4).Value, False))
+
+        ' Scheduler checkbox
+        config.EnableScheduler = CBool(If(paramsList(5).Value, False))
+
+        ' Voicemail settings
+        If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
+            config.EnableVoicemailProcessing = CBool(If(pVoicemail.Value, False))
+            config.VoicemailSenderAddress = If(pVoicemailSender?.Value?.ToString()?.Trim(), "")
+            config.VoicemailCallerIdMapPath = If(pVoicemailMapPath?.Value?.ToString()?.Trim(), "").Trim(""""c)
+
+            ' Validate voicemail config
+            If config.EnableVoicemailProcessing Then
+                If String.IsNullOrWhiteSpace(config.VoicemailSenderAddress) Then
+                    ShowCustomMessageBox("Voicemail processing requires a voicemail sender address.", AN)
+                    Return Nothing
+                End If
+                If String.IsNullOrWhiteSpace(config.VoicemailCallerIdMapPath) OrElse
+                   Not IO.File.Exists(config.VoicemailCallerIdMapPath) Then
+                    ShowCustomMessageBox("Voicemail processing requires a valid caller ID map file path." & vbCrLf &
+                                         "File not found: " & If(config.VoicemailCallerIdMapPath, "(empty)"), AN)
+                    Return Nothing
+                End If
+            End If
         End If
 
         ' ── Step 6: Source selection (only if model supports tooling) ──
@@ -344,11 +469,23 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Trigger word: {If(String.IsNullOrWhiteSpace(config.SubjectTriggerWord), "(none)", config.SubjectTriggerWord)}")
         summaryBuilder.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
         summaryBuilder.AppendLine($"Cooldown: {config.CooldownSeconds}s per sender")
-        summaryBuilder.AppendLine($"Max replies: {config.MaxRepliesPerSession} per session")
+        summaryBuilder.AppendLine($"Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())} per session")
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
+        summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
+        If config.EnableVoicemailProcessing Then
+            summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
+        End If
+        If config.ReprocessLookbackHours > 0 Then
+            summaryBuilder.AppendLine($"Reprocess lookback: {config.ReprocessLookbackHours}h (already-processed mails re-proposed)")
+        Else
+            summaryBuilder.AppendLine("Reprocess lookback: disabled (only new mails)")
+        End If
         summaryBuilder.AppendLine($"{ToolFriendlyName}: {If(config.SelectedExternalTools?.Count, 0)}")
         If modelSupportsTools Then
-            summaryBuilder.AppendLine($"Internal tools: document processing, PDF extraction")
+            Dim internalToolCount As Integer = 0
+            Try : internalToolCount = GetAutoPilotInternalTools().Count : Catch : End Try
+            summaryBuilder.AppendLine($"Internal tools: {internalToolCount} (document processing, PDF extraction, etc.)")
         End If
         summaryBuilder.AppendLine()
         summaryBuilder.AppendLine($"Mode: Auto-send for {config.WhitelistedSenders.Count} whitelisted pattern(s); approval required for others.")
@@ -413,6 +550,13 @@ Partial Public Class ThisAddIn
         My.Settings.AP_RequireApproval = config.RequireApprovalForNonWhitelisted
         My.Settings.AP_MonitoredMailbox = If(config.MonitoredMailbox, "")
         My.Settings.AP_SelectedModelKey = If(config.SelectedModelKey, "")
+        My.Settings.AP_UseSecondApi = config.UseSecondApi
+        My.Settings.AP_ReprocessLookbackHours = config.ReprocessLookbackHours
+        My.Settings.AP_EnableWebGrounding = config.EnableWebGrounding
+        My.Settings.AP_EnableVoicemailProcessing = config.EnableVoicemailProcessing
+        My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
+        My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
+        My.Settings.AP_EnableScheduler = config.EnableScheduler
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -433,12 +577,19 @@ Partial Public Class ThisAddIn
         Dim config As New AutoPilotConfig()
         config.SubjectTriggerWord = If(String.IsNullOrWhiteSpace(My.Settings.AP_SubjectTriggerWord), Nothing, My.Settings.AP_SubjectTriggerWord)
         config.CooldownSeconds = If(My.Settings.AP_CooldownSeconds > 0, CInt(My.Settings.AP_CooldownSeconds), AP_DefaultCooldownSeconds)
-        config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession > 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)
+        config.MaxRepliesPerSession = If(My.Settings.AP_MaxRepliesPerSession >= 0, My.Settings.AP_MaxRepliesPerSession, AP_DefaultMaxRepliesPerSession)
         config.MaxAttachmentBytes = CLng(If(My.Settings.AP_MaxAttachmentMB > 0, My.Settings.AP_MaxAttachmentMB, 10)) * 1024 * 1024
         config.FooterText = If(My.Settings.AP_FooterText, "")
         config.RequireApprovalForNonWhitelisted = My.Settings.AP_RequireApproval
         config.MonitoredMailbox = If(My.Settings.AP_MonitoredMailbox, "")
         config.SelectedModelKey = If(My.Settings.AP_SelectedModelKey, "")
+        config.UseSecondApi = My.Settings.AP_UseSecondApi
+        config.ReprocessLookbackHours = If(My.Settings.AP_ReprocessLookbackHours >= 0, My.Settings.AP_ReprocessLookbackHours, 0)
+        config.EnableWebGrounding = My.Settings.AP_EnableWebGrounding
+        config.EnableVoicemailProcessing = My.Settings.AP_EnableVoicemailProcessing
+        config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
+        config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
+        config.EnableScheduler = My.Settings.AP_EnableScheduler
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -451,7 +602,141 @@ Partial Public Class ThisAddIn
                 Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
         End If
 
+        ' Restore external tools by matching persisted names against currently available tools
+        If Not String.IsNullOrWhiteSpace(My.Settings.AP_SelectedExternalToolNames) Then
+            Dim savedToolNames = My.Settings.AP_SelectedExternalToolNames.Split({vbLf}, StringSplitOptions.RemoveEmptyEntries).
+                Select(Function(s) s.Trim()).Where(Function(s) s.Length > 0).ToList()
+            If savedToolNames.Count > 0 Then
+                Try
+                    Dim availableTools = GetAvailableTools()
+                    If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
+                        Dim matched = availableTools.Where(
+                            Function(t) savedToolNames.Any(Function(n)
+                                                               Return String.Equals(n, t.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+                                                                      String.Equals(n, t.ModelDescription, StringComparison.OrdinalIgnoreCase) OrElse
+                                                                      String.Equals(n, t.Model, StringComparison.OrdinalIgnoreCase)
+                                                           End Function)).ToList()
+                        If matched.Count > 0 Then config.SelectedExternalTools = matched
+                    End If
+                Catch
+                End Try
+            End If
+        End If
+
         Return config
     End Function
+
+    ''' <summary>
+    ''' Returns True if there is a previously saved AutoPilot configuration with at least
+    ''' a filter rule or monitored mailbox — i.e., the user has run AutoPilot before.
+    ''' </summary>
+    Private Function HasSavedAutoPilotConfig() As Boolean
+        ' We consider a config "saved" if at least the filter rules or monitored mailbox
+        ' were persisted, indicating a prior completed config dialog run.
+        Return Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) OrElse
+               Not String.IsNullOrWhiteSpace(My.Settings.AP_MonitoredMailbox) OrElse
+               Not String.IsNullOrWhiteSpace(My.Settings.AP_WhitelistedSenders)
+    End Function
+
+    ''' <summary>
+    ''' Attempts to auto-start AutoPilot using the last saved configuration.
+    ''' Shows a 30-second countdown dialog allowing the user to cancel or configure manually.
+    ''' Called from <see cref="DelayedStartupTasks"/> when <c>INI_AutoPilotAutoStart</c> is True.
+    ''' </summary>
+    Public Sub TryAutoStartAutoPilot()
+        Try
+            ' Gate: INI flag must be enabled and user must be licensed/permitted
+            If Not INI_AutoPilotAutoStart Then Return
+            If Not IsAutoPilotLicenseValid() Then Return
+            If Not IsAutoPilotPermitted() Then Return
+            If _apActive Then Return
+            If Not HasSavedAutoPilotConfig() Then Return
+
+            ' Load the last saved configuration
+            Dim config = LoadAutoPilotConfigDefaults()
+
+            ' Build a human-readable summary for the countdown dialog
+            Dim modelLabel As String
+            If Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
+                modelLabel = config.SelectedModelKey
+            ElseIf config.UseSecondApi Then
+                modelLabel = INI_Model_2
+            Else
+                modelLabel = INI_Model
+            End If
+
+            Dim summary As New System.Text.StringBuilder()
+            summary.AppendLine($"{AN6} AutoPilot will start automatically with the last used settings:")
+            summary.AppendLine()
+            summary.AppendLine($"Model: {modelLabel}")
+            summary.AppendLine($"Filters: {config.FilterRules.Count} rule(s)")
+            summary.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
+            summary.AppendLine($"Cooldown: {config.CooldownSeconds}s | Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())}")
+            If Not String.IsNullOrWhiteSpace(config.MonitoredMailbox) Then
+                summary.AppendLine($"Mailbox: {config.MonitoredMailbox}")
+            End If
+            summary.AppendLine()
+            summary.AppendLine("Press 'Configure' to open the full setup dialog instead.")
+
+            ' Show a 30-second auto-close dialog (returns 1=Start, 2=Configure, 3=auto-close)
+            Dim choice = ShowCustomYesNoBox(
+                summary.ToString().TrimEnd(),
+                $"Start {AN6} AutoPilot", "Configure",
+                header:=$"{AN6} AutoPilot — Auto Start",
+                autoCloseSeconds:=30,
+                Defaulttext:=$"AutoPilot will start automatically")
+
+            If choice = 2 Then
+                ' User chose to configure manually — fall through to the normal dialog
+                StartAutoPilot()
+                Return
+            End If
+
+            If choice = 0 Then
+                ' Dialog was closed/cancelled — do not start
+                Return
+            End If
+
+            ' choice = 1 (user clicked Start) → attended; choice = 3 (timer expired) → unattended
+            Dim unattended As Boolean = (choice = 3)
+            config.IsUnattended = unattended
+
+            ' Apply the saved model configuration to the context before starting.
+            ' This replicates what ShowModelSelection does interactively.
+            If config.UseSecondApi AndAlso Not String.IsNullOrWhiteSpace(config.SelectedModelKey) Then
+                ' Alternate model: find and apply it from the INI file
+                If INI_SecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                    Try
+                        Dim models = LoadAlternativeModels(INI_AlternateModelPath, _context)
+                        If models IsNot Nothing Then
+                            Dim match = models.FirstOrDefault(
+                                Function(m) String.Equals(
+                                    If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model),
+                                    config.SelectedModelKey, StringComparison.OrdinalIgnoreCase))
+                            If match IsNot Nothing Then
+                                originalConfig = GetCurrentConfig(_context)
+                                originalConfigLoaded = True
+                                ApplyModelConfig(_context, match)
+                                LastAlternateModel = config.SelectedModelKey
+                            End If
+                        End If
+                    Catch
+                        ' If model application fails, proceed with default — StartAutoPilotWithConfig
+                        ' will capture whatever config is active at that point
+                    End Try
+                End If
+            ElseIf config.UseSecondApi Then
+                ' Secondary API without alternate model path — just ensure SecondAPI is active
+                ' (the context should already have the secondary config from INI)
+            End If
+
+            SaveAutoPilotConfigToSettings(config)
+            StartAutoPilotWithConfig(config)
+
+        Catch ex As System.Exception
+            ' Auto-start is best-effort; do not block Outlook startup on failure
+            Debug.WriteLine($"AutoPilot auto-start failed: {ex.Message}")
+        End Try
+    End Sub
 
 End Class
