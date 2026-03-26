@@ -84,7 +84,7 @@
       <HintPath>..\packages\BouncyCastle.Cryptography.2.6.2\lib\net461\BouncyCastle.Cryptography.dll</HintPath>
     </Reference>
     <Reference Include="CommunityToolkit.HighPerformance, Version=8.4.0.0, Culture=neutral, PublicKeyToken=4aff67a105548ee2, processorArchitecture=MSIL">
-      <HintPath>..\packages\CommunityToolkit.HighPerformance.8.4.1\lib\netstandard2.0\CommunityToolkit.HighPerformance.dll</HintPath>
+      <HintPath>..\packages\CommunityToolkit.HighPerformance.8.4.2\lib\netstandard2.0\CommunityToolkit.HighPerformance.dll</HintPath>
     </Reference>
     <Reference Include="DiffPlex, Version=1.9.0.0, Culture=neutral, PublicKeyToken=1d35e91d1bd7bc0f, processorArchitecture=MSIL">
       <HintPath>..\packages\DiffPlex.1.9.0\lib\net45\DiffPlex.dll</HintPath>

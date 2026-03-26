@@ -440,16 +440,13 @@ Namespace SharedLibrary
                 End If
 
                 If x > 0 AndAlso y > 0 Then
-                    Dim wa As Rectangle = Screen.FromPoint(New Point(x, y)).WorkingArea
-                    If x >= wa.Left AndAlso x < wa.Right - 50 AndAlso
-                       y >= wa.Top AndAlso y < wa.Bottom - 50 Then
-                        Me.Location = New Point(x, y)
-                    Else
-                        PositionOnScreen()
-                    End If
+                    Me.Location = New Point(x, y)
                 Else
                     PositionOnScreen()
                 End If
+
+                SharedMethods.EnsureVisibleOnScreen(Me)
+
             Catch
                 txtLanguage.Text = _defaultLanguage
                 PositionOnScreen()
