@@ -1,5 +1,6 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
-' Purpose: Test helpers for license system - REMOVE BEFORE PRODUCTION
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Purpose: Debug-only interactive test helpers for license system.
 
 #If DEBUG Then
 

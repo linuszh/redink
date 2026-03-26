@@ -237,6 +237,7 @@ Public Class frmAIChat
         Else
             Me.StartPosition = FormStartPosition.CenterScreen
         End If
+        SharedMethods.EnsureVisibleOnScreen(Me)
 
         ' Set input panel to double the original designer height (63px × 2 = 126px)
         Try
