@@ -696,6 +696,40 @@ Namespace SharedLibrary
             Return available
         End Function
 
+        ''' <summary>
+        ''' Ensures a form is visible on at least one active screen.
+        ''' If off-screen (e.g. monitor disconnected), re-centers on the primary screen
+        ''' while respecting <see cref="Form.MinimumSize"/>.
+        ''' </summary>
+        ''' <param name="frm">The form to check and reposition if necessary.</param>
+        Public Shared Sub EnsureVisibleOnScreen(frm As System.Windows.Forms.Form)
+            If frm Is Nothing Then Return
+
+            ' Guard against zero/corrupt size
+            If frm.MinimumSize <> System.Drawing.Size.Empty Then
+                If frm.Width < frm.MinimumSize.Width OrElse frm.Height < frm.MinimumSize.Height Then
+                    frm.Size = New System.Drawing.Size(
+                        Math.Max(frm.MinimumSize.Width, frm.Width),
+                        Math.Max(frm.MinimumSize.Height, frm.Height))
+                End If
+            End If
+
+            Dim isVisible = False
+            For Each scr As Screen In Screen.AllScreens
+                If scr.WorkingArea.IntersectsWith(frm.Bounds) Then
+                    isVisible = True
+                    Exit For
+                End If
+            Next
+
+            If Not isVisible Then
+                Dim area = Screen.PrimaryScreen.WorkingArea
+                frm.Location = New System.Drawing.Point(
+                    area.Left + (area.Width - frm.Width) \ 2,
+                    area.Top + (area.Height - frm.Height) \ 2)
+            End If
+        End Sub
+
     End Class
 
 End Namespace

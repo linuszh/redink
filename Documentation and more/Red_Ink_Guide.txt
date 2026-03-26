@@ -3528,6 +3528,18 @@ W=1.3.6.200
 E=1.3.5.200
 O=1.3.6.200
 AutoPilot with scheduler for recurring tasks and support for web grounding and deep research as a tool; Bug fixes (emoji conversion limited as it interfered with MD conversions; web grounding also enabled for Local Agent); Improvement for "{dir}" imports (incl. button); Word helper now also offers prior flattening of PDFs and supports more formats; Web retriever now also provides URLs that AutoPilot, for example, can work with
+26.3.2026
+
+W=1.4.0.0
+E=1.4.0.0
+O=1.4.0.0
+
+W=1.4.0.200
+E=1.4.0.200
+O=1.4.0.200
+Bug Fix (more secure restoration of window positions with changed screen configurations); adjustment of the documentation
+ 
+Transfer of the previous improvements to the GA version
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -3536,6 +3548,7 @@ VII. ROADMAP
 * More tools for AutoPilot
 * Support for MacOS, the "new" Outlook and other platforms
 * Ability to have a directory with two versions of a file compared
+* FileMover
 * New models for speech recognition/transcription
 * Automatic model-based anonymization
 * App for Mobile
@@ -4615,10 +4628,10 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-25 March 2026	1
+26 March 2026	1
 
 
-	25 March 2026 
+	26 March 2026 
 
 
 
