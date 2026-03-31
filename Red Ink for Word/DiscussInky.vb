@@ -237,6 +237,13 @@ Public Class DiscussInky
     Private ReadOnly _btnTools As Button = New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
     Private ReadOnly _chkEnableTooling As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}", .AutoSize = True}
     Private ReadOnly _chkShowToolingLog As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Tooling log", .AutoSize = True, .Checked = True}
+    Private ReadOnly _chkInkyMemory As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Inky Memory", .AutoSize = True, .Checked = My.Settings.DiscussInkyMemory}
+    Private ReadOnly _lnkEditMemory As New LinkLabel() With {
+        .Text = "Edit",
+        .AutoSize = True,
+        .Visible = My.Settings.DiscussInkyMemory,
+        .Margin = New Padding(0, 5, 0, 0)
+    }
 
     ' State
     Private _htmlReady As Boolean = False
@@ -378,6 +385,8 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
         pnlButtons.Controls.Add(_chkShowToolingLog)
+        pnlButtons.Controls.Add(_chkInkyMemory)
+        pnlButtons.Controls.Add(_lnkEditMemory)
 
 
         table.Controls.Add(_splitChat, 0, 0)
@@ -413,6 +422,8 @@ Public Class DiscussInky
         AddHandler _btnTools.Click, AddressOf OnToolsClick
         AddHandler _chkEnableTooling.CheckedChanged, AddressOf OnEnableToolingChanged
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
+        AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
+        AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
 
     End Sub
 
@@ -1226,6 +1237,22 @@ Public Class DiscussInky
 
     Private Sub OnShowToolingLogChanged(sender As Object, e As EventArgs)
         ' No special handling needed - just uses the Checked state when calling ExecuteToolingLoop
+    End Sub
+
+    ''' <summary>
+    ''' Handles the Inky Memory checkbox change. Persists preference and toggles edit link.
+    ''' </summary>
+    Private Sub OnInkyMemoryChanged(sender As Object, e As EventArgs)
+        My.Settings.DiscussInkyMemory = _chkInkyMemory.Checked
+        My.Settings.Save()
+        _lnkEditMemory.Visible = _chkInkyMemory.Checked
+    End Sub
+
+    ''' <summary>
+    ''' Opens the Inky Memory file for manual editing.
+    ''' </summary>
+    Private Sub OnEditMemoryClicked(sender As Object, e As LinkLabelLinkClickedEventArgs)
+        SharedMethods.EditInkyMemoryFile()
     End Sub
 
     ''' <summary>
@@ -2470,6 +2497,14 @@ Public Class DiscussInky
                                "The knowledge provided may consist of multiple documents or sections combined into one. " &
                                $"Refer to it as 'the knowledge' or 'the materials' rather than 'the document' when appropriate. {dateContext} {locationContext} {languageInstruction}"
 
+            ' Inject InkyMemory into system prompt if enabled
+            If _chkInkyMemory.Checked Then
+                Dim memoryContent = SharedMethods.ReadInkyMemory(_context.INI_InkyMemoryCap)
+                systemPrompt &= vbLf & _context.SP_Add_InkyMemory
+                If Not String.IsNullOrWhiteSpace(memoryContent) Then
+                    systemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
+                End If
+            End If
 
             ' Build user prompt with knowledge and context
             Dim sb As New StringBuilder()
@@ -2590,6 +2625,11 @@ Public Class DiscussInky
 
                     answer = If(answer, "").Trim()
 
+                    ' Process InkyMemory updates from LLM response (if enabled)
+                    If _chkInkyMemory.Checked Then
+                        answer = SharedMethods.ProcessInkyMemoryResponse(answer, _context.INI_InkyMemoryCap)
+                    End If
+
                     RemoveAssistantThinking()
                     AppendAssistantMarkdown(answer)
                     _history.Add(("assistant", answer))
@@ -2614,6 +2654,11 @@ Public Class DiscussInky
             sw.Stop()
 
             stdAnswer = If(stdAnswer, "").Trim()
+
+            ' Process InkyMemory updates from LLM response (if enabled)
+            If _chkInkyMemory.Checked Then
+                stdAnswer = SharedMethods.ProcessInkyMemoryResponse(stdAnswer, _context.INI_InkyMemoryCap)
+            End If
 
             RemoveAssistantThinking()
             AppendAssistantMarkdown(stdAnswer)

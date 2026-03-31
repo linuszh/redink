@@ -462,6 +462,7 @@ Partial Public Class ThisAddIn
         Dim hasMarkers = processable.Any(Function(p) p.MarkerText IsNot Nothing)
 
         ' Build system prompt for document processing
+        ' Build system prompt for document processing
         Dim systemPrompt As String =
             "You are a professional document processor. Apply the following instruction to the numbered paragraphs " &
             "in the [TEXTTOPROCESS] section." & vbCrLf & vbCrLf &
@@ -472,23 +473,31 @@ Partial Public Class ThisAddIn
             "3. Return each processed paragraph with its [n] marker exactly as shown." & vbCrLf &
             "4. The processed text should have approximately the same number of words." & vbCrLf &
             "5. Maintain consistent terminology and style." & vbCrLf &
-            "6. Return ONLY the [n] processed paragraphs, no explanations."
+            "6. Return ONLY the [n] processed paragraphs, no explanations." & vbCrLf &
+            "7. CRITICAL LANGUAGE RULE: The INSTRUCTION may be written in a different language than the document text. " &
+            "Unless the instruction EXPLICITLY asks for translation to a specific language, you MUST keep the document " &
+            "text in its ORIGINAL language. NEVER translate the document content. Apply the instruction (e.g. correct, " &
+            "improve, shorten) while preserving the original language of the text."
+
+        Dim ruleNum As Integer = 8  ' Next rule number after the language rule (7)
 
         If hasMarkers Then
             systemPrompt &= vbCrLf &
-            "7. Some paragraphs contain pipe characters (|) that mark formatting boundaries. " &
+            $"{ruleNum}. Some paragraphs contain pipe characters (|) that mark formatting boundaries. " &
             "IMPORTANT: Preserve these | markers in your output at approximately the same positions " &
             "relative to the text. The number of | markers in each paragraph must stay EXACTLY the same. " &
             "Do NOT add or remove any | markers."
+            ruleNum += 1
         End If
 
         Dim hasNoteRefMarkers As Boolean = processable.Any(Function(p) p.FullText.Contains(AP_NoteRefMarker))
         If hasNoteRefMarkers Then
             systemPrompt &= vbCrLf &
-            If(hasMarkers, "8", "7") & ". Some paragraphs contain the character ‖ (double vertical line). " &
+            $"{ruleNum}. Some paragraphs contain the character ‖ (double vertical line). " &
             "This marks the position of a footnote or endnote reference. " &
             "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
             "Do NOT move, add, or remove any ‖ characters."
+            ruleNum += 1
         End If
 
         Dim batchIndex As Integer = 0
@@ -2117,7 +2126,11 @@ Partial Public Class ThisAddIn
             "8. Return ONLY [CellRef] lines, no explanations or commentary." & vbCrLf &
             "9. If no cells need changing, return exactly: NO_CHANGES" & vbCrLf &
             "10. When the instruction targets a specific column by name, ONLY change cells in that column. " &
-            "Use the SPREADSHEET STRUCTURE section above to identify which column letter corresponds to which heading."
+            "Use the SPREADSHEET STRUCTURE section above to identify which column letter corresponds to which heading." & vbCrLf &
+            "11. CRITICAL LANGUAGE RULE: The INSTRUCTION may be written in a different language than the cell content. " &
+            "Unless the instruction EXPLICITLY asks for translation to a specific language, you MUST keep the cell " &
+            "text in its ORIGINAL language. NEVER translate the content. Apply the instruction while preserving " &
+            "the original language of the text."
 
         Dim batchIndex As Integer = 0
         Dim totalBatches As Integer = CInt(Math.Ceiling(cells.Count / CDbl(AP_ParagraphsPerBatch)))

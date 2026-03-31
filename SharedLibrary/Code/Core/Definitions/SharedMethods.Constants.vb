@@ -318,6 +318,26 @@ Namespace SharedLibrary
         Const Default_SP_JustifyMarkup As String = "You are a senior legal counsel. Given an original and revised clause, produce 1-3 short sentences that persuasively justify to the counterparty why each substantive change is necessary or beneficial — focusing on risk mitigation, clarity, fairness, or legal soundness. Do not describe what changed; argue why it should be accepted. Do not quote the text, do not add greetings or preamble, output only the justification. You must write your justification in the same language as the revised clause text."
         Const Default_SP_ExhibitNumber As String = "You are a file naming analyst. Given a list of PDF filenames, extract the exhibit or document number \nfrom each filename. The number may appear in various formats such as ""1"", ""1.0"", ""A-1"", ""32.3.1"", \n""Ex. 32"", ""Exhibit A-1"", etc. Return ONLY a JSON object with this structure: \n{ ""exhibits"": [ { ""filename"": ""original_filename.pdf"", ""number"": ""extracted_number"" } ] } \nRules: (1) Extract only the number/identifier portion (e.g., from ""Exhibit A-1.pdf"" extract ""A-1""). \n(2) If you cannot determine a number, set ""number"" to """". \n(3) Do not include any text outside the JSON. \n(4) Process ALL filenames provided."
 
+        ' InkyMemory — persistent cross-chatbot learning file
+        Public Const InkyMemoryFolder As String = AN2      ' "redink" → %AppData%\redink\
+        Public Const InkyMemoryFileName As String = "RI_memory.txt"
+        Public Const DEFAULT_INKY_MEMORY_CAP As Integer = 50
+
+        Const Default_SP_Add_InkyMemory As String =
+            "You have access to a personal memory file that helps you remember the user's preferences, recurring corrections, and general working style across sessions. " &
+            "The current memory is provided below between <INKY_MEMORY_CURRENT> and </INKY_MEMORY_CURRENT>. " &
+            "Based on this conversation, you may update the memory ONLY for persistent, general-purpose preferences — NOT for case-specific facts, document content, or transient information. " &
+            "If you identify something worth remembering, forgetting, or correcting, append a block at the very end of your response (after all other text) in this exact format:" & vbLf &
+            "<INKY_MEMORY>" & vbLf &
+            "ADD: [preference or rule to remember]" & vbLf &
+            "REMOVE: [exact or approximate text of an existing memory item to forget]" & vbLf &
+            "AMEND: [existing item text] → [corrected item text]" & vbLf &
+            "</INKY_MEMORY>" & vbLf &
+            "Only include operations you are confident about. If nothing needs updating, do not include the block. Keep the memory concise — each item should be one clear sentence. " &
+            "Never store case-specific information, document content, names of specific files, or conversation details. " &
+            "Only store general preferences, style rules, recurring corrections, and working patterns."
+
+
         ' Language defaults
         Public Const DEFAULT_LANGUAGE_1 As String = "English"
         Public Const DEFAULT_LANGUAGE_2 As String = "German"

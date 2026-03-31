@@ -2256,6 +2256,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_InkyMemory As String
+        Get
+            Return _context.SP_Add_InkyMemory
+        End Get
+        Set(value As String)
+            _context.SP_Add_InkyMemory = value
+        End Set
+    End Property
+
     Public Shared Property Ignore As String
         Get
             Return _context.Ignore
@@ -2492,6 +2501,15 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As String)
             _context.INI_LogoPathLarge = value
+        End Set
+    End Property
+
+    Public Shared Property INI_InkyMemoryCap As Integer
+        Get
+            Return _context.INI_InkyMemoryCap
+        End Get
+        Set(value As Integer)
+            _context.INI_InkyMemoryCap = value
         End Set
     End Property
 

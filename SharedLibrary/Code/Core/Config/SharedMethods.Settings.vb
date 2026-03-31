@@ -1114,6 +1114,10 @@ Namespace SharedLibrary
                     Return context.INI_UpdateIniSilentMode.ToString()
                 Case "UpdateIniSilentLog"
                     Return context.INI_UpdateIniSilentLog.ToString()
+                Case "InkyMemoryCap"
+                    Return context.INI_InkyMemoryCap.ToString()
+                Case "SP_Add_InkyMemory"
+                    Return context.SP_Add_InkyMemory
                 Case Else
                     Return ""
             End Select
@@ -1416,6 +1420,10 @@ Namespace SharedLibrary
                     context.INI_UpdateIniSilentMode = Integer.Parse(value)
                 Case "UpdateIniSilentLog"
                     context.INI_UpdateIniSilentLog = Boolean.Parse(value)
+                Case "InkyMemoryCap"
+                    context.INI_InkyMemoryCap = CInt(value)
+                Case "SP_Add_InkyMemory"
+                    context.SP_Add_InkyMemory = value
 
                 Case Else
                     MessageBox.Show($"Error in SetSettingValue - could not save the value for '{settingName}'.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -1812,6 +1820,8 @@ Namespace SharedLibrary
                     {"SP_MergePrompt", context.SP_MergePrompt},
                     {"SP_MergePrompt2", context.SP_MergePrompt2},
                     {"SP_Add_MergePrompt", context.SP_Add_MergePrompt},
+                    {"SP_Add_InkyMemory", context.SP_Add_InkyMemory},
+                    {"InkyMemoryCap", context.INI_InkyMemoryCap.ToString()},
                     {"NoHelperDownload", context.INI_NoHelperDownload.ToString()},
                     {"AutoPilot", context.INI_AutoPilot},
                     {"ToolingLogWindow", context.INI_ToolingLogWindow.ToString()},
@@ -2056,6 +2066,8 @@ Namespace SharedLibrary
                 {"SP_Add_MergePrompt", Default_SP_Add_MergePrompt},
                 {"SP_MergePrompt", Default_SP_MergePrompt},
                 {"SP_MergePrompt2", Default_SP_MergePrompt2},
+                {"SP_Add_InkyMemory", Default_SP_Add_InkyMemory},
+                {"InkyMemoryCap", DEFAULT_INKY_MEMORY_CAP},
                 {"Temperature", DEFAULT_TEMPERATURE},
                 {"Timeout", DEFAULT_TIMEOUT_LONG},
                 {"Temperature_2", DEFAULT_TEMPERATURE},
@@ -3169,6 +3181,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
             variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_Add_Chart_App", context.SP_Add_Chart_App)
+            variableValues.Add("SP_Add_InkyMemory", context.SP_Add_InkyMemory)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
             variableValues.Add("SP_Add_Revisions", context.SP_Add_Revisions)
             variableValues.Add("SP_MarkupRegex", context.SP_MarkupRegex)
@@ -3193,6 +3206,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_FindPrompts", context.SP_FindPrompts)
             variableValues.Add("SP_MergePrompt", context.SP_MergePrompt)
             variableValues.Add("SP_MergePrompt2", context.SP_MergePrompt2)
+            variableValues.Add("InkyMemoryCap", context.INI_InkyMemoryCap)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
             variableValues.Add("ToolingLogWindow", context.INI_ToolingLogWindow)
@@ -3377,6 +3391,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_ChatExcel") Then context.SP_ChatExcel = CStr(updatedValues("SP_ChatExcel"))
                 If updatedValues.ContainsKey("SP_Add_ChatExcel_Commands") Then context.SP_Add_ChatExcel_Commands = CStr(updatedValues("SP_Add_ChatExcel_Commands"))
                 If updatedValues.ContainsKey("SP_Add_MergePrompt") Then context.SP_Add_MergePrompt = CStr(updatedValues("SP_Add_MergePrompt"))
+                If updatedValues.ContainsKey("SP_Add_InkyMemory") Then context.SP_Add_InkyMemory = CStr(updatedValues("SP_Add_InkyMemory"))
                 If updatedValues.ContainsKey("SP_FindPrompts") Then context.SP_FindPrompts = CStr(updatedValues("SP_FindPrompts"))
                 If updatedValues.ContainsKey("SP_MergePrompt") Then context.SP_MergePrompt = CStr(updatedValues("SP_MergePrompt"))
                 If updatedValues.ContainsKey("SP_MergePrompt2") Then context.SP_MergePrompt2 = CStr(updatedValues("SP_MergePrompt2"))
@@ -3445,6 +3460,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("LogoPathMedium") Then context.INI_LogoPathMedium = CStr(updatedValues("LogoPathMedium"))
                 If updatedValues.ContainsKey("LogoPathLarge") Then context.INI_LogoPathLarge = CStr(updatedValues("LogoPathLarge"))
                 If updatedValues.ContainsKey("NoHelperDownload") Then context.INI_NoHelperDownload = CBool(updatedValues("NoHelperDownload"))
+                If updatedValues.ContainsKey("InkyMemoryCap") Then context.INI_InkyMemoryCap = CInt(updatedValues("InkyMemoryCap"))
                 If updatedValues.ContainsKey("AutoPilot") Then context.INI_AutoPilot = CStr(updatedValues("AutoPilot"))
                 If updatedValues.ContainsKey("ToolingLogWindow") Then context.INI_ToolingLogWindow = CBool(updatedValues("ToolingLogWindow"))
                 If updatedValues.ContainsKey("ToolingDryRun") Then context.INI_ToolingDryRun = CBool(updatedValues("ToolingDryRun"))

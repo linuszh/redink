@@ -230,6 +230,7 @@ Namespace SharedLibrary
                 context.SP_Add_MergePrompt = If(configDict.ContainsKey("SP_Add_MergePrompt"), configDict("SP_Add_MergePrompt"), Default_SP_Add_MergePrompt)
                 context.SP_FindPrompts = If(configDict.ContainsKey("SP_FindPrompts"), configDict("SP_FindPrompts"), Default_SP_FindPrompts)
                 context.SP_Ignore = If(configDict.ContainsKey("SP_Ignore"), configDict("SP_Ignore"), Default_SP_Ignore)
+                context.SP_Add_InkyMemory = If(configDict.ContainsKey("SP_Add_InkyMemory"), configDict("SP_Add_InkyMemory"), Default_SP_Add_InkyMemory)
 
                 ' Legacy; was required For Excel Helper.
                 ' context.INI_OpenSSLPath = If(configDict.ContainsKey("OpenSSLPath"), configDict("OpenSSLPath"), "%APPDATA%\Microsoft\OpenSSL_Runtime\openssl.exe")
@@ -249,6 +250,7 @@ Namespace SharedLibrary
                 context.INI_MarkupDiffCap = If(configDict.ContainsKey("MarkupDiffCap"), CInt(configDict("MarkupDiffCap")), DEFAULT_MARKUP_DIFF_CAP)
                 context.INI_MarkupRegexCap = If(configDict.ContainsKey("MarkupRegexCap"), CInt(configDict("MarkupRegexCap")), DEFAULT_MARKUP_REGEX_CAP)
                 context.INI_ChatCap = If(configDict.ContainsKey("ChatCap"), CInt(configDict("ChatCap")), DEFAULT_CHAT_CAP)
+                context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
 
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix

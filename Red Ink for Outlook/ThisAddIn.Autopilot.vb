@@ -687,30 +687,43 @@ Partial Public Class ThisAddIn
                     ' Full pre-filter: same logic as ProcessIncomingMailAsync
                     Dim mailInfo = ExtractMailInfo(mi)
                     If mailInfo Is Nothing Then Continue For
-                    If mailInfo.HasAutoReplyHeader Then Continue For
-                    If IsAutoReplyOrOof(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
-                    If Not MatchesFilterRules(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
-                    If MatchesNegativeFilters(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
 
-                    ' Subject trigger word check
-                    If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
-                        If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    ' ── Voicemail detection (bypasses normal filter pipeline, same as ProcessIncomingMailAsync) ──
+                    Dim isVoicemail As Boolean = IsVoicemailFromRegisteredSender(mailInfo)
+
+                    If Not isVoicemail Then
+                        If mailInfo.HasAutoReplyHeader Then Continue For
+                        If IsAutoReplyOrOof(mailInfo) Then
                             skippedOther += 1
                             Continue For
+                        End If
+                        If Not MatchesFilterRules(mailInfo) Then
+                            skippedOther += 1
+                            Continue For
+                        End If
+                        If MatchesNegativeFilters(mailInfo) Then
+                            skippedOther += 1
+                            Continue For
+                        End If
+
+                        ' Subject trigger word check
+                        If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
+                            If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                                skippedOther += 1
+                                Continue For
+                            End If
                         End If
                     End If
 
                     Dim displayLabel As String = Nothing
-                    If isAlreadyProcessed Then
+                    If isVoicemail Then
+                        displayLabel = "[VOICEMAIL] " & New CatchUpCandidate() With {
+                            .SenderName = mailInfo.SenderName,
+                            .SenderEmail = mailInfo.SenderEmail,
+                            .Subject = mailInfo.Subject,
+                            .ReceivedTime = mailInfo.ReceivedTime
+                        }.ToDisplayLabel()
+                    ElseIf isAlreadyProcessed Then
                         reprocessCandidateCount += 1
                         displayLabel = "[REPROCESS] " & New CatchUpCandidate() With {
                             .SenderName = mailInfo.SenderName,
