@@ -121,6 +121,27 @@ Partial Public Class ThisAddIn
         ''' </summary>
         Public Property EnableScheduler As Boolean = False
 
+        ''' <summary>
+        ''' When True, per-user InkyMemory is enabled — the model learns from each user
+        ''' and personalises responses. Users can opt in/out individually.
+        ''' </summary>
+        Public Property EnableUserMemory As Boolean = False
+
+        ''' <summary>
+        ''' When True, per-user home directory file storage is enabled — users can
+        ''' store, retrieve, and manage persistent files for use in future requests.
+        ''' </summary>
+        Public Property EnableUserFiles As Boolean = False
+
+        ''' <summary>
+        ''' When True, privacy protections are enforced for web grounding and internet search tools.
+        ''' The model is instructed not to include personal data, confidential information, or
+        ''' non-public details in search queries sent to external services.
+        ''' When False (default), no such restrictions are applied — the model may use any
+        ''' information in search queries at the admin's discretion.
+        ''' </summary>
+        Public Property EnablePrivacyProtection As Boolean = False
+
 
     End Class
 
@@ -331,6 +352,18 @@ Partial Public Class ThisAddIn
             .Name = "Enable task scheduler (create && run scheduled tasks)",
             .Value = saved.EnableScheduler
         })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Enable per-user memory (learn user preferences)",
+            .Value = saved.EnableUserMemory
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Enable per-user file storage (home directory)",
+            .Value = saved.EnableUserFiles
+        })
+        paramsList.Add(New InputParameter() With {
+            .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
+            .Value = saved.EnablePrivacyProtection
+        })
 
         ' ── Voicemail processing (only if audio transcription is available) ──
         Dim audioTranscriptionAvailable As Boolean = IsAudioTranscriptionAvailable(_context)
@@ -389,6 +422,15 @@ Partial Public Class ThisAddIn
 
         ' Scheduler checkbox
         config.EnableScheduler = CBool(If(paramsList(5).Value, False))
+
+        ' User memory checkbox
+        config.EnableUserMemory = CBool(If(paramsList(6).Value, False))
+
+        ' User files checkbox
+        config.EnableUserFiles = CBool(If(paramsList(7).Value, False))
+
+        ' Privacy protection checkbox
+        config.EnablePrivacyProtection = CBool(If(paramsList(8).Value, False))
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -473,6 +515,9 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
         summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"User memory: {If(config.EnableUserMemory, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"User file storage: {If(config.EnableUserFiles, "enabled", "disabled")}")
+        summaryBuilder.AppendLine($"Privacy protection: {If(config.EnablePrivacyProtection, "enabled (queries sanitized)", "disabled (unrestricted)")}")
         If config.EnableVoicemailProcessing Then
             summaryBuilder.AppendLine($"Voicemail processing: enabled (from {config.VoicemailSenderAddress})")
         End If
@@ -557,6 +602,9 @@ Partial Public Class ThisAddIn
         My.Settings.AP_VoicemailSenderAddress = If(config.VoicemailSenderAddress, "")
         My.Settings.AP_VoicemailCallerIdMapPath = If(config.VoicemailCallerIdMapPath, "")
         My.Settings.AP_EnableScheduler = config.EnableScheduler
+        My.Settings.AP_EnableUserMemory = config.EnableUserMemory
+        My.Settings.AP_EnableUserFiles = config.EnableUserFiles
+        My.Settings.AP_EnablePrivacyProtection = config.EnablePrivacyProtection
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -590,6 +638,9 @@ Partial Public Class ThisAddIn
         config.VoicemailSenderAddress = If(My.Settings.AP_VoicemailSenderAddress, "")
         config.VoicemailCallerIdMapPath = If(My.Settings.AP_VoicemailCallerIdMapPath, "")
         config.EnableScheduler = My.Settings.AP_EnableScheduler
+        config.EnableUserMemory = My.Settings.AP_EnableUserMemory
+        config.EnableUserFiles = My.Settings.AP_EnableUserFiles
+        config.EnablePrivacyProtection = My.Settings.AP_EnablePrivacyProtection
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then

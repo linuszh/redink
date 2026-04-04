@@ -195,6 +195,14 @@ Public Class DragDropForm
         Me.Icon = icon
         ' Dispose bitmap to release GDI resources
         bmp.Dispose()
+
+        ' Ensure the form appears above TopMost progress bars that may be running
+        ' on a separate STA thread (e.g., during multi-trigger file loading).
+        ' Must stay TopMost because the progress form on its own thread keeps
+        ' reclaiming the foreground via its TopMost=True property.
+        Me.TopMost = True
+        Me.BringToFront()
+        Me.Activate()
     End Sub
 
     ''' <summary>

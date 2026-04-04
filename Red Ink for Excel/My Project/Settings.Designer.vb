@@ -461,6 +461,114 @@ Namespace My
                 Me("ChatInkyMemory") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property DIR_Prompt() As String
+            Get
+                Return CType(Me("DIR_Prompt"),String)
+            End Get
+            Set
+                Me("DIR_Prompt") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("10")>  _
+        Public Property DIR_ChunkSize() As Integer
+            Get
+                Return CType(Me("DIR_ChunkSize"),Integer)
+            End Get
+            Set
+                Me("DIR_ChunkSize") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("4000")>  _
+        Public Property DIR_MaxContentChars() As Integer
+            Get
+                Return CType(Me("DIR_MaxContentChars"),Integer)
+            End Get
+            Set
+                Me("DIR_MaxContentChars") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property DIR_ResultStartLine() As Integer
+            Get
+                Return CType(Me("DIR_ResultStartLine"),Integer)
+            End Get
+            Set
+                Me("DIR_ResultStartLine") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("1")>  _
+        Public Property DIR_ResultStartColumn() As Integer
+            Get
+                Return CType(Me("DIR_ResultStartColumn"),Integer)
+            End Get
+            Set
+                Me("DIR_ResultStartColumn") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("2")>  _
+        Public Property DIR_Attempts() As Integer
+            Get
+                Return CType(Me("DIR_Attempts"),Integer)
+            End Get
+            Set
+                Me("DIR_Attempts") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DIR_UseSecondModel() As Boolean
+            Get
+                Return CType(Me("DIR_UseSecondModel"),Boolean)
+            End Get
+            Set
+                Me("DIR_UseSecondModel") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property DIR_StartFile() As Integer
+            Get
+                Return CType(Me("DIR_StartFile"),Integer)
+            End Get
+            Set
+                Me("DIR_StartFile") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("0")>  _
+        Public Property DIR_FileCount() As Integer
+            Get
+                Return CType(Me("DIR_FileCount"),Integer)
+            End Get
+            Set
+                Me("DIR_FileCount") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

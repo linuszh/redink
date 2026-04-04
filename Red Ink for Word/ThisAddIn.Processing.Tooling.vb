@@ -712,6 +712,11 @@ Partial Public Class ThisAddIn
                 baseSysPrompt &= " " & SP_Add_Chart
             End If
 
+            ' Add privacy protection instructions when search privacy is enabled
+            If INI_EnablePrivacyForSearch AndAlso Not String.IsNullOrWhiteSpace(SP_Add_PrivacyProtection) Then
+                baseSysPrompt &= " " & SP_Add_PrivacyProtection
+            End If
+
             ' Add tool instructions on top of the standard prompt additions
             Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
 
@@ -825,7 +830,7 @@ Partial Public Class ThisAddIn
                                 toolConfig = GetInternalWebTool()
                                 ToolingFileLogger.LogStep("Using internal web tool.")
                             ElseIf tc.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
-                                toolConfig = GetInternalSearchTool()
+                                toolConfig = GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch)
                                 ToolingFileLogger.LogStep("Using internal search tool.")
                             Else
                                 context.LogError(
@@ -1425,12 +1430,32 @@ Partial Public Class ThisAddIn
     ''' Creates a built-in internal internet search tool configuration as a <see cref="ModelConfig"/>.
     ''' Only meaningful when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured.
     ''' </summary>
+    ''' <param name="enforcePrivacy">When True, privacy constraints are included in the tool definition and instructions.</param>
     ''' <returns>Internal search tool configuration.</returns>
-    Public Function GetInternalSearchTool() As ModelConfig
+    Public Function GetInternalSearchTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
+        Dim definition As String = InternalSearchToolDefinition
+        Dim instructions As String = InternalSearchToolInstructionsPrompt
+
+        If Not enforcePrivacy Then
+            definition =
+                "{""name"":""internet_search""," &
+                """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """query"":{""type"":""string"",""description"":""The search query.""}," &
+                """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
+                """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
+
+            instructions =
+                "internet_search: Searches the internet and returns readable text from the top result pages. " &
+                "Call this tool when you need current or factual information you are not confident about. " &
+                "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
+                "Return value includes the search query used, the URLs visited, and the page content for each qualifying result."
+        End If
+
         Return New ModelConfig() With {
             .ToolName = InternalSearchToolName,
-            .ToolInstructionsPrompt = InternalSearchToolInstructionsPrompt,
-            .ToolDefinition = InternalSearchToolDefinition,
+            .ToolInstructionsPrompt = instructions,
+            .ToolDefinition = definition,
             .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
             .Tool = True,
             .ToolPriority = 998,
@@ -1588,6 +1613,32 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            ' ── SharePoint / OneDrive / Teams detection ──
+            ' These authenticated cloud storage URLs require login and will not return useful content.
+            Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
+            Dim blockedUrls As New List(Of String)()
+            For Each url In urls
+                Dim lowerUrl = url.ToLowerInvariant()
+                For Each pattern In sharepointPatterns
+                    If lowerUrl.Contains(pattern) Then
+                        blockedUrls.Add(url)
+                        Exit For
+                    End If
+                Next
+            Next
+
+            If blockedUrls.Count > 0 Then
+                Dim blockedList = String.Join(", ", blockedUrls)
+                response.Success = False
+                response.ErrorMessage =
+                    $"Cannot retrieve content from the following URL(s) because they point to SharePoint, OneDrive, or Microsoft Teams — " &
+                    $"these are authenticated cloud storage resources that require login and cannot be accessed remotely: {blockedList}. " &
+                    "Please ask the user to download the file(s) and provide them directly."
+                context.Log($"Blocked SharePoint/OneDrive URL(s): {blockedList}", "warn")
+                ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
+                Return response
+            End If
+
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
@@ -1663,6 +1714,7 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
 
     ''' <summary>
     ''' Executes the internal internet search tool by querying the configured search engine,
@@ -2182,7 +2234,7 @@ Partial Public Class ThisAddIn
 
         ' Add internet search tool only when search grounding is enabled and configured
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
-            tools.Add(GetInternalSearchTool())
+            tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
         End If
 
         Return tools

@@ -508,7 +508,25 @@ Partial Public Class ThisAddIn
         Dim inlineUrlCount As Integer = Regex.Matches(prompt, inlineUrlPattern, RegexOptions.IgnoreCase).Count
         Dim fixedPathCount As Integer = 0
         If Not String.IsNullOrEmpty(patternFixed) Then
-            fixedPathCount = Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase).Count
+            ' Count only fixed path matches that are not already matched by other trigger types
+            ' (e.g., the pattern {[path]} -> \{(?<path>.*?)\} would also match {doc}, {dir}, {url})
+            For Each m As Match In Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase)
+                Dim candidatePath As String = If(m.Groups("path").Value, "").Trim()
+                ' Remove quotes if present
+                If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                    candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                End If
+                ' Skip if this match is actually one of the known triggers
+                Dim matchText As String = m.Value
+                If String.Equals(matchText, ExtTrigger, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If String.Equals(matchText, ExtDirTrigger, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If String.Equals(matchText, ExtUrlTrigger, StringComparison.OrdinalIgnoreCase) Then Continue For
+                ' Also skip if it doesn't look like a path
+                Dim looksLikePath As Boolean = candidatePath.Contains("\") OrElse candidatePath.Contains("/") OrElse candidatePath.Contains(":")
+                If Not looksLikePath Then Continue For
+                fixedPathCount += 1
+            Next
         End If
         ctx.ExpectedFileCount = extTriggerCount + fixedPathCount + urlTriggerCount + inlineUrlCount
         ' Note: dirTriggerCount files are added in LoadDirectoryFilesAsync
@@ -1104,6 +1122,7 @@ Partial Public Class ThisAddIn
             Dim DoBubblesExtract As Boolean = False
             Dim DoPushback As Boolean = False
             Dim DoFiles As Boolean = False
+            Dim DoAssemble As Boolean = False
             Dim DoShowModel As Boolean = False
 
             ' Build instruction strings for user guidance
@@ -1124,6 +1143,7 @@ Partial Public Class ThisAddIn
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
             Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
+            Dim AssembleInstruct As String = $"; use '{AssemblePrefix}' for assembling a document from templates"
             Dim ChunkInstruct As String = $"; add '{ChunkTrigger}' for iterating through the text"
             Dim BubblesExtractInstruct As String = $"; add '{BubblesExtractTrigger}' for including bubble comments"
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger}'/'{ObjectTrigger2}' for adding a file object"
@@ -1223,7 +1243,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -2160,6 +2180,9 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(FilePrefix2, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(FilePrefix2.Length).Trim()
                 DoFiles = True
+            ElseIf OtherPrompt.StartsWith(AssemblePrefix, StringComparison.OrdinalIgnoreCase) Then
+                OtherPrompt = OtherPrompt.Substring(AssemblePrefix.Length).Trim()
+                DoAssemble = True
             End If
 
             ' (net) trigger: Enable internet search
@@ -2256,6 +2279,32 @@ Partial Public Class ThisAddIn
                 Return
             End If
             OtherPrompt = fileResult.ModifiedPrompt
+
+
+            ' === Assemble dispatch (after all external triggers are resolved) ===
+            ' InsertDocs now contains (adddoc) content, and OtherPrompt has had
+            ' {doc}/{dir}/{url} triggers replaced with loaded document content.
+            ' Both the user instruction and the additional context are fully populated.
+
+            If DoAssemble Then
+                ' Combine any embedded document content from {doc}/{dir}/{url} triggers
+                ' with (adddoc) content as additional context for the assembler.
+                Dim assembleContext As String = ""
+                If Not String.IsNullOrWhiteSpace(InsertDocs) Then
+                    assembleContext = InsertDocs
+                End If
+
+                Try
+                    Await AssembleDocumentFromTemplates(OtherPrompt, assembleContext, UseSecondAPI)
+                Catch ex As System.Exception
+                    ShowCustomMessageBox("Error in Freestyle ('Assemble:'): " & ex.Message, "Error")
+                End Try
+                If UseSecondAPI And originalConfigLoaded Then
+                    RestoreDefaults(_context, originalConfig)
+                    originalConfigLoaded = False
+                End If
+                Return
+            End If
 
 
             ' === File object selection (for LLM APIs that support file attachments) ===

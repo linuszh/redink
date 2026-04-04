@@ -1418,6 +1418,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_Add_PrivacyProtection As String
+        Get
+            Return _context.SP_Add_PrivacyProtection
+        End Get
+        Set(value As String)
+            _context.SP_Add_PrivacyProtection = value
+        End Set
+    End Property
+
 
 
     Public Shared Property SP_AutoPilot As String
@@ -2314,6 +2323,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_EnablePrivacyForSearch As Boolean
+        Get
+            Return _context.INI_EnablePrivacyForSearch
+        End Get
+        Set(value As Boolean)
+            _context.INI_EnablePrivacyForSearch = value
+        End Set
+    End Property
+
     ' Tooling / tool-call settings 
 
     Public Shared Property INI_ToolingLogWindow As Boolean
@@ -2449,6 +2467,71 @@ Partial Public Class ThisAddIn
         End Get
         Set(value As Integer)
             _context.INI_InkyMemoryCap = value
+        End Set
+    End Property
+
+    ' Document Assembly settings
+
+    Public Shared Property INI_AssemblePath As String
+        Get
+            Return _context.INI_AssemblePath
+        End Get
+        Set(value As String)
+            _context.INI_AssemblePath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AssemblePathLocal As String
+        Get
+            Return _context.INI_AssemblePathLocal
+        End Get
+        Set(value As String)
+            _context.INI_AssemblePathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AssembleExecMaxChars As Integer
+        Get
+            Return _context.INI_AssembleExecMaxChars
+        End Get
+        Set(value As Integer)
+            _context.INI_AssembleExecMaxChars = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AssembleMaxContextSummaryChars As Integer
+        Get
+            Return _context.INI_AssembleMaxContextSummaryChars
+        End Get
+        Set(value As Integer)
+            _context.INI_AssembleMaxContextSummaryChars = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Assemble_Plan As String
+        Get
+            Return _context.SP_Assemble_Plan
+        End Get
+        Set(value As String)
+            _context.SP_Assemble_Plan = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Assemble_Execute As String
+        Get
+            Return _context.SP_Assemble_Execute
+        End Get
+        Set(value As String)
+            _context.SP_Assemble_Execute = value
+        End Set
+    End Property
+
+    Public Shared Property SP_Assemble_Summarize As String
+        Get
+            Return _context.SP_Assemble_Summarize
+        End Get
+        Set(value As String)
+            _context.SP_Assemble_Summarize = value
         End Set
     End Property
 

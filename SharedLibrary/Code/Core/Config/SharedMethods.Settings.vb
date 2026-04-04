@@ -798,7 +798,7 @@ Namespace SharedLibrary
         "DoubleS", "NoEmDash", "Clean", "MarkdownBubbles", "KeepFormat1", "MarkdownConvert", "ReplaceText1",
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
-        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles",
+        "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
         "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
             }
             Return booleanSettings.Contains(settingKey)
@@ -1052,10 +1052,14 @@ Namespace SharedLibrary
                     Return context.INI_ContextMenu.ToString()
                 Case "NoLocalConfig"
                     Return context.INI_NoLocalConfig.ToString()
+                Case "CentralConfigClients"
+                    Return context.INI_CentralConfigClients
                 Case "ForceDrawioLocal"
                     Return context.INI_ForceDrawioLocal.ToString()
                 Case "AllowLegacyDocFiles"
                     Return context.INI_AllowLegacyDocFiles.ToString()
+                Case "EnablePrivacyForSearch"
+                    Return context.INI_EnablePrivacyForSearch.ToString()
                 Case "UpdateCheckInterval"
                     Return context.INI_UpdateCheckInterval.ToString()
                 Case "UpdatePath"
@@ -1118,6 +1122,20 @@ Namespace SharedLibrary
                     Return context.INI_InkyMemoryCap.ToString()
                 Case "SP_Add_InkyMemory"
                     Return context.SP_Add_InkyMemory
+                Case "AssemblePath"
+                    Return context.INI_AssemblePath
+                Case "AssemblePathLocal"
+                    Return context.INI_AssemblePathLocal
+                Case "AssembleExecMaxChars"
+                    Return context.INI_AssembleExecMaxChars.ToString()
+                Case "AssembleMaxContextSummaryChars"
+                    Return context.INI_AssembleMaxContextSummaryChars.ToString()
+                Case "SP_Assemble_Plan"
+                    Return context.SP_Assemble_Plan
+                Case "SP_Assemble_Execute"
+                    Return context.SP_Assemble_Execute
+                Case "SP_Assemble_Summarize"
+                    Return context.SP_Assemble_Summarize
                 Case Else
                     Return ""
             End Select
@@ -1306,7 +1324,7 @@ Namespace SharedLibrary
                     context.INI_LogoPath = value
                 Case "LogoPathMedium"
                     context.INI_LogoPathMedium = value
-                Case "LotoPathLarge"
+                Case "LogoPathLarge"
                     context.INI_LogoPathLarge = value
                 Case "APIDebug"
                     context.INI_APIDebug = Boolean.Parse(value)
@@ -1364,10 +1382,14 @@ Namespace SharedLibrary
                     context.INI_ContextMenu = Boolean.Parse(value)
                 Case "NoLocalConfig"
                     context.INI_NoLocalConfig = Boolean.Parse(value)
+                Case "CentralConfigClients"
+                    context.INI_CentralConfigClients = value
                 Case "ForceDrawioLocal"
                     context.INI_ForceDrawioLocal = Boolean.Parse(value)
                 Case "AllowLegacyDocFiles"
                     context.INI_AllowLegacyDocFiles = Boolean.Parse(value)
+                Case "EnablePrivacyForSearch"
+                    context.INI_EnablePrivacyForSearch = Boolean.Parse(value)
                 Case "UpdateCheckInterval"
                     context.INI_UpdateCheckInterval = Integer.Parse(value)
                 Case "UpdatePath"
@@ -1424,6 +1446,20 @@ Namespace SharedLibrary
                     context.INI_InkyMemoryCap = CInt(value)
                 Case "SP_Add_InkyMemory"
                     context.SP_Add_InkyMemory = value
+                Case "AssemblePath"
+                    context.INI_AssemblePath = value
+                Case "AssemblePathLocal"
+                    context.INI_AssemblePathLocal = value
+                Case "AssembleExecMaxChars"
+                    context.INI_AssembleExecMaxChars = Integer.Parse(value)
+                Case "AssembleMaxContextSummaryChars"
+                    context.INI_AssembleMaxContextSummaryChars = Integer.Parse(value)
+                Case "SP_Assemble_Plan"
+                    context.SP_Assemble_Plan = value
+                Case "SP_Assemble_Execute"
+                    context.SP_Assemble_Execute = value
+                Case "SP_Assemble_Summarize"
+                    context.SP_Assemble_Summarize = value
 
                 Case Else
                     MessageBox.Show($"Error in SetSettingValue - could not save the value for '{settingName}'.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
@@ -1689,8 +1725,10 @@ Namespace SharedLibrary
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
+                    {"CentralConfigClients", context.INI_CentralConfigClients},
                     {"ForceDrawioLocal", context.INI_ForceDrawioLocal.ToString()},
                     {"AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles.ToString()},
+                    {"EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
@@ -1726,7 +1764,7 @@ Namespace SharedLibrary
                     {"BrandingName", context.INI_BrandingName},
                     {"LogoPath", context.INI_LogoPath},
                     {"LogoPathMedium", context.INI_LogoPathMedium},
-                    {"LotoPathLarge", context.INI_LogoPathLarge},
+                    {"LogoPathLarge", context.INI_LogoPathLarge},
                     {"SP_Translate", context.SP_Translate},
                     {"SP_Translate_Multi", context.SP_Translate_Multi},
                     {"SP_Translate_Multi_Source", context.SP_Translate_Multi_Source},
@@ -1796,6 +1834,7 @@ Namespace SharedLibrary
                     {"SP_Add_Slides", context.SP_Add_Slides},
                     {"SP_Add_Chart", context.SP_Add_Chart},
                     {"SP_Add_Chart_App", context.SP_Add_Chart_App},
+                    {"SP_Add_PrivacyProtection", context.SP_Add_PrivacyProtection},
                     {"SP_BubblesExcel", context.SP_BubblesExcel},
                     {"SP_Add_Revisions", context.SP_Add_Revisions},
                     {"SP_MarkupRegex", context.SP_MarkupRegex},
@@ -1834,7 +1873,14 @@ Namespace SharedLibrary
                     {"UpdateIniClients", context.INI_UpdateIniClients},
                     {"UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride},
                     {"UpdateIniSilentMode", context.INI_UpdateIniSilentMode.ToString()},
-                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()}
+                    {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
+                    {"AssemblePath", context.INI_AssemblePath},
+                    {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
+                    {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
+                    {"SP_Assemble_Plan", context.SP_Assemble_Plan},
+                    {"SP_Assemble_Execute", context.SP_Assemble_Execute},
+                    {"SP_Assemble_Summarize", context.SP_Assemble_Summarize}
                 }
 
                 Dim KeysToSkipWhenDefault As Dictionary(Of String, Object) = GetKeysToSkipWhenDefault()
@@ -2042,6 +2088,7 @@ Namespace SharedLibrary
                 {"SP_Add_Slides", Default_SP_Add_Slides},
                 {"SP_Add_Chart", Default_SP_Add_Chart},
                 {"SP_Add_Chart_App", Default_SP_Add_Chart_App},
+                {"SP_Add_PrivacyProtection", Default_SP_Add_PrivacyProtection},
                 {"SP_BubblesExcel", Default_SP_BubblesExcel},
                 {"SP_Add_Revisions", Default_SP_Add_Revisions},
                 {"SP_MarkupRegex", Default_SP_MarkupRegex},
@@ -2103,7 +2150,12 @@ Namespace SharedLibrary
                 {"ISearch_Results", ISearch_DefResults},
                 {"ISearch_MaxDepth", ISearch_DefMaxDepth},
                 {"ISearch_Timeout", ISearch_DefSearchTimeout},
-                {"UpdateCheckInterval", DefaultUpdateIntervalDays}
+                {"UpdateCheckInterval", DefaultUpdateIntervalDays},
+                {"AssembleExecMaxChars", DEFAULT_ASSEMBLE_EXEC_MAX_CHARS},
+                {"AssembleMaxContextSummaryChars", DEFAULT_ASSEMBLE_MAX_CONTEXT_SUMMARY_CHARS},
+                {"SP_Assemble_Plan", Default_SP_Assemble_Plan},
+                {"SP_Assemble_Execute", Default_SP_Assemble_Execute},
+                {"SP_Assemble_Summarize", Default_SP_Assemble_Summarize}
             }
         End Function
 
@@ -2303,6 +2355,8 @@ Namespace SharedLibrary
                     {"HelpMeInkyPath", context.INI_HelpMeInkyPath},
                     {"DiscussInkyPath", context.INI_DiscussInkyPath},
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
+                    {"AssemblePath", context.INI_AssemblePath},
+                    {"AssemblePathLocal", context.INI_AssemblePathLocal},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"BrandingName", context.INI_BrandingName},
@@ -3053,6 +3107,7 @@ Namespace SharedLibrary
             variableValues.Add("ISearch_URL", context.INI_ISearch_URL)
             variableValues.Add("ISearch_ResponseMask1", context.INI_ISearch_ResponseMask1)
             variableValues.Add("ISearch_ResponseMask2", context.INI_ISearch_ResponseMask2)
+            variableValues.Add("ISearch_ResponseURLStart", context.INI_ISearch_ResponseURLStart)
             variableValues.Add("ISearch_Name", context.INI_ISearch_Name)
             variableValues.Add("ISearch_Tries", context.INI_ISearch_Tries)
             variableValues.Add("ISearch_Results", context.INI_ISearch_Results)
@@ -3073,8 +3128,10 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
+            variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)
             variableValues.Add("ForceDrawioLocal", context.INI_ForceDrawioLocal)
             variableValues.Add("AllowLegacyDocFiles", context.INI_AllowLegacyDocFiles)
+            variableValues.Add("EnablePrivacyForSearch", context.INI_EnablePrivacyForSearch)
             variableValues.Add("UpdateCheckInterval", context.INI_UpdateCheckInterval)
             variableValues.Add("UpdatePath", context.INI_UpdatePath)
             variableValues.Add("HelpMeInkyPath", context.INI_HelpMeInkyPath)
@@ -3111,6 +3168,10 @@ Namespace SharedLibrary
             variableValues.Add("DocCheckPathLocal", context.INI_DocCheckPathLocal)
             variableValues.Add("DocStylePath", context.INI_DocStylePath)
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
+            variableValues.Add("AssemblePath", context.INI_AssemblePath)
+            variableValues.Add("AssemblePathLocal", context.INI_AssemblePathLocal)
+            variableValues.Add("AssembleExecMaxChars", context.INI_AssembleExecMaxChars)
+            variableValues.Add("AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
             variableValues.Add("SP_Translate", context.SP_Translate)
             variableValues.Add("SP_Translate_Multi", context.SP_Translate_Multi)
@@ -3181,6 +3242,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_Add_Slides", context.SP_Add_Slides)
             variableValues.Add("SP_Add_Chart", context.SP_Add_Chart)
             variableValues.Add("SP_Add_Chart_App", context.SP_Add_Chart_App)
+            variableValues.Add("SP_Add_PrivacyProtection", context.SP_Add_PrivacyProtection)
             variableValues.Add("SP_Add_InkyMemory", context.SP_Add_InkyMemory)
             variableValues.Add("SP_BubblesExcel", context.SP_BubblesExcel)
             variableValues.Add("SP_Add_Revisions", context.SP_Add_Revisions)
@@ -3206,6 +3268,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_FindPrompts", context.SP_FindPrompts)
             variableValues.Add("SP_MergePrompt", context.SP_MergePrompt)
             variableValues.Add("SP_MergePrompt2", context.SP_MergePrompt2)
+            variableValues.Add("SP_Assemble_Plan", context.SP_Assemble_Plan)
+            variableValues.Add("SP_Assemble_Execute", context.SP_Assemble_Execute)
+            variableValues.Add("SP_Assemble_Summarize", context.SP_Assemble_Summarize)
             variableValues.Add("InkyMemoryCap", context.INI_InkyMemoryCap)
             variableValues.Add("NoHelperDownload", context.INI_NoHelperDownload)
             variableValues.Add("AutoPilot", context.INI_AutoPilot)
@@ -3220,6 +3285,7 @@ Namespace SharedLibrary
             variableValues.Add("UpdateIniIgnoreOverride", context.INI_UpdateIniIgnoreOverride)
             variableValues.Add("UpdateIniSilentMode", context.INI_UpdateIniSilentMode)
             variableValues.Add("UpdateIniSilentLog", context.INI_UpdateIniSilentLog)
+
 
             ' Extract variable names from the dictionary
             Dim variableNames As New List(Of String)(variableValues.Keys)
@@ -3370,6 +3436,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_Add_Slides") Then context.SP_Add_Slides = CStr(updatedValues("SP_Add_Slides"))
                 If updatedValues.ContainsKey("SP_Add_Chart") Then context.SP_Add_Chart = CStr(updatedValues("SP_Add_Chart"))
                 If updatedValues.ContainsKey("SP_Add_Chart_App") Then context.SP_Add_Chart_App = CStr(updatedValues("SP_Add_Chart_App"))
+                If updatedValues.ContainsKey("SP_Add_PrivacyProtection") Then context.SP_Add_PrivacyProtection = CStr(updatedValues("SP_Add_PrivacyProtection"))
                 If updatedValues.ContainsKey("SP_BubblesExcel") Then context.SP_BubblesExcel = CStr(updatedValues("SP_BubblesExcel"))
                 If updatedValues.ContainsKey("SP_Add_Revisions") Then context.SP_Add_Revisions = CStr(updatedValues("SP_Add_Revisions"))
                 If updatedValues.ContainsKey("SP_MarkupRegex") Then context.SP_MarkupRegex = CStr(updatedValues("SP_MarkupRegex"))
@@ -3421,8 +3488,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
+                If updatedValues.ContainsKey("CentralConfigClients") Then context.INI_CentralConfigClients = CStr(updatedValues("CentralConfigClients"))
                 If updatedValues.ContainsKey("ForceDrawioLocal") Then context.INI_ForceDrawioLocal = CBool(updatedValues("ForceDrawioLocal"))
                 If updatedValues.ContainsKey("AllowLegacyDocFiles") Then context.INI_AllowLegacyDocFiles = CBool(updatedValues("AllowLegacyDocFiles"))
+                If updatedValues.ContainsKey("EnablePrivacyForSearch") Then context.INI_EnablePrivacyForSearch = CBool(updatedValues("EnablePrivacyForSearch"))
                 If updatedValues.ContainsKey("UpdateCheckInterval") Then context.INI_UpdateCheckInterval = CInt(updatedValues("UpdateCheckInterval"))
                 If updatedValues.ContainsKey("UpdatePath") Then context.INI_UpdatePath = CStr(updatedValues("UpdatePath"))
                 If updatedValues.ContainsKey("HelpMeInkyPath") Then context.INI_HelpMeInkyPath = CStr(updatedValues("HelpMeInkyPath"))
@@ -3473,6 +3542,14 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("UpdateIniIgnoreOverride") Then context.INI_UpdateIniIgnoreOverride = CStr(updatedValues("UpdateIniIgnoreOverride"))
                 If updatedValues.ContainsKey("UpdateIniSilentMode") Then context.INI_UpdateIniSilentMode = CInt(updatedValues("UpdateIniSilentMode"))
                 If updatedValues.ContainsKey("UpdateIniSilentLog") Then context.INI_UpdateIniSilentLog = CBool(updatedValues("UpdateIniSilentLog"))
+                If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
+                If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
+                If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                If updatedValues.ContainsKey("AssembleExecMaxChars") Then context.INI_AssembleExecMaxChars = CInt(updatedValues("AssembleExecMaxChars"))
+                If updatedValues.ContainsKey("AssembleMaxContextSummaryChars") Then context.INI_AssembleMaxContextSummaryChars = CInt(updatedValues("AssembleMaxContextSummaryChars"))
+                If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))
+                If updatedValues.ContainsKey("SP_Assemble_Execute") Then context.SP_Assemble_Execute = CStr(updatedValues("SP_Assemble_Execute"))
+                If updatedValues.ContainsKey("SP_Assemble_Summarize") Then context.SP_Assemble_Summarize = CStr(updatedValues("SP_Assemble_Summarize"))
 
                 ' Call UpdateAppConfig after all updates
                 UpdateAppConfig(context)

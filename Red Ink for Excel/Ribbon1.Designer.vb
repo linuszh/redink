@@ -65,6 +65,7 @@ Partial Class Ribbon1
         Me.RI_SwitchParty = Me.Factory.CreateRibbonButton
         Me.Menu3 = Me.Factory.CreateRibbonMenu
         Me.RI_CSVAnalyze = Me.Factory.CreateRibbonButton
+        Me.RI_TXTAnalyze = Me.Factory.CreateRibbonButton
         Me.RI_Extractor = Me.Factory.CreateRibbonButton
         Me.RI_Renamer = Me.Factory.CreateRibbonButton
         Me.RI_FreestyleNM = Me.Factory.CreateRibbonButton
@@ -215,6 +216,7 @@ Partial Class Ribbon1
         'Menu3
         '
         Me.Menu3.Items.Add(Me.RI_CSVAnalyze)
+        Me.Menu3.Items.Add(Me.RI_TXTAnalyze)
         Me.Menu3.Items.Add(Me.RI_Extractor)
         Me.Menu3.Items.Add(Me.RI_Renamer)
         Me.Menu3.Label = "Analyze"
@@ -231,6 +233,14 @@ Partial Class Ribbon1
         Me.RI_CSVAnalyze.OfficeImageId = "GetPowerQueryDataFromCsv"
         Me.RI_CSVAnalyze.ScreenTip = "Will parse through a CSV and analyze its content"
         Me.RI_CSVAnalyze.ShowImage = True
+        '
+        'RI_TXTAnalyze
+        '
+        Me.RI_TXTAnalyze.Label = "Analyze TXT"
+        Me.RI_TXTAnalyze.Name = "RI_TXTAnalyze"
+        Me.RI_TXTAnalyze.OfficeImageId = "GetPowerQueryDataFromText"
+        Me.RI_TXTAnalyze.ScreenTip = "Will parse through the TXT files in a directory and analyze their content"
+        Me.RI_TXTAnalyze.ShowImage = True
         '
         'RI_Extractor
         '
@@ -587,6 +597,7 @@ Partial Class Ribbon1
     Friend WithEvents RI_Model8 As RibbonButton
     Friend WithEvents RI_Model9 As RibbonButton
     Friend WithEvents RI_Model10 As RibbonButton
+    Friend WithEvents RI_TXTAnalyze As RibbonButton
 End Class
 
 Partial Class ThisRibbonCollection

@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 31.3.2026
+' 3.4.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.310326" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.030426" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -108,6 +108,7 @@ Partial Public Class ThisAddIn
     Private Const SlidesPrefix As String = "Slides:"
     Private Const ChartPrefix As String = "Chart:"
     Private Const ChartPrefixApp As String = "Appchart:"
+    Private Const AssemblePrefix As String = "Assemble:"
     Private Const BubbleCutText As String = " (" & ChrW(&H2702) & ")"
     Private Const SearchNextTrigger As String = "Next:"
     Private Const BoWTrigger As String = "(bow)"
@@ -247,13 +248,23 @@ Partial Public Class ThisAddIn
         "Retrieves readable text from one or more web pages. Use this tool when you need to access the content behind a URL instead of relying on summaries or excerpts."
 
     Public Const InternalWebToolDefinition As String =
-        "{""name"":""web_content_retriever"",""description"":""Fetches and returns readable text from one or more web URLs."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""},""url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}}}}" ' Note: do not require urls; code validates at runtime.
+        "{""name"":""web_content_retriever"",""description"":""Fetches and returns readable text from one or more web URLs. " &
+        "IMPORTANT: Cannot access SharePoint, OneDrive, Teams, or other authenticated cloud storage URLs " &
+        "(sharepoint.com, onedrive.com, 1drv.ms, teams.microsoft.com, :f:/). " &
+        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""},""url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}}}}" ' Note: do not require urls; code validates at runtime.
 
     Public Const InternalWebToolInstructionsPrompt As String =
         "web_content_retriever: Fetches readable text from web pages. " &
         "Call this tool when you need the actual page content behind a link. " &
         "Provide either urls (array of strings) or url (single string). " &
-        "Return value is plain text content for each URL (or an error per URL if retrieval fails)."
+        "Return value is plain text content for each URL (or an error per URL if retrieval fails). " &
+        "SHAREPOINT/ONEDRIVE LIMITATION: This tool CANNOT access SharePoint, OneDrive, Microsoft Teams, or any other " &
+        "authenticated cloud storage URLs. URLs containing 'sharepoint.com', 'onedrive.com', '1drv.ms', " &
+        "'teams.microsoft.com', or ':f:/' point to resources that require authentication and will NOT return " &
+        "useful content. UNC paths (e.g. \\server\share\file.doc) that resolve to SharePoint will also fail. " &
+        "If the user asks you to retrieve content from such a link, do NOT call this tool. Instead, explain " &
+        "that you cannot remotely log into authenticated cloud storage and ask the user to download the file(s) " &
+        "and provide them as direct attachments."
 
     ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
 
@@ -317,7 +328,6 @@ Partial Public Class ThisAddIn
     Public DialogueContext As String
     Public ExtraInstructions As String
     Public DiscussKnowledgeCache As String = ""
-
 
 
     <DllImport("user32.dll", SetLastError:=True)>
