@@ -87,6 +87,8 @@
 '  - generate_image
 '  - web_grounding
 '  - manage_scheduled_tasks
+'  - manage_user_memory
+'  - manage_user_files
 '  - report_inability
 '
 ' Notes:
@@ -151,6 +153,8 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_GenerateImage As String = "generate_image"
     Private Const AP_Tool_WebGrounding As String = "web_grounding"
     Private Const AP_Tool_ManageScheduledTasks As String = "manage_scheduled_tasks"
+    Private Const AP_Tool_ManageUserMemory As String = "manage_user_memory"
+    Private Const AP_Tool_ManageUserFiles As String = "manage_user_files"
     Private Const AP_Tool_ReportInability As String = "report_inability"
 
 
@@ -1014,6 +1018,28 @@ Partial Public Class ThisAddIn
                     modeInstructions = "Only 'deep_research' mode is available. It produces a detailed, structured report with multiple sections."
                 End If
 
+                Dim privacyConstraint As String = ""
+                Dim privacyConstraintDef As String = ""
+                Dim privacyConstraintQueryParam As String = ""
+                Dim privacyConstraintContextParam As String = ""
+
+                If (_apConfig IsNot Nothing AndAlso _apConfig.EnablePrivacyProtection) OrElse
+                   (_apConfig Is Nothing AndAlso _context.INI_EnablePrivacyForSearch) Then
+                    privacyConstraint =
+                        "PRIVACY CONSTRAINT: The query is sent to an external AI model with web access. " &
+                        "You MUST NOT include any personal data, confidential information, private names, " &
+                        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
+                        "account numbers, or any other non-public information in the query. " &
+                        "Only well-known public figures, public institutions, published legislation, " &
+                        "and other clearly public information may appear in the query. "
+                    privacyConstraintDef =
+                        "PRIVACY: The query is sent to an external model. MUST NOT contain personal data, confidential information, or non-public details."
+                    privacyConstraintQueryParam =
+                        "MUST NOT contain personal data, confidential information, or any non-public details."
+                    privacyConstraintContextParam =
+                        " Same privacy constraints apply — no personal or confidential data."
+                End If
+
                 tools.Add(New ModelConfig() With {
                     .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WebGrounding,
                     .ModelDescription = "Web Grounding / Deep Research (built-in)",
@@ -1025,12 +1051,7 @@ Partial Public Class ThisAddIn
                         "research, or information you are not confident about. " &
                         modeInstructions & " " &
                         "The 'query' parameter should contain a clear, focused search question or topic. " &
-                        "PRIVACY CONSTRAINT: The query is sent to an external AI model with web access. " &
-                        "You MUST NOT include any personal data, confidential information, private names, " &
-                        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
-                        "account numbers, or any other non-public information in the query. " &
-                        "Only well-known public figures, public institutions, published legislation, " &
-                        "and other clearly public information may appear in the query. " &
+                        privacyConstraint &
                         "RESPONSE HANDLING — MANDATORY SOURCE CITATION RULES: " &
                         "The tool returns the raw JSON response from the grounding model. " &
                         "You MUST extract and present the COMPLETE answer text from the response. Do NOT summarize or shorten it. " &
@@ -1055,13 +1076,13 @@ Partial Public Class ThisAddIn
                         "IMPORTANT: When processing the result, you MUST include the complete answer AND all source URLs as clickable links " &
                         "in a dedicated 'Sources' section. A reply without sources when the tool returned URLs is invalid. " &
                         "For deep_research mode, include the full extensive report without summarizing. " &
-                        "PRIVACY: The query is sent to an external model. MUST NOT contain personal data, confidential information, or non-public details.""," &
+                        If(privacyConstraintDef <> "", privacyConstraintDef, "") & """," &
                         """parameters"":{""type"":""object"",""properties"":{" &
-                        """query"":{""type"":""string"",""description"":""The search question or topic. Must be clear and focused. " &
-                        "MUST NOT contain personal data, confidential information, or any non-public details.""}," &
+                        """query"":{""type"":""string"",""description"":""The search question or topic. Must be clear and focused." &
+                        If(privacyConstraintQueryParam <> "", " " & privacyConstraintQueryParam, "") & """}," &
                         modeEnum &
-                        """context"":{""type"":""string"",""description"":""Optional additional context to help the grounding model understand the query better. " &
-                        "Same privacy constraints apply — no personal or confidential data.""}" &
+                        """context"":{""type"":""string"",""description"":""Optional additional context to help the grounding model understand the query better." &
+                        If(privacyConstraintContextParam <> "", privacyConstraintContextParam, "") & """}" &
                         "},""required"":[""query""]}}"
                 })
             End If
@@ -1116,6 +1137,80 @@ Partial Public Class ThisAddIn
                     """status"":{""type"":""string"",""enum"":[""active"",""paused""],""description"":""Task status (for update)""}," &
                     """store_attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of current e-mail attachments to copy into the task's permanent storage""}," &
                     """status_filter"":{""type"":""string"",""description"":""Filter for list action (e.g. 'active', 'completed', 'paused'). Omit to list all.""}" &
+                    "},""required"":[""action""]}}"
+            })
+        End If
+
+        ' ── manage_user_memory ──
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableUserMemory Then
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageUserMemory,
+                .ModelDescription = "Manage User Memory (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_ManageUserMemory & ": Manages the per-user persistent memory for the e-mail sender. " &
+                    "Memory stores user preferences, corrections, and working style that persist across sessions. " &
+                    "Actions: " &
+                    "'enable' — activates memory for this user (opt-in). " &
+                    "'disable' — deactivates memory and deletes all stored preferences (opt-out). " &
+                    "'list' — returns all current memory items. " &
+                    "'add' — adds a new memory item (value parameter required). " &
+                    "'remove' — removes a memory item by fuzzy match (value parameter required). " &
+                    "'amend' — changes an existing item (value = old text, new_value = replacement). " &
+                    "'clear' — removes all memory items but keeps memory enabled. " &
+                    "'toggle_auto_learn' — turns automatic learning on or off (auto_learn parameter: true/false). " &
+                    "When auto_learn is on (default when memory is enabled), the model automatically detects and stores " &
+                    "user preferences from conversations using <INKY_MEMORY> blocks. " &
+                    "When the user asks you to remember, forget, or change a preference, use this tool. " &
+                    "The sender_email is automatically determined from the incoming e-mail — never ask the user for it.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_ManageUserMemory & """," &
+                    """description"":""Manages per-user persistent memory (preferences, corrections, working style). " &
+                    "Memory persists across AutoPilot sessions. Users can enable/disable, add/remove/amend items, " &
+                    "or toggle automatic learning.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """action"":{""type"":""string"",""enum"":[""enable"",""disable"",""list"",""add"",""remove"",""amend"",""clear"",""toggle_auto_learn""]," &
+                    """description"":""The operation to perform""}," &
+                    """value"":{""type"":""string"",""description"":""Memory item text (for add/remove) or old text (for amend)""}," &
+                    """new_value"":{""type"":""string"",""description"":""Replacement text (for amend action only)""}," &
+                    """auto_learn"":{""type"":""boolean"",""description"":""Enable or disable automatic learning (for toggle_auto_learn)""}" &
+                    "},""required"":[""action""]}}"
+            })
+        End If
+
+        ' ── manage_user_files ──
+        If _apConfig IsNot Nothing AndAlso _apConfig.EnableUserFiles Then
+            tools.Add(New ModelConfig() With {
+                .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ManageUserFiles,
+                .ModelDescription = "Manage User Files (built-in)",
+                .ToolInstructionsPrompt =
+                    AP_Tool_ManageUserFiles & ": Manages the per-user persistent file storage (home directory). " &
+                    "Users can store files (templates, letterheads, reference documents) that persist across sessions " &
+                    "and are available for use in future requests. " &
+                    "Actions: " &
+                    "'list' — returns all files in the user's home directory with names and sizes. " &
+                    "'add' — copies a file from the current e-mail's attachments into the user's home directory. " &
+                    "The file_name parameter specifies which attachment to store. An optional target_name " &
+                    "renames the file. IMPORTANT: Inform the user that stored files will be visible to " &
+                    "all future AutoPilot sessions and can be used by document processing tools. " &
+                    "'remove' — deletes a file from the user's home directory. " &
+                    "'replace' — replaces an existing file with a new version from the current attachments. " &
+                    "'checkout' — retrieves a file from the home directory and includes it as an attachment " &
+                    "in the reply to the user. " &
+                    "'use' — loads a file from the home directory into the current processing session so that " &
+                    "other tools (e.g. process_word_document) can reference it by name. The file is NOT " &
+                    "returned to the user unless explicitly requested. " &
+                    "Per-user storage is capped at " & CStr(AP_UserHomeMaxBytes \ 1024 \ 1024) & " MB. " &
+                    "The sender_email is automatically determined from the incoming e-mail.",
+                .ToolDefinition =
+                    "{""name"":""" & AP_Tool_ManageUserFiles & """," &
+                    """description"":""Manages per-user persistent file storage. Users can store, list, remove, replace, " &
+                    "checkout (retrieve), or use (load into session) files that persist across AutoPilot sessions. " &
+                    "Storage is capped at " & CStr(AP_UserHomeMaxBytes \ 1024 \ 1024) & " MB per user.""," &
+                    """parameters"":{""type"":""object"",""properties"":{" &
+                    """action"":{""type"":""string"",""enum"":[""list"",""add"",""remove"",""replace"",""checkout"",""use""]," &
+                    """description"":""The operation to perform""}," &
+                    """file_name"":{""type"":""string"",""description"":""Filename of the attachment (for add/replace) or home file (for remove/checkout/use)""}," &
+                    """target_name"":{""type"":""string"",""description"":""Optional: rename the file when storing (for add/replace). If omitted, uses the original name.""}" &
                     "},""required"":[""action""]}}"
             })
         End If
@@ -1227,6 +1322,10 @@ Partial Public Class ThisAddIn
                 Return Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageScheduledTasks
                 Return Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ManageUserMemory
+                Return Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+            Case AP_Tool_ManageUserFiles
+                Return Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -7601,6 +7700,320 @@ Partial Public Class ThisAddIn
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: manage_user_memory
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteManageUserMemoryTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim action = GetArgString(toolCall.Arguments, "action")
+            If String.IsNullOrWhiteSpace(action) Then
+                response.Success = False
+                response.Response = "Missing required parameter: action"
+                Return response
+            End If
+
+            ' SECURITY: sender e-mail comes from the mail being processed, not from user input
+            Dim senderEmail = _apCurrentMailInfo?.SenderEmail
+            If String.IsNullOrWhiteSpace(senderEmail) Then
+                response.Success = False
+                response.Response = "Error: Could not determine sender e-mail address."
+                Return response
+            End If
+
+            Select Case action.ToLowerInvariant()
+
+                Case "enable"
+                    EnableUserMemory(senderEmail)
+                    response.Success = True
+                    response.Response = "Memory has been enabled. I will now learn and remember your preferences across sessions. " &
+                        "You can ask me to remember specific things, or I will automatically pick up on your preferences. " &
+                        "Use 'disable' to opt out at any time (this will delete all stored preferences)."
+                    ApDashboardLog($"🧠 User memory enabled for: {senderEmail}", "info")
+
+                Case "disable"
+                    DisableUserMemory(senderEmail)
+                    response.Success = True
+                    response.Response = "Memory has been disabled and all stored preferences have been deleted. " &
+                        "I will no longer remember preferences across sessions."
+                    ApDashboardLog($"🧠 User memory disabled for: {senderEmail}", "info")
+
+                Case "list"
+                    If Not IsUserMemoryEnabled(senderEmail) Then
+                        response.Success = True
+                        response.Response = "Memory is not enabled for this user. Use action='enable' to activate it."
+                        Return response
+                    End If
+                    Dim memoryContent = ReadUserMemory(senderEmail, _context.INI_InkyMemoryCap)
+                    If String.IsNullOrWhiteSpace(memoryContent) Then
+                        response.Success = True
+                        response.Response = "Memory is enabled but currently empty. No preferences stored yet."
+                    Else
+                        response.Success = True
+                        response.Response = "Current memory items:" & vbCrLf & memoryContent
+                    End If
+
+                Case "add"
+                    Dim value = GetArgString(toolCall.Arguments, "value")
+                    If String.IsNullOrWhiteSpace(value) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: value"
+                        Return response
+                    End If
+                    If Not IsUserMemoryEnabled(senderEmail) Then EnableUserMemory(senderEmail)
+                    Dim ops As New List(Of SharedMethods.MemoryOperation)()
+                    ops.Add(New SharedMethods.MemoryOperation With {
+                        .Type = SharedMethods.MemoryOperation.OpType.Add, .Value = value
+                    })
+                    SharedMethods.ApplyMemoryOperationsToFile(GetUserMemoryFilePath(senderEmail), ops, _context.INI_InkyMemoryCap)
+                    response.Success = True
+                    response.Response = $"Memory item added: {value}"
+                    ApDashboardLog($"🧠 Memory add for {senderEmail}: {value}", "step")
+
+                Case "remove"
+                    Dim value = GetArgString(toolCall.Arguments, "value")
+                    If String.IsNullOrWhiteSpace(value) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: value"
+                        Return response
+                    End If
+                    If Not IsUserMemoryEnabled(senderEmail) Then
+                        response.Success = True
+                        response.Response = "Memory is not enabled — nothing to remove."
+                        Return response
+                    End If
+                    Dim ops As New List(Of SharedMethods.MemoryOperation)()
+                    ops.Add(New SharedMethods.MemoryOperation With {
+                        .Type = SharedMethods.MemoryOperation.OpType.Remove, .Value = value
+                    })
+                    SharedMethods.ApplyMemoryOperationsToFile(GetUserMemoryFilePath(senderEmail), ops, _context.INI_InkyMemoryCap)
+                    response.Success = True
+                    response.Response = $"Memory item removed (if matched): {value}"
+                    ApDashboardLog($"🧠 Memory remove for {senderEmail}: {value}", "step")
+
+                Case "amend"
+                    Dim value = GetArgString(toolCall.Arguments, "value")
+                    Dim newValue = GetArgString(toolCall.Arguments, "new_value")
+                    If String.IsNullOrWhiteSpace(value) OrElse String.IsNullOrWhiteSpace(newValue) Then
+                        response.Success = False
+                        response.Response = "Missing required parameters: value and new_value"
+                        Return response
+                    End If
+                    If Not IsUserMemoryEnabled(senderEmail) Then EnableUserMemory(senderEmail)
+                    Dim ops As New List(Of SharedMethods.MemoryOperation)()
+                    ops.Add(New SharedMethods.MemoryOperation With {
+                        .Type = SharedMethods.MemoryOperation.OpType.Amend, .Value = value, .NewValue = newValue
+                    })
+                    SharedMethods.ApplyMemoryOperationsToFile(GetUserMemoryFilePath(senderEmail), ops, _context.INI_InkyMemoryCap)
+                    response.Success = True
+                    response.Response = $"Memory item amended: '{value}' → '{newValue}'"
+                    ApDashboardLog($"🧠 Memory amend for {senderEmail}: {value} → {newValue}", "step")
+
+                Case "clear"
+                    If IsUserMemoryEnabled(senderEmail) Then
+                        SharedMethods.WriteFileWithRetry(GetUserMemoryFilePath(senderEmail), SharedMethods.GetDefaultMemoryFileContent())
+                        response.Success = True
+                        response.Response = "All memory items have been cleared. Memory remains enabled."
+                        ApDashboardLog($"🧠 Memory cleared for: {senderEmail}", "info")
+                    Else
+                        response.Success = True
+                        response.Response = "Memory is not enabled — nothing to clear."
+                    End If
+
+                Case "toggle_auto_learn"
+                    ' Auto-learn is controlled by the <INKY_MEMORY> block in the system prompt.
+                    ' We track it via a special memory item.
+                    Dim autoLearn = GetArgBool(toolCall.Arguments, "auto_learn", True)
+                    If Not IsUserMemoryEnabled(senderEmail) Then EnableUserMemory(senderEmail)
+
+                    Dim filePath = GetUserMemoryFilePath(senderEmail)
+                    Dim markerOff = "AUTO_LEARN_DISABLED"
+
+                    If autoLearn Then
+                        ' Remove the disable marker
+                        Dim ops As New List(Of SharedMethods.MemoryOperation)()
+                        ops.Add(New SharedMethods.MemoryOperation With {
+                            .Type = SharedMethods.MemoryOperation.OpType.Remove, .Value = markerOff
+                        })
+                        SharedMethods.ApplyMemoryOperationsToFile(filePath, ops, _context.INI_InkyMemoryCap)
+                        response.Success = True
+                        response.Response = "Automatic learning is now ON. I will automatically learn from your preferences in conversations."
+                    Else
+                        ' Add the disable marker
+                        Dim ops As New List(Of SharedMethods.MemoryOperation)()
+                        ops.Add(New SharedMethods.MemoryOperation With {
+                            .Type = SharedMethods.MemoryOperation.OpType.Add, .Value = markerOff
+                        })
+                        SharedMethods.ApplyMemoryOperationsToFile(filePath, ops, _context.INI_InkyMemoryCap)
+                        response.Success = True
+                        response.Response = "Automatic learning is now OFF. I will only update memory when you explicitly ask me to remember or forget something."
+                    End If
+                    ApDashboardLog($"🧠 Auto-learn {If(autoLearn, "ON", "OFF")} for: {senderEmail}", "info")
+
+                Case Else
+                    response.Success = False
+                    response.Response = $"Unknown action: {action}. Valid actions: enable, disable, list, add, remove, amend, clear, toggle_auto_learn."
+            End Select
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.Response = "Operation was cancelled."
+        Catch ex As Exception
+            response.Success = False
+            response.Response = $"Error managing user memory: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
+    '  TOOL EXECUTION: manage_user_files
+    ' ═══════════════════════════════════════════════════════════════════════════
+
+    Private Async Function ExecuteManageUserFilesTool(
+            toolCall As ToolCall,
+            context As ToolExecutionContext,
+            ct As CancellationToken) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId, .ToolName = toolCall.ToolName, .Timestamp = DateTime.UtcNow
+        }
+
+        Try
+            Dim action = GetArgString(toolCall.Arguments, "action")
+            If String.IsNullOrWhiteSpace(action) Then
+                response.Success = False
+                response.Response = "Missing required parameter: action"
+                Return response
+            End If
+
+            ' SECURITY: sender e-mail comes from the mail being processed, not from user input
+            Dim senderEmail = _apCurrentMailInfo?.SenderEmail
+            If String.IsNullOrWhiteSpace(senderEmail) Then
+                response.Success = False
+                response.Response = "Error: Could not determine sender e-mail address."
+                Return response
+            End If
+
+            Dim fileName = GetArgString(toolCall.Arguments, "file_name")
+            Dim targetName = GetArgString(toolCall.Arguments, "target_name")
+
+            Select Case action.ToLowerInvariant()
+
+                Case "list"
+                    Dim files = ListUserHomeFiles(senderEmail)
+                    If files.Count = 0 Then
+                        response.Success = True
+                        response.Response = "No files stored in your home directory."
+                    Else
+                        Dim sb As New StringBuilder()
+                        sb.AppendLine($"Files in home directory ({files.Count}):")
+                        Dim totalSize As Long = 0
+                        For Each f In files
+                            sb.AppendLine($"  - {f.Name} ({f.SizeBytes / 1024:F0} KB)")
+                            totalSize += f.SizeBytes
+                        Next
+                        sb.AppendLine($"Total: {totalSize / 1024 / 1024:F1} MB / {AP_UserHomeMaxBytes / 1024 / 1024:F0} MB limit")
+                        response.Success = True
+                        response.Response = sb.ToString()
+                    End If
+
+                Case "add", "replace"
+                    If String.IsNullOrWhiteSpace(fileName) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: file_name (the attachment to store)"
+                        Return response
+                    End If
+
+                    ' Find the attachment in the current session
+                    Dim att = FindAttachment(fileName)
+                    If att Is Nothing OrElse att.TempFilePath Is Nothing OrElse Not IO.File.Exists(att.TempFilePath) Then
+                        response.Success = False
+                        response.Response = $"Attachment '{fileName}' not found in the current e-mail. Available: {String.Join(", ", GetAllAvailableFileNames())}"
+                        Return response
+                    End If
+
+                    Dim storeName = If(String.IsNullOrWhiteSpace(targetName), att.OriginalFileName, targetName.Trim())
+                    Dim result = StoreFileToUserHome(senderEmail, att.TempFilePath, storeName)
+                    response.Success = Not result.StartsWith("Error")
+                    response.Response = result
+                    If response.Success Then
+                        ApDashboardLog($"📁 File stored for {senderEmail}: {storeName} ({att.SizeBytes / 1024:F0} KB)", "info")
+                    End If
+
+                Case "remove"
+                    If String.IsNullOrWhiteSpace(fileName) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: file_name"
+                        Return response
+                    End If
+                    Dim result = RemoveFileFromUserHome(senderEmail, fileName)
+                    response.Success = Not result.StartsWith("Error")
+                    response.Response = result
+                    If response.Success Then
+                        ApDashboardLog($"📁 File removed for {senderEmail}: {fileName}", "info")
+                    End If
+
+                Case "checkout"
+                    If String.IsNullOrWhiteSpace(fileName) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: file_name"
+                        Return response
+                    End If
+                    Dim loaded = LoadFileFromUserHome(senderEmail, fileName)
+                    If loaded Is Nothing Then
+                        response.Success = False
+                        response.Response = $"File '{fileName}' not found in home directory, or session context unavailable."
+                    Else
+                        ' Register as output so it gets attached to the reply
+                        loaded.OutputFiles.Add(loaded.TempFilePath)
+                        response.Success = True
+                        response.Response = $"File '{fileName}' retrieved from home directory and will be attached to the reply."
+                        ApDashboardLog($"📁 File checkout for {senderEmail}: {fileName}", "info")
+                    End If
+
+                Case "use"
+                    If String.IsNullOrWhiteSpace(fileName) Then
+                        response.Success = False
+                        response.Response = "Missing required parameter: file_name"
+                        Return response
+                    End If
+                    Dim loaded = LoadFileFromUserHome(senderEmail, fileName)
+                    If loaded Is Nothing Then
+                        response.Success = False
+                        response.Response = $"File '{fileName}' not found in home directory, or session context unavailable."
+                    Else
+                        response.Success = True
+                        response.Response = $"File '{fileName}' loaded into the current session. " &
+                            "It is now available as an attachment and can be referenced by other tools " &
+                            $"(e.g., process_word_document, read_attachment) using the name '{loaded.OriginalFileName}'."
+                        ApDashboardLog($"📁 File loaded into session for {senderEmail}: {fileName}", "step")
+                    End If
+
+                Case Else
+                    response.Success = False
+                    response.Response = $"Unknown action: {action}. Valid actions: list, add, remove, replace, checkout, use."
+            End Select
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.Response = "Operation was cancelled."
+        Catch ex As Exception
+            response.Success = False
+            response.Response = $"Error managing user files: {ex.Message}"
+        End Try
+
+        Return response
+    End Function
+
+    ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL IDENTIFICATION
     ' ═══════════════════════════════════════════════════════════════════════════
 
@@ -7635,6 +8048,8 @@ Partial Public Class ThisAddIn
                  AP_Tool_GenerateImage,
                  AP_Tool_WebGrounding,
                  AP_Tool_ManageScheduledTasks,
+                 AP_Tool_ManageUserMemory,
+                 AP_Tool_ManageUserFiles,
                  AP_Tool_ReportInability
                 Return True
             Case Else

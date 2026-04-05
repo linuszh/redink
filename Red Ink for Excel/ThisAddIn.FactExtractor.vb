@@ -343,9 +343,12 @@ ShowBuilderLoop:
                                                                                                                             CloseAfterExtra:=closeAfterExtra) = False Then Return
 
             Dim chosenPreparedDisplay = System.Convert.ToString(params(0).Value)
+            manualInstruction = System.Convert.ToString(params(1).Value)
 
             ' Intercept the builder sentinel: launch wizard, then re-show the main dialog
-            If String.Equals(chosenPreparedDisplay, BuilderSentinel, StringComparison.Ordinal) Then
+            ' Only trigger if the user did NOT provide a manual instruction override
+            If String.Equals(chosenPreparedDisplay, BuilderSentinel, StringComparison.Ordinal) AndAlso
+               String.IsNullOrWhiteSpace(manualInstruction) Then
                 Dim builderResult = Await RunLibraryEntryBuilderAsync(localPath)
                 If builderResult Then
                     ShowCustomMessageBox("The new library entry has been saved." & vbCrLf &
@@ -354,7 +357,6 @@ ShowBuilderLoop:
                 Return
             End If
 
-            manualInstruction = System.Convert.ToString(params(1).Value)
             manualSchemaText = System.Convert.ToString(params(2).Value)
             dateColumnsText = System.Convert.ToString(params(3).Value)
             clampFrom = System.Convert.ToString(params(4).Value)

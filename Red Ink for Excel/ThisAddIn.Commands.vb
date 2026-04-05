@@ -463,7 +463,24 @@ Partial Public Class ThisAddIn
         Dim dirTriggerCount As Integer = Regex.Matches(prompt, Regex.Escape(ExtDirTrigger), RegexOptions.IgnoreCase).Count
         Dim fixedPathCount As Integer = 0
         If Not String.IsNullOrEmpty(patternFixed) Then
-            fixedPathCount = Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase).Count
+            ' Count only fixed path matches that are not already matched by other trigger types
+            ' (e.g., the pattern {[path]} -> \{(?<path>.*?)\} would also match {doc}, {dir})
+            For Each m As Match In Regex.Matches(prompt, patternFixed, RegexOptions.IgnoreCase)
+                Dim candidatePath As String = If(m.Groups("path").Value, "").Trim()
+                ' Remove quotes if present
+                If (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("""") AndAlso candidatePath.EndsWith("""")) OrElse
+                   (candidatePath.Length >= 2 AndAlso candidatePath.StartsWith("'") AndAlso candidatePath.EndsWith("'")) Then
+                    candidatePath = candidatePath.Substring(1, candidatePath.Length - 2).Trim()
+                End If
+                ' Skip if this match is actually one of the known triggers
+                Dim matchText As String = m.Value
+                If String.Equals(matchText, ExtTrigger, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If String.Equals(matchText, ExtDirTrigger, StringComparison.OrdinalIgnoreCase) Then Continue For
+                ' Also skip if it doesn't look like a path
+                Dim looksLikePath As Boolean = candidatePath.Contains("\") OrElse candidatePath.Contains("/") OrElse candidatePath.Contains(":")
+                If Not looksLikePath Then Continue For
+                fixedPathCount += 1
+            Next
         End If
         ctx.ExpectedFileCount = extTriggerCount + fixedPathCount
         ' Note: dirTriggerCount files are added in LoadDirectoryFilesAsync

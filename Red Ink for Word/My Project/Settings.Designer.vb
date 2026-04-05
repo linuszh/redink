@@ -1516,6 +1516,30 @@ Namespace My
                 Me("Tabular_MergeInstruction") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property ChatInkyMemory() As Boolean
+            Get
+                Return CType(Me("ChatInkyMemory"),Boolean)
+            End Get
+            Set
+                Me("ChatInkyMemory") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property DiscussInkyMemory() As Boolean
+            Get
+                Return CType(Me("DiscussInkyMemory"),Boolean)
+            End Get
+            Set
+                Me("DiscussInkyMemory") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

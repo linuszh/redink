@@ -320,6 +320,7 @@
     </Compile>
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.CSVAnalyzer.vb" />
+    <Compile Include="ThisAddIn.DirectoryAnalyzer.vb" />
     <Compile Include="ThisAddIn.ExcelHelpers.vb" />
     <Compile Include="ThisAddIn.FactExtractor.vb" />
     <Compile Include="ThisAddIn.FileHelpers.vb" />

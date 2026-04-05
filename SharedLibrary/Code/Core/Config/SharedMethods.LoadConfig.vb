@@ -205,6 +205,7 @@ Namespace SharedLibrary
                 context.SP_Add_Slides = If(configDict.ContainsKey("SP_Add_Slides"), configDict("SP_Add_Slides"), Default_SP_Add_Slides)
                 context.SP_Add_Chart = If(configDict.ContainsKey("SP_Add_Chart"), configDict("SP_Add_Chart"), Default_SP_Add_Chart)
                 context.SP_Add_Chart_App = If(configDict.ContainsKey("SP_Add_Chart_App"), configDict("SP_Add_Chart_App"), Default_SP_Add_Chart_App)
+                context.SP_Add_PrivacyProtection = If(configDict.ContainsKey("SP_Add_PrivacyProtection"), configDict("SP_Add_PrivacyProtection"), Default_SP_Add_PrivacyProtection)
                 context.SP_BubblesExcel = If(configDict.ContainsKey("SP_BubblesExcel"), configDict("SP_BubblesExcel"), Default_SP_BubblesExcel)
                 context.SP_Add_Revisions = If(configDict.ContainsKey("SP_Add_Revisions"), configDict("SP_Add_Revisions"), Default_SP_Add_Revisions)
                 context.SP_MarkupRegex = If(configDict.ContainsKey("SP_MarkupRegex"), configDict("SP_MarkupRegex"), Default_SP_MarkupRegex)
@@ -230,8 +231,17 @@ Namespace SharedLibrary
                 context.SP_Add_MergePrompt = If(configDict.ContainsKey("SP_Add_MergePrompt"), configDict("SP_Add_MergePrompt"), Default_SP_Add_MergePrompt)
                 context.SP_FindPrompts = If(configDict.ContainsKey("SP_FindPrompts"), configDict("SP_FindPrompts"), Default_SP_FindPrompts)
                 context.SP_Ignore = If(configDict.ContainsKey("SP_Ignore"), configDict("SP_Ignore"), Default_SP_Ignore)
+                context.SP_Add_InkyMemory = If(configDict.ContainsKey("SP_Add_InkyMemory"), configDict("SP_Add_InkyMemory"), Default_SP_Add_InkyMemory)
 
-                ' Legacy; was required For Excel Helper.
+                ' Document Assembly settings
+                context.INI_AssemblePath = If(configDict.ContainsKey("AssemblePath"), configDict("AssemblePath"), "")
+                context.INI_AssemblePathLocal = If(configDict.ContainsKey("AssemblePathLocal"), configDict("AssemblePathLocal"), "")
+                context.INI_AssembleExecMaxChars = If(configDict.ContainsKey("AssembleExecMaxChars"), CInt(configDict("AssembleExecMaxChars")), DEFAULT_ASSEMBLE_EXEC_MAX_CHARS)
+                context.INI_AssembleMaxContextSummaryChars = If(configDict.ContainsKey("AssembleMaxContextSummaryChars"), CInt(configDict("AssembleMaxContextSummaryChars")), DEFAULT_ASSEMBLE_MAX_CONTEXT_SUMMARY_CHARS)
+                context.SP_Assemble_Plan = If(configDict.ContainsKey("SP_Assemble_Plan"), configDict("SP_Assemble_Plan"), Default_SP_Assemble_Plan)
+                context.SP_Assemble_Execute = If(configDict.ContainsKey("SP_Assemble_Execute"), configDict("SP_Assemble_Execute"), Default_SP_Assemble_Execute)
+                context.SP_Assemble_Summarize = If(configDict.ContainsKey("SP_Assemble_Summarize"), configDict("SP_Assemble_Summarize"), Default_SP_Assemble_Summarize)               ' Legacy; was required For Excel Helper.
+
                 ' context.INI_OpenSSLPath = If(configDict.ContainsKey("OpenSSLPath"), configDict("OpenSSLPath"), "%APPDATA%\Microsoft\OpenSSL_Runtime\openssl.exe")
 
                 ' Optional values.
@@ -249,6 +259,7 @@ Namespace SharedLibrary
                 context.INI_MarkupDiffCap = If(configDict.ContainsKey("MarkupDiffCap"), CInt(configDict("MarkupDiffCap")), DEFAULT_MARKUP_DIFF_CAP)
                 context.INI_MarkupRegexCap = If(configDict.ContainsKey("MarkupRegexCap"), CInt(configDict("MarkupRegexCap")), DEFAULT_MARKUP_REGEX_CAP)
                 context.INI_ChatCap = If(configDict.ContainsKey("ChatCap"), CInt(configDict("ChatCap")), DEFAULT_CHAT_CAP)
+                context.INI_InkyMemoryCap = If(configDict.ContainsKey("InkyMemoryCap"), CInt(configDict("InkyMemoryCap")), DEFAULT_INKY_MEMORY_CAP)
 
                 ' Load per-user overrides from My.Settings.
                 context.INI_DefaultPrefix = My.Settings.DefaultPrefix
@@ -280,6 +291,7 @@ Namespace SharedLibrary
                 context.INI_NoLocalConfig = ParseBoolean(configDict, "NoLocalConfig")
                 context.INI_ForceDrawioLocal = ParseBoolean(configDict, "ForceDrawioLocal")
                 context.INI_AllowLegacyDocFiles = ParseBoolean(configDict, "AllowLegacyDocFiles")
+                context.INI_EnablePrivacyForSearch = ParseBoolean(configDict, "EnablePrivacyForSearch")
 
                 context.INI_AutoPilot = If(configDict.ContainsKey("AutoPilot"), configDict("AutoPilot"), "")
 

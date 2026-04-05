@@ -952,6 +952,41 @@
       ]
     },
     {
+      "id": "document_assembly",
+      "title": "Document Assembly",
+      "description": "Settings for the template-based document assembly feature (Word only). Configure the template directories and LLM processing limits.",
+      "fields": [
+        {
+          "key": "AssemblePath",
+          "label": "Assembly Templates (Central)",
+          "type": "path",
+          "default": "",
+          "description": "Path to the shared directory containing .docx assembly templates. Red Ink lists these templates when the user starts an assembly. Example: N:\\AI\\Library\\Templates. [AssemblePath]"
+        },
+        {
+          "key": "AssemblePathLocal",
+          "label": "Assembly Templates (Local)",
+          "type": "path",
+          "default": "",
+          "description": "Path to the user's local directory containing .docx assembly templates. Local templates appear first in the selection list and are marked with '(local)'. Example: C:\\Users\\david\\Desktop. [AssemblePathLocal]"
+        },
+        {
+          "key": "AssembleExecMaxChars",
+          "label": "Max Chars per LLM Call",
+          "type": "integer",
+          "default": "80000",
+          "description": "Maximum characters of template text sent per LLM execution call during assembly. Larger values allow more context but may exceed token limits for some models. Example: 80000. [AssembleExecMaxChars]"
+        },
+        {
+          "key": "AssembleMaxContextSummaryChars",
+          "label": "Max Context Summary Chars",
+          "type": "integer",
+          "default": "20000",
+          "description": "Maximum characters for the rolling context summary that keeps the LLM coherent across assembly sections. Increase if documents have many long sections. Example: 20000. [AssembleMaxContextSummaryChars]"
+        }
+      ]
+    },
+    {
       "id": "search",
       "title": "Internet Search (ISearch)",
       "description": "Configuration for Red Ink internet searching inside Freestyle. These values describe the search engine endpoint and how result links are extracted from its HTML.",
@@ -994,6 +1029,13 @@
           "description": "Text pattern found immediately to the right of a result URL in the search engine HTML. Red Ink uses it together with ResponseMask1 to isolate the link. Example: &. [ISearch_ResponseMask2]"
         },
         {
+          "key": "ISearch_ResponseURLStart",
+          "label": "Response URL Prefix",
+          "type": "string",
+          "condition": "ISearch == True",
+          "description": "Optional prefix that result URLs must start with to be accepted by Red Ink when filtering search engine hits. Leave empty to accept any URL. Example: https://. [ISearch_ResponseURLStart]"
+        },
+        {
           "key": "ISearch_Tries",
           "label": "Max Tries",
           "type": "integer",
@@ -1024,6 +1066,22 @@
           "default": "False",
           "condition": "ISearch == True",
           "description": "Enable this if the user should be asked for permission before Red Ink sends a query to the internet search engine. Example: False. [ISearch_Approve]"
+        },
+        {
+          "key": "EnablePrivacyForSearch",
+          "label": "Privacy Protection",
+          "type": "boolean",
+          "default": "False",
+          "condition": "ISearch == True",
+          "description": "Enable this to enforce privacy constraints on internet search queries. When enabled, the model is instructed never to include personal data, confidential information, or non-public details in search queries sent to external search engines. This affects both the tool definition and the prompt instructions. Example: True. [EnablePrivacyForSearch]"
+        },
+        {
+          "key": "ISearch_Timeout",
+          "label": "Timeout (ms)",
+          "type": "integer",
+          "default": "30000",
+          "condition": "ISearch == True",
+          "description": "Maximum time in seconds Red Ink should spend on a single internet-search hit before moving on. Example: 3. [ISearch_Timeout]"
         },
         {
           "key": "ISearch_Timeout",

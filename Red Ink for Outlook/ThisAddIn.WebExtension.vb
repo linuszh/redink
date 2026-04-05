@@ -1237,6 +1237,11 @@ Partial Public Class ThisAddIn
         html.AppendLine("    </div>")
         html.AppendLine("    <button id=""toolLogBtn"" title=""Toggle tooling log window"" style=""display:none;line-height:1;align-items:center;justify-content:center;padding:.45rem .5rem;""><svg viewBox=""0 0 24 24"" width=""16"" height=""16"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z""/><polyline points=""14 2 14 8 20 8""/><line x1=""16"" y1=""13"" x2=""8"" y2=""13""/><line x1=""16"" y1=""17"" x2=""8"" y2=""17""/><polyline points=""10 9 9 9 8 9""/></svg></button>")
 
+        html.AppendLine("    <div class=""toolingRow"" id=""memorySlot"" style=""display:inline-flex;align-items:center;gap:6px;flex-shrink:0;"">")
+        html.AppendLine("      <input type=""checkbox"" id=""memoryChk"" title=""Enable Inky Memory — persistent cross-session learning"">")
+        html.AppendLine("      <label for=""memoryChk"" style=""font-size:.8rem;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;"">Memory</label>")
+        html.AppendLine("      <a href=""#"" id=""memoryEditLnk"" title=""Edit the Inky Memory file"" style=""font-size:.7rem;color:var(--muted);text-decoration:underline;cursor:pointer;white-space:nowrap;display:none;"">Edit</a>")
+        html.AppendLine("    </div>")
         html.AppendLine("    <button id=""playBtn"" title=""Open mini games"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""3"" y=""8"" width=""18"" height=""8"" rx=""4"" ry=""4""/><circle cx=""8"" cy=""12"" r=""1""/><circle cx=""12"" cy=""12"" r=""1""/><circle cx=""16"" cy=""12"" r=""1""/></svg></button>")
         html.AppendLine("    <button id=""themeBtn"" title=""Toggle theme"" style=""line-height:1;display:flex;align-items:center;justify-content:center;""><svg id=""themeIcon"" viewBox=""0 0 24 24"" width=""18"" height=""18"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/></svg></button>")
         html.AppendLine("  </div>")
@@ -1334,6 +1339,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
+        html.AppendLine("let __memoryEnabled=false;")
+        html.AppendLine("const memoryEditLnk=document.getElementById('memoryEditLnk');")
 
         html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
         html.AppendLine("function forceExternalLinks(scope){try{(scope||document).querySelectorAll('a[href]').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});}catch{}}")
@@ -1358,7 +1365,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
         ' Boot        
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);__agentModelAvailable=(st.agentModelAvailable===true);__agentModelActive=(st.agentModelActive===true);updateAgentModelBtn();updateToolingVisibility();applyCoupling();adjustModelSel();} ")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);__agentModelAvailable=(st.agentModelAvailable===true);__agentModelActive=(st.agentModelActive===true);updateAgentModelBtn();__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';updateToolingVisibility();applyCoupling();adjustModelSel();} ")
 
         ' Poll job
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
@@ -1403,6 +1410,10 @@ Partial Public Class ThisAddIn
 
         ' Tooling log button (toggle)
         html.AppendLine("toolLogBtn.addEventListener('click',async()=>{__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);const r=await api('inky_settoolinglog',{Enabled:__toolLogEnabled});if(!r.ok){__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);}});")
+
+        ' Memory toggle + editor
+        html.AppendLine("memoryChk.addEventListener('change',async()=>{const r=await api('inky_setmemory',{Enabled:memoryChk.checked});if(!r.ok){memoryChk.checked=!memoryChk.checked;alert(r.error||'Failed to toggle memory');}else{__memoryEnabled=!!r.enabled;}memoryEditLnk.style.display=__memoryEnabled?'inline':'none';});")
+        html.AppendLine("memoryEditLnk.addEventListener('click',async(e)=>{e.preventDefault();const r=await api('inky_editmemory');if(!r.ok)alert(r.error||'Could not open memory editor');});")
 
         ' Agent files display
         html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__agentEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
@@ -1499,6 +1510,16 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle agent mode: " & ex.Message)
+                        End Try
+
+                    Case "inky_editmemory"
+                        Try
+                            Await SwitchToUi(Sub()
+                                                 SharedMethods.EditInkyMemoryFile(_context)
+                                             End Sub).ConfigureAwait(False)
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open memory editor: " & ex.Message)
                         End Try
 
                     Case "inky_toggleagentmodel"
@@ -1704,6 +1725,16 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Failed to toggle tooling log: " & ex.Message)
                         End Try
 
+                    Case "inky_setmemory"
+                        Try
+                            Dim enabled As Boolean = CBool(j("Enabled"))
+                            My.Settings.Inky_InkyMemory = enabled
+                            My.Settings.Save()
+                            Return JsonOk(New With {.ok = True, .enabled = enabled})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to toggle memory: " & ex.Message)
+                        End Try
+
                     Case "inky_selecttools"
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SelectTools invoked")
@@ -1826,7 +1857,8 @@ Partial Public Class ThisAddIn
                             .agentEnabled = _chatAgentModeEnabled,
                             .agentFiles = GetAgentFileListForBrowser(),
                             .agentModelActive = st.AgentModelActive,
-                            .agentModelAvailable = IsAgentDefaultModelAvailable()
+                            .agentModelAvailable = IsAgentDefaultModelAvailable(),
+                            .inkyMemoryEnabled = My.Settings.Inky_InkyMemory
                         })
 
                     ' Remaining cases kept intact (command-specific logic)
@@ -2190,6 +2222,16 @@ Partial Public Class ThisAddIn
                         Dim nowLocal As String = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss zzz", Globalization.CultureInfo.InvariantCulture)
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
+
+                        ' Inject InkyMemory into system prompt if enabled
+                        If My.Settings.Inky_InkyMemory Then
+                            Dim memoryContent = ReadInkyMemory(_context.INI_InkyMemoryCap)
+                            sysPromptBase &= Environment.NewLine & _context.SP_Add_InkyMemory
+                            If Not String.IsNullOrWhiteSpace(memoryContent) Then
+                                sysPromptBase &= Environment.NewLine & "<INKY_MEMORY_CURRENT>" & Environment.NewLine & memoryContent & Environment.NewLine & "</INKY_MEMORY_CURRENT>"
+                            End If
+                        End If
+
                         Dim useSecondApiLocal As Boolean = st.UseSecondApi
                         Dim selectedModelKeyLocal As String = st.SelectedModelKey
                         ' Capture file object (may be Nothing after extraction)
@@ -2410,6 +2452,12 @@ Partial Public Class ThisAddIn
                                        localOutput.Equals("Operation was canceled by the user.", StringComparison.OrdinalIgnoreCase) Then
                                         localOutput = "Aborted by user."
                                     End If
+
+                                    ' Process InkyMemory updates from LLM response (if enabled)
+                                    If My.Settings.Inky_InkyMemory Then
+                                        localOutput = ProcessInkyMemoryResponse(localOutput, _context.INI_InkyMemoryCap)
+                                    End If
+
                                     ' (3) Build assistant turn or error turn
                                     Dim assistantText As String = localOutput
                                     Dim wasCanceled As Boolean = jobCts.IsCancellationRequested
