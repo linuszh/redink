@@ -367,6 +367,16 @@ Public Class frmAIChat
     ''' </summary>
     Private WithEvents btnTools As New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
 
+    ''' <summary>
+    ''' Clickable label to open the Inky Memory file for manual editing.
+    ''' Styled as a link to save space alongside checkboxes.
+    ''' </summary>
+    Private WithEvents lnkEditMemory As New LinkLabel() With {
+        .Text = "Edit",
+        .AutoSize = True,
+        .Visible = My.Settings.ChatInkyMemory,
+        .Margin = New Padding(0, 5, 0, 0)
+    }
 
     ' =========================================================================
     ' ToolTrigger (t) Support - ToolDefaultModel
@@ -505,6 +515,17 @@ Public Class frmAIChat
     .AutoSize = True,
     .Checked = False
 }
+
+    ''' <summary>
+    ''' When checked, enables InkyMemory — persistent cross-session learning.
+    ''' The LLM is instructed to identify and store user preferences automatically.
+    ''' Persisted to My.Settings.ChatInkyMemory.
+    ''' </summary>
+    Private WithEvents chkInkyMemory As New System.Windows.Forms.CheckBox() With {
+        .Text = "Inky Memory",
+        .AutoSize = True,
+        .Checked = My.Settings.ChatInkyMemory
+    }
 
     ''' <summary>
     ''' Controls window TopMost property.
@@ -791,6 +812,8 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkConvertMarkdown)
         pnlCheckboxes.Controls.Add(chkIncludeOtherDocs)
+        pnlCheckboxes.Controls.Add(chkInkyMemory)
+        pnlCheckboxes.Controls.Add(lnkEditMemory)
 
         ' Attach event handlers to buttons
         AddHandler btnCopy.Click, AddressOf btnCopy_Click
@@ -806,6 +829,8 @@ Public Class frmAIChat
         AddHandler chkPermitCommands.Click, AddressOf chkPermitCommands_Click
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
         AddHandler chkConvertMarkdown.Click, AddressOf chkConvertMarkdown_Click
+        AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
+        AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
@@ -968,6 +993,15 @@ Public Class frmAIChat
                         If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
                            _context.SP_Add_ChatWord_Commands,
                            _context.SP_Add_Chat_NoCommands)
+
+            ' Inject InkyMemory into system prompt if enabled
+            If chkInkyMemory.Checked Then
+                Dim memoryContent = SharedMethods.ReadInkyMemory(_context.INI_InkyMemoryCap)
+                SystemPrompt &= vbLf & _context.SP_Add_InkyMemory
+                If Not String.IsNullOrWhiteSpace(memoryContent) Then
+                    SystemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
+                End If
+            End If
 
             ' ──────────────────────────────────────────────────────────────
             ' STEP 2: Build Conversation Context
@@ -1252,6 +1286,13 @@ Public Class frmAIChat
             ' ──────────────────────────────────────────────────────────────
             ' STEP 9: Process LLM Response
             ' ──────────────────────────────────────────────────────────────
+
+            ' Process InkyMemory updates from LLM response (if enabled)
+            If chkInkyMemory.Checked Then
+                aiResponseOriginal = SharedMethods.ProcessInkyMemoryResponse(
+                    aiResponseOriginal, _context.INI_InkyMemoryCap)
+            End If
+
             ' Keep original Markdown for HTML rendering
             Dim aiResponseMd As String = (If(aiResponseOriginal, "")).TrimEnd()
 
@@ -1712,6 +1753,22 @@ Public Class frmAIChat
 
         ' Update tooling log checkbox enabled state
         chkShowToolingLog.Enabled = chkEnableTooling.Checked AndAlso chkEnableTooling.Enabled
+    End Sub
+
+    ''' <summary>
+    ''' Handles chkInkyMemory checkbox click. Persists preference and toggles edit link visibility.
+    ''' </summary>
+    Private Sub chkInkyMemory_Click(sender As Object, e As EventArgs)
+        My.Settings.ChatInkyMemory = chkInkyMemory.Checked
+        My.Settings.Save()
+        lnkEditMemory.Visible = chkInkyMemory.Checked
+    End Sub
+
+    ''' <summary>
+    ''' Opens the Inky Memory file for manual editing.
+    ''' </summary>
+    Private Sub lnkEditMemory_LinkClicked(sender As Object, e As LinkLabelLinkClickedEventArgs)
+        SharedMethods.EditInkyMemoryFile()
     End Sub
 
     ' =========================================================================

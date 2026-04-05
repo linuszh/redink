@@ -89,7 +89,7 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.4.0.200</ApplicationVersion>
+    <ApplicationVersion>1.4.1.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
@@ -487,6 +487,8 @@
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />

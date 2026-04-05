@@ -121,7 +121,7 @@ Partial Public Class ThisAddIn
                 do2ndModel = CType(Nothing, Boolean?)
             End If
 
-            Dim p0 As New SLib.InputParameter("Prompt for analysis", promptDefault)
+            Dim p0 As New SLib.InputParameter("Prompt for analysis (leave empty for multiline)", promptDefault)
             Dim p1 As New SLib.InputParameter("CSV separator", Separator)
             Dim p2 As New SLib.InputParameter("Columns to process (empty = all; separate by same separator)", colsDefault)
 
@@ -166,6 +166,23 @@ Partial Public Class ThisAddIn
                 UseSecondAPI = CBool(prms(9).Value)
             End If
 
+            ' If the prompt field was left empty or too short, open the multiline input box
+            ' so the user can compose a detailed, multi-line prompt comfortably.
+            If OtherPrompt.Trim().Length < 5 Then
+                Dim multilinePrompt As String = ShowCustomInputBox(
+                    "Please enter your analysis prompt (multiline supported):",
+                    $"{AN} CSV Analyzer",
+                    SimpleInput:=False,
+                    DefaultValue:=GetSetting("CSV_Prompt", OtherPrompt))
+
+                If multilinePrompt = "ESC" OrElse String.IsNullOrWhiteSpace(multilinePrompt) Then
+                    ShowCustomMessageBox("No prompt provided — aborting.")
+                    Return
+                End If
+
+                OtherPrompt = multilinePrompt
+            End If
+
             SaveSetting("CSV_Separator", Separator)
             SaveSetting("CSV_Columns", columnsToProcessRaw)
             SaveSetting("CSV_ChunkSize", chunkSize)
@@ -175,6 +192,7 @@ Partial Public Class ThisAddIn
             SaveSetting("CSV_ResultStartColumn", resultStartCol)
             SaveSetting("CSV_Attempts", llmAttempts)
             SaveSetting("CSV_UseSecondModel", UseSecondAPI)
+            SaveSetting("CSV_Prompt", OtherPrompt)
             Try : My.Settings.Save() : Catch : End Try
 
             If OtherPrompt.Trim().Length < 5 Then
