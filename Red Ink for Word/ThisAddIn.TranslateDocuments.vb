@@ -914,6 +914,9 @@ Partial Public Class ThisAddIn
             ' Apply processed text back to XML nodes
             ApplyTranslationsToXml(paragraphs)
 
+            ' Expand multi-line translations into separate XML paragraphs
+            ExpandMultiLineParagraphs(paragraphs, nsMgr)
+
             ' Save modified document.xml
             xmlDoc.Save(documentXmlPath)
 
@@ -2280,5 +2283,64 @@ Partial Public Class ThisAddIn
 
         Return sb.ToString()
     End Function
+
+    ''' <summary>
+    ''' Expands paragraphs whose translated text contains line breaks into multiple
+    ''' sibling &lt;w:p&gt; elements, cloning the original paragraph's formatting.
+    ''' Must be called AFTER ApplyTranslationsToXml.
+    ''' </summary>
+    Private Sub ExpandMultiLineParagraphs(paragraphs As List(Of TranslateParagraphInfo),
+                                          nsMgr As System.Xml.XmlNamespaceManager)
+        For Each para In paragraphs
+            If para.IsEmpty OrElse String.IsNullOrEmpty(para.TranslatedText) Then Continue For
+            If para.TextRuns.Count = 0 Then Continue For
+
+            Dim lines As String() = para.TranslatedText.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None)
+            If lines.Length <= 1 Then Continue For
+
+            ' Find the parent <w:p> node from the first text run
+            Dim paraNode As System.Xml.XmlNode = para.TextRuns(0).TextNode
+            While paraNode IsNot Nothing AndAlso paraNode.LocalName <> "p"
+                paraNode = paraNode.ParentNode
+            End While
+            If paraNode Is Nothing OrElse paraNode.ParentNode Is Nothing Then Continue For
+
+            Dim parentNode As System.Xml.XmlNode = paraNode.ParentNode
+
+            ' Set the first line on the existing paragraph
+            SetAllTextInParagraph(paraNode, nsMgr, lines(0).TrimEnd())
+
+            ' Clone and insert additional paragraphs for remaining lines
+            Dim insertAfter As System.Xml.XmlNode = paraNode
+            For lineIdx As Integer = 1 To lines.Length - 1
+                Dim lineText As String = lines(lineIdx).TrimEnd()
+                If String.IsNullOrEmpty(lineText) Then Continue For
+
+                Dim newPara As System.Xml.XmlNode = paraNode.CloneNode(deep:=True)
+                SetAllTextInParagraph(newPara, nsMgr, lineText)
+                parentNode.InsertAfter(newPara, insertAfter)
+                insertAfter = newPara
+            Next
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Sets all w:t nodes in a paragraph to a single text value (first run gets
+    ''' the text, remaining runs are cleared).
+    ''' </summary>
+    Private Sub SetAllTextInParagraph(paraNode As System.Xml.XmlNode,
+                                      nsMgr As System.Xml.XmlNamespaceManager,
+                                      text As String)
+        Dim tNodes = paraNode.SelectNodes(".//w:r/w:t", nsMgr)
+        If tNodes Is Nothing OrElse tNodes.Count = 0 Then Return
+
+        For i As Integer = 0 To tNodes.Count - 1
+            If i = 0 Then
+                SetTextNodeWithSpacePreserve(tNodes(i), text)
+            Else
+                SetTextNodeWithSpacePreserve(tNodes(i), "")
+            End If
+        Next
+    End Sub
 
 End Class

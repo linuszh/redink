@@ -2205,8 +2205,10 @@ Partial Public Class ThisAddIn
                     valueStr = $"[{DirectCast(kvp.Value, IEnumerable(Of Object)).Count()} items]"
                 Else
                     valueStr = kvp.Value.ToString()
-                    If valueStr.Length > maxLength Then
-                        valueStr = valueStr.Substring(0, maxLength - 3) & "..."
+                    ' Use shorter limit for long text parameters like "instruction"
+                    Dim effectiveMax = If(valueStr.Length > 200, Math.Min(maxLength, 80), maxLength)
+                    If valueStr.Length > effectiveMax Then
+                        valueStr = valueStr.Substring(0, effectiveMax - 3) & "..."
                     End If
                 End If
             End If

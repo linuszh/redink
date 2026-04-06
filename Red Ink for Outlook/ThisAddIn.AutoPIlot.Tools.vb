@@ -3658,7 +3658,8 @@ Partial Public Class ThisAddIn
             Dim resultMessages As New List(Of String)()
 
             For Each att In toProcess
-                context.Log($"Processing: {att.OriginalFileName} with instruction: {instruction} (task_type={taskType})")
+                Dim truncatedInstruction = If(instruction.Length > 120, instruction.Substring(0, 117) & "...", instruction)
+                context.Log($"Processing: {att.OriginalFileName} with instruction: {truncatedInstruction} (task_type={taskType})")
 
                 Dim inputPath = att.TempFilePath
                 Dim ext = att.Extension.ToLowerInvariant()
