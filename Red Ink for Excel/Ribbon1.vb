@@ -292,4 +292,11 @@ Public Class Ribbon1
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "RIRemove_Excel invoked")
         Globals.ThisAddIn.RemoveRIPrefixFromComments()
     End Sub
+
+    Private Sub RI_TXTAnalyze_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_TXTAnalyze.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "TXTAnalyze_Excel invoked")
+        Globals.ThisAddIn.AnalyzeDirectoryWithLLM()
+    End Sub
+
+
 End Class

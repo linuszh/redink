@@ -74,13 +74,23 @@ Partial Public Class ThisAddIn
     ''' Human-readable tool instructions shown to the model describing how to use the internal web tool.
     ''' </summary>
     Private Const InternalWebToolInstructionsPrompt As String =
-        "retrieve_web_content: Retrieves text content from one or more URLs. Use this to fetch information from websites when needed."
+        "retrieve_web_content: Retrieves text content from one or more URLs. Use this to fetch information from websites when needed. " &
+        "SHAREPOINT/ONEDRIVE LIMITATION: This tool CANNOT access SharePoint, OneDrive, Microsoft Teams, or any other " &
+        "authenticated cloud storage URLs. URLs containing 'sharepoint.com', 'onedrive.com', '1drv.ms', " &
+        "'teams.microsoft.com', or ':f:/' point to resources that require authentication and will NOT return " &
+        "useful content. UNC paths (e.g. \\server\share\file.doc) that resolve to SharePoint will also fail. " &
+        "If the user asks you to retrieve content from such a link, do NOT call this tool. Instead, explain " &
+        "that you cannot remotely log into authenticated cloud storage and ask the user to download the file(s) " &
+        "and provide them as direct attachments."
 
     ''' <summary>
     ''' Canonical tool definition JSON used for the internal web tool.
     ''' </summary>
     Private Const InternalWebToolDefinition As String =
-        "{""name"":""retrieve_web_content"",""description"":""Retrieves the text content from one or more web URLs"",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of URLs to retrieve content from""}},""required"":[""urls""]}}"
+        "{""name"":""retrieve_web_content"",""description"":""Retrieves the text content from one or more web URLs. " &
+        "IMPORTANT: Cannot access SharePoint, OneDrive, Teams, or other authenticated cloud storage URLs " &
+        "(sharepoint.com, onedrive.com, 1drv.ms, teams.microsoft.com, :f:/). " &
+        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of URLs to retrieve content from""}},""required"":[""urls""]}}"
 
     ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
 
@@ -1366,7 +1376,14 @@ Partial Public Class ThisAddIn
                                 toolConfig = GetInternalWebTool()
                                 ToolingFileLogger.LogStep("Using internal web tool.")
                             ElseIf tc.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
-                                toolConfig = GetInternalSearchTool()
+                                ' Determine privacy flag: AutoPilot config takes precedence, then INI setting
+                                Dim enforcePrivacy As Boolean
+                                If _apConfig IsNot Nothing Then
+                                    enforcePrivacy = _apConfig.EnablePrivacyProtection
+                                Else
+                                    enforcePrivacy = INI_EnablePrivacyForSearch
+                                End If
+                                toolConfig = GetInternalSearchTool(enforcePrivacy:=enforcePrivacy)
                                 ToolingFileLogger.LogStep("Using internal search tool.")
                             Else
                                 context.LogError(
@@ -1985,12 +2002,33 @@ Partial Public Class ThisAddIn
     ''' Creates a built-in internal internet search tool configuration as a <see cref="ModelConfig"/>.
     ''' Only meaningful when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured.
     ''' </summary>
+    ''' <param name="enforcePrivacy">When True, privacy constraints are included in the tool definition and instructions.</param>
     ''' <returns>Internal search tool configuration.</returns>
-    Public Function GetInternalSearchTool() As ModelConfig
+    Public Function GetInternalSearchTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
+        Dim definition As String = InternalSearchToolDefinition
+        Dim instructions As String = InternalSearchToolInstructionsPrompt
+
+        If Not enforcePrivacy Then
+            ' Strip privacy constraints from the tool definition
+            definition =
+                "{""name"":""internet_search""," &
+                """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about.""," &
+                """parameters"":{""type"":""object"",""properties"":{" &
+                """query"":{""type"":""string"",""description"":""The search query.""}," &
+                """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
+                """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
+
+            instructions =
+                "internet_search: Searches the internet and returns readable text from the top result pages. " &
+                "Call this tool when you need current or factual information you are not confident about. " &
+                "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
+                "Return value includes the search query used, the URLs visited, and the page content for each qualifying result."
+        End If
+
         Return New ModelConfig() With {
             .ToolName = InternalSearchToolName,
-            .ToolInstructionsPrompt = InternalSearchToolInstructionsPrompt,
-            .ToolDefinition = InternalSearchToolDefinition,
+            .ToolInstructionsPrompt = instructions,
+            .ToolDefinition = definition,
             .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
             .Tool = True,
             .ToolPriority = 998,
@@ -2167,8 +2205,10 @@ Partial Public Class ThisAddIn
                     valueStr = $"[{DirectCast(kvp.Value, IEnumerable(Of Object)).Count()} items]"
                 Else
                     valueStr = kvp.Value.ToString()
-                    If valueStr.Length > maxLength Then
-                        valueStr = valueStr.Substring(0, maxLength - 3) & "..."
+                    ' Use shorter limit for long text parameters like "instruction"
+                    Dim effectiveMax = If(valueStr.Length > 200, Math.Min(maxLength, 80), maxLength)
+                    If valueStr.Length > effectiveMax Then
+                        valueStr = valueStr.Substring(0, effectiveMax - 3) & "..."
                     End If
                 End If
             End If
@@ -2223,6 +2263,32 @@ Partial Public Class ThisAddIn
                 Return response
             End If
 
+            ' ── SharePoint / OneDrive / Teams detection ──
+            ' These authenticated cloud storage URLs require login and will not return useful content.
+            Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
+            Dim blockedUrls As New List(Of String)()
+            For Each url In urls
+                Dim lowerUrl = url.ToLowerInvariant()
+                For Each pattern In sharepointPatterns
+                    If lowerUrl.Contains(pattern) Then
+                        blockedUrls.Add(url)
+                        Exit For
+                    End If
+                Next
+            Next
+
+            If blockedUrls.Count > 0 Then
+                Dim blockedList = String.Join(", ", blockedUrls)
+                response.Success = False
+                response.ErrorMessage =
+                    $"Cannot retrieve content from the following URL(s) because they point to SharePoint, OneDrive, or Microsoft Teams — " &
+                    $"these are authenticated cloud storage resources that require login and cannot be accessed remotely: {blockedList}. " &
+                    "Please ask the user to download the file(s) and attach them directly to the e-mail."
+                context.Log($"Blocked SharePoint/OneDrive URL(s): {blockedList}", "warn")
+                ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
+                Return response
+            End If
+
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
@@ -2237,6 +2303,7 @@ Partial Public Class ThisAddIn
                         context.Log($"  Fetching: {url}")
                         ' RetrieveWebsiteContent_WebView2 handles its own threading (runs on STA thread internally)
                         Dim content = Await RetrieveWebsiteContent_WebView2(url, 0)
+
 
                         If Not String.IsNullOrWhiteSpace(content) Then
                             results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
@@ -2357,9 +2424,16 @@ Partial Public Class ThisAddIn
 
             ' ── PII / confidential data safety net ───────────────────────
             ' Block queries that contain obvious personal data patterns.
-            ' This is a last-resort filter; the model is instructed not to include such data,
-            ' but defense-in-depth requires a code-level check before the query leaves the system.
-            Dim piiPatterns As String() = {
+            ' Only enforced when privacy protection is enabled.
+            Dim enforcePrivacyForPII As Boolean = True  ' default for non-AutoPilot callers
+            If _apConfig IsNot Nothing Then
+                enforcePrivacyForPII = _apConfig.EnablePrivacyProtection
+            ElseIf _context IsNot Nothing Then
+                enforcePrivacyForPII = _context.INI_EnablePrivacyForSearch
+            End If
+
+            If enforcePrivacyForPII Then
+                Dim piiPatterns As String() = {
                 "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
                 "\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
                 "\b\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}[-.\s]?\d{0,4}\b",
@@ -2369,17 +2443,17 @@ Partial Public Class ThisAddIn
                 "\b(?:4\d{3}|5[1-5]\d{2}|6011|3[47]\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
                 "\bAHV[\s-]?\d{3}[\.\s]?\d{4}[\.\s]?\d{4}[\.\s]?\d{2}\b"
             }
-
-            For Each piiPattern In piiPatterns
-                If Regex.IsMatch(query, piiPattern, RegexOptions.IgnoreCase) Then
-                    response.Success = False
-                    response.ErrorMessage = "Search query blocked: appears to contain personal or confidential data."
-                    ToolingFileLogger.LogWarn("Internal search tool: query blocked by PII filter.",
+                For Each piiPattern In piiPatterns
+                    If Regex.IsMatch(query, piiPattern, RegexOptions.IgnoreCase) Then
+                        response.Success = False
+                        response.ErrorMessage = "Search query blocked: appears to contain personal or confidential data."
+                        ToolingFileLogger.LogWarn("Internal search tool: query blocked by PII filter.",
                         details:=$"CallId={toolCall.CallId}; Pattern='{piiPattern}'")
-                    context.Log("  ⚠ Search query blocked — contains data that appears personal or confidential.", "warn")
-                    Return response
-                End If
-            Next
+                        context.Log("  ⚠ Search query blocked — contains data that appears personal or confidential.", "warn")
+                        Return response
+                    End If
+                Next
+            End If
 
             ' Clamp max_results to server limit (INI_ISearch_Tries)
             Dim maxResults As Integer = INI_ISearch_Results
@@ -2856,7 +2930,7 @@ Partial Public Class ThisAddIn
 
         ' Add internet search tool only when search grounding is enabled and configured
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
-            tools.Add(GetInternalSearchTool())
+            tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
         End If
 
         Return tools

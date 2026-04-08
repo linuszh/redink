@@ -220,6 +220,8 @@ Namespace SharedLibrary
             Property SP_Add_Slides As String
             Property SP_Add_Chart As String
             Property SP_Add_Chart_App As String
+            Property SP_Add_PrivacyProtection As String
+
             Property SP_BubblesExcel As String
             Property SP_Add_Revisions As String
             Property SP_MarkupRegex As String
@@ -323,6 +325,8 @@ Namespace SharedLibrary
             Property INI_CentralConfigClients As String
 
             Property INI_AutoPilot As String
+            ' Privacy protection for external search/web queries
+            Property INI_EnablePrivacyForSearch As Boolean
 
             ' Tooling / tool-call settings 
             Property INI_ToolingLogWindow As Boolean
@@ -341,6 +345,19 @@ Namespace SharedLibrary
             Property INI_LogoPathMedium As String
             Property INI_LogoPath As String
             Property INI_BrandingName As String
+
+            ' InkyMemory settings
+            Property INI_InkyMemoryCap As Integer
+            Property SP_Add_InkyMemory As String
+
+            ' Document Assembly settings
+            Property INI_AssemblePath As String
+            Property INI_AssemblePathLocal As String
+            Property INI_AssembleExecMaxChars As Integer
+            Property INI_AssembleMaxContextSummaryChars As Integer
+            Property SP_Assemble_Plan As String
+            Property SP_Assemble_Execute As String
+            Property SP_Assemble_Summarize As String
 
 
         End Interface
@@ -527,6 +544,7 @@ Namespace SharedLibrary
         Public Property SP_Add_Slides As String Implements ISharedContext.SP_Add_Slides
         Public Property SP_Add_Chart As String Implements ISharedContext.SP_Add_Chart
         Public Property SP_Add_Chart_App As String Implements ISharedContext.SP_Add_Chart_App
+        Public Property SP_Add_PrivacyProtection As String Implements ISharedContext.SP_Add_PrivacyProtection
         Public Property SP_BubblesExcel As String Implements ISharedContext.SP_BubblesExcel
         Public Property SP_Add_Revisions As String Implements ISharedContext.SP_Add_Revisions
         Public Property SP_MarkupRegex As String Implements ISharedContext.SP_MarkupRegex
@@ -622,6 +640,8 @@ Namespace SharedLibrary
 
         Public Property INI_AutoPilot As String Implements ISharedContext.INI_AutoPilot
 
+        Public Property INI_EnablePrivacyForSearch As Boolean Implements ISharedContext.INI_EnablePrivacyForSearch
+
         ' Tooling / tool-call settings 
         Public Property INI_ToolingLogWindow As Boolean Implements ISharedContext.INI_ToolingLogWindow
         Public Property INI_ToolingDryRun As Boolean Implements ISharedContext.INI_ToolingDryRun
@@ -639,6 +659,17 @@ Namespace SharedLibrary
         Public Property INI_LogoPath As String Implements ISharedContext.INI_LogoPath
         Public Property INI_BrandingName As String Implements ISharedContext.INI_BrandingName
 
+        Public Property INI_InkyMemoryCap As Integer Implements ISharedContext.INI_InkyMemoryCap
+        Public Property SP_Add_InkyMemory As String Implements ISharedContext.SP_Add_InkyMemory
+
+        ' Document Assembly settings
+        Public Property INI_AssemblePath As String Implements ISharedContext.INI_AssemblePath
+        Public Property INI_AssemblePathLocal As String Implements ISharedContext.INI_AssemblePathLocal
+        Public Property INI_AssembleExecMaxChars As Integer Implements ISharedContext.INI_AssembleExecMaxChars
+        Public Property INI_AssembleMaxContextSummaryChars As Integer Implements ISharedContext.INI_AssembleMaxContextSummaryChars
+        Public Property SP_Assemble_Plan As String Implements ISharedContext.SP_Assemble_Plan
+        Public Property SP_Assemble_Execute As String Implements ISharedContext.SP_Assemble_Execute
+        Public Property SP_Assemble_Summarize As String Implements ISharedContext.SP_Assemble_Summarize
 
     End Class
 End Namespace

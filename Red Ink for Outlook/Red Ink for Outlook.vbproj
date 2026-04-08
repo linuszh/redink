@@ -89,14 +89,14 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.4.0.200</ApplicationVersion>
+    <ApplicationVersion>1.4.2.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
     <FriendlyName>Red Ink for Outlook %28Preview%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'GA'">
-    <ApplicationVersion>1.4.0.0</ApplicationVersion>
+    <ApplicationVersion>1.4.2.0</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\ga\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/ga/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook</ProductName>
@@ -203,7 +203,7 @@
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
     </Reference>
     <Reference Include="Markdig, Version=1.1.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Markdig.1.1.1\lib\net462\Markdig.dll</HintPath>
+      <HintPath>..\packages\Markdig.1.1.2\lib\net462\Markdig.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
@@ -487,6 +487,8 @@
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />

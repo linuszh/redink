@@ -673,6 +673,54 @@ Namespace My
                 Me("AP_EnableScheduler") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property Inky_InkyMemory() As Boolean
+            Get
+                Return CType(Me("Inky_InkyMemory"),Boolean)
+            End Get
+            Set
+                Me("Inky_InkyMemory") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnableUserMemory() As Boolean
+            Get
+                Return CType(Me("AP_EnableUserMemory"),Boolean)
+            End Get
+            Set
+                Me("AP_EnableUserMemory") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnableUserFiles() As Boolean
+            Get
+                Return CType(Me("AP_EnableUserFiles"),Boolean)
+            End Get
+            Set
+                Me("AP_EnableUserFiles") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property AP_EnablePrivacyProtection() As Boolean
+            Get
+                Return CType(Me("AP_EnablePrivacyProtection"),Boolean)
+            End Get
+            Set
+                Me("AP_EnablePrivacyProtection") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

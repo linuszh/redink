@@ -290,6 +290,7 @@ Partial Public Class ThisAddIn
         StopSchedulerTimer()
         StopSchedulerTimer()
         CloseSchedulerDashboard()
+        CloseUserStorageDashboard()
         Try : _apCts?.Cancel() : Catch : End Try
         Try : _apCurrentJobCts?.Cancel() : Catch : End Try
         Try : _apCts?.Dispose() : Catch : End Try
@@ -376,18 +377,8 @@ Partial Public Class ThisAddIn
         _apSenderLastMailSentUtc.Clear()
         _apUseSecondApi = config.UseSecondApi
 
-        ' Set the WebGrounding field for InterpolateAtRuntime resolution
-        'If config.EnableWebGrounding Then
-        'WebGrounding = "WEB GROUNDING: Your model has built-in Internet search / web grounding capability. " &
-        '       "When a user's question would benefit from current, factual, or verifiable information, " &
-        '      "you SHOULD proactively use your web search capability to look up the answer. " &
-        '     "You do not need a tool call for this — use your native search functionality directly. " &
-        '    "When presenting search results, cite sources when possible, but NEVER invent URLs. " &
-        '   "NEVER echo your search queries in the response. " &
-        '  "The CONFIDENTIALITY AND QUERY SANITIZATION RULE above applies equally to your web searches."
-        'Else
         WebGrounding = ""
-        'End If
+        PrivacyProtection = If(_apConfig.EnablePrivacyProtection, SP_Add_PrivacyProtection, "")
 
         ' Load voicemail caller ID map if voicemail processing is enabled
         If config.EnableVoicemailProcessing AndAlso Not String.IsNullOrWhiteSpace(config.VoicemailCallerIdMapPath) Then
@@ -433,6 +424,24 @@ Partial Public Class ThisAddIn
                     }
                     AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
                     buttonPanel.Controls.Add(btnScheduler)
+                End If
+            Catch
+            End Try
+        End If
+
+        ' Add User Storage dashboard button if memory or files are enabled
+        If config.EnableUserMemory OrElse config.EnableUserFiles Then
+            Try
+                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+                If buttonPanel IsNot Nothing Then
+                    Dim btnUserStorage As New Button() With {
+                        .Text = "User Storage",
+                        .AutoSize = True,
+                        .Padding = New Padding(10, 5, 10, 5)
+                    }
+                    AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
+                    buttonPanel.Controls.Add(btnUserStorage)
                 End If
             Catch
             End Try
@@ -485,6 +494,18 @@ Partial Public Class ThisAddIn
             Else
                 ApDashboardLog("   ⚠ Caller ID map not loaded", "warn")
             End If
+        End If
+
+        If config.EnableUserMemory Then
+            ApDashboardLog("🧠 Per-user memory enabled (auto-learn + manage_user_memory tool)", "info")
+        End If
+        If config.EnableUserFiles Then
+            ApDashboardLog("📁 Per-user file storage enabled (manage_user_files tool)", "info")
+        End If
+        If config.EnablePrivacyProtection Then
+            ApDashboardLog("🔒 Privacy protection enabled (search queries sanitized)", "info")
+        Else
+            ApDashboardLog("🔓 Privacy protection disabled (unrestricted search queries)", "info")
         End If
 
         ApDashboardLog($"Filters: {config.FilterRules.Count} rule(s) active", "info")
@@ -687,30 +708,43 @@ Partial Public Class ThisAddIn
                     ' Full pre-filter: same logic as ProcessIncomingMailAsync
                     Dim mailInfo = ExtractMailInfo(mi)
                     If mailInfo Is Nothing Then Continue For
-                    If mailInfo.HasAutoReplyHeader Then Continue For
-                    If IsAutoReplyOrOof(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
-                    If Not MatchesFilterRules(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
-                    If MatchesNegativeFilters(mailInfo) Then
-                        skippedOther += 1
-                        Continue For
-                    End If
 
-                    ' Subject trigger word check
-                    If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
-                        If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                    ' ── Voicemail detection (bypasses normal filter pipeline, same as ProcessIncomingMailAsync) ──
+                    Dim isVoicemail As Boolean = IsVoicemailFromRegisteredSender(mailInfo)
+
+                    If Not isVoicemail Then
+                        If mailInfo.HasAutoReplyHeader Then Continue For
+                        If IsAutoReplyOrOof(mailInfo) Then
                             skippedOther += 1
                             Continue For
+                        End If
+                        If Not MatchesFilterRules(mailInfo) Then
+                            skippedOther += 1
+                            Continue For
+                        End If
+                        If MatchesNegativeFilters(mailInfo) Then
+                            skippedOther += 1
+                            Continue For
+                        End If
+
+                        ' Subject trigger word check
+                        If Not String.IsNullOrWhiteSpace(_apConfig.SubjectTriggerWord) Then
+                            If mailInfo.Subject.IndexOf(_apConfig.SubjectTriggerWord, StringComparison.OrdinalIgnoreCase) < 0 Then
+                                skippedOther += 1
+                                Continue For
+                            End If
                         End If
                     End If
 
                     Dim displayLabel As String = Nothing
-                    If isAlreadyProcessed Then
+                    If isVoicemail Then
+                        displayLabel = "[VOICEMAIL] " & New CatchUpCandidate() With {
+                            .SenderName = mailInfo.SenderName,
+                            .SenderEmail = mailInfo.SenderEmail,
+                            .Subject = mailInfo.Subject,
+                            .ReceivedTime = mailInfo.ReceivedTime
+                        }.ToDisplayLabel()
+                    ElseIf isAlreadyProcessed Then
                         reprocessCandidateCount += 1
                         displayLabel = "[REPROCESS] " & New CatchUpCandidate() With {
                             .SenderName = mailInfo.SenderName,
@@ -1751,6 +1785,31 @@ Partial Public Class ThisAddIn
                 End If
                 Dim systemPrompt As String = InterpolateAtRuntime(SP_AutoPilot)
 
+                ' ── Inject per-user memory into system prompt ──
+                If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(mailInfo.SenderEmail) Then
+                    Dim userMemory = ReadUserMemory(mailInfo.SenderEmail, _context.INI_InkyMemoryCap)
+                    systemPrompt &= vbLf & _context.SP_Add_InkyMemory
+                    If Not String.IsNullOrWhiteSpace(userMemory) Then
+                        systemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & userMemory & vbLf & "</INKY_MEMORY_CURRENT>"
+                    End If
+                End If
+
+                ' ── Inject user home file listing into user prompt ──
+                If _apConfig.EnableUserFiles AndAlso HasUserHomeFiles(mailInfo.SenderEmail) Then
+                    Dim homeFiles = ListUserHomeFiles(mailInfo.SenderEmail)
+                    If homeFiles.Count > 0 Then
+                        Dim fileListing As New StringBuilder()
+                        fileListing.AppendLine()
+                        fileListing.AppendLine("[USER HOME FILES — persistent files stored by this user for use in requests]")
+                        For Each f In homeFiles
+                            fileListing.AppendLine($"  - {f.Name} ({f.SizeBytes / 1024:F0} KB)")
+                        Next
+                        fileListing.AppendLine("Use manage_user_files with action='use' to load a file into the current session for processing.")
+                        fileListing.AppendLine("[/USER HOME FILES]")
+                        userPrompt &= fileListing.ToString()
+                    End If
+                End If
+
                 ' ── Set AutoPilot tool context ──
                 _apCurrentTempDir = tempDir
                 _apCurrentAttachments = attachmentPaths
@@ -1906,6 +1965,30 @@ Partial Public Class ThisAddIn
                 End If
 
                 ApDashboardLog($"AI response received ({response.Length} chars).", "info")
+
+                ' ── Refined version of the memory processing block ──
+
+                ' ── Process automatic memory learning from LLM response ──
+                If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(mailInfo.SenderEmail) Then
+                    ' Check if auto-learn is disabled for this user
+                    Dim userMemoryContent = ReadUserMemory(mailInfo.SenderEmail, _context.INI_InkyMemoryCap)
+                    Dim autoLearnDisabled = (userMemoryContent IsNot Nothing AndAlso
+                        userMemoryContent.Contains("AUTO_LEARN_DISABLED"))
+
+                    If Not autoLearnDisabled Then
+                        Try
+                            response = ProcessUserMemoryResponse(mailInfo.SenderEmail, response, _context.INI_InkyMemoryCap)
+                        Catch
+                            response = StripInkyMemoryBlock(response)
+                        End Try
+                    Else
+                        ' Auto-learn off — strip the block but don't apply operations
+                        response = StripInkyMemoryBlock(response)
+                    End If
+                Else
+                    ' Always strip memory blocks from output even if memory is disabled
+                    response = StripInkyMemoryBlock(response)
+                End If
 
                 ' Collect result attachments from OutputFiles
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
@@ -4349,10 +4432,38 @@ Partial Public Class ThisAddIn
             Dim previousMaxToolIterations = MaxToolIterations
             MaxToolIterations = AP_MaxToolIterations
 
+            ' Save references before Finally clears them
+            Dim savedAttachments = _apCurrentAttachments
+
             Try
                 ' Build prompt with the transcription as the "email body"
                 Dim userPrompt = BuildUserPromptFromMail(voicemailMailInfo, Nothing)
                 Dim systemPrompt = InterpolateAtRuntime(SP_AutoPilot)
+
+                ' ── Inject per-user memory into system prompt (keyed on recipientEmail, not voicemail system) ──
+                If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(recipientEmail) Then
+                    Dim userMemory = ReadUserMemory(recipientEmail, _context.INI_InkyMemoryCap)
+                    systemPrompt &= vbLf & _context.SP_Add_InkyMemory
+                    If Not String.IsNullOrWhiteSpace(userMemory) Then
+                        systemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & userMemory & vbLf & "</INKY_MEMORY_CURRENT>"
+                    End If
+                End If
+
+                ' ── Inject user home file listing into user prompt ──
+                If _apConfig.EnableUserFiles AndAlso HasUserHomeFiles(recipientEmail) Then
+                    Dim homeFiles = ListUserHomeFiles(recipientEmail)
+                    If homeFiles.Count > 0 Then
+                        Dim fileListing As New StringBuilder()
+                        fileListing.AppendLine()
+                        fileListing.AppendLine("[USER HOME FILES — persistent files stored by this user for use in requests]")
+                        For Each f In homeFiles
+                            fileListing.AppendLine($"  - {f.Name} ({f.SizeBytes / 1024:F0} KB)")
+                        Next
+                        fileListing.AppendLine("Use manage_user_files with action='use' to load a file into the current session for processing.")
+                        fileListing.AppendLine("[/USER HOME FILES]")
+                        userPrompt &= fileListing.ToString()
+                    End If
+                End If
 
                 ' Re-apply base model config
                 ApplyModelConfig(_context, _apBaseModelConfig)
@@ -4388,8 +4499,27 @@ Partial Public Class ThisAddIn
 
             ApDashboardLog($"AI response received ({response.Length} chars).", "info")
 
-            ' Collect any result attachments
-            Dim resultAttachments = CollectResultAttachments(tempDir, _apCurrentAttachments)
+            ' ── Process automatic memory learning from LLM response (keyed on recipientEmail) ──
+            If _apConfig.EnableUserMemory AndAlso IsUserMemoryEnabled(recipientEmail) Then
+                Dim userMemoryContent = ReadUserMemory(recipientEmail, _context.INI_InkyMemoryCap)
+                Dim autoLearnDisabled = (userMemoryContent IsNot Nothing AndAlso
+                    userMemoryContent.Contains("AUTO_LEARN_DISABLED"))
+
+                If Not autoLearnDisabled Then
+                    Try
+                        response = ProcessUserMemoryResponse(recipientEmail, response, _context.INI_InkyMemoryCap)
+                    Catch
+                        response = StripInkyMemoryBlock(response)
+                    End Try
+                Else
+                    response = StripInkyMemoryBlock(response)
+                End If
+            Else
+                response = StripInkyMemoryBlock(response)
+            End If
+
+            ' Collect any result attachments (use saved reference, not cleared field)
+            Dim resultAttachments = CollectResultAttachments(tempDir, savedAttachments)
 
             ' Build "Sources used:" footer
             Dim sourcesHtml = BuildSourcesUsedHtml(_apCurrentToolCallLog)

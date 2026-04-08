@@ -99,6 +99,19 @@ Public Class frmAIChat
     ''' <summary>Checkbox: control TopMost behavior.</summary>
     Private WithEvents chkStayOnTop As New System.Windows.Forms.CheckBox() With {.Text = "Do not stay on top", .AutoSize = True, .Checked = My.Settings.NotAlwaysOnTop}
 
+    Private WithEvents chkInkyMemory As New System.Windows.Forms.CheckBox() With {
+        .Text = "Inky Memory",
+        .AutoSize = True,
+        .Checked = My.Settings.ChatInkyMemory
+    }
+
+    Private WithEvents lnkEditMemory As New LinkLabel() With {
+        .Text = "Edit",
+        .AutoSize = True,
+        .Visible = My.Settings.ChatInkyMemory,
+        .Margin = New Padding(0, 5, 0, 0)
+    }
+
     ''' <summary>Panel hosting action buttons.</summary>
     Dim pnlButtons As New FlowLayoutPanel() With {
         .Dock = DockStyle.Bottom,
@@ -273,6 +286,8 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
+        pnlCheckboxes.Controls.Add(chkInkyMemory)
+        pnlCheckboxes.Controls.Add(lnkEditMemory)
 
         AddHandler btnCopy.Click, AddressOf btnCopy_Click
         AddHandler btnClear.Click, AddressOf btnClear_Click
@@ -284,6 +299,8 @@ Public Class frmAIChat
         AddHandler chkIncludeDocText.Click, AddressOf chkIncludeDocText_Click
         AddHandler chkPermitCommands.Click, AddressOf chkPermitCommands_Click
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
+        AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
+        AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
 
         If String.IsNullOrWhiteSpace(txtChatHistory.Text) Then
             Dim result = Await WelcomeMessage()
@@ -315,6 +332,15 @@ Public Class frmAIChat
                 If(chkIncludeDocText.Checked, vbLf & "You have access to the user's document. " & vbLf, "") &
                 If(chkIncludeselection.Checked, vbLf & "You have access to a selection of user's document. " & vbLf & " ", "") &
                 If(My.Settings.DoCommands, _context.SP_Add_ChatExcel_Commands, _context.SP_Add_Chat_NoCommands)
+
+            ' Inject InkyMemory into system prompt if enabled
+            If chkInkyMemory.Checked Then
+                Dim memoryContent = SharedMethods.ReadInkyMemory(_context.INI_InkyMemoryCap)
+                SystemPrompt &= vbLf & _context.SP_Add_InkyMemory
+                If Not String.IsNullOrWhiteSpace(memoryContent) Then
+                    SystemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
+                End If
+            End If
 
             Dim conversationSoFar As String = BuildConversationString(_chatHistory)
             If Not String.IsNullOrWhiteSpace(OldChat) Then
@@ -458,6 +484,11 @@ Public Class frmAIChat
             aiResponse = aiResponse.Replace($"  *  ", "  " & ChrW(8226) & "  ")
             aiResponse = RemoveMarkdownFormatting(aiResponse)
 
+            ' Process InkyMemory updates from LLM response (if enabled)
+            If chkInkyMemory.Checked Then
+                aiResponse = SharedMethods.ProcessInkyMemoryResponse(aiResponse, _context.INI_InkyMemoryCap)
+            End If
+
             Dim CommandsString As String = ""
             If My.Settings.DoCommands Then
                 CommandsString = aiResponse
@@ -556,6 +587,19 @@ Public Class frmAIChat
         Me.TopMost = Not Me.TopMost
         My.Settings.NotAlwaysOnTop = Me.TopMost
         My.Settings.Save()
+    End Sub
+
+    ''' <summary>
+    ''' Handles chkInkyMemory checkbox click. Persists preference and toggles edit link visibility.
+    ''' </summary>
+    Private Sub chkInkyMemory_Click(sender As Object, e As EventArgs)
+        My.Settings.ChatInkyMemory = chkInkyMemory.Checked
+        My.Settings.Save()
+        lnkEditMemory.Visible = chkInkyMemory.Checked
+    End Sub
+
+    Private Sub lnkEditMemory_LinkClicked(sender As Object, e As LinkLabelLinkClickedEventArgs)
+        SharedMethods.EditInkyMemoryFile()
     End Sub
 
     ''' <summary>
