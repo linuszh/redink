@@ -161,6 +161,7 @@ Partial Public Class ThisAddIn
     '  MAIN ENTRY POINT
     ' ═══════════════════════════════════════════════════════════════════════════
 
+
     ''' <summary>
     ''' Processes a DOCX file by applying the given instruction via LLM to all text paragraphs.
     ''' </summary>
@@ -197,6 +198,10 @@ Partial Public Class ThisAddIn
             If Not success Then Return False
 
             APApplyTranslations(paragraphs)
+
+            ' Expand multi-line fills into separate XML paragraphs
+            APExpandMultiLineParagraphs(paragraphs, nsMgr)
+
             xmlDoc.Save(documentXmlPath)
 
             ' Process headers, footers, comments, footnotes, endnotes
@@ -221,6 +226,62 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+
+
+
+    ''' <summary>
+    ''' Expands paragraphs whose translated text contains line breaks into multiple
+    ''' sibling w:p elements, cloning the original paragraph's formatting.
+    ''' Must be called AFTER APApplyTranslations.
+    ''' </summary>
+    Private Sub APExpandMultiLineParagraphs(paragraphs As List(Of APParagraphInfo),
+                                            nsMgr As System.Xml.XmlNamespaceManager)
+        For Each para In paragraphs
+            If para.IsEmpty OrElse String.IsNullOrEmpty(para.TranslatedText) Then Continue For
+            If para.TextRuns.Count = 0 Then Continue For
+
+            Dim lines As String() = para.TranslatedText.Split({vbCrLf, vbLf, vbCr}, StringSplitOptions.None)
+            If lines.Length <= 1 Then Continue For
+
+            Dim paraNode As System.Xml.XmlNode = para.TextRuns(0).TextNode
+            While paraNode IsNot Nothing AndAlso paraNode.LocalName <> "p"
+                paraNode = paraNode.ParentNode
+            End While
+            If paraNode Is Nothing OrElse paraNode.ParentNode Is Nothing Then Continue For
+
+            Dim parentNode As System.Xml.XmlNode = paraNode.ParentNode
+
+            APSetAllTextInParagraph(paraNode, nsMgr, lines(0).TrimEnd())
+
+            Dim insertAfter As System.Xml.XmlNode = paraNode
+            For lineIdx As Integer = 1 To lines.Length - 1
+                Dim lineText As String = lines(lineIdx).TrimEnd()
+                If String.IsNullOrEmpty(lineText) Then Continue For
+
+                Dim newPara As System.Xml.XmlNode = paraNode.CloneNode(deep:=True)
+                APSetAllTextInParagraph(newPara, nsMgr, lineText)
+                parentNode.InsertAfter(newPara, insertAfter)
+                insertAfter = newPara
+            Next
+        Next
+    End Sub
+
+    Private Sub APSetAllTextInParagraph(paraNode As System.Xml.XmlNode,
+                                         nsMgr As System.Xml.XmlNamespaceManager,
+                                         text As String)
+        Dim tNodes = paraNode.SelectNodes(".//w:r/w:t", nsMgr)
+        If tNodes Is Nothing OrElse tNodes.Count = 0 Then Return
+
+        For i As Integer = 0 To tNodes.Count - 1
+            If i = 0 Then
+                APSetTextNode(tNodes(i), text)
+            Else
+                APSetTextNode(tNodes(i), "")
+            End If
+        Next
+    End Sub
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  PARAGRAPH EXTRACTION
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -237,6 +298,7 @@ Partial Public Class ThisAddIn
         Dim paraIndex As Integer = 0
 
         For Each paraNode As System.Xml.XmlNode In paraNodes
+
             Dim paraInfo As New APParagraphInfo() With {
                 .Index = paraIndex,
                 .TextRuns = New List(Of APTextRunInfo)(),
@@ -462,24 +524,53 @@ Partial Public Class ThisAddIn
         Dim hasMarkers = processable.Any(Function(p) p.MarkerText IsNot Nothing)
 
         ' Build system prompt for document processing
-        ' Build system prompt for document processing
         Dim systemPrompt As String =
             "You are a professional document processor. Apply the following instruction to the numbered paragraphs " &
             "in the [TEXTTOPROCESS] section." & vbCrLf & vbCrLf &
             "INSTRUCTION: " & instruction & vbCrLf & vbCrLf &
+            "IMPORTANT CONTEXT: The document is being processed in multiple sequential batches. Each batch " &
+            "contains only a SMALL PORTION of the full document. The INSTRUCTION describes the OVERALL task " &
+            "for the entire document — it does NOT mean that every paragraph in THIS batch needs to be changed. " &
+            "Only modify paragraphs whose content is actually relevant to the INSTRUCTION. If a paragraph in " &
+            "this batch does not need any change, return it EXACTLY as-is." & vbCrLf & vbCrLf &
             "RULES:" & vbCrLf &
             "1. Process ONLY paragraphs inside [TEXTTOPROCESS], not the context sections." & vbCrLf &
             "2. Use [CONTEXT BEFORE] and [CONTEXT AFTER] to understand meaning, tone, and terminology." & vbCrLf &
-            "3. Return each processed paragraph with its [n] marker exactly as shown." & vbCrLf &
-            "4. The processed text should have approximately the same number of words." & vbCrLf &
-            "5. Maintain consistent terminology and style." & vbCrLf &
-            "6. Return ONLY the [n] processed paragraphs, no explanations." & vbCrLf &
-            "7. CRITICAL LANGUAGE RULE: The INSTRUCTION may be written in a different language than the document text. " &
-            "Unless the instruction EXPLICITLY asks for translation to a specific language, you MUST keep the document " &
-            "text in its ORIGINAL language. NEVER translate the document content. Apply the instruction (e.g. correct, " &
-            "improve, shorten) while preserving the original language of the text."
+            "3. Return each paragraph with its [n] marker exactly as shown — including paragraphs you did NOT change." & vbCrLf &
+            "4. For paragraphs that DO NOT need changes based on their content, return them UNCHANGED — " &
+            "copy the original text character for character." & vbCrLf &
+            "5. For paragraphs that DO need changes, apply the INSTRUCTION precisely. Only modify what the " &
+            "INSTRUCTION asks for. Do not rephrase, improve, or restructure text beyond the scope of the INSTRUCTION." & vbCrLf &
+            "6. Maintain consistent terminology and style." & vbCrLf &
+            "7. Return ONLY the [n] paragraphs, no explanations." & vbCrLf &
+            "8. LANGUAGE RULE: NEVER translate or change the language of the document text unless the INSTRUCTION " &
+            "EXPLICITLY requests translation to a specific target language. The INSTRUCTION itself may be in a " &
+            "different language than the document — that does NOT mean you should translate. Apply the instruction " &
+            "(e.g. correct, fill template, shorten) while preserving the original language of every paragraph." & vbCrLf &
+            "9. TEMPLATE/PLACEHOLDER RULE: When filling a template or completing a document, preserve all " &
+            "boilerplate, headings, and structural text verbatim. Only replace placeholders (text in brackets, " &
+            "underscores, ellipsis …, guillemets, TBD, etc.) and resolve alternative patterns (e.g. Mr./Ms., " &
+            "he/she, Herr/Frau) based on the data provided in the INSTRUCTION. A paragraph that contains no " &
+            "placeholders and is not otherwise targeted by the INSTRUCTION must be returned unchanged." & vbCrLf &
+            "10. When the INSTRUCTION requires ADDING content (e.g. listing multiple persons, adding paragraphs), " &
+            "you MAY return multi-line text for a single [n] paragraph. Use actual line breaks between the lines — " &
+            "each line will become a separate paragraph in the output document."
 
-        Dim ruleNum As Integer = 8  ' Next rule number after the language rule (7)
+        Dim ruleNum As Integer = 11
+
+        systemPrompt &= vbCrLf &
+            $"{ruleNum}. Only modify text that is directly relevant to the INSTRUCTION. Leave all other text " &
+            "EXACTLY as-is, character for character. When filling a template or completing a document, preserve " &
+            "all boilerplate, headings, and structural text verbatim. Only replace placeholders (brackets, " &
+            "underscores, ellipsis …, guillemets, TBD, etc.) and resolve alternative patterns (e.g. Mr./Ms. → Mr., " &
+            "Herr/Frau → Herr) based on the data in the instruction."
+        ruleNum += 1
+
+        systemPrompt &= vbCrLf &
+            $"{ruleNum}. When the INSTRUCTION requires ADDING content (e.g. listing multiple persons, " &
+            "adding paragraphs), you MAY return multi-line text for a single [n] paragraph. Use actual " &
+            "line breaks between the lines — each line will become a separate paragraph in the output document."
+        ruleNum += 1
 
         If hasMarkers Then
             systemPrompt &= vbCrLf &
@@ -1187,6 +1278,7 @@ Partial Public Class ThisAddIn
         Dim success = Await APProcessBatches(paragraphs, instruction, ct)
         If success Then
             APApplyTranslations(paragraphs)
+            APExpandMultiLineParagraphs(paragraphs, nsMgr)
             xmlDoc.Save(filePath)
         End If
     End Function
@@ -1208,6 +1300,20 @@ Partial Public Class ThisAddIn
                                                        instruction As String, ct As CancellationToken,
                                                        Optional sheetFilter As List(Of String) = Nothing,
                                                        Optional useOfflineDocs As Boolean = True) As Task(Of Boolean)
+
+        ' ── Parse and strip task_type tag from instruction ──
+        Dim taskTypeMatch = Regex.Match(instruction, "\s*\(task_type\s*=\s*(\w+)\)\s*$", RegexOptions.IgnoreCase)
+        If taskTypeMatch.Success Then
+            Dim taskType = taskTypeMatch.Groups(1).Value.ToLowerInvariant()
+            instruction = instruction.Substring(0, taskTypeMatch.Index).TrimEnd()
+            ' Override useOfflineDocs based on task_type
+            Select Case taskType
+                Case "translate", "correct"
+                    useOfflineDocs = True
+                Case Else
+                    useOfflineDocs = False
+            End Select
+        End If
 
         ' ── Determine format-specific SpecialTaskModel key ──
         Dim ext = Path.GetExtension(inputPath).ToLowerInvariant()
