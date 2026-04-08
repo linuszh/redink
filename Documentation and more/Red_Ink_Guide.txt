@@ -3629,6 +3629,18 @@ W=1.4.1.200
 E=1.4.1.200
 O=1.4.1.200
 Memory for user preferences for all chatbots (can be enabled and edited); "Assemble:" function in Word to use Word documents as templates for creating new documents; in Excel, a large number of TXT files can now be analyzed for specific content (e.g., for email reviews); AutoPilot can now save user files (in addition to the memory function) and allows enabling data protection and confidentiality settings for search tools (also in agent mode); Bug Fixes (Data Extractor allows overriding predefined scripts; progress indicator no longer covers the drag & drop area for multiple placeholders in Freestyle; adjustment of the DocProcessor to prevent it from making unwanted translations); the Web Retriever issues an error message for SharePoint addresses
+8.4.2026
+
+W=1.4.2.200
+E=1.4.2.200
+O=1.4.2.200
+
+W=1.4.2.0
+E=1.4.2.0
+O=1.4.2.0
+Changed the method for accessing APIs via HTTP due to potential Google blocking issuess
+
+Transfer of the previous improvements to the GA version
 Note: Version numbers with x.x.x.2nn are Preview-Releases.
 
 
@@ -4717,10 +4729,10 @@ We provide various documents for end-users at https://redink.ai/downloads-site/m
 
 
 
-05 April 2026	1
+08 April 2026	1
 
 
-	05 April 2026 
+	08 April 2026 
 
 
 
