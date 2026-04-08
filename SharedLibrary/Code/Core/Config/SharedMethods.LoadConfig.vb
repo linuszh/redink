@@ -109,9 +109,11 @@ Namespace SharedLibrary
                 Dim iniContent As String = ""
                 Dim configDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
 
+                Debug.WriteLine("Config = " & IniFilePath)
+
                 ' Read and parse the .ini file.
                 iniContent = System.IO.File.ReadAllText(IniFilePath)
-                Dim iniLines As String() = iniContent.Split({vbCrLf}, StringSplitOptions.RemoveEmptyEntries)
+                Dim iniLines As String() = iniContent.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
                 For Each line As String In iniLines
                     Dim trimmedLine = line.Trim()
                     If Not String.IsNullOrEmpty(trimmedLine) AndAlso Not trimmedLine.StartsWith(";") Then ' Skip comments and empty lines.

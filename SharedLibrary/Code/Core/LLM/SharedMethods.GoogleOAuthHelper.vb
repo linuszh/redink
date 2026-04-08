@@ -99,28 +99,35 @@ Namespace SharedLibrary
             ''' <returns>Signature bytes.</returns>
             Private Shared Function SignData(data As Byte()) As Byte()
                 Dim rsaKey As RsaPrivateCrtKeyParameters
-                Dim formattedPrivateKey As String = private_key.Replace("\n", Environment.NewLine)
+
+                ' Normalize line endings for BouncyCastle's PEM reader:
+                Dim formattedPrivateKey As String = private_key _
+                    .Replace(vbCrLf, vbLf) _
+                    .Replace(vbCr, vbLf) _
+                    .Replace("\n", vbLf) _
+                    .Replace(vbLf, Environment.NewLine)
 
                 Using reader As New StringReader(formattedPrivateKey)
                     Dim pemReader = New Org.BouncyCastle.OpenSsl.PemReader(reader)
                     rsaKey = DirectCast(pemReader.ReadObject(), RsaPrivateCrtKeyParameters)
                 End Using
 
-                Dim signer = SignerUtilities.GetSigner("SHA256withRSA")
+                ' Explicitly specify PKCS1 padding for RS256
+                Dim signer = SignerUtilities.GetSigner("SHA256WITHRSAENCRYPTION")
                 signer.Init(True, rsaKey)
                 signer.BlockUpdate(data, 0, data.Length)
                 Return signer.GenerateSignature()
             End Function
 
             ' Generate JWT
-
             ''' <summary>
             ''' Generates a compact serialized JWT signed with RS256 containing `iss`, `scope`, `aud`, `exp`, and `iat`.
             ''' </summary>
             ''' <returns>Compact JWT string (`Base64Url(header).Base64Url(payload).Base64Url(signature)`).</returns>
             Public Shared Function GenerateJWT() As String
                 Dim issuedAt As Long = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-                Dim expiry As Long = issuedAt + 3600 ' 1 hour expiry
+                Dim lifetimeSeconds As Long = If(token_life > 0, token_life, 3600)
+                Dim expiry As Long = issuedAt + lifetimeSeconds
 
                 Dim header = New With {.alg = "RS256", .typ = "JWT"}
                 Dim payload = New With {
@@ -175,15 +182,16 @@ Namespace SharedLibrary
                         Return ""
                     End Try
 
-                    Dim requestBody As String = JsonConvert.SerializeObject(New With {
-                        .grant_type = "urn:ietf:params:oauth:grant-type:jwt-bearer",
-                        .assertion = jwt
-                    })
+                    ' Google's token endpoint expects form-encoded data, not JSON.
+                    Dim formData As New Dictionary(Of String, String) From {
+                        {"grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"},
+                        {"assertion", jwt}
+                    }
 
                     Using client As New HttpClient()
                         client.Timeout = TimeSpan.FromSeconds(30)
 
-                        Dim content = New StringContent(requestBody, Encoding.UTF8, "application/json")
+                        Dim content As New FormUrlEncodedContent(formData)
                         Dim response = Await client.PostAsync(token_uri, content)
 
                         Dim responseBody = Await response.Content.ReadAsStringAsync()
@@ -216,7 +224,7 @@ Namespace SharedLibrary
                     Return ""
 
                 Catch ex As TaskCanceledException
-                    ShowCustomMessageBox("OAuth request timed out.{vbCrLf}{vbCrLf}" &
+                    ShowCustomMessageBox("OAuth request timed out." & vbCrLf & vbCrLf &
                                        "The authentication server did not respond in time. Please try again later.")
                     Return ""
 

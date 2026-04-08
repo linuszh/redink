@@ -69,6 +69,8 @@ Namespace SharedLibrary
             Return OutputText
         End Function
 
+
+
         ''' <summary>
         ''' Calls a configured LLM endpoint and returns extracted response text based on the configured response template/key.
         ''' </summary>
@@ -137,11 +139,9 @@ Namespace SharedLibrary
 
             Try
 
-                ' Configure TLS
-                If (System.Net.ServicePointManager.SecurityProtocol And System.Net.SecurityProtocolType.Tls12) = 0 Then
-                    System.Net.ServicePointManager.SecurityProtocol = System.Net.ServicePointManager.SecurityProtocol Or System.Net.SecurityProtocolType.Tls12
-                End If
-                System.Net.ServicePointManager.DefaultConnectionLimit = 100 ' Adjust based on expected load
+                ' Configure TLS — only allow TLS 1.2 and above.
+                System.Net.ServicePointManager.SecurityProtocol = System.Net.SecurityProtocolType.Tls12
+                System.Net.ServicePointManager.DefaultConnectionLimit = 100
 
                 ' Initialize API variables
                 Dim Endpoint As String
@@ -388,6 +388,18 @@ Namespace SharedLibrary
                     Endpoint = Endpoint.Substring(4)
                 End If
 
+                If context.INI_APIDebug Then
+                    Dim dbg As New StringBuilder()
+                    dbg.AppendLine("[LLM Debug] Pre-request state")
+                    dbg.AppendLine($"  Endpoint        = {Endpoint}")
+                    dbg.AppendLine($"  HeaderA         = {HeaderA}")
+                    dbg.AppendLine($"  HeaderB         = {HeaderB}")
+                    dbg.AppendLine($"  DecodedAPI      = {If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI)}")
+                    dbg.AppendLine($"  DecodedAPI len  = {If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI).Length}")
+                    dbg.AppendLine($"  useGetMethod    = {useGetMethod}")
+                    WriteDebugError(dbg.ToString())
+                End If
+
                 ' Replace placeholders in the request body
                 Dim requestBody As String = APICall
                 requestBody = requestBody.Replace("{model}", ModelValue)
@@ -577,35 +589,30 @@ Namespace SharedLibrary
 
                 Dim Returnvalue As String = ""
 
-                Try
+                ' === Multipart uploads: use HttpClient (WebRequest does not support multipart natively) ===
+                If requiresMultipart Then
 
-                    ' Configure HttpClient with timeout.
-                    Using handler As New System.Net.Http.HttpClientHandler()
-                        handler.UseProxy = True
-                        handler.Proxy = System.Net.WebRequest.DefaultWebProxy
-                        handler.Proxy.Credentials = System.Net.CredentialCache.DefaultCredentials
-                        Using client As New System.Net.Http.HttpClient(handler)
-                            client.Timeout = TimeSpan.FromMilliseconds(TimeoutValue)
+                    Try
+                        Using handler As New System.Net.Http.HttpClientHandler()
+                            handler.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
 
-                            ' Send the request.
-                            Try
+                            Using client As New System.Net.Http.HttpClient(handler)
+                                client.Timeout = TimeSpan.FromMilliseconds(TimeoutValue)
 
-                                Dim maxRetries As Integer = 3
-                                Dim delayIntervals As Integer() = {5000, 10000, 30000} ' delays in milliseconds
-                                Dim responseText As String = ""
-                                Dim lastContentType As String = Nothing
+                                Try
+                                    Dim maxRetries As Integer = 3
+                                    Dim delayIntervals As Integer() = {5000, 10000, 30000}
+                                    Dim responseText As String = ""
+                                    Dim lastContentType As String = Nothing
 
-                                For attempt As Integer = 0 To maxRetries
-                                    ' On retries, wait the specified delay before sending a new request.
-                                    If attempt > 0 Then
-                                        If Not Hidesplash Then
-                                            splash.RestartCountdown(timeoutSeconds, "Slowing down due to AI...")
+                                    For attempt As Integer = 0 To maxRetries
+                                        If attempt > 0 Then
+                                            If Not Hidesplash Then
+                                                splash.RestartCountdown(timeoutSeconds, "Slowing down due to AI...")
+                                            End If
+                                            Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
                                         End If
-                                        Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
-                                    End If
 
-                                    Dim requestContent As System.Net.Http.HttpContent
-                                    If requiresMultipart Then
                                         ' Recreate MultipartFormDataContent on each attempt to avoid duplicate parts.
                                         Dim attemptMultipart As New System.Net.Http.MultipartFormDataContent()
 
@@ -624,309 +631,413 @@ Namespace SharedLibrary
                                         Dim fileContent As New System.Net.Http.ByteArrayContent(fileBytes)
                                         fileContent.Headers.ContentType = New System.Net.Http.Headers.MediaTypeHeaderValue(mimeType)
                                         attemptMultipart.Add(fileContent, fileFieldName, fileName)
-                                        requestContent = attemptMultipart
-                                    Else
-                                        requestContent = New System.Net.Http.StringContent(requestBody, System.Text.Encoding.UTF8, "application/json")
-                                    End If
 
-                                    Dim response As System.Net.Http.HttpResponseMessage
+                                        Dim postReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Post, Endpoint)
+                                        postReq.Content = attemptMultipart
+                                        ApplyHeaders(postReq.Headers, HeaderA, HeaderB)
 
-                                    splash.RestartCountdown(timeoutSeconds)
-
-                                    If useGetMethod Then
-                                        ' Build a GET request (no request body is sent here).
-                                        Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, Endpoint)
-                                        ApplyHeaders(getReq.Headers, HeaderA, HeaderB)
+                                        splash.RestartCountdown(timeoutSeconds)
 
                                         If context.INI_APIDebug Then
-                                            Debug.WriteLine($"SENT TO API as GET ({Endpoint}):{Environment.NewLine}{String.Empty}") ' No body.
-                                        End If
-                                        response = Await client.SendAsync(getReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
-                                    Else
-                                        ' Standard POST request.
-                                        ApplyHeaders(client.DefaultRequestHeaders, HeaderA, HeaderB)
-
-                                        If context.INI_APIDebug Then
-                                            If requiresMultipart Then
-                                                Dim multipartInfo As New System.Text.StringBuilder()
-                                                multipartInfo.AppendLine($"SENT TO API ({Endpoint}) as multipart:")
-                                                ' Cast requestContent back to MultipartFormDataContent for enumeration.
-                                                For Each content As System.Net.Http.HttpContent In DirectCast(requestContent, System.Net.Http.MultipartFormDataContent)
-                                                    Dim contentName As String = ""
+                                            Dim multipartInfo As New System.Text.StringBuilder()
+                                            multipartInfo.AppendLine($"SENT TO API ({Endpoint}) as multipart:")
+                                            For Each content As System.Net.Http.HttpContent In attemptMultipart
+                                                Dim contentName As String = ""
+                                                If content.Headers.ContentDisposition IsNot Nothing Then
+                                                    contentName = content.Headers.ContentDisposition.Name
+                                                    If Not String.IsNullOrEmpty(contentName) Then
+                                                        contentName = contentName.Trim(""""c)
+                                                    End If
+                                                End If
+                                                If TypeOf content Is System.Net.Http.StringContent Then
+                                                    Dim val As String = Await content.ReadAsStringAsync()
+                                                    multipartInfo.AppendLine($" - {contentName}: '{val}'")
+                                                ElseIf TypeOf content Is System.Net.Http.ByteArrayContent Then
+                                                    Dim fileNamex As String = ""
                                                     If content.Headers.ContentDisposition IsNot Nothing Then
-                                                        contentName = content.Headers.ContentDisposition.Name
-                                                        If Not String.IsNullOrEmpty(contentName) Then
-                                                            contentName = contentName.Trim(""""c)
-                                                        End If
+                                                        fileNamex = content.Headers.ContentDisposition.FileName?.Trim(""""c)
                                                     End If
-                                                    If TypeOf content Is System.Net.Http.StringContent Then
-                                                        Dim val As String = Await content.ReadAsStringAsync()
-                                                        multipartInfo.AppendLine($" - {contentName}: '{val}'")
-                                                    ElseIf TypeOf content Is System.Net.Http.ByteArrayContent Then
-                                                        Dim fileNamex As String = ""
-                                                        If content.Headers.ContentDisposition IsNot Nothing Then
-                                                            fileNamex = content.Headers.ContentDisposition.FileName?.Trim(""""c)
-                                                        End If
-                                                        multipartInfo.AppendLine($" - {contentName}: <file: '{fileNamex}', type: {content.Headers.ContentType}>")
-                                                    Else
-                                                        multipartInfo.AppendLine($" - {contentName}: <unknown part type>")
-                                                    End If
-                                                Next
-                                                Debug.WriteLine(multipartInfo.ToString())
-                                                Try
-                                                    Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                                                    Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Sent.json")
-                                                    System.IO.File.WriteAllText(debugFilePath, multipartInfo.ToString())
-                                                Catch
-                                                    ' Silent fail
-                                                End Try
-                                            Else
-                                                Debug.WriteLine($"SENT TO API ({Endpoint}):{Environment.NewLine}{requestBody}")
-                                                Try
-                                                    Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                                                    Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Sent.json")
-                                                    System.IO.File.WriteAllText(debugFilePath, requestBody)
-                                                Catch
-                                                    ' Silent fail
-                                                End Try
-
-                                            End If
+                                                    multipartInfo.AppendLine($" - {contentName}: <file: '{fileNamex}', type: {content.Headers.ContentType}>")
+                                                Else
+                                                    multipartInfo.AppendLine($" - {contentName}: <unknown part type>")
+                                                End If
+                                            Next
+                                            Debug.WriteLine(multipartInfo.ToString())
+                                            Try
+                                                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                                                System.IO.File.WriteAllText(System.IO.Path.Combine(desktopPath, "RI_Debug_Sent.json"), multipartInfo.ToString())
+                                            Catch
+                                            End Try
                                         End If
-                                        response = Await client.PostAsync(Endpoint, requestContent, ct).ConfigureAwait(False)
-                                    End If
 
-                                    lastContentType = If(response.Content IsNot Nothing AndAlso response.Content.Headers IsNot Nothing AndAlso response.Content.Headers.ContentType IsNot Nothing,
-                                             response.Content.Headers.ContentType.ToString(),
-                                             Nothing)
+                                        Dim response = Await client.SendAsync(postReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
 
-                                    If response.IsSuccessStatusCode Then
-                                        responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                        Exit For
+                                        lastContentType = If(response.Content IsNot Nothing AndAlso response.Content.Headers IsNot Nothing AndAlso response.Content.Headers.ContentType IsNot Nothing,
+                                                 response.Content.Headers.ContentType.ToString(), Nothing)
 
-                                    ElseIf response.StatusCode = 429 Then
-                                        If attempt = maxRetries Then
-                                            If Not Hidesplash Then ShowCustomMessageBox($"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key).") Else Return $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
+                                        If response.IsSuccessStatusCode Then
+                                            responseText = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
+                                            Exit For
+                                        ElseIf response.StatusCode = 429 Then
+                                            If attempt = maxRetries Then
+                                                Dim errMsg As String = $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
+                                                If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
+                                                If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
+                                                Return ""
+                                            End If
+                                            Continue For
+                                        Else
+                                            Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
+                                            Dim errMsg As String = $"HTTP Error {response.StatusCode} when accessing the LLM endpoint: {errorContent}"
+                                            If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, errorContent)
+                                            If Not Hidesplash Then ShowCustomMessageBox(errMsg)
                                             Return ""
                                         End If
-                                        Continue For
-                                    Else
-                                        Dim errorContent As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                        If Not Hidesplash Then ShowCustomMessageBox($"HTTP Error {response.StatusCode} when accessing the LLM endpoint: {errorContent}")
+                                    Next
+
+                                    If context.INI_APIDebug Then
+                                        Debug.WriteLine($"RECEIVED FROM API:{Environment.NewLine}{responseText}")
+                                        Try
+                                            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                                            System.IO.File.WriteAllText(System.IO.Path.Combine(desktopPath, "RI_Debug_Received.json"), responseText)
+                                        Catch
+                                        End Try
+                                    End If
+
+                                    If String.IsNullOrWhiteSpace(responseText) Then
+                                        If context.INI_APIDebug Then WriteDebugError("Empty response from the endpoint.", Endpoint, requestBody)
+                                        If Not Hidesplash Then ShowCustomMessageBox("Empty response from the endpoint.")
                                         Return ""
                                     End If
-                                Next
 
+                                    Dim root As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(responseText)
+                                    LogTokenSpending(root, TokenCountString, AddUserPrompt)
+
+                                    Select Case root.Type
+                                        Case Newtonsoft.Json.Linq.JTokenType.Object
+                                            Returnvalue = HandleObject(CType(root, Newtonsoft.Json.Linq.JObject), ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
+                                        Case Newtonsoft.Json.Linq.JTokenType.Array
+                                            Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
+                                            If hasLoop Then
+                                                Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
+                                            Else
+                                                For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
+                                                    If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                                                        Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject), ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
+                                                    End If
+                                                Next
+                                            End If
+                                        Case Else
+                                            Dim errMsg As String = $"Unexpected JSON root type: {root.Type} ({responseText})"
+                                            If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, responseText)
+                                            If Not Hidesplash Then ShowCustomMessageBox(errMsg)
+                                    End Select
+
+                                Catch ex As System.Net.Http.HttpRequestException When Not ct.IsCancellationRequested
+                                    If context.INI_APIDebug Then WriteDebugError("HTTP request exception (multipart).", Endpoint, requestBody, "", ex)
+                                    If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint.")
+                                Catch ex As TaskCanceledException When ct.IsCancellationRequested
+                                    Throw New OperationCanceledException(ct)
+                                Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
+                                    If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
+                                    If Not Hidesplash Then splash.Close()
+                                    If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
+                                Catch ex As System.Exception When Not ct.IsCancellationRequested
+                                    If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
+                                    If Not Hidesplash Then splash.Close()
+                                    If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
+                                End Try
+                            End Using
+                        End Using
+                    Catch ex As OperationCanceledException
+                        If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
+                        Return ""
+                    Finally
+                        cts.Dispose()
+                        If Not Hidesplash Then splash.Close()
+                    End Try
+
+                    GoTo PostProcess
+                End If
+
+                ' === Standard JSON path: use WebRequest ===
+
+                Try
+                    ' Send the request.
+                    Try
+
+                        Dim maxRetries As Integer = 3
+                        Dim delayIntervals As Integer() = {5000, 10000, 30000} ' delays in milliseconds
+                        Dim responseText As String = ""
+                        Dim lastContentType As String = Nothing
+
+                        For attempt As Integer = 0 To maxRetries
+                            ' On retries, wait the specified delay before sending a new request.
+                            If attempt > 0 Then
                                 If Not Hidesplash Then
-                                    splash.RestartCountdown(timeoutSeconds, "Waiting for the AI to respond...")
+                                    splash.RestartCountdown(timeoutSeconds, "Slowing down due to AI...")
                                 End If
+                                Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
+                            End If
 
-                                If context.INI_APIDebug Then
-                                    Debug.WriteLine($"RECEIVED FROM API:{Environment.NewLine}{responseText}")
+                            splash.RestartCountdown(timeoutSeconds)
+
+                            If context.INI_APIDebug Then
+                                If useGetMethod Then
+                                    Debug.WriteLine($"SENT TO API as GET ({Endpoint}):{Environment.NewLine}{String.Empty}")
+                                Else
+                                    Debug.WriteLine($"SENT TO API ({Endpoint}):{Environment.NewLine}{requestBody}")
                                     Try
                                         Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                                        Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Received.json")
-                                        System.IO.File.WriteAllText(debugFilePath, responseText)
+                                        Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Sent.json")
+                                        System.IO.File.WriteAllText(debugFilePath, requestBody)
                                     Catch
                                         ' Silent fail
                                     End Try
                                 End If
+                            End If
 
-                                ' Normalize/validate response BEFORE JSON parse.
-                                Dim respTrim As String = If(responseText, String.Empty)
+                            Dim result = Await SendViaWebRequestAsync(
+                                Endpoint,
+                                If(useGetMethod, "GET", "POST"),
+                                HeaderA,
+                                HeaderB,
+                                requestBody,
+                                TimeoutValue,
+                                ct).ConfigureAwait(False)
 
-                                ' SSE normalization: drop keepalive/comment lines starting with ":" and unwrap "data:" frames.
-                                Dim sseProbe As String = respTrim.TrimStart()
-                                If sseProbe.StartsWith(":", StringComparison.Ordinal) OrElse sseProbe.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
-                                    Dim sb As New System.Text.StringBuilder()
-                                    Dim lfNormalized As String = respTrim.Replace(vbCrLf, vbLf)
-                                    Dim parts As String() = lfNormalized.Split(New String() {vbLf}, StringSplitOptions.None)
+                            lastContentType = result.ContentType
 
-                                    For Each raw In parts
-                                        Dim t As String = If(raw, String.Empty).Trim()
-                                        If t.Length = 0 Then Continue For
+                            If result.StatusCode >= 200 AndAlso result.StatusCode < 300 Then
+                                responseText = result.Body
+                                Exit For
 
-                                        If t.StartsWith(":", StringComparison.Ordinal) Then
-                                            Continue For
-                                        End If
+                            ElseIf result.StatusCode = 429 Then
+                                If attempt = maxRetries Then
+                                    Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
+                                    If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
+                                    If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
+                                    Return ""
+                                End If
+                                Continue For
+                            Else
+                                Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
+                                If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, result.Body)
+                                If Not Hidesplash Then ShowCustomMessageBox(errMsg)
+                                Return ""
+                            End If
+                        Next
 
-                                        If t.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
-                                            Dim payload As String = t.Substring(5).Trim()
-                                            If payload.Length > 0 AndAlso Not payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) Then
-                                                sb.Append(payload)
+                        If Not Hidesplash Then
+                            splash.RestartCountdown(timeoutSeconds, "Waiting for the AI to respond...")
+                        End If
+
+                        If context.INI_APIDebug Then
+                            Debug.WriteLine($"RECEIVED FROM API:{Environment.NewLine}{responseText}")
+                            Try
+                                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                                Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Received.json")
+                                System.IO.File.WriteAllText(debugFilePath, responseText)
+                            Catch
+                                ' Silent fail
+                            End Try
+                        End If
+
+                        ' Normalize/validate response BEFORE JSON parse.
+                        Dim respTrim As String = If(responseText, String.Empty)
+
+                        ' SSE normalization: drop keepalive/comment lines starting with ":" and unwrap "data:" frames.
+                        Dim sseProbe As String = respTrim.TrimStart()
+                        If sseProbe.StartsWith(":", StringComparison.Ordinal) OrElse sseProbe.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
+                            Dim sb As New System.Text.StringBuilder()
+                            Dim lfNormalized As String = respTrim.Replace(vbCrLf, vbLf)
+                            Dim parts As String() = lfNormalized.Split(New String() {vbLf}, StringSplitOptions.None)
+
+                            For Each raw In parts
+                                Dim t As String = If(raw, String.Empty).Trim()
+                                If t.Length = 0 Then Continue For
+
+                                If t.StartsWith(":", StringComparison.Ordinal) Then
+                                    Continue For
+                                End If
+
+                                If t.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
+                                    Dim payload As String = t.Substring(5).Trim()
+                                    If payload.Length > 0 AndAlso Not payload.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) Then
+                                        sb.Append(payload)
+                                    End If
+                                    Continue For
+                                End If
+
+                                sb.AppendLine(raw)
+                            Next
+
+                            responseText = sb.ToString().Trim()
+                        End If
+
+                        respTrim = If(responseText, String.Empty).TrimStart()
+
+                        If String.IsNullOrWhiteSpace(respTrim) Then
+                            If context.INI_APIDebug Then WriteDebugError("Empty response from the endpoint.", Endpoint, requestBody)
+                            If Not Hidesplash Then ShowCustomMessageBox("Empty response from the endpoint.")
+                            Return ""
+                        End If
+
+                        If Not (respTrim.StartsWith("{") OrElse respTrim.StartsWith("[")) Then
+                            Dim preview As String = If(respTrim.Length > 400, respTrim.Substring(0, 400) & "...", respTrim)
+                            Dim errMsg As String = $"Endpoint returned non‑JSON (Content-Type={lastContentType}). First bytes: {preview}"
+                            If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, respTrim)
+                            If Not Hidesplash Then ShowCustomMessageBox(errMsg)
+                            Return ""
+                        End If
+
+                        ' Process the response.
+                        Dim root As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(responseText)
+                        LogTokenSpending(root, TokenCountString, AddUserPrompt)
+
+                        If multiCall Then
+
+                            ' 1) Split all keys and extract values from the POST response.
+                            Dim keys() As String = postResponseKey.Split(New String() {sep2}, StringSplitOptions.None)
+                            Dim extracted As New Dictionary(Of String, String)
+
+                            For Each key As String In keys
+                                Dim val As String = CType(root, Newtonsoft.Json.Linq.JObject).SelectToken(key)?.ToString()
+                                If String.IsNullOrEmpty(val) Then
+                                    Throw New System.Exception($"POST response contains no value for '{key}'.")
+                                End If
+                                extracted(key) = val
+                            Next
+
+                            ' 2) Fill placeholders in GET endpoint.
+                            Dim rawGetEndpoint As String = getEndpointTemplate
+                            rawGetEndpoint = rawGetEndpoint.Replace("{model}", ModelValue)
+                            rawGetEndpoint = rawGetEndpoint.Replace("{ownsessionid}", OwnSessionID)
+                            rawGetEndpoint = rawGetEndpoint.Replace("{apikey}", If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI))
+                            For Each kvp As KeyValuePair(Of String, String) In extracted
+                                rawGetEndpoint = rawGetEndpoint.Replace("{" & kvp.Key & "}", kvp.Value)
+                            Next
+
+                            ' 3) Fill placeholders in optional GET body.
+                            Dim rawGetBody As String = getAPICallTemplate
+                            If Not String.IsNullOrWhiteSpace(rawGetBody) Then
+                                rawGetBody = rawGetBody.Replace("{model}", ModelValue)
+                                rawGetBody = rawGetBody.Replace("{ownsessionid}", OwnSessionID)
+                                rawGetBody = rawGetBody.Replace("{apikey}", If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI))
+                                For Each kvp As KeyValuePair(Of String, String) In extracted
+                                    rawGetBody = rawGetBody.Replace("{" & kvp.Key & "}", kvp.Value)
+                                Next
+                            End If
+
+                            If context.INI_APIDebug Then
+                                Debug.WriteLine($"SENT TO API as GET ({rawGetEndpoint}):{Environment.NewLine}{rawGetBody}")
+                                Try
+                                    Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                                    Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Sent_Get.json")
+                                    System.IO.File.WriteAllText(debugFilePath, rawGetBody)
+                                Catch
+                                    ' Silent fail
+                                End Try
+                            End If
+
+                            splash.RestartCountdown(timeoutSeconds)
+
+                            ' 4) Send GET request via WebRequest.
+                            Dim getResult = Await SendViaWebRequestAsync(
+                                rawGetEndpoint, "GET", HeaderA, HeaderB,
+                                rawGetBody, TimeoutValue, ct).ConfigureAwait(False)
+
+                            Dim getResponseText As String
+                            If getResult.StatusCode >= 200 AndAlso getResult.StatusCode < 300 Then
+                                getResponseText = getResult.Body
+                            Else
+                                Throw New System.Exception($"HTTP GET Error {getResult.StatusCode}: {getResult.Body}")
+                            End If
+
+                            If context.INI_APIDebug Then
+                                Debug.WriteLine($"RECEIVED FROM API (GET):{Environment.NewLine}{getResponseText}")
+                                Try
+                                    Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                                    Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Received_GET.json")
+                                    System.IO.File.WriteAllText(debugFilePath, getResponseText)
+                                Catch
+                                    ' Silent fail
+                                End Try
+                            End If
+
+                            ' 5) Process GET response using the same extraction logic as POST-only mode.
+                            Dim root2 As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(getResponseText)
+
+                            Select Case root2.Type
+                                Case Newtonsoft.Json.Linq.JTokenType.Object
+                                    Dim obj2 As Newtonsoft.Json.Linq.JObject = CType(root2, Newtonsoft.Json.Linq.JObject)
+                                    Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
+
+                                Case Newtonsoft.Json.Linq.JTokenType.Array
+                                    ' If template has a loop, process entire array at once
+                                    Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
+                                    If hasLoop Then
+                                        ' Pass entire response to template formatter which will handle the array
+                                        Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
+                                    Else
+                                        ' Legacy behavior: process each item separately
+                                        For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
+                                            If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                                                Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
+                                                ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
                                             End If
-                                            Continue For
-                                        End If
-
-                                        sb.AppendLine(raw)
-                                    Next
-
-                                    responseText = sb.ToString().Trim()
-                                End If
-
-                                respTrim = If(responseText, String.Empty).TrimStart()
-
-                                If String.IsNullOrWhiteSpace(respTrim) Then
-                                    If Not Hidesplash Then ShowCustomMessageBox("Empty response from the endpoint.")
-                                    Return ""
-                                End If
-
-                                If Not (respTrim.StartsWith("{") OrElse respTrim.StartsWith("[")) Then
-                                    Dim preview As String = If(respTrim.Length > 400, respTrim.Substring(0, 400) & "...", respTrim)
-                                    If Not Hidesplash Then ShowCustomMessageBox($"Endpoint returned non‑JSON (Content-Type={lastContentType}). First bytes: {preview}")
-                                    Return ""
-                                End If
-
-                                ' Process the response.
-                                Dim root As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(responseText)
-                                LogTokenSpending(root, TokenCountString, AddUserPrompt)
-
-                                If multiCall Then
-
-                                    ' 1) Split all keys and extract values from the POST response.
-                                    Dim keys() As String = postResponseKey.Split(New String() {sep2}, StringSplitOptions.None)
-                                    Dim extracted As New Dictionary(Of String, String)
-
-                                    For Each key As String In keys
-                                        Dim val As String = CType(root, Newtonsoft.Json.Linq.JObject).SelectToken(key)?.ToString()
-                                        If String.IsNullOrEmpty(val) Then
-                                            Throw New System.Exception($"POST response contains no value for '{key}'.")
-                                        End If
-                                        extracted(key) = val
-                                    Next
-
-                                    ' 2) Fill placeholders in GET endpoint.
-                                    Dim rawGetEndpoint As String = getEndpointTemplate
-                                    rawGetEndpoint = rawGetEndpoint.Replace("{model}", ModelValue)
-                                    rawGetEndpoint = rawGetEndpoint.Replace("{ownsessionid}", OwnSessionID)
-                                    rawGetEndpoint = rawGetEndpoint.Replace("{apikey}", If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI))
-                                    For Each kvp As KeyValuePair(Of String, String) In extracted
-                                        rawGetEndpoint = rawGetEndpoint.Replace("{" & kvp.Key & "}", kvp.Value)
-                                    Next
-
-                                    ' 3) Fill placeholders in optional GET body.
-                                    Dim rawGetBody As String = getAPICallTemplate
-                                    If Not String.IsNullOrWhiteSpace(rawGetBody) Then
-                                        rawGetBody = rawGetBody.Replace("{model}", ModelValue)
-                                        rawGetBody = rawGetBody.Replace("{ownsessionid}", OwnSessionID)
-                                        rawGetBody = rawGetBody.Replace("{apikey}", If(UseSecondAPI, context.DecodedAPI_2, context.DecodedAPI))
-                                        For Each kvp As KeyValuePair(Of String, String) In extracted
-                                            rawGetBody = rawGetBody.Replace("{" & kvp.Key & "}", kvp.Value)
                                         Next
                                     End If
 
-                                    ' 4) Prepare GET request and set header.
-                                    Dim getReq As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, rawGetEndpoint)
+                                Case Else
+                                    Dim errMsg As String = $"Unexpected JSON root type: {root2.Type} ({getResponseText})"
+                                    If context.INI_APIDebug Then WriteDebugError(errMsg, rawGetEndpoint, rawGetBody, getResponseText)
+                                    If Not Hidesplash Then ShowCustomMessageBox(errMsg)
+                            End Select
 
-                                    ApplyHeaders(getReq.Headers, HeaderA, HeaderB)
+                        Else
+                            ' POST-only processing.
+                            Select Case root.Type
+                                Case Newtonsoft.Json.Linq.JTokenType.Object
+                                    Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
+                                    Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
 
-                                    If Not String.IsNullOrWhiteSpace(rawGetBody) Then
-                                        getReq.Content = New System.Net.Http.StringContent(rawGetBody, System.Text.Encoding.UTF8, "application/json")
-                                    End If
-
-                                    If context.INI_APIDebug Then
-                                        Debug.WriteLine($"SENT TO API as GET ({rawGetEndpoint}):{Environment.NewLine}{rawGetBody}")
-                                        Try
-                                            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                                            Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Sent_Get.json")
-                                            System.IO.File.WriteAllText(debugFilePath, rawGetBody)
-                                        Catch
-                                            ' Silent fail
-                                        End Try
-                                    End If
-
-                                    splash.RestartCountdown(timeoutSeconds)
-
-                                    ' 5) Send GET request.
-                                    Dim getResponseText As String
-                                    Using getResp = Await client.SendAsync(getReq, System.Net.Http.HttpCompletionOption.ResponseContentRead, ct).ConfigureAwait(False)
-                                        If getResp.IsSuccessStatusCode Then
-                                            getResponseText = Await getResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                        Else
-                                            Dim err = Await getResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                                            Throw New System.Exception($"HTTP GET Error {getResp.StatusCode}: {err}")
-                                        End If
-                                    End Using
-
-                                    If context.INI_APIDebug Then
-                                        Debug.WriteLine($"RECEIVED FROM API (GET):{Environment.NewLine}{getResponseText}")
-                                        Try
-                                            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                                            Dim debugFilePath As String = System.IO.Path.Combine(desktopPath, "RI_Debug_Received_GET.json")
-                                            System.IO.File.WriteAllText(debugFilePath, responseText)
-                                        Catch
-                                            ' Silent fail
-                                        End Try
-                                    End If
-
-                                    ' 6) Process GET response using the same extraction logic as POST-only mode.
-                                    Dim root2 As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(getResponseText)
-
-                                    Select Case root2.Type
-                                        Case Newtonsoft.Json.Linq.JTokenType.Object
-                                            Dim obj2 As Newtonsoft.Json.Linq.JObject = CType(root2, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(obj2, getResponseKey, getResponseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
-
-                                        Case Newtonsoft.Json.Linq.JTokenType.Array
-                                            ' If template has a loop, process entire array at once
-                                            Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
-                                            If hasLoop Then
-                                                ' Pass entire response to template formatter which will handle the array
-                                                Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
-                                            Else
-                                                ' Legacy behavior: process each item separately
-                                                For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
-                                                    If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
-                                                        Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                        ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
-                                                    End If
-                                                Next
+                                Case Newtonsoft.Json.Linq.JTokenType.Array
+                                    ' If template has a loop, process entire array at once
+                                    Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
+                                    If hasLoop Then
+                                        ' Pass entire response to template formatter which will handle the array
+                                        Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
+                                    Else
+                                        ' Legacy behavior: process each item separately
+                                        For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
+                                            If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
+                                                Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
+                                                    ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
                                             End If
+                                        Next
+                                    End If
 
-                                        Case Else
-                                            If Not Hidesplash Then ShowCustomMessageBox($"Unexpected JSON root type: {root2.Type} ({getResponseText})")
-                                    End Select
-
-                                Else
-                                    ' POST-only processing.
-                                    Select Case root.Type
-                                        Case Newtonsoft.Json.Linq.JTokenType.Object
-                                            Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
-                                            Returnvalue = HandleObject(jsonObject, ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
-
-                                        Case Newtonsoft.Json.Linq.JTokenType.Array
-                                            ' If template has a loop, process entire array at once
-                                            Dim hasLoop = Regex.IsMatch(ResponseKey, "\{\%\s*for\s+", RegexOptions.Singleline)
-                                            If hasLoop Then
-                                                ' Pass entire response to template formatter which will handle the array
-                                                Returnvalue = JsonTemplateFormatter.FormatJsonWithTemplate(responseText, ResponseKey)
-                                            Else
-                                                ' Legacy behavior: process each item separately
-                                                For Each item As Newtonsoft.Json.Linq.JToken In CType(root, Newtonsoft.Json.Linq.JArray)
-                                                    If item.Type = Newtonsoft.Json.Linq.JTokenType.Object Then
-                                                        Returnvalue &= HandleObject(CType(item, Newtonsoft.Json.Linq.JObject),
-                                                            ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
-                                                    End If
-                                                Next
-                                            End If
-
-                                        Case Else
-                                            If Not Hidesplash Then ShowCustomMessageBox($"Unexpected JSON root type: {root.Type} ({responseText})")
-                                    End Select
-                                End If
-
-                            Catch ex As System.Net.Http.HttpRequestException When Not ct.IsCancellationRequested
-                                If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
-                            Catch ex As TaskCanceledException When ct.IsCancellationRequested
-                                Throw New OperationCanceledException(ct)
-                            Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
-                                If Not Hidesplash Then splash.Close()
-                                If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
-                            Catch ex As System.Exception When Not ct.IsCancellationRequested
-                                If Not Hidesplash Then splash.Close()
-                                If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
-                            End Try
-                        End Using ' Dispose HttpClient
-                    End Using ' Dispose HttpClientHandler
+                                Case Else
+                                    Dim errMsg As String = $"Unexpected JSON root type: {root.Type} ({responseText})"
+                                    If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, responseText)
+                                    If Not Hidesplash Then ShowCustomMessageBox(errMsg)
+                            End Select
+                        End If
+                    Catch ex As System.Net.WebException When Not ct.IsCancellationRequested
+                        If context.INI_APIDebug Then WriteDebugError("HTTP request exception when accessing the LLM endpoint (2).", Endpoint, requestBody, "", ex)
+                        If Not Hidesplash Then ShowCustomMessageBox($"An HTTP request exception occurred: {ex.Message} when accessing the LLM endpoint (2).")
+                    Catch ex As TaskCanceledException When ct.IsCancellationRequested
+                        Throw New OperationCanceledException(ct)
+                    Catch ex As TaskCanceledException When Not ct.IsCancellationRequested
+                        If context.INI_APIDebug Then WriteDebugError("Request to the endpoint timed out.", Endpoint, requestBody, "", ex)
+                        If Not Hidesplash Then splash.Close()
+                        If Not Hidesplash Then ShowCustomMessageBox($"The request to the endpoint timed out. Please try again or increase the timeout setting.")
+                    Catch ex As System.Exception When Not ct.IsCancellationRequested
+                        If context.INI_APIDebug Then WriteDebugError("Response from the endpoint resulted in an error.", Endpoint, requestBody, "", ex)
+                        If Not Hidesplash Then splash.Close()
+                        If Not Hidesplash Then ShowCustomMessageBox($"The response from the endpoint resulted in an error: {ex.Message}")
+                    End Try
                 Catch ex As OperationCanceledException
                     If Not Hidesplash Then ShowCustomMessageBox("Request canceled.")
                     Return ""
@@ -934,8 +1045,10 @@ Namespace SharedLibrary
                     cts.Dispose()
                     If Not Hidesplash Then splash.Close()
                 End Try
+
+PostProcess:
                 If DoubleS Then
-                    Returnvalue = Returnvalue.Replace(ChrW(223), "ss") ' Replace German sharp-S if needed
+                    Returnvalue = Returnvalue.Replace(ChrW(223), "ss")
                 End If
                 If context.INI_NoDash Then
                     Returnvalue = System.Text.RegularExpressions.Regex.Replace(
@@ -985,7 +1098,7 @@ Namespace SharedLibrary
                 System.Diagnostics.Debugger.Break()
 #End If
 
-
+                If context.INI_APIDebug Then WriteDebugError("Unexpected error when accessing the LLM endpoint.", "", "", "", ex)
                 If Not Hidesplash Then ShowCustomMessageBox($"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}") Else Return $"An unexpected error occurred when accessing the LLM endpoint: {ex.Message}"
                 Return ""
             Finally
@@ -994,6 +1107,170 @@ Namespace SharedLibrary
                 End If
             End Try
         End Function
+
+
+        ''' <summary>
+        ''' Sends an HTTP request using <see cref="System.Net.HttpWebRequest"/> as a fallback
+        ''' for providers that are incompatible with <see cref="System.Net.Http.HttpClient"/>.
+        ''' </summary>
+        Private Shared Async Function SendViaWebRequestAsync(
+                endpoint As String,
+                method As String,
+                headerA As String,
+                headerB As String,
+                requestBody As String,
+                timeoutMs As Long,
+                ct As System.Threading.CancellationToken) As Task(Of (StatusCode As Integer, Body As String, ContentType As String))
+
+            Dim req As System.Net.HttpWebRequest = DirectCast(System.Net.WebRequest.Create(endpoint), System.Net.HttpWebRequest)
+            req.Method = method
+            req.Timeout = CInt(timeoutMs)
+            req.ReadWriteTimeout = CInt(timeoutMs)
+            req.AutomaticDecompression = System.Net.DecompressionMethods.GZip Or System.Net.DecompressionMethods.Deflate
+            req.ContentType = "application/json; charset=utf-8"
+            req.Accept = "application/json"
+            req.ServicePoint.Expect100Continue = False
+            req.KeepAlive = True
+            req.ProtocolVersion = System.Net.HttpVersion.Version11
+
+            ' Apply headers using the same ¦-separated format.
+            If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                Dim sep As String = "¦"
+                Dim names() As String = headerA.Split(New String() {sep}, StringSplitOptions.None)
+                Dim values() As String = headerB.Split(New String() {sep}, StringSplitOptions.None)
+                Dim count As Integer = Math.Min(names.Length, values.Length)
+                For i As Integer = 0 To count - 1
+                    Dim hName As String = names(i).Trim()
+                    Dim hValue As String = values(i).Trim()
+                    If String.IsNullOrWhiteSpace(hName) OrElse String.IsNullOrWhiteSpace(hValue) Then Continue For
+                    If hName.Equals("Authorization", StringComparison.OrdinalIgnoreCase) Then
+                        req.Headers("Authorization") = hValue
+                    ElseIf hName.Equals("Content-Type", StringComparison.OrdinalIgnoreCase) Then
+                        req.ContentType = hValue
+                    ElseIf hName.Equals("Accept", StringComparison.OrdinalIgnoreCase) Then
+                        req.Accept = hValue
+                    Else
+                        req.Headers(hName) = hValue
+                    End If
+                Next
+            End If
+
+            ' Register cancellation token to abort the request.
+            ' GetResponseAsync() / ReadToEndAsync() do not observe CancellationToken natively,
+            ' so we abort the underlying HttpWebRequest which causes a WebException.
+            Dim ctRegistration As System.Threading.CancellationTokenRegistration = ct.Register(
+                Sub()
+                    Try
+                        req.Abort()
+                    Catch
+                    End Try
+                End Sub)
+
+            Try
+                ' Write request body for POST.
+                If method.Equals("POST", StringComparison.OrdinalIgnoreCase) AndAlso Not String.IsNullOrEmpty(requestBody) Then
+                    Dim bodyBytes As Byte() = System.Text.Encoding.UTF8.GetBytes(requestBody)
+                    req.ContentLength = bodyBytes.Length
+                    Using reqStream = Await req.GetRequestStreamAsync().ConfigureAwait(False)
+                        Await reqStream.WriteAsync(bodyBytes, 0, bodyBytes.Length, ct).ConfigureAwait(False)
+                    End Using
+                End If
+
+                ' Send and read response.
+                ' Note: Await is not allowed in Catch blocks in VB.NET / .NET Framework,
+                ' so we capture the WebException and handle it after the Try block.
+                Dim caughtWebEx As System.Net.WebException = Nothing
+                Try
+                    Using resp As System.Net.HttpWebResponse = DirectCast(
+                        Await req.GetResponseAsync().ConfigureAwait(False), System.Net.HttpWebResponse)
+
+                        Dim responseBody As String
+                        Using sr As New System.IO.StreamReader(resp.GetResponseStream(), System.Text.Encoding.UTF8)
+                            responseBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
+                        End Using
+                        Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
+                    End Using
+
+                Catch webEx As System.Net.WebException When webEx.Response IsNot Nothing
+                    caughtWebEx = webEx
+                End Try
+
+                ' Handle the error response outside the Catch block so we can use Await.
+                If caughtWebEx IsNot Nothing Then
+                    Dim errResp As System.Net.HttpWebResponse = DirectCast(caughtWebEx.Response, System.Net.HttpWebResponse)
+                    Dim errBody As String
+                    Using sr As New System.IO.StreamReader(errResp.GetResponseStream(), System.Text.Encoding.UTF8)
+                        errBody = Await sr.ReadToEndAsync().ConfigureAwait(False)
+                    End Using
+                    Return (CInt(errResp.StatusCode), errBody, errResp.ContentType)
+                End If
+
+                ' Should not reach here, but just in case:
+                Throw New System.Net.WebException("Request failed with no response.")
+
+            Finally
+                ctRegistration.Dispose()
+            End Try
+        End Function
+
+
+
+
+        ''' <summary>
+        ''' When API debug mode is active, appends a timestamped error entry (with endpoint, request body,
+        ''' response text, exception details, and any additional context) to <c>RI_Error.txt</c> on the Desktop.
+        ''' Silently ignores any I/O failures.
+        ''' </summary>
+        ''' <param name="errorMessage">Primary error description.</param>
+        ''' <param name="endpoint">The endpoint URL that was called (may be empty).</param>
+        ''' <param name="requestBody">The request body that was sent (may be empty).</param>
+        ''' <param name="responseText">The raw response text received (may be empty).</param>
+        ''' <param name="ex">Optional exception whose Message and StackTrace will be included.</param>
+        Private Shared Sub WriteDebugError(errorMessage As String,
+                                           Optional endpoint As String = "",
+                                           Optional requestBody As String = "",
+                                           Optional responseText As String = "",
+                                           Optional ex As System.Exception = Nothing)
+            Try
+                Dim sb As New StringBuilder()
+                sb.AppendLine("========== RED INK API ERROR ==========")
+                sb.AppendLine("Timestamp: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture))
+                sb.AppendLine("Error: " & If(errorMessage, "(no message)"))
+                If Not String.IsNullOrWhiteSpace(endpoint) Then
+                    sb.AppendLine("Endpoint: " & endpoint)
+                End If
+                If Not String.IsNullOrWhiteSpace(requestBody) Then
+                    sb.AppendLine("Request Body:")
+                    sb.AppendLine(If(requestBody.Length > 8000, requestBody.Substring(0, 8000) & "... (truncated)", requestBody))
+                End If
+                If Not String.IsNullOrWhiteSpace(responseText) Then
+                    sb.AppendLine("Response Text:")
+                    sb.AppendLine(If(responseText.Length > 8000, responseText.Substring(0, 8000) & "... (truncated)", responseText))
+                End If
+                If ex IsNot Nothing Then
+                    sb.AppendLine("Exception Type: " & ex.GetType().FullName)
+                    sb.AppendLine("Exception Message: " & ex.Message)
+                    If ex.StackTrace IsNot Nothing Then
+                        sb.AppendLine("Stack Trace:")
+                        sb.AppendLine(ex.StackTrace)
+                    End If
+                    If ex.InnerException IsNot Nothing Then
+                        sb.AppendLine("Inner Exception: " & ex.InnerException.GetType().FullName & ": " & ex.InnerException.Message)
+                    End If
+                End If
+                sb.AppendLine("=======================================")
+                sb.AppendLine()
+
+                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                Dim filePath As String = System.IO.Path.Combine(desktopPath, "RI_Error.txt")
+                System.IO.File.AppendAllText(filePath, sb.ToString(), Encoding.UTF8)
+            Catch
+                ' Silent fail — debug logging must never disrupt the main flow.
+            End Try
+        End Sub
+
+
+
 
 
         ''' <summary>
@@ -1019,6 +1296,24 @@ Namespace SharedLibrary
                 Dim value As String = values(i).Trim()
                 If String.IsNullOrWhiteSpace(name) OrElse String.IsNullOrWhiteSpace(value) Then Continue For
                 Try
+                    ' Authorization must be set via the typed property; the generic Add() method
+                    ' may silently reject Bearer tokens whose value trips the header parser.
+                    If name.Equals("Authorization", StringComparison.OrdinalIgnoreCase) Then
+                        Dim reqHeaders = TryCast(headers, System.Net.Http.Headers.HttpRequestHeaders)
+                        If reqHeaders IsNot Nothing Then
+                            ' Parse "Bearer <token>" or "Basic <token>" etc.
+                            Dim spaceIdx As Integer = value.IndexOf(" "c)
+                            If spaceIdx > 0 Then
+                                reqHeaders.Authorization = New System.Net.Http.Headers.AuthenticationHeaderValue(
+                                    value.Substring(0, spaceIdx),
+                                    value.Substring(spaceIdx + 1).TrimStart())
+                            Else
+                                reqHeaders.Authorization = New System.Net.Http.Headers.AuthenticationHeaderValue(value)
+                            End If
+                            Continue For
+                        End If
+                    End If
+
                     If Not headers.Contains(name) Then
                         headers.Add(name, value)
                     End If
@@ -1891,6 +2186,23 @@ Namespace SharedLibrary
                     currentexpiry = context.TokenExpiry
                 End If
 
+                If context.INI_APIDebug Then
+                    Dim dbg As New StringBuilder()
+                    dbg.AppendLine("[OAuth2 Debug] GetFreshAccessToken called")
+                    dbg.AppendLine($"  SecondAPI       = {SecondAPI}")
+                    dbg.AppendLine($"  clientEmail     = {If(String.IsNullOrWhiteSpace(clientEmail), "(empty)", clientEmail)}")
+                    dbg.AppendLine($"  ClientScopes    = {If(String.IsNullOrWhiteSpace(ClientScopes), "(empty)", ClientScopes)}")
+                    dbg.AppendLine($"  AuthServer      = {If(String.IsNullOrWhiteSpace(AuthServer), "(empty)", AuthServer)}")
+                    dbg.AppendLine($"  TLife           = {TLife}")
+                    dbg.AppendLine($"  PrivateKey len  = {If(PrivateKey IsNot Nothing, PrivateKey.Length.ToString(), "Nothing")}")
+                    dbg.AppendLine($"  PrivateKey head = {If(PrivateKey IsNot Nothing AndAlso PrivateKey.Length > 40, PrivateKey.Substring(0, 40) & "...", If(PrivateKey, "(Nothing)"))}")
+                    dbg.AppendLine($"  Cached token    = {If(String.IsNullOrEmpty(accessToken), "(empty)", accessToken)}")
+                    dbg.AppendLine($"  Token expiry    = {currentexpiry:yyyy-MM-dd HH:mm:ss} UTC")
+                    dbg.AppendLine($"  UtcNow          = {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC")
+                    dbg.AppendLine($"  Token expired?  = {DateTime.UtcNow >= currentexpiry}")
+                    WriteDebugError(dbg.ToString())
+                End If
+
                 PrivateKey = PrivateKey.Replace("\n", "")
 
                 Dim formattedKey As String = String.Empty
@@ -1907,11 +2219,29 @@ Namespace SharedLibrary
                 GoogleOAuthHelper.private_key = "-----BEGIN PRIVATE KEY-----" & vbLf & formattedKey & "-----END PRIVATE KEY-----" & vbLf
                 GoogleOAuthHelper.scopes = ClientScopes
                 GoogleOAuthHelper.token_uri = AuthServer
-                GoogleOAuthHelper.token_life = TLife
+                GoogleOAuthHelper.token_life = If(TLife > 0, TLife, 3600)
+
+                If context.INI_APIDebug Then
+                    Dim dbg As New StringBuilder()
+                    dbg.AppendLine("[OAuth2 Debug] PEM key prepared")
+                    dbg.AppendLine($"  Formatted key length = {GoogleOAuthHelper.private_key.Length}")
+                    dbg.AppendLine($"  Starts with BEGIN    = {GoogleOAuthHelper.private_key.StartsWith("-----BEGIN")}")
+                    dbg.AppendLine($"  Contains real LF     = {GoogleOAuthHelper.private_key.Contains(vbLf)}")
+                    dbg.AppendLine($"  Contains literal \n  = {GoogleOAuthHelper.private_key.Contains("\n")}")
+                    dbg.AppendLine($"  token_life           = {GoogleOAuthHelper.token_life}")
+                    WriteDebugError(dbg.ToString())
+                End If
 
                 If String.IsNullOrEmpty(accessToken) OrElse DateTime.UtcNow >= currentexpiry Then
                     ' Token is missing or expired, fetch a new one.
+                    If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Token missing or expired — calling GetAccessToken()...")
+
                     accessToken = Await GoogleOAuthHelper.GetAccessToken()
+
+                    If context.INI_APIDebug Then
+                        WriteDebugError($"[OAuth2 Debug] GetAccessToken() returned:{Environment.NewLine}{If(String.IsNullOrEmpty(accessToken), "(empty — FAILED)", accessToken)}")
+                    End If
+
                     If SecondAPI Then
                         context.TokenExpiry_2 = DateTime.UtcNow.AddSeconds(GoogleOAuthHelper.token_life - 300) ' Set expiry 5 minutes before actual
                         context.DecodedAPI_2 = accessToken
@@ -1919,11 +2249,15 @@ Namespace SharedLibrary
                         context.TokenExpiry = DateTime.UtcNow.AddSeconds(GoogleOAuthHelper.token_life - 300) ' Set expiry 5 minutes before actual
                         context.DecodedAPI = accessToken
                     End If
+                Else
+                    If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Using cached token (not expired).")
                 End If
+
                 Return accessToken
 
             Catch ex As System.Exception
                 ' Handle exceptions explicitly with System.Exception
+                If context.INI_APIDebug Then WriteDebugError("[OAuth2 Debug] Exception in GetFreshAccessToken.", "", "", "", ex)
                 If Not silent Then
                     MessageBox.Show("Error while fetching an access token: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
                 End If
