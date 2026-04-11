@@ -2524,7 +2524,8 @@ Public Class DiscussInky
                         ' Strip the trigger from user text so it doesn't reach the LLM
                         cleanedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
 
-                        Dim kbResolved = KnowledgeTriggerHelper.ResolveKnowledge(kbRequest, _context)
+                        Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             kbContext = kbResolved.Content
                             AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")

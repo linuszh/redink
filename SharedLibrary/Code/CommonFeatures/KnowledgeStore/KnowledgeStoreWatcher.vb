@@ -27,9 +27,11 @@ Option Strict On
 Option Explicit On
 
 Imports System.Collections.Concurrent
+Imports System.Drawing
 Imports System.IO
 Imports System.Threading
 Imports System.Threading.Tasks
+Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -253,16 +255,38 @@ Namespace SharedLibrary
                 Return results ' Another tick is still running
             End If
 
+            Dim trayIcon As System.Windows.Forms.NotifyIcon = Nothing
+
             Try
                 Dim processed As Integer = 0
-                While processed < maxFiles
+                Dim startCount As Integer = _pendingFiles.Count
+
+                ' Show non-intrusive Tray Icon for background KB reporting
+                If startCount > 0 AndAlso _context.INI_KnowledgeStoreUseLLMIndex Then
+                    Try
+                        trayIcon = New System.Windows.Forms.NotifyIcon()
+                        trayIcon.Icon = System.Drawing.SystemIcons.Information
+                        trayIcon.Visible = True
+                        trayIcon.Text = $"Knowledge Store: Preparing to index {startCount} file(s)..."
+                    Catch
+                    End Try
+                End If
+
+                While processed < maxFiles AndAlso processed < startCount
                     Dim pending As PendingFile = Nothing
                     If Not _pendingFiles.TryDequeue(pending) Then Exit While
+
+                    Dim safeFileName = Path.GetFileName(pending.FilePath)
+
+                    ' Update Tray Icon smoothly without interrupting user
+                    If trayIcon IsNot Nothing Then
+                        Dim statusText = $"Knowledge Store ({processed + 1}/{startCount}): {safeFileName}"
+                        trayIcon.Text = If(statusText.Length > 63, statusText.Substring(0, 60) & "...", statusText)
+                    End If
 
                     Dim result As New IndexResult() With {.FilePath = pending.FilePath}
 
                     Try
-                        ' Verify file still exists (may have been deleted between detection and processing)
                         If Not File.Exists(pending.FilePath) Then
                             result.ErrorMessage = "File no longer exists."
                             results.Add(result)
@@ -278,16 +302,15 @@ Namespace SharedLibrary
                             Continue While
                         End If
 
-                        ' Index the document
-                        Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(pending.FilePath, _context, _context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+                        Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(pending.FilePath, store.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+
                         If entry Is Nothing Then
-                            result.ErrorMessage = "Indexer returned nothing (unsupported or empty file)."
+                            result.ErrorMessage = "Indexer returned nothing."
                             results.Add(result)
                             processed += 1
                             Continue While
                         End If
 
-                        ' Update manifest (atomic save)
                         Dim manifest = KnowledgeStoreManifest.Load(store)
                         manifest.AddOrUpdate(entry)
                         manifest.Save(store)
@@ -302,12 +325,19 @@ Namespace SharedLibrary
 
                     Catch ex As Exception
                         result.ErrorMessage = ex.Message
+                        KnowledgeWikiService.LogWikiError(KnowledgeStoreCatalog.GetStoreByName(pending.StoreName, _context)?.ResolvedSourcePath, pending.FilePath, ex.Message)
                     End Try
 
                     results.Add(result)
                     processed += 1
                 End While
+
             Finally
+                ' Ensure tray icon is explicitly destroyed after batch finishes
+                If trayIcon IsNot Nothing Then
+                    trayIcon.Visible = False
+                    trayIcon.Dispose()
+                End If
                 _processLock.Release()
             End Try
 

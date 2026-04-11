@@ -8,16 +8,9 @@
 '
 ' Architecture / How it works:
 '  - Reads the document using existing SharedLibrary file-reading utilities.
-'  - Extracts a title (first heading or first line).
-'  - Generates a short summary and keyword list for search matching.
-'  - When UseLLMIndex is True, delegates summary/keyword generation to the LLM
-'    for richer, more context-aware metadata.
-'  - Returns a KnowledgeEntry ready for persistence in the index.
-'
-' External Dependencies:
-'  - SharedMethods file-reading utilities (ReadFileContent).
-'  - KnowledgeStoreManager.KnowledgeEntry for the data model.
-'  - ISharedContext for configuration.
+'  - When UseLLMIndex is True, it triggers the Agentic KnowledgeWikiService
+'    to generate a persistent Markdown concept page and vector embeddings.
+'  - Returns a KnowledgeEntry ready for persistence in the local index.
 ' =============================================================================
 
 Option Strict On
@@ -72,14 +65,16 @@ Namespace SharedLibrary
             "Output ONLY these three sections. No markdown, no numbering, no extra text."
 
         ''' <summary>
-        ''' Indexes a single document and returns a KnowledgeEntry.
+        ''' Indexes a single document, triggers agentic Wiki generation if requested, and returns a KnowledgeEntry.
         ''' </summary>
-        ''' <param name="filePath">Full or environment-variable path to the file.</param>
+        ''' <param name="filePath">Full or environment-variable path to the raw source file.</param>
+        ''' <param name="kbRootPath">The root directory of the current Knowledge Store.</param>
         ''' <param name="context">Shared context for configuration.</param>
-        ''' <param name="useLLMIndex">When True, uses the LLM for richer summary/keyword generation.</param>
+        ''' <param name="useLLMIndex">When True, invokes the Wiki Agent to generate persistent Markdown structure.</param>
         ''' <returns>A populated KnowledgeEntry, or Nothing if the file cannot be read.</returns>
         Public Shared Async Function IndexDocumentAsync(
                 filePath As String,
+                kbRootPath As String,
                 context As ISharedContext,
                 Optional useLLMIndex As Boolean = False) As Task(Of KnowledgeStoreManager.KnowledgeEntry)
 
@@ -90,48 +85,95 @@ Namespace SharedLibrary
             Dim ext = Path.GetExtension(expandedPath).ToLowerInvariant()
             If Not SupportedExtensions.Contains(ext) Then Return Nothing
 
-            ' Read content using existing infrastructure
+            ' Ensure the physical Raw directory exists to persist the document if it isn't there already
+            Dim rawPath = Path.Combine(kbRootPath, "Raw")
+            If Not Directory.Exists(rawPath) Then Directory.CreateDirectory(rawPath)
+
+            Dim finalSourcePath As String = expandedPath
+            If Not expandedPath.StartsWith(rawPath, StringComparison.OrdinalIgnoreCase) Then
+                Try
+                    finalSourcePath = Path.Combine(rawPath, Path.GetFileName(expandedPath))
+                    File.Copy(expandedPath, finalSourcePath, overwrite:=True)
+                Catch ex As Exception
+                    finalSourcePath = expandedPath
+                End Try
+            End If
+
+            ' Read content using robust advanced extractor
             Dim content As String = ""
             Try
-                content = Await Task.Run(Function() ReadFileForIndex(expandedPath))
+                content = Await ReadFileForIndexAsync(finalSourcePath, context)
             Catch ex As Exception
-                Debug.WriteLine($"KnowledgeIndexer: Error reading '{expandedPath}': {ex.Message}")
+                System.Diagnostics.Debug.WriteLine($"KnowledgeIndexer: Error reading '{finalSourcePath}': {ex.Message}")
+                KnowledgeWikiService.LogWikiError(kbRootPath, finalSourcePath, $"File could not be read: {ex.Message}")
                 Return Nothing
             End Try
 
-            If String.IsNullOrWhiteSpace(content) Then Return Nothing
+            If String.IsNullOrWhiteSpace(content) Then
+                KnowledgeWikiService.LogWikiError(kbRootPath, finalSourcePath, "File resulted in empty text payload.")
+                Return Nothing
+            End If
 
-            ' Default: local extraction
-            Dim title = ExtractTitle(content, expandedPath)
+            ' Default: local extraction (Keyword / Regex)
+            Dim title = ExtractTitle(content, finalSourcePath)
             Dim summary = BuildSummary(content)
             Dim keywords = ExtractKeywords(content)
 
-            ' LLM enrichment — overrides title/summary/keywords if successful
+            ' LLM enrichment — Triggers the Wiki Agent Architecture
             If useLLMIndex Then
                 Try
-                    Dim llmInput = If(content.Length > MaxLLMInputChars,
-                                      content.Substring(0, MaxLLMInputChars),
-                                      content)
+                    ' 1. Orchestrator: Generate physical Wiki Page and update vector database
+                    Await KnowledgeWikiService.IngestSourceAsync(kbRootPath, finalSourcePath, context)
 
-                    Dim llmResponse = Await SharedMethods.LLM(
-                        context, LLMIndexPrompt, llmInput,
-                        "", "", 0L, False, True).ConfigureAwait(False)
+                    ' 2. Metadata enrichment
+                    Dim backupConfig As ModelConfig = Nothing
+                    Dim useAlternateAPI As Boolean = False
+                    Dim llmResponse As String = ""
+
+                    Try
+                        If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+                            backupConfig = SharedMethods.GetCurrentConfig(context)
+                            If SharedMethods.GetSpecialTaskModel(context, context.INI_AlternateModelPath, "KnowledgeStore") Then
+                                useAlternateAPI = True
+                            Else
+                                backupConfig = Nothing
+                            End If
+                        End If
+
+                        If content.Length <= KnowledgeWikiService.MaxChunkChars Then
+                            llmResponse = Await SharedMethods.LLM(
+                                context:=context,
+                                promptSystem:=LLMIndexPrompt,
+                                promptUser:=content,
+                                UseSecondAPI:=useAlternateAPI,
+                                Hidesplash:=True).ConfigureAwait(False)
+                        Else
+                            llmResponse = Await KnowledgeWikiService.ProcessLargeTextInChunksAsync(context, LLMIndexPrompt, content, useAlternateAPI, Path.GetFileName(finalSourcePath))
+                        End If
+
+                    Finally
+                        If backupConfig IsNot Nothing Then
+                            SharedMethods.RestoreDefaults(context, backupConfig)
+                        End If
+                    End Try
 
                     If Not String.IsNullOrWhiteSpace(llmResponse) Then
                         Dim parsed = ParseLLMIndexResponse(llmResponse)
                         If Not String.IsNullOrWhiteSpace(parsed.Title) Then title = parsed.Title
                         If Not String.IsNullOrWhiteSpace(parsed.Summary) Then summary = parsed.Summary
                         If parsed.Keywords IsNot Nothing AndAlso parsed.Keywords.Length > 0 Then keywords = parsed.Keywords
+                    Else
+                        KnowledgeWikiService.LogWikiError(kbRootPath, finalSourcePath, "LLM catalog generation returned empty response.")
                     End If
                 Catch ex As Exception
-                    ' LLM failure is non-fatal — fall back to local extraction (already set above)
-                    Debug.WriteLine($"KnowledgeIndexer: LLM enrichment failed for '{expandedPath}': {ex.Message}")
+                    System.Diagnostics.Debug.WriteLine($"KnowledgeIndexer: Agent generation failed for '{finalSourcePath}': {ex.Message}")
+                    KnowledgeWikiService.LogWikiError(kbRootPath, finalSourcePath, $"Agent Generation exception: {ex.Message}")
                 End Try
             End If
 
-            ' Create entry
+            ' Create entry for the ephemeral catalog indexer
             Dim entry As New KnowledgeStoreManager.KnowledgeEntry() With {
-                .FilePath = filePath,
+                .FilePath = finalSourcePath,
                 .Title = title,
                 .Summary = summary,
                 .Keywords = keywords,
@@ -191,9 +233,9 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Reads file content using appropriate method based on extension.
+        ''' Reads file content using appropriate advanced tooling based on extension.
         ''' </summary>
-        Private Shared Function ReadFileForIndex(expandedPath As String) As String
+        Private Shared Async Function ReadFileForIndexAsync(expandedPath As String, context As ISharedContext) As Task(Of String)
             Dim ext = Path.GetExtension(expandedPath).ToLowerInvariant()
 
             Select Case ext
@@ -206,13 +248,11 @@ Namespace SharedLibrary
                     Return SharedMethods.ReadDocxSandboxed(expandedPath)
 
                 Case ".pdf"
-                    ' ReadPdfAsText is Async; run synchronously for indexing
-                    Dim t = SharedMethods.ReadPdfAsText(expandedPath, ReturnErrorInsteadOfEmpty:=False, DoOCR:=False, AskUser:=False)
-                    t.Wait()
-                    Return If(t.Result, "")
+                    ' Utilizes the robust PDF extraction logic, forcing silent automatic OCR for high quality results
+                    Dim pdfResult = Await SharedMethods.ReadPdfAsTextEx(expandedPath, ReturnErrorInsteadOfEmpty:=False, DoOCR:=True, AskUser:=False, context:=context)
+                    Return If(pdfResult.Content, "")
 
                 Case ".rtf"
-                    ' Read RTF as raw text, stripping RTF control words
                     Try
                         Using rtb As New System.Windows.Forms.RichTextBox()
                             rtb.LoadFile(expandedPath, System.Windows.Forms.RichTextBoxStreamType.RichText)
@@ -234,18 +274,15 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
-        ''' Extracts a title from the content (first heading or first non-empty line).
-        ''' Falls back to the filename without extension.
+        ''' Extracts a title from the content.
         ''' </summary>
         Private Shared Function ExtractTitle(content As String, filePath As String) As String
-            ' Try to find a markdown heading
             Dim headingMatch = Regex.Match(content, "^#{1,3}\s+(.+)$", RegexOptions.Multiline)
             If headingMatch.Success Then
                 Dim heading = headingMatch.Groups(1).Value.Trim()
                 If heading.Length > 0 AndAlso heading.Length <= 200 Then Return heading
             End If
 
-            ' Try first non-empty line (if reasonable length)
             Dim lines = content.Split({vbCrLf, vbCr, vbLf}, StringSplitOptions.RemoveEmptyEntries)
             For Each line In lines
                 Dim trimmed = line.Trim()
@@ -254,7 +291,6 @@ Namespace SharedLibrary
                 End If
             Next
 
-            ' Fall back to filename
             Return Path.GetFileNameWithoutExtension(filePath)
         End Function
 
@@ -262,18 +298,15 @@ Namespace SharedLibrary
         ''' Builds a short summary from the document content.
         ''' </summary>
         Private Shared Function BuildSummary(content As String) As String
-            ' Clean whitespace
             Dim cleaned = Regex.Replace(content, "\s+", " ").Trim()
             If cleaned.Length <= MaxSummaryChars Then Return cleaned
-            ' Cut at word boundary
             Dim cutoff = cleaned.LastIndexOf(" "c, MaxSummaryChars)
             If cutoff < MaxSummaryChars \ 2 Then cutoff = MaxSummaryChars
             Return cleaned.Substring(0, cutoff).Trim() & "..."
         End Function
 
         ''' <summary>
-        ''' Extracts keywords from the content using simple frequency analysis.
-        ''' Returns the top N most frequent meaningful words.
+        ''' Extracts keywords using frequency analysis.
         ''' </summary>
         Private Shared Function ExtractKeywords(content As String) As String()
             Dim stopWords As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
@@ -288,7 +321,6 @@ Namespace SharedLibrary
                 "le", "la", "les", "de", "du", "des", "un", "une", "et", "ou", "en"
             }
 
-            ' Tokenize
             Dim words = Regex.Matches(content, "\b[a-zA-ZÀ-ÿ]{3,}\b")
             Dim freq As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             For Each m As Match In words
@@ -298,7 +330,6 @@ Namespace SharedLibrary
                 freq(w) += 1
             Next
 
-            ' Return top 20 keywords
             Return freq.OrderByDescending(Function(kv) kv.Value).
                 Take(20).
                 Select(Function(kv) kv.Key.ToLowerInvariant()).
@@ -306,5 +337,4 @@ Namespace SharedLibrary
         End Function
 
     End Class
-
 End Namespace

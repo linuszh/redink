@@ -331,6 +331,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeEmbeddingService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeIndexer.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeQueryService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreCatalog.vb" />
@@ -343,6 +344,7 @@
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreManifest.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreWatcher.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeTriggerHelper.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeWikiService.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.MyStyleHelpers.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.PromptLibrary.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.TextFileEditor.vb" />

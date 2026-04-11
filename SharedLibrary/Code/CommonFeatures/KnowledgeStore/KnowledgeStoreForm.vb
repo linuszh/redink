@@ -307,7 +307,7 @@ Namespace SharedLibrary
             For Each filePath In filesToIndex
                 Try
                     Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(
-                        filePath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
+                        filePath, targetStore.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
                     If entry IsNot Nothing Then
                         manifest.AddOrUpdate(entry)
                         addedCount += 1
@@ -462,7 +462,7 @@ Namespace SharedLibrary
 
                     Try
                         Dim updated = Await KnowledgeIndexer.IndexDocumentAsync(
-                            expandedPath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
+                            expandedPath, row.Store.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
                         If updated IsNot Nothing Then
                             updated.Tags = row.Entry.Tags ' Preserve tags
                             row.Entry = updated

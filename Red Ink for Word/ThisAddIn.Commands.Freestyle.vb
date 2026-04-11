@@ -1326,47 +1326,49 @@ Partial Public Class ThisAddIn
                 AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
                 AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
                 AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
+                AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
+                AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
 
                 ' TOOLS / SOURCES
-                AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
-                AddItem("loadurl", "Retrieve the text of a particular URL given.")
-                AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
-                AddItem("drawio", "Open a draw.io for editing chart files, optionally with Internet blocking.")
-                AddItem("drawioconverter", "Convert a draw.io flow chart to a HTML mini-web-app.")
+                AddItem("setsources", "Select sources/tools available For tooling-capable models (session scope).")
+                AddItem("loadurl", "Retrieve the text Of a particular URL given.")
+                AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
+                AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
+                AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
 
                 ' PRIVACY / TRANSFORMS
-                AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
-                AddItem("convertmarkdown", "Convert Markdown in the selected text to Word formatting.")
+                AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
+                AddItem("convertmarkdown", "Convert Markdown In the selected text To Word formatting.")
 
                 ' AUDIO / SPEECH
                 AddItem("speech", "Start speech transcription (Transcriptor).")
                 AddItem("read", "Create audio (TTS) from the selected text.")
-                AddItem("readlocal", "Read the selected text using local TTS (no cloud call).")
-                AddItem("voices", "Select a single cloud TTS voice.")
+                AddItem("readlocal", "Read the selected text Using local TTS (no cloud Call).")
+                AddItem("voices", "Select a Single cloud TTS voice.")
                 AddItem("voices2", "Select multiple cloud TTS voices.")
                 AddItem("voiceslocal", "Select the local TTS voice.")
                 AddItem("createpodcast", "Create a podcast from the selected text.")
-                AddItem("readpodcast", "Play/read a podcast based on the current selection.")
+                AddItem("readpodcast", "Play/read a podcast based On the current selection.")
 
                 ' DOCUMENT / CLAUSES
                 AddItem("doccheck", "Run the document check.")
-                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document or automatic/AI).")
+                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document Or automatic/AI).")
                 AddItem("applydocstyle", "Apply a style template.")
-                AddItem("findclause", "Search for a clause in the clause library/database.")
-                AddItem("addclause", "Add a clause to the clause library/database.")
-                AddItem("splitpdf", "Split a PDF into separate exhibits based on its content.")
-                AddItem("stamper", "Apply an exhibit stamp to a PDF based on its filename.")
+                AddItem("findclause", "Search For a clause In the clause library/database.")
+                AddItem("addclause", "Add a clause To the clause library/database.")
+                AddItem("splitpdf", "Split a PDF into separate exhibits based On its content.")
+                AddItem("stamper", "Apply an exhibit stamp To a PDF based On its filename.")
 
                 ' WEB AGENT
                 AddItem("webagentcreator", "Create/modify web agent scripts.")
                 AddItem("webagent", "Run the web agent (requires configured script paths).")
 
                 ' ANALYSIS
-                AddItem("findhiddenprompts", "Scan the document for hidden prompts.")
+                AddItem("findhiddenprompts", "Scan the document For hidden prompts.")
 
                 Dim chosen As Integer = SLib.SelectValue(items,
                             1,
-                            "Select a Freestyle short command (Esc to cancel):",
+                            "Select a Freestyle Short command (Esc To cancel):",
                             $"{AN} Freestyle - Help"
                         )
 
@@ -1426,6 +1428,60 @@ Partial Public Class ThisAddIn
 
             End If
 
+            ' Knowledge store indexing commands
+            If OtherPrompt.Equals("cliptowiki", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select a Knowledge Store:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Await KnowledgeWikiService.CreatePageFromClipboardAsync(selectedStorePath, My.Computer.Clipboard.GetText(), _context)
+                ShowCustomMessageBox("Clipboard saved to Wiki!")
+                Return
+            End If
+
+            ' Run Knowledge Base health check / linter
+            If OtherPrompt.Equals("kbhealth", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to Lint:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Dim report = Await KnowledgeWikiService.LintWikiAsync(selectedStorePath, _context)
+                SP_MergePrompt_Cached = SP_MergePrompt
+
+                Dim response = ShowCustomWindow("Here is the health report of the Knowledge Store you have selected:", report, "You can copy it to the clipboard, if you wish.", "{AN} Knowledge Store")
+
+                Return
+            End If
 
             ' Knowledge store indexing commands
             If OtherPrompt.Equals("kbindex", StringComparison.OrdinalIgnoreCase) Then
@@ -1442,7 +1498,7 @@ Partial Public Class ThisAddIn
                     ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
                 Else
                     Dim answer As Integer = ShowCustomYesNoBox(
-                        "This will force a full re-index of all active Knowledge Stores, regenerating all metadata and wiki summaries. This may take a while and use API credits. Continue?",
+                        "This will force a full re-index of all active Knowledge Stores, regenerating all metadata and Wiki summaries. This may take a while and use API credits. Continue?",
                         "Yes, re-index", "No, cancel")
                     If answer = 1 Then
                         Await RunForegroundKnowledgeStoreIndexAsync(storeName:="", forceReindex:=True)
@@ -1460,11 +1516,31 @@ Partial Public Class ThisAddIn
                         "Example: kbaddstore Research|%UserProfile%\Documents\Research",
                         $"{AN} Knowledge Store")
                 Else
-                    Dim def = KnowledgeStoreCatalog.CreateDefinition(parts(0).Trim(), parts(1).Trim(), _context)
-                    Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
-                    allDefs.Add(def)
-                    KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
-                    ShowCustomMessageBox($"Knowledge Store '{def.Name}' created.", $"{AN} Knowledge Store")
+                    Dim storeName As String = parts(0).Trim()
+                    Dim rawPath As String = parts(1).Trim()
+
+                    ' 1. Resolve environment variables (e.g. %UserProfile%)
+                    Dim resolvedPath As String = SLib.ExpandEnvironmentVariables(rawPath)
+
+                    Try
+                        ' 2. Physically create the root directory if it doesn't exist
+                        If Not System.IO.Directory.Exists(resolvedPath) Then
+                            System.IO.Directory.CreateDirectory(resolvedPath)
+                        End If
+
+                        ' 3. Pre-initialize the Wiki and Raw subfolders so it's ready natively
+                        KnowledgeWikiService.InitializeWikiStructure(resolvedPath)
+
+                        ' 4. Save definition to the logical catalog
+                        Dim def = KnowledgeStoreCatalog.CreateDefinition(storeName, rawPath, _context)
+                        Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
+                        allDefs.Add(def)
+                        KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
+
+                        ShowCustomMessageBox($"Knowledge Store '{def.Name}' successfully created physically at:{vbCrLf}{resolvedPath}", $"{AN} Knowledge Store")
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Could not create directory at '{resolvedPath}'. Error: {ex.Message}", $"{AN} Knowledge Store")
+                    End Try
                 End If
                 Return
             End If
@@ -2567,7 +2643,8 @@ Partial Public Class ThisAddIn
                         ' Strip the trigger from OtherPrompt so it doesn't reach the LLM
                         OtherPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
 
-                        Dim kbResolved = KnowledgeTriggerHelper.ResolveKnowledge(kbRequest, _context)
+                        Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             ' Inject knowledge context into system prompt
                             SysPrompt = SysPrompt & vbCrLf & vbCrLf &

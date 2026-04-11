@@ -388,6 +388,234 @@ Namespace SharedLibrary
 
 #End Region
 
+#Region "Knowledge Resolution"
+
+        ''' <summary>
+        ''' Resolves a KnowledgeRequest to assembled document content ready for LLM injection.
+        ''' Uses the multi-store catalog and manifest infrastructure. If a search query is provided,
+        ''' it uses semantic vector search for ranking.
+        ''' </summary>
+        Public Shared Async Function ResolveKnowledgeAsync(
+                request As KnowledgeRequest,
+                context As ISharedContext) As Task(Of (Content As String, StatusMessage As String))
+
+            If request Is Nothing Then Return ("", "")
+
+            If Not KnowledgeStoreCatalog.IsConfigured(context) Then
+                Return ("", "Knowledge Store is not configured.")
+            End If
+
+            Dim stores = KnowledgeStoreCatalog.GetActiveStores(context)
+            If stores.Count = 0 Then
+                Return ("", "No active Knowledge Stores found.")
+            End If
+
+            ' Resolve store name from request (explicit or by matching CSV values against store names)
+            Dim targetStores As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) = Nothing
+            Dim resolvedStoreFromTag As Boolean = False
+
+            If Not String.IsNullOrWhiteSpace(request.StoreName) Then
+                ' Explicit store: prefix
+                Dim match = stores.FirstOrDefault(Function(s) s.Name.Equals(request.StoreName, StringComparison.OrdinalIgnoreCase))
+                If match IsNot Nothing Then
+                    targetStores = New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) From {match}
+                Else
+                    Return ("", $"Knowledge Store '{request.StoreName}' not found.")
+                End If
+            ElseIf request.Tags IsNot Nothing AndAlso request.Tags.Length = 1 AndAlso Not request.LoadAll Then
+                ' Single value in (kb:xxx) — check if it's a store name first
+                Dim singleVal = request.Tags(0)
+                Dim storeMatch = stores.FirstOrDefault(Function(s) s.Name.Equals(singleVal, StringComparison.OrdinalIgnoreCase))
+                If storeMatch IsNot Nothing Then
+                    targetStores = New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) From {storeMatch}
+                    resolvedStoreFromTag = True
+                    ' Clear tags since it was actually a store name
+                    request = New KnowledgeRequest() With {
+                        .LoadAll = True,
+                        .StoreName = singleVal,
+                        .RawTrigger = request.RawTrigger
+                    }
+                End If
+            End If
+
+            If targetStores Is Nothing Then
+                targetStores = stores
+            End If
+
+            ' =================================================================
+            ' 1. NEW SEMANTIC VECTOR SEARCH BRANCH
+            ' If the user provided a search term (rather than just loading all docs or explicit tags),
+            ' bypass legacy metadata scanning and route directly to the Embedding engine!
+            ' =================================================================
+            If Not request.LoadAll AndAlso request.Tags Is Nothing AndAlso Not String.IsNullOrWhiteSpace(request.SearchQuery) Then
+                Dim searchResults As New List(Of KnowledgeSearchResult)()
+
+                For Each store In targetStores
+                    Dim storeResults = Await KnowledgeEmbeddingService.SearchAsync(store.ResolvedSourcePath, request.SearchQuery, MaxDocuments, context)
+                    searchResults.AddRange(storeResults)
+                Next
+
+                If searchResults.Count = 0 Then
+                    Return ("", $"No semantic knowledge found matching '{request.SearchQuery}'.")
+                End If
+
+                ' Order across all stores by score
+                searchResults = searchResults.OrderByDescending(Function(x) x.Score).Take(MaxDocuments).ToList()
+
+                Dim semanticSb As New StringBuilder()
+                semanticSb.AppendLine(KnowledgeOpenTag)
+                Dim tChars As Integer = 0
+
+                For Each res In searchResults
+                    If String.IsNullOrWhiteSpace(res.TextChunk) Then Continue For
+                    If tChars + res.TextChunk.Length > MaxTotalChars Then Exit For
+
+                    Dim title = If(String.IsNullOrWhiteSpace(res.FilePath), "Unknown", Path.GetFileNameWithoutExtension(res.FilePath))
+
+                    ' Include the search ranking score as metadata context instead of the store name
+                    semanticSb.AppendLine(String.Format(DocOpenTag, SecurityElement.Escape(title), SecurityElement.Escape($"RankScore: {res.Score:F2}")))
+                    semanticSb.AppendLine(res.TextChunk)
+                    semanticSb.AppendLine(DocCloseTag)
+                    tChars += res.TextChunk.Length
+                Next
+                semanticSb.AppendLine(KnowledgeCloseTag)
+
+                Dim semanticMsg = $"Loaded top {searchResults.Count} matches via Semantic Search"
+                If Not String.IsNullOrWhiteSpace(request.StoreName) Then semanticMsg &= $" in store '{request.StoreName}'"
+                Return (semanticSb.ToString(), semanticMsg & ".")
+            End If
+
+
+            ' =================================================================
+            ' 2. LEGACY LOGIC / METADATA SEARCH (Fallback or LoadAll logic)
+            ' =================================================================
+            Dim allMatches As New List(Of Tuple(Of KnowledgeStoreManager.KnowledgeEntry, String, String))() ' (entry, storeName, wikiPath)
+
+            For Each store In targetStores
+                Dim manifest = KnowledgeStoreManifest.Load(store)
+                Dim wikiDir = KnowledgeStoreCatalog.GetWikiPath(store, createIfMissing:=False)
+
+                For Each entry In manifest.Entries
+                    If String.IsNullOrWhiteSpace(entry.FilePath) Then Continue For
+
+                    Dim include As Boolean = False
+
+                    If request.LoadAll Then
+                        include = True
+                    ElseIf request.Tags IsNot Nothing AndAlso request.Tags.Length > 0 Then
+                        ' Try tag match
+                        If entry.Tags IsNot Nothing Then
+                            For Each reqTag In request.Tags
+                                If entry.Tags.Any(Function(t) t.Equals(reqTag, StringComparison.OrdinalIgnoreCase)) Then
+                                    include = True
+                                    Exit For
+                                End If
+                            Next
+                        End If
+
+                        ' If no tag match, try keyword/title search
+                        If Not include AndAlso Not String.IsNullOrWhiteSpace(request.SearchQuery) Then
+                            Dim sq = request.SearchQuery.ToLowerInvariant()
+                            If If(entry.Title, "").ToLowerInvariant().Contains(sq) Then include = True
+                            If Not include AndAlso entry.Keywords IsNot Nothing Then
+                                If entry.Keywords.Any(Function(k) k.IndexOf(sq, StringComparison.OrdinalIgnoreCase) >= 0) Then
+                                    include = True
+                                End If
+                            End If
+                            If Not include AndAlso If(entry.Summary, "").ToLowerInvariant().Contains(sq) Then
+                                include = True
+                            End If
+                        End If
+                    Else
+                        include = True
+                    End If
+
+                    If include Then
+                        Dim wikiPath As String = ""
+                        If Not String.IsNullOrWhiteSpace(wikiDir) Then
+                            Dim safeName = SanitizeFileName(If(entry.Title, Path.GetFileNameWithoutExtension(If(entry.FilePath, "unknown"))))
+                            Dim candidate = Path.Combine(wikiDir, safeName & "-summary.md")
+                            If File.Exists(candidate) Then wikiPath = candidate
+                        End If
+                        allMatches.Add(Tuple.Create(entry, store.Name, wikiPath))
+                    End If
+                Next
+            Next
+
+            If allMatches.Count = 0 Then
+                Dim filterDesc = ""
+                If request.Tags IsNot Nothing Then filterDesc = String.Join(", ", request.Tags)
+                If Not String.IsNullOrWhiteSpace(request.StoreName) Then filterDesc = $"store '{request.StoreName}'"
+                Return ("", $"No Knowledge Store documents found matching '{filterDesc}'.")
+            End If
+
+            ' Limit and assemble
+            Dim entriesToLoad = allMatches.Take(MaxDocuments).ToList()
+            Dim sb As New StringBuilder()
+            sb.AppendLine(KnowledgeOpenTag)
+
+            Dim totalChars As Integer = 0
+            Dim loadedCount As Integer = 0
+
+            For Each item In entriesToLoad
+                Dim entry = item.Item1
+                Dim sName = item.Item2
+                Dim wikiPath = item.Item3
+
+                ' Prefer wiki summary if available
+                Dim content As String = ""
+                If Not String.IsNullOrWhiteSpace(wikiPath) Then
+                    Try
+                        content = File.ReadAllText(wikiPath, System.Text.Encoding.UTF8)
+                    Catch
+                    End Try
+                End If
+
+                ' Fall back to raw document
+                If String.IsNullOrWhiteSpace(content) Then
+                    content = KnowledgeStoreManager.GetContent(entry)
+                End If
+
+                If String.IsNullOrWhiteSpace(content) Then Continue For
+
+                If totalChars + content.Length > MaxTotalChars Then
+                    Dim remaining = MaxTotalChars - totalChars
+                    If remaining > 500 Then
+                        content = content.Substring(0, remaining) & vbCrLf & "... [truncated]"
+                    Else
+                        Exit For
+                    End If
+                End If
+
+                Dim title = If(entry.Title, Path.GetFileNameWithoutExtension(If(entry.FilePath, "Unknown")))
+                sb.AppendLine(String.Format(DocOpenTag, SecurityElement.Escape(title), SecurityElement.Escape(sName)))
+                sb.AppendLine(content)
+                sb.AppendLine(DocCloseTag)
+
+                totalChars += content.Length
+                loadedCount += 1
+            Next
+
+            sb.AppendLine(KnowledgeCloseTag)
+
+            If loadedCount = 0 Then
+                Return ("", "Knowledge Store documents could not be read.")
+            End If
+
+            Dim statusMsg = $"Loaded {loadedCount} document(s)"
+            If Not String.IsNullOrWhiteSpace(request.StoreName) Then
+                statusMsg &= $" from store '{request.StoreName}'"
+            End If
+            If request.Tags IsNot Nothing AndAlso request.Tags.Length > 0 AndAlso Not resolvedStoreFromTag Then
+                statusMsg &= $" for '{String.Join(", ", request.Tags)}'"
+            End If
+            statusMsg &= "."
+
+            Return (sb.ToString(), statusMsg)
+        End Function
+
+#End Region
+
 #Region "Helpers"
 
         Private Shared Function SanitizeFileName(name As String) As String

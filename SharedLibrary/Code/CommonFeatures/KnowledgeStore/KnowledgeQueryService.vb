@@ -176,6 +176,7 @@ Namespace SharedLibrary
             Return results
         End Function
 
+
         ''' <summary>
         ''' Builds a knowledge context block from the given matches for LLM prompt injection.
         ''' Prefers wiki summary pages when available; falls back to raw document content.
@@ -186,7 +187,8 @@ Namespace SharedLibrary
 
             Dim sb As New StringBuilder()
             sb.AppendLine("<KNOWLEDGESTORE>")
-            sb.AppendLine("The following knowledge documents have been provided for context:")
+            sb.AppendLine("The following knowledge documents have been provided for context.")
+            sb.AppendLine("IMPORTANT: Whenever you use or reference information from these documents, you MUST include a clickable source link in your answer using the precise markdown format: [Text](sourcePath).")
             sb.AppendLine()
 
             Dim totalChars As Integer = 0
@@ -220,7 +222,14 @@ Namespace SharedLibrary
 
                 Dim title = If(m.Entry.Title, Path.GetFileNameWithoutExtension(If(m.Entry.FilePath, "Unknown")))
                 Dim storeLabel = If(Not String.IsNullOrWhiteSpace(m.StoreName), m.StoreName, "")
-                sb.AppendLine($"<KSDOCUMENT title=""{System.Security.SecurityElement.Escape(title)}"" store=""{System.Security.SecurityElement.Escape(storeLabel)}"">")
+
+                ' Resolve true clickable local file URI
+                Dim safeURI = ""
+                If Not String.IsNullOrWhiteSpace(m.Entry.FilePath) Then
+                    safeURI = "file:///" & m.Entry.FilePath.Replace("\", "/")
+                End If
+
+                sb.AppendLine($"<KSDOCUMENT title=""{System.Security.SecurityElement.Escape(title)}"" store=""{System.Security.SecurityElement.Escape(storeLabel)}"" sourcePath=""{safeURI}"">")
                 sb.AppendLine(content)
                 sb.AppendLine("</KSDOCUMENT>")
                 sb.AppendLine()
@@ -232,6 +241,7 @@ Namespace SharedLibrary
             sb.AppendLine("</KNOWLEDGESTORE>")
             Return sb.ToString()
         End Function
+
 
         ''' <summary>
         ''' Convenience method: resolves a query and builds the context block in one call.

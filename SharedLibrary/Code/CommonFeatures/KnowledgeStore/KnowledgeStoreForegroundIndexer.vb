@@ -134,7 +134,7 @@ Namespace SharedLibrary
                 Try
                     Try
                         Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(
-                        item.FilePath, context, context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+                        item.FilePath, item.Store.ResolvedSourcePath, context, context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
 
                         If entry Is Nothing Then
                             result.FailedFiles += 1
