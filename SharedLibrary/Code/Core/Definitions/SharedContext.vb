@@ -285,6 +285,11 @@ Namespace SharedLibrary
 
             Property INI_DocCheckPath As String
             Property INI_DocCheckPathLocal As String
+            Property INI_KnowledgeStorePath As String
+            Property INI_KnowledgeStorePathLocal As String
+            Property INI_KnowledgeStoreUseLLMIndex As Boolean
+            Property INI_KnowledgeStoreOwner As String
+            Property INI_KnowledgeStoreBackgroundIndexing As Boolean
             Property INI_DocStylePath As String
             Property INI_DocStylePathLocal As String
             Property INI_PromptLibPath_Transcript As String
@@ -608,6 +613,12 @@ Namespace SharedLibrary
 
         Public Property INI_DocCheckPath As String Implements ISharedContext.INI_DocCheckPath
         Public Property INI_DocCheckPathLocal As String Implements ISharedContext.INI_DocCheckPathLocal
+        Public Property INI_KnowledgeStorePath As String Implements ISharedContext.INI_KnowledgeStorePath
+        Public Property INI_KnowledgeStorePathLocal As String Implements ISharedContext.INI_KnowledgeStorePathLocal
+        Public Property INI_KnowledgeStoreUseLLMIndex As Boolean Implements ISharedContext.INI_KnowledgeStoreUseLLMIndex
+        Public Property INI_KnowledgeStoreOwner As String Implements ISharedContext.INI_KnowledgeStoreOwner
+
+        Public Property INI_KnowledgeStoreBackgroundIndexing As Boolean Implements ISharedContext.INI_KnowledgeStoreBackgroundIndexing
         Public Property INI_DocStylePath As String Implements ISharedContext.INI_DocStylePath
         Public Property INI_DocStylePathLocal As String Implements ISharedContext.INI_DocStylePathLocal
         Public Property INI_PromptLibPath_Transcript As String Implements ISharedContext.INI_PromptLibPath_Transcript

@@ -1371,7 +1371,9 @@ Partial Public Class ThisAddIn
             {"PromptLibPath", "Prompt library file"},
             {"PromptLibPathLocal", "Prompt library file (local)"},
             {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
-            {"Location", "Location information to use, e.g., in 'Freestyle'"}
+            {"Location", "Location information to use, e.g., in 'Freestyle'"},
+            {"KnowledgeStorePath", "Knowledge store file (central)"},
+            {"KnowledgeStorePathLocal", "Knowledge store file (local)"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1388,7 +1390,9 @@ Partial Public Class ThisAddIn
             {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
             {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
             {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."},
-            {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."}
+            {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
+            {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
+            {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"}
         }
         ShowSettingsWindow(Settings, SettingsTips)
         Dim splash As New SplashScreen("Updating menu following your changes ...")

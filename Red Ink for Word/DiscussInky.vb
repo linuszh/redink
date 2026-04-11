@@ -133,6 +133,7 @@ Public Class DiscussInky
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
     Private Const ToolTrigger As String = "(t)"
+    Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured
     Private Const DefaultPersonaName As String = "Discussion Partner"
@@ -2398,6 +2399,12 @@ Public Class DiscussInky
             sb.Append(" | Knowledge: None loaded")
         End If
 
+        ' Knowledge store hint
+        If Not String.IsNullOrEmpty(Globals.ThisAddIn._context.INI_KnowledgeStorePath) OrElse
+           Not String.IsNullOrEmpty(Globals.ThisAddIn._context.INI_KnowledgeStorePathLocal) Then
+            sb.Append($" | Type '(kb)' to search all stores, '(kb:storename)' for a specific store, or '(kb:tag:...)' for tagged documents")
+        End If
+
         ' ToolTrigger hint
         If IsToolDefaultModelAvailable() Then
             sb.Append($" | Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request.")
@@ -2506,11 +2513,37 @@ Public Class DiscussInky
                 End If
             End If
 
+
+            ' (kb) / (kb:...) trigger: Supplement with knowledge store results
+            Dim kbContext As String = Nothing
+            Dim cleanedUserText = userText
+            If KnowledgeTriggerHelper.HasKnowledgeTrigger(cleanedUserText) Then
+                Try
+                    Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(cleanedUserText)
+                    If kbRequest IsNot Nothing Then
+                        ' Strip the trigger from user text so it doesn't reach the LLM
+                        cleanedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
+
+                        Dim kbResolved = KnowledgeTriggerHelper.ResolveKnowledge(kbRequest, _context)
+                        If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
+                            kbContext = kbResolved.Content
+                            AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")
+                        Else
+                            AppendSystemMessage(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
+                                                   "No documents found in the Knowledge Store.",
+                                                   $"Knowledge store: {kbResolved.StatusMessage}"))
+                        End If
+                    End If
+                Catch ex As Exception
+                    AppendSystemMessage($"Knowledge store query failed: {ex.Message}")
+                End Try
+            End If
+
             ' Build user prompt with knowledge and context
             Dim sb As New StringBuilder()
 
             sb.AppendLine("User message:")
-            sb.AppendLine(userText)
+            sb.AppendLine(cleanedUserText)
             sb.AppendLine()
 
             ' Include full knowledge document without truncation for smaller docs
@@ -2519,6 +2552,16 @@ Public Class DiscussInky
                 Dim knowledgeText = _knowledgeContent
                 sb.AppendLine(knowledgeText)
                 sb.AppendLine("</Knowledge Base>")
+                sb.AppendLine()
+            End If
+
+            ' Append knowledge store results (supplemental to manually loaded knowledge)
+            If Not String.IsNullOrWhiteSpace(kbContext) Then
+                sb.AppendLine("<Knowledge Store Results>")
+                sb.AppendLine("The following documents were retrieved from the knowledge store based on the user's query. " &
+                              "Use them as additional reference material alongside any loaded knowledge.")
+                sb.AppendLine(kbContext)
+                sb.AppendLine("</Knowledge Store Results>")
                 sb.AppendLine()
             End If
 
@@ -2645,6 +2688,7 @@ Public Class DiscussInky
 
                 Return
             End If
+
 
             ' ──────────────────────────────────────────────────────────────
             ' Standard LLM call (existing behavior)

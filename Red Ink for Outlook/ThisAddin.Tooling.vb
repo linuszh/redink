@@ -127,6 +127,31 @@ Partial Public Class ThisAddIn
         "If you cannot formulate a useful query without disclosing non-public information, " &
         "do NOT call this tool — instead respond based on your existing knowledge and state your uncertainty."
 
+    ' Knowledge Store Tooling (available only when KnowledgeStorePath or KnowledgeStorePathLocal is configured)
+
+    Private Const InternalKnowledgeToolName As String = "knowledge_search"
+
+    Private Const InternalKnowledgeToolDefinition As String =
+        "{""name"":""knowledge_search""," &
+        """description"":""Searches the user's local knowledge store (a curated collection of documents such as contracts, policies, legal briefs, " &
+        "manuals, and reference material) and returns the most relevant document content. Use this tool when the user's question " &
+        "relates to their own documents, internal policies, past work, or reference material that would not be found on the public internet. " &
+        "Do NOT use this tool for general knowledge questions or publicly available information — use your training data or internet_search instead.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """query"":{""type"":""string"",""description"":""A natural language search query describing what information is needed from the knowledge store. " &
+        "Supports optional prefixes: 'tag:tagname' to filter by tag, 'store:storename' to restrict to a specific store, " &
+        "or both 'tag:tagname store:storename'. Without prefixes, all stores are searched by keyword relevance.""}," &
+        """max_results"":{""type"":""integer"",""description"":""Maximum number of documents to retrieve (default: 5, max: 10).""}},""required"":[""query""]}}"
+
+    Private Const InternalKnowledgeToolInstructionsPrompt As String =
+        "knowledge_search: Searches the user's local knowledge store — a curated library of the user's own documents " &
+        "(contracts, policies, briefs, manuals, templates, reference material, etc.). " &
+        "Call this tool when the user's question relates to their own documents, internal policies, past work, or reference material. " &
+        "Provide query (required string) describing the information needed. Optionally provide max_results (integer, default 5). " &
+        "The query supports optional prefixes: 'tag:tagname' filters by document tag, 'store:storename' restricts to a specific knowledge store. " &
+        "Return value is the text content of the most relevant documents, each tagged with the document name and store. " &
+        "IMPORTANT: Do NOT use this tool for general knowledge or publicly available information — only for the user's own document library. " &
+        "When citing information from the results, mention the document name so the user can locate the source."
 
     ''' <summary>Minimum characters for a search hit to be considered relevant.</summary>
     Private Const ISearch_MinChars As Integer = 500
@@ -2036,6 +2061,25 @@ Partial Public Class ThisAddIn
         }
     End Function
 
+
+    ''' <summary>
+    ''' Creates a built-in internal knowledge store search tool configuration as a <see cref="ModelConfig"/>.
+    ''' Only meaningful when <c>INI_KnowledgeStorePath</c> or <c>INI_KnowledgeStorePathLocal</c> is configured
+    ''' and at least one knowledge store has an indexed manifest.
+    ''' </summary>
+    ''' <returns>Internal knowledge search tool configuration.</returns>
+    Public Function GetInternalKnowledgeTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalKnowledgeToolName,
+            .ToolInstructionsPrompt = InternalKnowledgeToolInstructionsPrompt,
+            .ToolDefinition = InternalKnowledgeToolDefinition,
+            .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 997,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
     ''' <summary>
     ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
@@ -2085,6 +2129,10 @@ Partial Public Class ThisAddIn
 
             ElseIf toolCall.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalSearchTool(toolCall, context, cancellationToken)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
+            ElseIf toolCall.ToolName.Equals(InternalKnowledgeToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = Await ExecuteInternalKnowledgeTool(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
             Else
@@ -2621,6 +2669,69 @@ Partial Public Class ThisAddIn
         Return response
     End Function
 
+
+    ''' <summary>
+    ''' Executes the internal knowledge store search tool by querying the merged index
+    ''' via KnowledgeQueryService and returning tagged document content blocks.
+    ''' </summary>
+    ''' <param name="toolCall">Tool call payload containing <c>query</c> and optional <c>max_results</c>.</param>
+    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
+    ''' <returns>Tool response containing relevant document content or an error.</returns>
+    Private Async Function ExecuteInternalKnowledgeTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName
+        }
+
+        Try
+            ' ── Extract parameters ──
+            Dim query As String = ""
+            If toolCall.Arguments.ContainsKey("query") Then
+                query = If(toolCall.Arguments("query")?.ToString(), "").Trim()
+            End If
+
+            If String.IsNullOrWhiteSpace(query) Then
+                response.Success = False
+                response.ErrorMessage = "No search query provided."
+                ToolingFileLogger.LogWarn("Internal knowledge tool: empty query.",
+                    details:=$"CallId={toolCall.CallId}; Args={Newtonsoft.Json.JsonConvert.SerializeObject(toolCall.Arguments)}")
+                Return response
+            End If
+
+            Dim maxResults As Integer = 5
+            If toolCall.Arguments.ContainsKey("max_results") Then
+                Dim mr As Integer
+                If Integer.TryParse(toolCall.Arguments("max_results")?.ToString(), mr) Then
+                    maxResults = Math.Min(Math.Max(1, mr), 10)
+                End If
+            End If
+
+            context.Log($"Knowledge search: ""{If(query.Length > 60, query.Substring(0, 60) & "...", query)}""")
+
+            ' ── Query via KnowledgeQueryService (Architecture A) ──
+            Dim knowledgeContext As String = SharedLibrary.SharedLibrary.KnowledgeQueryService.ResolveAndBuild(
+                query, _context, maxResults)
+
+            If String.IsNullOrWhiteSpace(knowledgeContext) Then
+                response.Success = True
+                response.Response = "No relevant documents found in the knowledge store for the given query."
+                Return response
+            End If
+
+            context.Log($"Knowledge search returned content ({knowledgeContext.Length:N0} chars).", "success")
+
+            response.Success = True
+            response.Response = knowledgeContext
+
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = $"Knowledge store search failed: {ex.Message}"
+            ToolingFileLogger.LogError("Internal knowledge tool error.", ex:=ex)
+        End Try
+
+        Return response
+    End Function
+
     ''' <summary>
     ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
     ''' the tool API call payload, and invoking <c>LLM</c> in JSON response mode.
@@ -2914,8 +3025,10 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Returns all available tools by loading external tools from <c>INI_SpecialServicePath</c>,
-    ''' adding the internal web tool, and conditionally adding the internal search tool
-    ''' (only when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured).
+    ''' adding the internal web tool, conditionally adding the internal search tool
+    ''' (only when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured),
+    ''' and conditionally adding the internal knowledge store search tool
+    ''' (only when a knowledge store path is configured and at least one store is indexed).
     ''' </summary>
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools() As List(Of ModelConfig)
@@ -2931,6 +3044,27 @@ Partial Public Class ThisAddIn
         ' Add internet search tool only when search grounding is enabled and configured
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
             tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
+        End If
+
+        ' Add knowledge store tool only when at least one store path is configured
+        If Not String.IsNullOrWhiteSpace(_context.INI_KnowledgeStorePath) OrElse
+           Not String.IsNullOrWhiteSpace(_context.INI_KnowledgeStorePathLocal) Then
+            Try
+                ' Only add if at least one active store has manifest entries
+                Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+                Dim hasEntries = stores.Any(Function(s)
+                                                Try
+                                                    Return KnowledgeStoreManifest.Load(s).Entries.Count > 0
+                                                Catch
+                                                    Return False
+                                                End Try
+                                            End Function)
+                If hasEntries Then
+                    tools.Add(GetInternalKnowledgeTool())
+                End If
+            Catch
+                ' Silently skip if KB check fails — tool just won't appear
+            End Try
         End If
 
         Return tools

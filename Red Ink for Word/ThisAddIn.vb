@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.4.2026
+' 11.4.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -49,7 +49,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.080426" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.110426" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -117,6 +117,8 @@ Partial Public Class ThisAddIn
     Private Const RefreshTrigger As String = "(refresh)"
     Private Const ToolSelectionTrigger As String = "(sources)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
     Public Const ToolFriendlyName As String = "Sources"  ' How to refer to tools (e.g., sources) towards the user
+    Private Const KbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger          ' "(kb)"
+    Private Const KbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix ' "(kb:"
 
     Private Const MaxFilibuster As Integer = 10000 ' Maximum number of words for filibuster mode 
     Private Const ArgueAgainstDefault As Integer = 50 ' Number of words to propose for Argue Against
@@ -292,6 +294,32 @@ Partial Public Class ThisAddIn
         "If you cannot formulate a useful query without disclosing non-public information, " &
         "do NOT call this tool — instead respond based on your existing knowledge and state your uncertainty."
 
+
+    ' Knowledge Store Tooling (available only when KnowledgeStorePath or KnowledgeStorePathLocal is configured)
+
+    Public Const InternalKnowledgeToolName As String = "knowledge_search"
+
+    Public Const InternalKnowledgeToolDefinition As String =
+        "{""name"":""knowledge_search""," &
+        """description"":""Searches the user's local knowledge store (a curated collection of documents such as contracts, policies, legal briefs, " &
+        "manuals, and reference material) and returns the most relevant document content. Use this tool when the user's question " &
+        "relates to their own documents, internal policies, past work, or reference material that would not be found on the public internet. " &
+        "Do NOT use this tool for general knowledge questions or publicly available information — use your training data or internet_search instead.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """query"":{""type"":""string"",""description"":""A natural language search query describing what information is needed from the knowledge store. " &
+        "Supports optional prefixes: 'tag:tagname' to filter by tag, 'store:storename' to restrict to a specific store, " &
+        "or both 'tag:tagname store:storename'. Without prefixes, all stores are searched by keyword relevance.""}," &
+        """max_results"":{""type"":""integer"",""description"":""Maximum number of documents to retrieve (default: 5, max: 10).""}},""required"":[""query""]}}"
+
+    Public Const InternalKnowledgeToolInstructionsPrompt As String =
+        "knowledge_search: Searches the user's local knowledge store — a curated library of the user's own documents " &
+        "(contracts, policies, briefs, manuals, templates, reference material, etc.). " &
+        "Call this tool when the user's question relates to their own documents, internal policies, past work, or reference material. " &
+        "Provide query (required string) describing the information needed. Optionally provide max_results (integer, default 5). " &
+        "The query supports optional prefixes: 'tag:tagname' filters by document tag, 'store:storename' restricts to a specific knowledge store. " &
+        "Return value is the text content of the most relevant documents, each tagged with the document name and store. " &
+        "IMPORTANT: Do NOT use this tool for general knowledge or publicly available information — only for the user's own document library. " &
+        "When citing information from the results, mention the document name so the user can locate the source."
 
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
 
@@ -495,14 +523,18 @@ Partial Public Class ThisAddIn
         Try
             InitializeAddInFeatures()
             StartupHttpListener()
+            ' Initialize Knowledge Store background indexing service
+            InitializeKnowledgeStoreService()
         Catch ex As System.Exception
             ' Handle exceptions gracefully.
         End Try
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
-        RemoveOldContextMenu()
+        ' Shut down Knowledge Store service
+        ShutdownKnowledgeStoreService()
         ShutdownHttpListener()
+        RemoveOldContextMenu()
     End Sub
 
     Public Sub InitializeAddInFeatures()

@@ -981,6 +981,32 @@ Partial Public Class ThisAddIn
 
     End Sub
 
+    ''' <summary>
+    ''' Opens the Knowledge Store management form.
+    ''' </summary>
+    Public Sub ShowKnowledgeStore()
+        Try
+            If Not _context.INIloaded Then
+                ShowCustomMessageBox($"{AN} is not configured. Please configure {AN} first.", AN)
+                Return
+            End If
+
+            If Not SharedLibrary.SharedLibrary.KnowledgeStoreCatalog.IsConfigured(_context) Then
+                ShowCustomMessageBox(
+                    $"The Knowledge Store is not configured. " &
+                    $"Please set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration " &
+                    $"(Settings → Configuration Wizard → Knowledge Store).", AN)
+                Return
+            End If
+
+            Using frm As New SharedLibrary.SharedLibrary.KnowledgeStoreForm(_context)
+                frm.ShowDialog()
+            End Using
+        Catch ex As System.Exception
+            ShowCustomMessageBox($"Error opening Knowledge Store: {ex.Message}", AN)
+        End Try
+    End Sub
+
 
     Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
 
@@ -1086,7 +1112,12 @@ Partial Public Class ThisAddIn
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
                 {"ToolingLogWindow", "Tooling: Show log window"},
                 {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
-                {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"}
+                {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                {"KnowledgeStorePath", "Knowledge store file (central)"},
+                {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
+                {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
+                {"KnowledgeStoreOwner", "Knowledge store: Default owner"},
+                {"KnowledgeStoreBackgroundIndexing", "Knowledge store: Background indexing"}
             }
         Dim SettingsTips As New Dictionary(Of String, String) From {
                 {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1126,7 +1157,12 @@ Partial Public Class ThisAddIn
                 {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
                 {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                 {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
-                {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."}
+                {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
+                {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
+                {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
+                {"KnowledgeStoreOwner", "Default owner identity for locally created stores (empty = current Windows username)"},
+                {"KnowledgeStoreBackgroundIndexing", "When enabled, new or changed documents in active stores are indexed automatically in the background"}
             }
 
         ShowSettingsWindow(Settings, SettingsTips)

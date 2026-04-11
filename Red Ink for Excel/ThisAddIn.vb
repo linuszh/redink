@@ -79,6 +79,7 @@ Partial Public Class ThisAddIn
     Private Const ObjectTrigger2 As String = "(clip)"
     Private Const ColorTrigger As String = "(color)"
     Private Const NoFormulasTrigger As String = "(noformulas)"
+    Private Const KBTrigger As String = "(kb)"
     Private Const RIMenu = AN
     Private Const MinHelperVersion = 1  ' Minimum version of the helper file that is required
     Public Const LargeWorksheetSize As Integer = 2500

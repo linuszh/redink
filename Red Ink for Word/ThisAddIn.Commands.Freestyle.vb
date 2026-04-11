@@ -1124,6 +1124,7 @@ Partial Public Class ThisAddIn
             Dim DoFiles As Boolean = False
             Dim DoAssemble As Boolean = False
             Dim DoShowModel As Boolean = False
+            Dim DoKB As Boolean = False
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -1320,6 +1321,12 @@ Partial Public Class ThisAddIn
                 AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
                 AddItem("insertclip", "Insert clipboard content at the cursor position.")
 
+                ' KNOWLEDGE STORE
+                AddItem("kbindex", "Index new/changed files across all active knowledge stores.")
+                AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
+                AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
+                AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
+
                 ' TOOLS / SOURCES
                 AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
                 AddItem("loadurl", "Retrieve the text of a particular URL given.")
@@ -1418,6 +1425,55 @@ Partial Public Class ThisAddIn
                 End If
 
             End If
+
+
+            ' Knowledge store indexing commands
+            If OtherPrompt.Equals("kbindex", StringComparison.OrdinalIgnoreCase) Then
+                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
+                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                Else
+                    Await RunForegroundKnowledgeStoreIndexAsync(storeName:="", forceReindex:=False)
+                End If
+                Return
+            End If
+
+            If OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase) Then
+                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
+                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                Else
+                    Dim answer As Integer = ShowCustomYesNoBox(
+                        "This will force a full re-index of all active Knowledge Stores, regenerating all metadata and wiki summaries. This may take a while and use API credits. Continue?",
+                        "Yes, re-index", "No, cancel")
+                    If answer = 1 Then
+                        Await RunForegroundKnowledgeStoreIndexAsync(storeName:="", forceReindex:=True)
+                    End If
+                End If
+                Return
+            End If
+
+            ' Add a new Knowledge Store via freestyle command
+            If OtherPrompt.StartsWith("kbaddstore", StringComparison.OrdinalIgnoreCase) Then
+                Dim parts = OtherPrompt.Substring("kbaddstore".Length).Trim().Split("|"c)
+                If parts.Length < 2 OrElse String.IsNullOrWhiteSpace(parts(0)) OrElse String.IsNullOrWhiteSpace(parts(1)) Then
+                    ShowCustomMessageBox(
+                        "Usage: kbaddstore Name|Path" & vbCrLf &
+                        "Example: kbaddstore Research|%UserProfile%\Documents\Research",
+                        $"{AN} Knowledge Store")
+                Else
+                    Dim def = KnowledgeStoreCatalog.CreateDefinition(parts(0).Trim(), parts(1).Trim(), _context)
+                    Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
+                    allDefs.Add(def)
+                    KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
+                    ShowCustomMessageBox($"Knowledge Store '{def.Name}' created.", $"{AN} Knowledge Store")
+                End If
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
+                ShowKnowledgeStore()
+                Return
+            End If
+
 
             ' Decode serial 
             If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then
@@ -2004,6 +2060,11 @@ Partial Public Class ThisAddIn
                 DoLib = True
             End If
 
+            ' (kb) or (kb:...) trigger: Query knowledge store and inject context
+            If KnowledgeTriggerHelper.HasKnowledgeTrigger(OtherPrompt) Then
+                DoKB = True
+            End If
+
             ' Track point markup trigger: Enable revision tracking in markup
             If OtherPrompt.IndexOf(TPMarkupTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(TPMarkupTrigger, "").Trim()
@@ -2497,6 +2558,29 @@ Partial Public Class ThisAddIn
                     If DoBubbles Then SysPrompt = SysPrompt & " " & SP_Add_Bubbles
                     If DoPushback Then SysPrompt = SysPrompt & " " & SP_Add_BubblesReply
                     If INI_MarkdownBubbles Then FormatInstruction = SP_Add_Bubbles_Format Else FormatInstruction = ""
+                End If
+
+                ' (kb) / (kb:...) trigger: Knowledge store RAG
+                If DoKB Then
+                    Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(OtherPrompt)
+                    If kbRequest IsNot Nothing Then
+                        ' Strip the trigger from OtherPrompt so it doesn't reach the LLM
+                        OtherPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+
+                        Dim kbResolved = KnowledgeTriggerHelper.ResolveKnowledge(kbRequest, _context)
+                        If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
+                            ' Inject knowledge context into system prompt
+                            SysPrompt = SysPrompt & vbCrLf & vbCrLf &
+                                "The following documents from the user's knowledge store are provided as reference material. " &
+                                "Use them to answer the user's question. When citing information, mention the document name." & vbCrLf &
+                                kbResolved.Content
+                        Else
+                            ShowCustomMessageBox(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
+                                                    "No documents found in the Knowledge Store.",
+                                                    kbResolved.StatusMessage), $"{AN} Knowledge Store")
+                            Exit Sub
+                        End If
+                    End If
                 End If
             End If
 

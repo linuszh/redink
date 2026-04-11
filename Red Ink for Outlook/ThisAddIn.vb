@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.4.2026
+' 11.4.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -59,7 +59,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.080426" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.110426" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -84,6 +84,7 @@ Partial Public Class ThisAddIn
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
     Private Const ToolTrigger As String = "(t)"
+    Private Const KBTrigger As String = "(kb)"
 
     Private Const ESC_KEY As Integer = &H1B
 
@@ -327,12 +328,16 @@ Partial Public Class ThisAddIn
 
         Try
             InitializeConfig(True, True)
+
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
             Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
             result = Globals.Ribbons.Ribbon2.UpdateRibbon()
             mainThreadControl.CreateControl()
             StartListenerWatchdog()
             StartupHttpListener()
+
+            ' Initialize Knowledge Store background indexing service
+            InitializeKnowledgeStoreService()
 
         Catch ex As System.Exception
             ' Handling errors gracefully
@@ -344,12 +349,20 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+
     End Sub
 
     ''' <summary>
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+
+        ' Shut down Knowledge Store service
+        Try
+            ShutdownKnowledgeStoreService()
+        Catch
+        End Try
+
         ' 1) deterministically stop the HTTP listener (await synchronously)
         Try
             Dim t As System.Threading.Tasks.Task = ShutdownHttpListener()
