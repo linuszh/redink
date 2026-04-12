@@ -1142,6 +1142,7 @@ Partial Public Class ThisAddIn
             Dim MyStyleInstruct As String = $"; add '{MyStyleTrigger}' to apply your personal style"
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
+            Dim KBInstruct As String = $"; add '{KnowledgeTriggerHelper.KbTrigger}' to search all stores or use '{KnowledgeTriggerHelper.KbTriggerPrefix}your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}store:StoreName your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}tag:TagName your query)' for Knowledge Store retrieval"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
             Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim AssembleInstruct As String = $"; use '{AssemblePrefix}' for assembling a document from templates"
@@ -1185,6 +1186,10 @@ Partial Public Class ThisAddIn
             End If
             If INI_ISearch Then
                 AddOnInstruct += NetInstruct.Replace("; add", ", ")
+            End If
+            If Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse
+               Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
+                AddOnInstruct += KBInstruct.Replace("; add", ", ")
             End If
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add", ", ")
@@ -1324,9 +1329,11 @@ Partial Public Class ThisAddIn
                 ' KNOWLEDGE STORE
                 AddItem("kbindex", "Index new/changed files across all active knowledge stores.")
                 AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
+                AddItem("kbrefreshvectors", "Rebuild embeddings from existing wiki pages only (use after changing the embedding model).")
                 AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
                 AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
+                AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
 
                 ' TOOLS / SOURCES
@@ -1470,7 +1477,7 @@ Partial Public Class ThisAddIn
                         items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
                         idx += 1
                     Next
-                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to Lint:", "Knowledge Store")
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to lint:", "Knowledge Store")
                     If chosen <= 0 Then Return
                     selectedStorePath = stores(chosen - 1).ResolvedSourcePath
                 End If
@@ -1483,27 +1490,233 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Knowledge store indexing commands
-            If OtherPrompt.Equals("kbindex", StringComparison.OrdinalIgnoreCase) Then
-                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
-                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
-                Else
-                    Await RunForegroundKnowledgeStoreIndexAsync(storeName:="", forceReindex:=False)
+            ' Run Knowledge Base repair only
+            If OtherPrompt.Equals("kbrepair", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
                 End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to repair:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Dim summary = Await KnowledgeWikiService.ApplyWikiHealthFixesAsync(
+                    kbRootPath:=selectedStorePath,
+                    context:=_context,
+                    includeLlmRepairs:=True)
+
+                SP_MergePrompt_Cached = SP_MergePrompt
+
+                Dim response = ShowCustomWindow(
+                    "Here is the summary of the Knowledge Store repair:",
+                    summary,
+                    "You can copy it to the clipboard, if you wish.",
+                    $"{AN} Knowledge Store")
+
                 Return
             End If
 
-            If OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase) Then
+            ' Knowledge store indexing commands
+            If OtherPrompt.Equals("kbindex", StringComparison.OrdinalIgnoreCase) OrElse
+               OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase) Then
+
                 If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
                     ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim forceReindex As Boolean = OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase)
+                Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No active Knowledge Stores found.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim selectedStoreName As String = ""
+
+                If stores.Count = 1 Then
+                    selectedStoreName = stores(0).Name
                 Else
-                    Dim answer As Integer = ShowCustomYesNoBox(
-                        "This will force a full re-index of all active Knowledge Stores, regenerating all metadata and Wiki summaries. This may take a while and use API credits. Continue?",
-                        "Yes, re-index", "No, cancel")
-                    If answer = 1 Then
-                        Await RunForegroundKnowledgeStoreIndexAsync(storeName:="", forceReindex:=True)
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    items.Add(New SLib.SelectionItem("All active Knowledge Stores", 1))
+
+                    Dim idx As Integer = 2
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem($"{s.Name} ({s.ResolvedSourcePath})", idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(
+                        items,
+                        1,
+                        "Select which Knowledge Store(s) to index:",
+                        "Knowledge Store")
+
+                    If chosen <= 0 Then Return
+
+                    If chosen > 1 Then
+                        selectedStoreName = stores(chosen - 2).Name
                     End If
                 End If
+
+                If forceReindex Then
+                    Dim targetText As String = If(String.IsNullOrWhiteSpace(selectedStoreName),
+                                                  "all active Knowledge Stores",
+                                                  $"Knowledge Store '{selectedStoreName}'")
+
+                    Dim answer As Integer = ShowCustomYesNoBox(
+                        $"This will force a full re-index of {targetText}, regenerating all metadata and Wiki summaries. This may take a while and use API credits. Continue?",
+                        "Yes, re-index", "No, cancel")
+
+                    If answer <> 1 Then Return
+                End If
+
+                Await RunForegroundKnowledgeStoreIndexAsync(
+                    storeName:=selectedStoreName,
+                    forceReindex:=forceReindex)
+
+                Return
+            End If
+
+            If OtherPrompt.Equals("kbrefreshvectors", StringComparison.OrdinalIgnoreCase) OrElse
+               OtherPrompt.Equals("kbrefreshembeddings", StringComparison.OrdinalIgnoreCase) Then
+
+                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
+                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No active Knowledge Stores found.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim targetStores As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
+
+                If stores.Count = 1 Then
+                    targetStores.Add(stores(0))
+                Else
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    items.Add(New SLib.SelectionItem("All active Knowledge Stores", 1))
+
+                    Dim idx As Integer = 2
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem($"{s.Name} ({s.ResolvedSourcePath})", idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(
+                        items,
+                        1,
+                        "Select which Knowledge Store(s) to rebuild embeddings for:",
+                        "Knowledge Store")
+
+                    If chosen <= 0 Then Return
+
+                    If chosen = 1 Then
+                        targetStores.AddRange(stores)
+                    Else
+                        targetStores.Add(stores(chosen - 2))
+                    End If
+                End If
+
+                Dim CountEmbeddableWikiPages As Func(Of String, Integer) =
+                    Function(kbStoreRoot As String) As Integer
+                        If String.IsNullOrWhiteSpace(kbStoreRoot) Then Return 0
+
+                        Dim wikiRoot As String = Path.Combine(kbStoreRoot, ".redink", KnowledgeStoreCatalog.WikiFolder)
+                        If Not Directory.Exists(wikiRoot) Then Return 0
+
+                        Dim count As Integer = 0
+
+                        For Each filePath In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
+                            Dim name As String = Path.GetFileName(filePath)
+
+                            If name.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            If name.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            If name.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                            count += 1
+                        Next
+
+                        Return count
+                    End Function
+
+                Dim totalPages As Integer = 0
+                For Each store In targetStores
+                    totalPages += CountEmbeddableWikiPages(store.ResolvedSourcePath)
+                Next
+
+                If totalPages = 0 Then
+                    ShowCustomMessageBox("No wiki pages were found to rebuild embeddings for.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim targetText As String = If(targetStores.Count = 1,
+                                              $"Knowledge Store '{targetStores(0).Name}'",
+                                              "all active Knowledge Stores")
+
+                Dim answer As Integer = ShowCustomYesNoBox(
+                    $"This will rebuild the embedding index for {targetText} from the existing wiki pages using the currently configured embedding model. Continue?",
+                    "Yes, rebuild embeddings", "No, cancel")
+
+                If answer <> 1 Then Return
+
+                ProgressBarModule.GlobalProgressValue = 0
+                ProgressBarModule.GlobalProgressMax = totalPages
+                ProgressBarModule.GlobalProgressLabel = "Preparing embedding rebuild..."
+                ProgressBarModule.CancelOperation = False
+                ProgressBarModule.ShowProgressBarInSeparateThread(
+                    $"{AN} Knowledge Store — Embeddings",
+                    "Refreshing embeddings...")
+
+                Dim rebuiltPages As Integer = 0
+                Dim progressOffset As Integer = 0
+
+                Try
+                    For Each store In targetStores
+                        If ProgressBarModule.CancelOperation Then Exit For
+
+                        Dim storePageCount As Integer = CountEmbeddableWikiPages(store.ResolvedSourcePath)
+
+                        rebuiltPages += Await KnowledgeEmbeddingService.RebuildAllWikiEmbeddingsAsync(
+                            kbRootPath:=store.ResolvedSourcePath,
+                            context:=_context,
+                            progressPrefix:=store.Name,
+                            progressOffset:=progressOffset,
+                            progressTotal:=totalPages)
+
+                        progressOffset += storePageCount
+                    Next
+                Finally
+                    Dim wasCancelled As Boolean = ProgressBarModule.CancelOperation
+                    ProgressBarModule.CancelOperation = True
+
+                    If wasCancelled Then
+                        ShowCustomMessageBox(
+                            $"Embedding rebuild was cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
+                            $"{AN} Knowledge Store")
+                    Else
+                        ShowCustomMessageBox(
+                            $"Embedding rebuild complete. Refreshed {rebuiltPages} wiki page embedding set(s) across {targetStores.Count} store(s).",
+                            $"{AN} Knowledge Store")
+                    End If
+                End Try
+
                 Return
             End If
 
@@ -2640,8 +2853,25 @@ Partial Public Class ThisAddIn
                 If DoKB Then
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(OtherPrompt)
                     If kbRequest IsNot Nothing Then
-                        ' Strip the trigger from OtherPrompt so it doesn't reach the LLM
-                        OtherPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+                        ' Strip the trigger from OtherPrompt so it doesn't reach the LLM.
+                        ' If the trigger itself carried the actual user query, preserve that intent.
+                        Dim strippedPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+
+                        If String.IsNullOrWhiteSpace(strippedPrompt) Then
+                            If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
+                                OtherPrompt = kbRequest.SearchQuery.Trim()
+                            ElseIf kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0 Then
+                                OtherPrompt = "Answer based on the provided Knowledge Store content, focusing on: " &
+                                              String.Join(", ", kbRequest.Tags)
+                            ElseIf Not String.IsNullOrWhiteSpace(kbRequest.StoreName) Then
+                                OtherPrompt = "Answer based on the provided Knowledge Store content from store '" &
+                                              kbRequest.StoreName & "'."
+                            Else
+                                OtherPrompt = "Answer based on the provided Knowledge Store content."
+                            End If
+                        Else
+                            OtherPrompt = strippedPrompt
+                        End If
 
                         Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
 
@@ -2649,7 +2879,11 @@ Partial Public Class ThisAddIn
                             ' Inject knowledge context into system prompt
                             SysPrompt = SysPrompt & vbCrLf & vbCrLf &
                                 "The following documents from the user's knowledge store are provided as reference material. " &
-                                "Use them to answer the user's question. When citing information, mention the document name." & vbCrLf &
+                                "Use them to answer the user's question. " &
+                                "When citing information, prefer clickable markdown citations. " &
+                                "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
+                                "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                                "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata." & vbCrLf &
                                 kbResolved.Content
                         Else
                             ShowCustomMessageBox(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),

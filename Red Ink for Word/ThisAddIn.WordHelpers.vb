@@ -3495,6 +3495,9 @@ Partial Public Class ThisAddIn
     ''' extracts text (excluding final paragraph marks) → calls CompareAndInsert or CompareAndInsertComparedoc
     ''' based on INI_MarkupMethodHelper setting (1 = CompareDoc method, other = direct insert method).
     ''' Empty paragraphs (length ≤ 1 after trim) are ignored in counting.
+    ''' For markup method 2 (surgical), arguments are swapped: text2 becomes the "original" and text1
+    ''' becomes the "revised", because secondRange already contains text2 and the surgical method
+    ''' patches the target range in-place (it expects the range to contain the original text).
     ''' </remarks>
     Public Sub CompareSelectionHalves()
 
@@ -3545,7 +3548,8 @@ Partial Public Class ThisAddIn
         If INI_MarkupMethodHelper = 1 Then
             CompareAndInsertComparedoc(text1, text2, secondRange)
         ElseIf INI_MarkupMethodHelper = 2 Then
-            CompareAndInsertSurgical(text1, text2, secondRange)
+
+            CompareAndInsertSurgical(text2, text1, secondRange)
         Else
             CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
         End If

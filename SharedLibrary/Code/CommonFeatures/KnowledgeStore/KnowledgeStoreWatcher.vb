@@ -3,24 +3,28 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreWatcher.vb
-' Purpose: Monitors Knowledge Store directories for new/modified documents and
-'          queues them for background indexing. Usable from any host (Word, Outlook, Excel).
+' Purpose:
+'   Monitors active, writable Knowledge Store directories for file changes and
+'   queues supported documents for incremental background indexing.
 '
-' Hardening:
-'  - The pending queue is in-memory (ConcurrentQueue); losing it on crash is safe
-'    because the next periodic scan will re-detect unindexed files.
-'  - Manifest writes use atomic save (write .tmp, then rename).
-'  - Wiki/log writes are fire-and-forget; failure does not corrupt the manifest.
-'  - FileSystemWatcher errors are logged but never propagate to the host.
-'  - ProcessPendingAsync uses SemaphoreSlim to prevent overlapping ticks.
-'  - Individual file indexing failures do not stop the batch.
+' Responsibilities:
+'   - Create and manage `FileSystemWatcher` instances for active stores.
+'   - Detect newly created or modified source documents.
+'   - Maintain an in-memory pending queue of files awaiting indexing.
+'   - Perform periodic scans to recover missed events and discover files not yet
+'     captured by watcher notifications.
+'   - Process a limited number of queued files per idle tick and return
+'     per-file indexing results.
+'   - Keep failures isolated so one bad file or watcher error does not stop the
+'     overall background indexing pipeline.
 '
-' Future enhancements (planned for next iteration):
-'  - LLM-powered summary generation during indexing (calling SP_KB_Index prompt).
-'  - Entity extraction and cross-referencing across wiki pages.
-'  - Contradiction detection when new sources conflict with existing wiki content.
-'  - Query-driven page generation (filing answers back into the wiki).
-'  - Lint/health-check pass (orphan pages, stale summaries, missing cross-refs).
+' Notes:
+'   - The queue is intentionally in-memory; missed items are recovered by later
+'     scans.
+'   - Actual document processing is delegated to
+'     `KnowledgeStoreProcessingService`.
+'   - Designed for use from host idle services such as
+'     `KnowledgeStoreIdleService`.
 ' =============================================================================
 
 Option Strict On
@@ -223,6 +227,11 @@ Namespace SharedLibrary
 
                             Dim entry = manifest.FindByPath(filePath)
                             If entry Is Nothing Then
+                                Dim legacyRawCandidate = Path.Combine(store.ResolvedSourcePath, ".redink", "Raw", Path.GetFileName(filePath))
+                                entry = manifest.FindByPath(legacyRawCandidate)
+                            End If
+
+                            If entry Is Nothing Then
                                 OnFileDetected(filePath, store.Name)
                             Else
                                 Try
@@ -252,7 +261,7 @@ Namespace SharedLibrary
         Public Async Function ProcessPendingAsync(Optional maxFiles As Integer = MaxFilesPerTick) As Task(Of List(Of IndexResult))
             Dim results As New List(Of IndexResult)()
             If Not Await _processLock.WaitAsync(0).ConfigureAwait(False) Then
-                Return results ' Another tick is still running
+                Return results
             End If
 
             Dim trayIcon As System.Windows.Forms.NotifyIcon = Nothing
@@ -261,7 +270,6 @@ Namespace SharedLibrary
                 Dim processed As Integer = 0
                 Dim startCount As Integer = _pendingFiles.Count
 
-                ' Show non-intrusive Tray Icon for background KB reporting
                 If startCount > 0 AndAlso _context.INI_KnowledgeStoreUseLLMIndex Then
                     Try
                         trayIcon = New System.Windows.Forms.NotifyIcon()
@@ -278,7 +286,6 @@ Namespace SharedLibrary
 
                     Dim safeFileName = Path.GetFileName(pending.FilePath)
 
-                    ' Update Tray Icon smoothly without interrupting user
                     If trayIcon IsNot Nothing Then
                         Dim statusText = $"Knowledge Store ({processed + 1}/{startCount}): {safeFileName}"
                         trayIcon.Text = If(statusText.Length > 63, statusText.Substring(0, 60) & "...", statusText)
@@ -302,30 +309,29 @@ Namespace SharedLibrary
                             Continue While
                         End If
 
-                        Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(pending.FilePath, store.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+                        Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
+                            store:=store,
+                            filePath:=pending.FilePath,
+                            context:=_context,
+                            useLlmIndex:=_context.INI_KnowledgeStoreUseLLMIndex,
+                            isBackground:=True).ConfigureAwait(False)
 
-                        If entry Is Nothing Then
-                            result.ErrorMessage = "Indexer returned nothing."
+                        If Not processResult.Success OrElse processResult.Entry Is Nothing Then
+                            result.ErrorMessage = processResult.ErrorMessage
                             results.Add(result)
                             processed += 1
                             Continue While
                         End If
 
-                        Dim manifest = KnowledgeStoreManifest.Load(store)
-                        manifest.AddOrUpdate(entry)
-                        manifest.Save(store)
-
-                        ' Wiki pages — fire-and-forget; failures here do NOT affect the manifest
-                        Try : WriteWikiSummaryPage(store, entry) : Catch : End Try
-                        Try : UpdateIndexFile(store, entry) : Catch : End Try
-                        Try : AppendLogEntry(store, entry) : Catch : End Try
-
                         result.Success = True
-                        result.Title = entry.Title
+                        result.Title = processResult.Entry.Title
 
                     Catch ex As Exception
                         result.ErrorMessage = ex.Message
-                        KnowledgeWikiService.LogWikiError(KnowledgeStoreCatalog.GetStoreByName(pending.StoreName, _context)?.ResolvedSourcePath, pending.FilePath, ex.Message)
+                        KnowledgeWikiService.LogWikiError(
+                            KnowledgeStoreCatalog.GetStoreByName(pending.StoreName, _context)?.ResolvedSourcePath,
+                            pending.FilePath,
+                            ex.Message)
                     End Try
 
                     results.Add(result)
@@ -333,7 +339,6 @@ Namespace SharedLibrary
                 End While
 
             Finally
-                ' Ensure tray icon is explicitly destroyed after batch finishes
                 If trayIcon IsNot Nothing Then
                     trayIcon.Visible = False
                     trayIcon.Dispose()

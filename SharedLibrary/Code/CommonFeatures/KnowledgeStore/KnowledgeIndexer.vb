@@ -3,14 +3,31 @@
 '
 ' =============================================================================
 ' File: KnowledgeIndexer.vb
-' Purpose: Indexes documents for the Knowledge Store by extracting text content
-'          and generating searchable metadata (title, summary, keywords).
+' Purpose:
+'   Indexes source documents for a Knowledge Store by extracting readable text,
+'   deriving metadata, and optionally triggering wiki/embedding generation.
 '
-' Architecture / How it works:
-'  - Reads the document using existing SharedLibrary file-reading utilities.
-'  - When UseLLMIndex is True, it triggers the Agentic KnowledgeWikiService
-'    to generate a persistent Markdown concept page and vector embeddings.
-'  - Returns a KnowledgeEntry ready for persistence in the local index.
+' Responsibilities:
+'   - Document ingest:
+'       * Read supported source files via shared file-reading utilities.
+'       * Normalize extracted text and cap stored/raw summary sizes.
+'       * Skip unsupported or unreadable files safely.
+'   - Metadata generation:
+'       * Derive title, summary, and keywords from document content.
+'       * Optionally use the LLM-based indexing prompt for richer metadata.
+'   - Knowledge Store integration:
+'       * Return populated `KnowledgeStoreManager.KnowledgeEntry` objects
+'         ready for manifest persistence.
+'       * Optionally invoke agentic wiki generation and embedding refresh for
+'         the indexed document.
+'   - Diagnostics and safety:
+'       * Limit LLM input sizes.
+'       * Keep indexing resilient for background and foreground runs.
+'
+' Notes:
+'   - Supported file types are defined by `SupportedExtensions`.
+'   - This service is used by the Knowledge Store watcher, foreground indexer,
+'     and other indexing workflows.
 ' =============================================================================
 
 Option Strict On
@@ -76,7 +93,8 @@ Namespace SharedLibrary
                 filePath As String,
                 kbRootPath As String,
                 context As ISharedContext,
-                Optional useLLMIndex As Boolean = False) As Task(Of KnowledgeStoreManager.KnowledgeEntry)
+                Optional useLLMIndex As Boolean = False,
+                Optional isBackground As Boolean = False) As Task(Of KnowledgeStoreManager.KnowledgeEntry)
 
             Dim expandedPath = SharedMethods.ExpandEnvironmentVariables(If(filePath, "").Trim().Trim(""""c, "'"c))
             If Not File.Exists(expandedPath) Then Return Nothing
@@ -86,13 +104,19 @@ Namespace SharedLibrary
             If Not SupportedExtensions.Contains(ext) Then Return Nothing
 
             ' Ensure the physical Raw directory exists to persist the document if it isn't there already
-            Dim rawPath = Path.Combine(kbRootPath, "Raw")
+            Dim rawPath = Path.Combine(kbRootPath, ".redink", "Raw")
             If Not Directory.Exists(rawPath) Then Directory.CreateDirectory(rawPath)
 
             Dim finalSourcePath As String = expandedPath
             If Not expandedPath.StartsWith(rawPath, StringComparison.OrdinalIgnoreCase) Then
                 Try
-                    finalSourcePath = Path.Combine(rawPath, Path.GetFileName(expandedPath))
+                    finalSourcePath = BuildRawSnapshotPath(kbRootPath, expandedPath)
+
+                    Dim finalDir = Path.GetDirectoryName(finalSourcePath)
+                    If Not String.IsNullOrWhiteSpace(finalDir) AndAlso Not Directory.Exists(finalDir) Then
+                        Directory.CreateDirectory(finalDir)
+                    End If
+
                     File.Copy(expandedPath, finalSourcePath, overwrite:=True)
                 Catch ex As Exception
                     finalSourcePath = expandedPath
@@ -123,7 +147,11 @@ Namespace SharedLibrary
             If useLLMIndex Then
                 Try
                     ' 1. Orchestrator: Generate physical Wiki Page and update vector database
-                    Await KnowledgeWikiService.IngestSourceAsync(kbRootPath, finalSourcePath, context)
+                    Await KnowledgeWikiService.IngestSourceAsync(
+                        kbRootPath,
+                        If(File.Exists(expandedPath), expandedPath, finalSourcePath),
+                        context,
+                        isBackground:=isBackground)
 
                     ' 2. Metadata enrichment
                     Dim backupConfig As ModelConfig = Nothing
@@ -140,16 +168,44 @@ Namespace SharedLibrary
                             End If
                         End If
 
-                        If content.Length <= KnowledgeWikiService.MaxChunkChars Then
-                            llmResponse = Await SharedMethods.LLM(
-                                context:=context,
-                                promptSystem:=LLMIndexPrompt,
-                                promptUser:=content,
-                                UseSecondAPI:=useAlternateAPI,
-                                Hidesplash:=True).ConfigureAwait(False)
-                        Else
-                            llmResponse = Await KnowledgeWikiService.ProcessLargeTextInChunksAsync(context, LLMIndexPrompt, content, useAlternateAPI, Path.GetFileName(finalSourcePath))
-                        End If
+                        Dim llmAttempts As Integer = Math.Max(1, KnowledgeWikiService.IngestionLlmEmptyRetryCount + 1)
+
+                        For attempt As Integer = 1 To llmAttempts
+                            If isBackground Then
+                                If KnowledgeWikiService.IngestionLlmThrottleBackgroundMs > 0 Then
+                                    Await Task.Delay(KnowledgeWikiService.IngestionLlmThrottleBackgroundMs).ConfigureAwait(False)
+                                End If
+                            Else
+                                If KnowledgeWikiService.IngestionLlmThrottleForegroundMs > 0 Then
+                                    Await Task.Delay(KnowledgeWikiService.IngestionLlmThrottleForegroundMs).ConfigureAwait(False)
+                                End If
+                            End If
+
+                            If content.Length <= KnowledgeWikiService.MaxChunkChars Then
+                                llmResponse = Await SharedMethods.LLM(
+                                    context:=context,
+                                    promptSystem:=LLMIndexPrompt,
+                                    promptUser:=content,
+                                    UseSecondAPI:=useAlternateAPI,
+                                    Hidesplash:=True).ConfigureAwait(False)
+                            Else
+                                llmResponse = Await KnowledgeWikiService.ProcessLargeTextInChunksAsync(
+                                    context:=context,
+                                    systemPrompt:=LLMIndexPrompt,
+                                    fullText:=content,
+                                    useAlternateAPI:=useAlternateAPI,
+                                    fileName:=Path.GetFileName(finalSourcePath),
+                                    isBackground:=isBackground).ConfigureAwait(False)
+                            End If
+
+                            If Not String.IsNullOrWhiteSpace(llmResponse) Then
+                                Exit For
+                            End If
+
+                            If attempt < llmAttempts AndAlso KnowledgeWikiService.IngestionLlmEmptyRetryDelayMs > 0 Then
+                                Await Task.Delay(KnowledgeWikiService.IngestionLlmEmptyRetryDelayMs).ConfigureAwait(False)
+                            End If
+                        Next
 
                     Finally
                         If backupConfig IsNot Nothing Then
@@ -173,7 +229,7 @@ Namespace SharedLibrary
 
             ' Create entry for the ephemeral catalog indexer
             Dim entry As New KnowledgeStoreManager.KnowledgeEntry() With {
-                .FilePath = finalSourcePath,
+                .FilePath = expandedPath,
                 .Title = title,
                 .Summary = summary,
                 .Keywords = keywords,
@@ -187,6 +243,50 @@ Namespace SharedLibrary
 
             Return entry
         End Function
+
+
+        Private Shared Function BuildRawSnapshotPath(kbRootPath As String, originalPath As String) As String
+            Dim rawRoot = Path.Combine(kbRootPath, ".redink", "Raw")
+            Dim relativePath As String = Path.GetFileName(originalPath)
+
+            Try
+                Dim fullKbRoot = Path.GetFullPath(kbRootPath)
+                Dim fullOriginal = Path.GetFullPath(originalPath)
+
+                If fullOriginal.StartsWith(fullKbRoot & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+                    relativePath = GetRelativePathCompat(fullKbRoot, fullOriginal)
+                End If
+            Catch
+            End Try
+
+            relativePath = relativePath.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Return Path.Combine(rawRoot, relativePath)
+        End Function
+
+        Private Shared Function GetRelativePathCompat(basePath As String, targetPath As String) As String
+            Try
+                If String.IsNullOrWhiteSpace(basePath) Then Return targetPath
+                If String.IsNullOrWhiteSpace(targetPath) Then Return ""
+
+                Dim normalizedBase = Path.GetFullPath(basePath)
+                Dim normalizedTarget = Path.GetFullPath(targetPath)
+
+                If Not normalizedBase.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) Then
+                    normalizedBase &= Path.DirectorySeparatorChar
+                End If
+
+                Dim baseUri As New Uri(normalizedBase, UriKind.Absolute)
+                Dim targetUri As New Uri(normalizedTarget, UriKind.Absolute)
+
+                Dim relativeUri = baseUri.MakeRelativeUri(targetUri)
+                Dim relativePath = Uri.UnescapeDataString(relativeUri.ToString())
+
+                Return relativePath.Replace("/"c, Path.DirectorySeparatorChar)
+            Catch
+                Return Path.GetFileName(targetPath)
+            End Try
+        End Function
+
 
         ''' <summary>
         ''' Parses the structured LLM response into title, summary, and keywords.
@@ -334,6 +434,15 @@ Namespace SharedLibrary
                 Take(20).
                 Select(Function(kv) kv.Key.ToLowerInvariant()).
                 ToArray()
+        End Function
+
+        ''' <summary>
+        ''' Reads source text using the same robust extraction logic used for indexing.
+        ''' </summary>
+        Public Shared Async Function ReadSourceTextAsync(filePath As String, context As ISharedContext) As Task(Of String)
+            Dim expandedPath = SharedMethods.ExpandEnvironmentVariables(If(filePath, "").Trim().Trim(""""c, "'"c))
+            If String.IsNullOrWhiteSpace(expandedPath) OrElse Not File.Exists(expandedPath) Then Return ""
+            Return Await ReadFileForIndexAsync(expandedPath, context).ConfigureAwait(False)
         End Function
 
     End Class

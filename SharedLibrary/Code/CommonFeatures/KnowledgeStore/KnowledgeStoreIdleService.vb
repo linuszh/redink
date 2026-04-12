@@ -3,17 +3,21 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreIdleService.vb
-' Purpose: Singleton service that hosts (Word, Outlook, Excel) call from their
-'          idle/timer callbacks to drive background Knowledge Store indexing.
+' Purpose:
+'   Hosts the shared background-indexing lifecycle used by Office hosts
+'   (Word, Outlook, Excel) from their idle or timer callbacks.
 '
-' Usage from host:
-'   1. At startup: KnowledgeStoreIdleService.Initialize(context)
-'      Will query My.Settings.EnableKBBackgroundIndexing to evaluate startup state.
-'   2. Toggle: KnowledgeStoreIdleService.SetEnabled(True/False)
-'   3. From timer/idle: Await KnowledgeStoreIdleService.OnIdleTickAsync()
-'   4. At shutdown: KnowledgeStoreIdleService.Shutdown()
+' Responsibilities:
+'   - Initialize and retain the shared Knowledge Store watcher instance.
+'   - Enable or disable background indexing based on persisted user settings.
+'   - Trigger periodic scans and incremental processing during idle ticks.
+'   - Keep the shared context synchronized with the current enabled state.
+'   - Shut down watcher resources cleanly when the host closes.
 '
-' The host is responsible for persisting the enabled state in My.Settings.
+' Notes:
+'   - Hosts call `Initialize`, `SetEnabled`, `OnIdleTickAsync`, and `Shutdown`.
+'   - The host remains responsible for deciding when it is truly idle enough to
+'     call this service.
 ' =============================================================================
 
 Option Strict On

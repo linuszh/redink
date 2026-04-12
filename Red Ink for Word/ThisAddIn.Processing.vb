@@ -2783,6 +2783,10 @@ Partial Public Class ThisAddIn
         Dim originalScreenUpdating As Boolean = wordApp.ScreenUpdating
         Dim rng As Word.Range
 
+        ' Track the target document's TrackRevisions state so we can restore it
+        Dim targetDoc As Word.Document = targetrange.Document
+        Dim originalTrackRevisions As Boolean = targetDoc.TrackRevisions
+
         Try
             ' Disable screen updating to reduce flickers
             wordApp.ScreenUpdating = False
@@ -2832,14 +2836,29 @@ Partial Public Class ThisAddIn
             ' Copy the comparison document's content while keeping the original format
             comparisonDoc.Content.Copy()
 
+            ' Disable TrackRevisions on the target document BEFORE pasting.
+            ' If TrackRevisions is on, Word will record the entire paste as
+            ' a new tracked insertion ON TOP of the revisions already embedded
+            ' in the comparison document — causing the changed parts to appear
+            ' both as tracked changes and as plain (duplicated) text.
+            targetDoc.TrackRevisions = False
+
             ' Insert the compared content at the specified range
             targetrange.Paste()
+
+            ' Re-enable TrackRevisions so that the pasted revisions (from the
+            ' comparison document) are visible and any subsequent user edits
+            ' continue to be tracked.
+            targetDoc.TrackRevisions = True
 
         Catch ex As System.Exception
             MessageBox.Show("Error in CompareAndInsertComparedoc: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
             ' Restore screen updating
             wordApp.ScreenUpdating = originalScreenUpdating
+
+            ' Restore the original TrackRevisions state
+            targetDoc.TrackRevisions = originalTrackRevisions
 
             ' Restore the original author name
             'wordApp.UserName = originalAuthor
@@ -2853,6 +2872,7 @@ Partial Public Class ThisAddIn
 
         End Try
     End Sub
+
 
     ''' <summary>
     ''' Generates inline diff markup using DiffPlex, converting word-by-word changes into [INS_START]/[DEL_START] tags.

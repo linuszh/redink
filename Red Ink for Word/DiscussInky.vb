@@ -2521,13 +2521,36 @@ Public Class DiscussInky
                 Try
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(cleanedUserText)
                     If kbRequest IsNot Nothing Then
-                        ' Strip the trigger from user text so it doesn't reach the LLM
-                        cleanedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
+                        Dim strippedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
+
+                        If String.IsNullOrWhiteSpace(strippedUserText) Then
+                            If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
+                                cleanedUserText = kbRequest.SearchQuery.Trim()
+                            ElseIf kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0 Then
+                                cleanedUserText = "Answer based on the provided Knowledge Store content, focusing on: " &
+                                                  String.Join(", ", kbRequest.Tags)
+                            ElseIf Not String.IsNullOrWhiteSpace(kbRequest.StoreName) Then
+                                cleanedUserText = "Answer based on the provided Knowledge Store content from store '" &
+                                                  kbRequest.StoreName & "'."
+                            Else
+                                cleanedUserText = "Answer based on the provided Knowledge Store content."
+                            End If
+                        Else
+                            cleanedUserText = strippedUserText
+                        End If
 
                         Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             kbContext = kbResolved.Content
+
+                            systemPrompt &= " The following documents from the user's knowledge store are provided as reference material. " &
+                                            "Use them to answer the user's question. " &
+                                            "When citing information, prefer clickable markdown citations. " &
+                                            "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
+                                            "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                                            "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata."
+
                             AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")
                         Else
                             AppendSystemMessage(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
@@ -2559,8 +2582,12 @@ Public Class DiscussInky
             ' Append knowledge store results (supplemental to manually loaded knowledge)
             If Not String.IsNullOrWhiteSpace(kbContext) Then
                 sb.AppendLine("<Knowledge Store Results>")
-                sb.AppendLine("The following documents were retrieved from the knowledge store based on the user's query. " &
-                              "Use them as additional reference material alongside any loaded knowledge.")
+                sb.AppendLine("The following documents from the user's knowledge store are provided as reference material. " &
+                              "Use them as additional reference material alongside any loaded knowledge. " &
+                              "When citing information, prefer clickable markdown citations. " &
+                              "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
+                              "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                              "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata.")
                 sb.AppendLine(kbContext)
                 sb.AppendLine("</Knowledge Store Results>")
                 sb.AppendLine()

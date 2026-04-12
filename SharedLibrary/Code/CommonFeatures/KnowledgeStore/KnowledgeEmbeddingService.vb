@@ -3,8 +3,37 @@
 '
 ' =============================================================================
 ' File: KnowledgeEmbeddingService.vb
-' Purpose: Handles universal interaction with Embedding APIs, chunking, storage
-'          and local fast-math vector/keyword searches using BM25 Fallback.
+' Purpose:
+'   Provides embedding generation, chunk storage, and local semantic/keyword
+'   search for Knowledge Store content.
+'
+' Responsibilities:
+'   - Embedding acquisition:
+'       * Resolve and temporarily apply the configured special-task model
+'         "Embedding" from `INI_AlternateModelPath` when available.
+'       * Call `SharedMethods.LLM(...)` to retrieve embedding vectors.
+'       * Parse separator-delimited numeric responses into `Single()` vectors.
+'       * Fail safely when the API returns errors or non-vector content.
+'   - Chunking and persistence:
+'       * Split source text into paragraph-oriented chunks via `ChunkText`.
+'       * Remove YAML-style front matter before embedding generation.
+'       * Maintain `.redink\.embeddings.json` per Knowledge Store root.
+'       * Rebuild or update per-file embedding records using atomic writes.
+'   - Search:
+'       * Execute semantic vector search using cosine similarity when
+'         embeddings are available for the query.
+'       * Fall back to local Okapi BM25 keyword scoring when no embedding
+'         vector can be produced.
+'   - Rebuild support:
+'       * Recreate the embedding index from Knowledge Store wiki pages.
+'       * Report progress through `ProgressBarModule` during full rebuilds.
+'
+' Notes:
+'   - Embedding updates are serialized via `EmbeddingUpdateLock` to avoid
+'     concurrent index corruption.
+'   - Search operates entirely on the local `.embeddings.json` cache.
+'   - This service depends on `KnowledgeStoreCatalog`, `KnowledgeWikiService`,
+'     `SharedMethods`, and the shared configuration context.
 ' =============================================================================
 
 Option Strict On
@@ -45,6 +74,8 @@ Namespace SharedLibrary
     Public Class KnowledgeEmbeddingService
 
         Private Shared ReadOnly VectorCacheLock As New Object()
+        Private Shared ReadOnly EmbeddingUpdateLock As New Threading.SemaphoreSlim(1, 1)
+
         ''' <summary>
         ''' Gets an embedding vector for a given text by calling the configured LLM API.
         ''' </summary>
@@ -199,29 +230,168 @@ Namespace SharedLibrary
         ''' Chunks a file's content, grabs Vector embeddings if available, and updates the local store.
         ''' </summary>
         Public Shared Async Function UpdateFileEmbeddingsAsync(kbRootPath As String, filePath As String, text As String, context As ISharedContext) As Task
-            If String.IsNullOrWhiteSpace(kbRootPath) OrElse String.IsNullOrWhiteSpace(text) Then Return
+            If String.IsNullOrWhiteSpace(kbRootPath) OrElse
+               String.IsNullOrWhiteSpace(filePath) OrElse
+               String.IsNullOrWhiteSpace(text) Then
+                Return
+            End If
 
-            Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
-            Dim records As List(Of EmbeddingRecord) = LoadIndex(indexPath)
+            Await EmbeddingUpdateLock.WaitAsync().ConfigureAwait(False)
+            Try
+                Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
+                Dim records As List(Of EmbeddingRecord) = LoadIndex(indexPath)
 
-            ' Remove old records associated with this file
-            records.RemoveAll(Function(r) String.Equals(r.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
+                records.RemoveAll(Function(r) String.Equals(r.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
 
-            Dim chunks = ChunkText(text)
-            For Each chunk In chunks
-                Dim vector = Await GetEmbeddingAsync(chunk, context)
+                Dim embeddingText = RemoveFrontMatter(text)
+                Dim chunks = ChunkText(embeddingText)
 
-                ' We add the record even if the vector is nothing (so BM25 search can still use it)
-                records.Add(New EmbeddingRecord With {
-                    .Id = Guid.NewGuid().ToString(),
-                    .FilePath = filePath,
-                    .TextChunk = chunk,
-                    .Vector = vector
-                })
+                For Each chunk In chunks
+                    Dim vector = Await GetEmbeddingAsync(chunk, context).ConfigureAwait(False)
+
+                    records.Add(New EmbeddingRecord With {
+                        .Id = Guid.NewGuid().ToString(),
+                        .FilePath = filePath,
+                        .TextChunk = chunk,
+                        .Vector = vector
+                    })
+                Next
+
+                SaveIndex(indexPath, records)
+            Finally
+                EmbeddingUpdateLock.Release()
+            End Try
+        End Function
+
+
+        ''' <summary>
+        ''' Rebuilds the entire embedding index for a Knowledge Store from the existing wiki pages.
+        ''' Useful after changing the configured embedding model.
+        ''' </summary>
+        Public Shared Async Function RebuildAllWikiEmbeddingsAsync(kbRootPath As String,
+                                                                   context As ISharedContext,
+                                                                   Optional progressPrefix As String = "",
+                                                                   Optional progressOffset As Integer = 0,
+                                                                   Optional progressTotal As Integer = 0) As Task(Of Integer)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return 0
+
+            Dim wikiRoot As String = Path.Combine(kbRootPath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+            If Not Directory.Exists(wikiRoot) Then Return 0
+
+            Dim wikiPages As New List(Of String)()
+            For Each filePath In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
+                Dim name As String = Path.GetFileName(filePath)
+
+                If name.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If name.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If name.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                wikiPages.Add(filePath)
             Next
 
-            SaveIndex(indexPath, records)
+            Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
+
+            ' Start from a clean embedding index so no stale vectors survive model changes.
+            SaveIndex(indexPath, New List(Of EmbeddingRecord)())
+
+            Dim rebuiltCount As Integer = 0
+
+            For i As Integer = 0 To wikiPages.Count - 1
+                If ProgressBarModule.CancelOperation Then
+                    Exit For
+                End If
+
+                Dim filePath As String = wikiPages(i)
+                Dim absoluteIndex As Integer = progressOffset + i + 1
+
+                If progressTotal > 0 Then
+                    ProgressBarModule.GlobalProgressMax = progressTotal
+                    ProgressBarModule.GlobalProgressValue = absoluteIndex - 1
+
+                    Dim labelPrefix As String = If(String.IsNullOrWhiteSpace(progressPrefix),
+                                                   "Refreshing embeddings",
+                                                   $"Refreshing embeddings - {progressPrefix}")
+
+                    ProgressBarModule.GlobalProgressLabel =
+                        $"{labelPrefix} ({absoluteIndex}/{progressTotal}): {Path.GetFileName(filePath)}"
+                End If
+
+                Try
+                    Dim text As String = File.ReadAllText(filePath, System.Text.Encoding.UTF8)
+                    If String.IsNullOrWhiteSpace(text) Then
+                        If progressTotal > 0 Then
+                            ProgressBarModule.GlobalProgressValue = absoluteIndex
+                        End If
+                        Continue For
+                    End If
+
+                    Await UpdateFileEmbeddingsAsync(
+                        kbRootPath:=kbRootPath,
+                        filePath:=filePath,
+                        text:=text,
+                        context:=context).ConfigureAwait(False)
+
+                    rebuiltCount += 1
+                Catch ex As Exception
+                    KnowledgeWikiService.LogWikiError(kbRootPath, filePath, $"Embedding rebuild failed: {ex.Message}")
+                Finally
+                    If progressTotal > 0 Then
+                        ProgressBarModule.GlobalProgressValue = absoluteIndex
+                    End If
+                End Try
+            Next
+
+            KnowledgeWikiService.AppendOperationalLog(kbRootPath, "embeddings-refresh", $"Pages={rebuiltCount}")
+
+            Return rebuiltCount
         End Function
+
+        ''' <summary>
+        ''' Rebuilds the entire embedding index for a Knowledge Store from the existing wiki pages.
+        ''' Useful after changing the configured embedding model.
+        ''' </summary>
+        Public Shared Async Function RebuildAllWikiEmbeddingsAsync(kbRootPath As String,
+                                                                   context As ISharedContext) As Task(Of Integer)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return 0
+
+            Dim wikiRoot As String = Path.Combine(kbRootPath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+            If Not Directory.Exists(wikiRoot) Then Return 0
+
+            Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
+
+            ' Start from a clean embedding index so no stale vectors survive model changes.
+            SaveIndex(indexPath, New List(Of EmbeddingRecord)())
+
+            Dim rebuiltCount As Integer = 0
+
+            For Each filePath In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
+                Dim name As String = Path.GetFileName(filePath)
+
+                If name.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If name.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                If name.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                Try
+                    Dim text As String = File.ReadAllText(filePath, System.Text.Encoding.UTF8)
+                    If String.IsNullOrWhiteSpace(text) Then Continue For
+
+                    Await UpdateFileEmbeddingsAsync(
+                        kbRootPath:=kbRootPath,
+                        filePath:=filePath,
+                        text:=text,
+                        context:=context).ConfigureAwait(False)
+
+                    rebuiltCount += 1
+                Catch ex As Exception
+                    KnowledgeWikiService.LogWikiError(kbRootPath, filePath, $"Embedding rebuild failed: {ex.Message}")
+                End Try
+            Next
+
+            KnowledgeWikiService.AppendOperationalLog(kbRootPath, "embeddings-refresh", $"Pages={rebuiltCount}")
+
+            Return rebuiltCount
+        End Function
+
 
         Private Shared Function LoadIndex(path As String) As List(Of EmbeddingRecord)
             If Not File.Exists(path) Then Return New List(Of EmbeddingRecord)()
@@ -236,8 +406,19 @@ Namespace SharedLibrary
         Private Shared Sub SaveIndex(path As String, records As List(Of EmbeddingRecord))
             Try
                 SyncLock VectorCacheLock
+                    Dim dir = System.IO.Path.GetDirectoryName(path)
+                    If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
+                        Directory.CreateDirectory(dir)
+                    End If
+
                     Dim json = JsonConvert.SerializeObject(records, Formatting.None)
-                    File.WriteAllText(path, json)
+                    Dim tmpPath = path & ".tmp"
+
+                    File.WriteAllText(tmpPath, json)
+                    If File.Exists(path) Then
+                        File.Delete(path)
+                    End If
+                    File.Move(tmpPath, path)
                 End SyncLock
             Catch ex As Exception
                 System.Diagnostics.Debug.WriteLine($"Failed to save embeddings: {ex.Message}")
@@ -252,7 +433,7 @@ Namespace SharedLibrary
         ''' Searches the KB using Semantic Embeddings or Okapi BM25 Keyword fallback.
         ''' </summary>
         Public Shared Async Function SearchAsync(kbRootPath As String, query As String, topK As Integer, context As ISharedContext) As Task(Of List(Of KnowledgeSearchResult))
-            Dim indexPath As String = Path.Combine(kbRootPath, ".embeddings.json")
+            Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
             Dim records As List(Of EmbeddingRecord) = LoadIndex(indexPath)
             If records.Count = 0 Then Return New List(Of KnowledgeSearchResult)()
 
@@ -354,6 +535,24 @@ Namespace SharedLibrary
 
             Return results.OrderByDescending(Function(x) x.Score).Take(topK).ToList()
         End Function
+
+        Private Shared Function RemoveFrontMatter(text As String) As String
+            If String.IsNullOrWhiteSpace(text) Then Return ""
+
+            Dim normalized = text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            If Not normalized.StartsWith("---" & vbLf, StringComparison.Ordinal) Then
+                Return text
+            End If
+
+            Dim endMarker = vbLf & "---" & vbLf
+            Dim endPos = normalized.IndexOf(endMarker, 4, StringComparison.Ordinal)
+            If endPos < 0 Then
+                Return text
+            End If
+
+            Return normalized.Substring(endPos + endMarker.Length).Replace(vbLf, vbCrLf)
+        End Function
+
 
     End Class
 End Namespace

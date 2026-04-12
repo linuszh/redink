@@ -3,14 +3,21 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreManifest.vb
-' Purpose: Per-store manifest file (.redink/manifest.json) tracking all indexed
-'          documents within a single Knowledge Store directory.
+' Purpose:
+'   Manages the per-store manifest file `.redink\manifest.json`, which tracks
+'   indexed documents and their metadata inside a single Knowledge Store.
 '
-' Hardening:
-'  - Save() uses atomic write (write to .tmp, then File.Move with overwrite)
-'    so a crash mid-write cannot corrupt the manifest.
-'  - Load() tolerates missing, empty, or partially corrupted JSON gracefully.
-'  - FindByPath() normalizes paths for reliable deduplication.
+' Responsibilities:
+'   - Load manifest entries for a specific store.
+'   - Tolerate missing, empty, locked, or malformed manifest files safely.
+'   - Add, update, remove, and locate manifest entries by normalized file path.
+'   - Persist manifest changes with atomic-write semantics.
+'   - Preserve per-store indexing state independently from catalog metadata.
+'
+' Notes:
+'   - This manifest is store-local and distinct from broader catalog/index
+'     configuration files.
+'   - Corrupted manifests are treated as empty and can be rebuilt on save.
 ' =============================================================================
 
 Option Strict On

@@ -3,37 +3,38 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreCatalog.vb
-' Purpose: Manages the catalog of multiple named Knowledge Stores.
-'          Each store points to a watched directory tree and carries metadata
-'          (name, owner restriction, role, active flag).
+' Purpose:
+'   Manages the catalog of named Knowledge Stores, including loading, merging,
+'   validating, saving, and resolving store definitions from central and local
+'   catalog files.
 '
-' Architecture / How it works:
-'  - Two catalog files exist (mirroring the central/local INI pattern):
-'      * Central catalog  = INI_KnowledgeStorePath  → read-only for non-owners
-'      * Local catalog     = INI_KnowledgeStorePathLocal → user-writable
-'  - Both are JSON arrays of KnowledgeStoreDefinition objects.
-'  - LoadAll() merges both catalogs; local definitions override central ones
-'    with the same Name (case-insensitive).
-'  - Per-store metadata is kept in a .redink/ subfolder inside each store's
-'    SourcePath: manifest.json, wiki/ pages, index.md, log.md.
+' Responsibilities:
+'   - Catalog loading and merge:
+'       * Load central stores from `INI_KnowledgeStorePath`.
+'       * Load user-local stores from `INI_KnowledgeStorePathLocal`.
+'       * Merge both catalogs with local definitions overriding central ones by
+'         case-insensitive store name.
+'   - Validation and recovery:
+'       * Auto-create missing local catalog files as empty JSON arrays.
+'       * Detect malformed or empty catalog files.
+'       * Recover from `.tmp` / `.bak` files where possible, and reset invalid
+'         local catalogs safely.
+'   - Store helpers:
+'       * Return active stores, resolve stores by name, and create new store
+'         definitions with default ownership metadata.
+'       * Resolve metadata and wiki folder paths under each store's `.redink`
+'         directory.
+'       * Evaluate whether the current user may write to a given store.
+'   - Persistence:
+'       * Save local-only store definitions back to the local catalog using
+'         atomic write semantics.
 '
-' JSON Format (per catalog file):
-'  [
-'    {
-'      "Name": "Contracts",
-'      "SourcePath": "\\\\server\\legal\\contracts",
-'      "Owner": "jdoe",
-'      "Role": "shared",
-'      "Active": true,
-'      "ScanSubdirectories": true
-'    }, ...
-'  ]
-'
-' Future enhancements (planned for next iteration):
-'  - Entity/topic cross-linking pages in the wiki layer.
-'  - Contradiction detection across wiki pages.
-'  - Full lint/health-check operations.
-'  - LLM-driven query-time page generation and filing.
+' Notes:
+'   - Catalog files are JSON arrays of `KnowledgeStoreDefinition` objects.
+'   - Per-store runtime metadata lives under `.redink\` inside each store's
+'     resolved source path.
+'   - This class is the entry point for store discovery across the Knowledge
+'     Store subsystem.
 ' =============================================================================
 
 Option Strict On
@@ -103,14 +104,17 @@ Namespace SharedLibrary
         ''' <summary>Manifest file inside .redink/ listing all indexed documents.</summary>
         Public Const ManifestFile As String = "manifest.json"
 
-        ''' <summary>Wiki subfolder inside .redink/ containing LLM-generated summary pages.</summary>
-        Public Const WikiFolder As String = "wiki"
+        ''' <summary>Wiki subfolder inside .redink/ containing LLM-generated wiki pages.</summary>
+        Public Const WikiFolder As String = "Wiki"
 
         ''' <summary>Auto-maintained catalog of all wiki pages with one-line summaries.</summary>
         Public Const IndexFile As String = "index.md"
 
         ''' <summary>Append-only chronological record of ingest/query/lint operations.</summary>
         Public Const LogFile As String = "log.md"
+
+        ''' <summary>Per-store schema steering ingest, query, and linting behavior.</summary>
+        Public Const SchemaFile As String = "schema.json"
 
 #End Region
 

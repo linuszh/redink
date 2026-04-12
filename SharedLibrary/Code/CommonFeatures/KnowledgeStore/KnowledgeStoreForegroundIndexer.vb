@@ -3,9 +3,23 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreForegroundIndexer.vb
-' Purpose: Runs a foreground (user-initiated) full index of all or a specific
-'          Knowledge Store with a progress dialog. Uses the shared
-'          ProgressBarModule + DPIProgressForm pattern.
+' Purpose:
+'   Runs a user-initiated foreground indexing pass for one or more Knowledge
+'   Stores with progress reporting and cancellation support.
+'
+' Responsibilities:
+'   - Collect active Knowledge Stores, optionally restricted to a single store.
+'   - Build the file queue from supported source documents while skipping
+'     metadata files and, unless forced, already-indexed documents.
+'   - Drive the shared processing pipeline for each queued document.
+'   - Update progress UI via `ProgressBarModule` / `DPIProgressForm`.
+'   - Return aggregate run statistics such as indexed, skipped, failed, and
+'     cancelled file counts.
+'
+' Notes:
+'   - This is the foreground, user-visible counterpart to background indexing.
+'   - Actual document processing is delegated to
+'     `KnowledgeStoreProcessingService`.
 ' =============================================================================
 
 Option Strict On
@@ -133,22 +147,16 @@ Namespace SharedLibrary
 
                 Try
                     Try
-                        Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(
-                        item.FilePath, item.Store.ResolvedSourcePath, context, context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+                        Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
+                        store:=item.Store,
+                        filePath:=item.FilePath,
+                        context:=context,
+                        useLlmIndex:=context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
 
-                        If entry Is Nothing Then
+                        If Not processResult.Success OrElse processResult.Entry Is Nothing Then
                             result.FailedFiles += 1
                             Continue For
                         End If
-
-                        Dim manifest = KnowledgeStoreManifest.Load(item.Store)
-                        manifest.AddOrUpdate(entry)
-                        manifest.Save(item.Store)
-
-                        ' Wiki pages, index.md, log.md — failures here do NOT affect the manifest
-                        Try : KnowledgeStoreWatcher.WriteWikiSummaryPage(item.Store, entry) : Catch : End Try
-                        Try : KnowledgeStoreWatcher.UpdateIndexFile(item.Store, entry) : Catch : End Try
-                        Try : KnowledgeStoreWatcher.AppendLogEntry(item.Store, entry) : Catch : End Try
 
                         result.IndexedFiles += 1
                     Catch

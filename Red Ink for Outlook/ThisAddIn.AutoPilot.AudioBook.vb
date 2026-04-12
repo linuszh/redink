@@ -50,6 +50,9 @@ Partial Public Class ThisAddIn
     ''' <summary>Duration of silence inserted after title/heading segments (seconds).</summary>
     Private Const AB_SilenceAfterTitle As Double = 0.7
 
+    ''' <summary>Maximum number of retries when a TTS segment returns no audio.</summary>
+    Private Const AB_MaxSegmentRetries As Integer = 3
+
     Private Shared AB_googleAvailable As Boolean = False
     Private Shared AB_googleSecondary As Boolean = False
     Private Shared AB_openAIAvailable As Boolean = False
@@ -105,7 +108,7 @@ Partial Public Class ThisAddIn
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
-        &H0, &H0, &H0, &H0, &H49, &H6E, &H66, &H6F,
+        &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
         &H0, &H0, &H0, &H0, &H0, &H0, &H0, &H0,
@@ -702,6 +705,66 @@ Partial Public Class ThisAddIn
         Return cleaned.Trim()
     End Function
 
+
+    ''' <summary>
+    ''' Strips the Xing/Info VBR header frame from the beginning of an MP3 byte
+    ''' array. TTS providers often prepend this frame, and when multiple segments
+    ''' are concatenated the stale header causes players to report wrong duration.
+    ''' </summary>
+    Private Shared Function AB_StripXingHeader(mp3 As Byte()) As Byte()
+        If mp3 Is Nothing OrElse mp3.Length < 4 Then Return mp3
+
+        ' An MP3 frame starts with the sync word &HFF &HE0 (top 11 bits set).
+        ' Check if the first frame contains a Xing or Info tag.
+        If mp3(0) <> &HFF OrElse (mp3(1) And &HE0) <> &HE0 Then Return mp3
+
+        ' Determine the MPEG version and layer to calculate the side-info length,
+        ' which tells us where the Xing/Info tag sits inside the frame.
+        Dim mpegV1 = (mp3(1) And &H8) = &H8  ' MPEG1 vs MPEG2/2.5
+        Dim stereo = (mp3(3) And &HC0) <> &HC0 ' not mono
+        Dim sideInfoLen As Integer
+        If mpegV1 Then
+            sideInfoLen = If(stereo, 32, 17)
+        Else
+            sideInfoLen = If(stereo, 17, 9)
+        End If
+
+        Dim tagOffset = 4 + sideInfoLen ' past the 4-byte header + side information
+        If tagOffset + 4 > mp3.Length Then Return mp3
+
+        ' Look for "Xing" (&H58 &H69 &H6E &H67) or "Info" (&H49 &H6E &H66 &H6F)
+        Dim isXing = (mp3(tagOffset) = &H58 AndAlso mp3(tagOffset + 1) = &H69 AndAlso
+                      mp3(tagOffset + 2) = &H6E AndAlso mp3(tagOffset + 3) = &H67)
+        Dim isInfo = (mp3(tagOffset) = &H49 AndAlso mp3(tagOffset + 1) = &H6E AndAlso
+                      mp3(tagOffset + 2) = &H66 AndAlso mp3(tagOffset + 3) = &H6F)
+
+        If Not isXing AndAlso Not isInfo Then Return mp3
+
+        ' Calculate the frame length from the header to skip exactly one frame.
+        ' Bitrate index is bits 15-12 of the header, sample rate bits 11-10.
+        Dim bitrateIndex = (mp3(2) >> 4) And &HF
+        Dim sampleRateIndex = (mp3(2) >> 2) And &H3
+        Dim padding = (mp3(2) >> 1) And &H1
+
+        ' MPEG1 Layer 3 bitrate table (kbps). Index 0 and 15 are invalid.
+        Dim bitrates = {0, 32, 40, 48, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0}
+        Dim sampleRates = If(mpegV1, {44100, 48000, 32000}, {22050, 24000, 16000})
+
+        If bitrateIndex < 1 OrElse bitrateIndex > 14 Then Return mp3
+        If sampleRateIndex > 2 Then Return mp3
+
+        Dim bitrate = bitrates(bitrateIndex) * 1000
+        Dim sampleRate = sampleRates(sampleRateIndex)
+        Dim frameLen = (144 * bitrate \ sampleRate) + padding
+
+        If frameLen <= 0 OrElse frameLen >= mp3.Length Then Return mp3
+
+        ' Return everything after the first (Xing/Info) frame.
+        Dim result(mp3.Length - frameLen - 1) As Byte
+        Buffer.BlockCopy(mp3, frameLen, result, 0, result.Length)
+        Return result
+    End Function
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TTS — PARAGRAPH SPLITTER FOR AUDIOBOOK MODE
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -922,12 +985,27 @@ Partial Public Class ThisAddIn
                     Continue For
                 End If
 
-                Dim audioBytes = Await AB_GenerateSegmentAsync(segText, language, voice, ct)
+                Dim audioBytes As Byte() = Nothing
+                For attempt = 1 To AB_MaxSegmentRetries
+                    ct.ThrowIfCancellationRequested()
+                    audioBytes = Await AB_GenerateSegmentAsync(segText, language, voice, ct)
+                    If audioBytes IsNot Nothing AndAlso audioBytes.Length > 0 Then Exit For
+                    Debug.WriteLine($"[AB-TTS] Segment {i + 1} attempt {attempt}/{AB_MaxSegmentRetries} returned no audio.")
+                    If attempt < AB_MaxSegmentRetries Then
+                        ApDashboardLog($"⚠ Segment {i + 1} attempt {attempt} failed, retrying...", "warn")
+                        Await Task.Delay(1000 * attempt, ct) ' exponential back-off: 1s, 2s
+                    End If
+                Next
 
                 If audioBytes Is Nothing OrElse audioBytes.Length = 0 Then
-                    ApDashboardLog($"⚠ Segment {i + 1}/{segments.Count} returned no audio, skipping.", "warn")
+                    ApDashboardLog($"⚠ Segment {i + 1}/{segments.Count} returned no audio after {AB_MaxSegmentRetries} attempts, skipping.", "warn")
                     Continue For
                 End If
+
+                ' Strip any Xing/Info VBR header from the TTS response so that
+                ' byte-concatenated MP3s don't confuse players into reporting
+                ' an incorrect total duration.
+                audioBytes = AB_StripXingHeader(audioBytes)
 
                 Dim tempFile = Path.Combine(tempDir, $"ab_seg_{i:D4}.mp3")
                 File.WriteAllBytes(tempFile, audioBytes)

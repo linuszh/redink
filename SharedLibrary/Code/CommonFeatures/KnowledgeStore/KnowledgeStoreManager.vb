@@ -3,36 +3,23 @@
 '
 ' =============================================================================
 ' File: KnowledgeStoreManager.vb
-' Purpose: Manages Knowledge Store index files — loading, saving, and merging
-'          central and local index entries. Provides the KnowledgeEntry data model.
+' Purpose:
+'   Defines the core Knowledge Store entry model and manages persisted index
+'   files for document-level metadata across configured stores.
 '
-' Architecture / How it works:
-'  - Each index file is a JSON array of KnowledgeEntry objects persisted to disk.
-'  - Central index (KnowledgeStorePath) is read-only from the user's perspective;
-'    it is maintained by administrators and shared across users.
-'  - Local index (KnowledgeStorePathLocal) is user-writable; additions, deletions,
-'    tag edits, and re-indexing are persisted here.
-'  - LoadMergedIndex() reads both files, marks provenance (IsFromCentralIndex),
-'    and deduplicates by FilePath (local wins on collision).
-'  - SaveLocalIndex() writes only local entries back to KnowledgeStorePathLocal.
+' Responsibilities:
+'   - Provide the `KnowledgeEntry` data model used throughout indexing and
+'     retrieval workflows.
+'   - Load Knowledge Store index files from disk.
+'   - Merge central and local index content with provenance tracking and
+'     de-duplication.
+'   - Save user-writable local index entries back to disk.
+'   - Expose basic configuration checks for Knowledge Store availability.
 '
-' JSON Format (per index file):
-'  [
-'    {
-'      "FilePath": "%AppData%\\...",
-'      "Title": "Employment Agreement Template",
-'      "Summary": "This document covers...",
-'      "Keywords": ["employment", "termination", ...],
-'      "ContentSnapshot": "Full text up to 80K chars...",
-'      "IndexedDate": "2026-04-09T14:30:00",
-'      "Tags": ["contracts", "employment"]
-'    }, ...
-'  ]
-'
-' External Dependencies:
-'  - Newtonsoft.Json (JArray, JObject) for JSON serialization.
-'  - SharedMethods.ExpandEnvironmentVariables for path resolution.
-'  - ISharedContext for KnowledgeStorePath / KnowledgeStorePathLocal.
+' Notes:
+'   - This file manages document-entry indexes, while per-store manifests are
+'     handled by `KnowledgeStoreManifest`.
+'   - Local entries override central ones on collisions by normalized file path.
 ' =============================================================================
 
 Option Strict On

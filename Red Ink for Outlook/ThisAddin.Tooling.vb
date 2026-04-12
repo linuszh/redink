@@ -1410,6 +1410,9 @@ Partial Public Class ThisAddIn
                                 End If
                                 toolConfig = GetInternalSearchTool(enforcePrivacy:=enforcePrivacy)
                                 ToolingFileLogger.LogStep("Using internal search tool.")
+                            ElseIf tc.ToolName.Equals(InternalKnowledgeToolName, StringComparison.OrdinalIgnoreCase) Then
+                                toolConfig = GetInternalKnowledgeTool()
+                                ToolingFileLogger.LogStep("Using internal knowledge tool.")
                             Else
                                 context.LogError(
                                     $"Unknown tool: {tc.ToolName}",
@@ -2004,7 +2007,294 @@ Partial Public Class ThisAddIn
             End If
         Next
 
+        If sortedTools.Any(Function(t) String.Equals(t.ToolName, InternalKnowledgeToolName, StringComparison.OrdinalIgnoreCase)) Then
+            Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
+            If Not String.IsNullOrWhiteSpace(storeInventory) Then
+                sb.AppendLine()
+                sb.AppendLine(storeInventory)
+            End If
+        End If
+
         Return sb.ToString()
+    End Function
+
+    Private Function BuildKnowledgeToolStoreInventoryLine() As String
+        Dim storeLabels As New List(Of String)()
+
+        Try
+            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+            For Each store In stores
+                If store Is Nothing OrElse String.IsNullOrWhiteSpace(store.Name) Then Continue For
+
+                Dim label As String = store.Name.Trim()
+
+                Try
+                    Dim manifest = KnowledgeStoreManifest.Load(store)
+                    If manifest IsNot Nothing AndAlso manifest.Entries IsNot Nothing AndAlso manifest.Entries.Count > 0 Then
+                        label &= $" ({manifest.Entries.Count} docs)"
+                    End If
+                Catch
+                End Try
+
+                If Not storeLabels.Any(Function(x) String.Equals(x, label, StringComparison.OrdinalIgnoreCase)) Then
+                    storeLabels.Add(label)
+                End If
+            Next
+        Catch
+        End Try
+
+        If storeLabels.Count = 0 Then
+            Return ""
+        End If
+
+        Return "Knowledge stores currently available: " & String.Join(", ", storeLabels) & "."
+    End Function
+
+    Private Function GetAvailableKnowledgeStoreNames() As List(Of String)
+        Dim storeNames As New List(Of String)()
+
+        Try
+            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+            For Each store In stores
+                If store Is Nothing Then Continue For
+
+                Dim name As String = If(store.Name, "").Trim()
+                If name = "" Then Continue For
+
+                If Not storeNames.Any(Function(x) String.Equals(x, name, StringComparison.OrdinalIgnoreCase)) Then
+                    storeNames.Add(name)
+                End If
+            Next
+        Catch
+        End Try
+
+        Return storeNames
+    End Function
+
+    Private Function BuildInternalKnowledgeToolDefinition() As String
+        Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
+        Dim descriptionSuffix As String = If(String.IsNullOrWhiteSpace(storeInventory), "", " " & storeInventory)
+
+        Dim definition As New JObject(
+        New JProperty("name", InternalKnowledgeToolName),
+        New JProperty("description",
+            "Searches the user's local knowledge stores (their own curated document collections). " &
+            "This tool mirrors the Freestyle knowledge trigger functionality. " &
+            "You can either use structured arguments (query/store/tag/max_results) or pass the exact Freestyle trigger syntax via raw_trigger. " &
+            "Use this for the user's own materials, not for public-web lookup." & descriptionSuffix),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
+                    New JObject(
+                        New JProperty("query",
+                            New JObject(
+                                New JProperty("type", "string"),
+                                New JProperty("description", "Optional natural-language knowledge-store query. If omitted, the tool can still search broadly or within a given store/tag scope.")
+                            )
+                        ),
+                        New JProperty("store",
+                            New JObject(
+                                New JProperty("type", "string"),
+                                New JProperty("description", "Optional knowledge store name. Use exactly one of the store names exposed in the tool instructions.")
+                            )
+                        ),
+                        New JProperty("tag",
+                            New JObject(
+                                New JProperty("type", "string"),
+                                New JProperty("description", "Optional tag filter, equivalent to Freestyle syntax 'tag:YourTag'.")
+                            )
+                        ),
+                        New JProperty("raw_trigger",
+                            New JObject(
+                                New JProperty("type", "string"),
+                                New JProperty("description", "Optional exact Freestyle-style trigger. Examples: '(kb)', '(kb:termination without notice)', '(kb:store:Policies confidentiality)', '(kb:tag:NDA confidentiality)'. If supplied, this takes precedence over query/store/tag.")
+                            )
+                        ),
+                        New JProperty("max_results",
+                            New JObject(
+                                New JProperty("type", "integer"),
+                                New JProperty("description", "Optional maximum number of results to retrieve. Best effort; the resolver may still enforce its own cap.")
+                            )
+                        )
+                    )
+                ),
+                New JProperty("additionalProperties", False)
+            )
+        )
+    )
+
+        Return definition.ToString(Formatting.None)
+    End Function
+
+    Private Function BuildInternalKnowledgeToolInstructionsPrompt() As String
+        Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
+        Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
+
+        Dim sb As New StringBuilder()
+        sb.Append("knowledge_search: Searches the user's local knowledge stores — the user's own curated document collections such as contracts, policies, briefs, manuals, templates, emails, and reference material. ")
+        sb.Append("This tool supports the same search semantics as the Freestyle knowledge trigger. ")
+        sb.Append("Prefer structured arguments for normal calls: query (optional), store (optional), tag (optional), max_results (optional). ")
+        sb.Append("If you need exact parity with Freestyle, pass raw_trigger using the literal syntax. ")
+        sb.Append($"Valid trigger forms include '{kbTrigger}', '{kbTriggerPrefix}your query)', '{kbTriggerPrefix}store:StoreName your query)', '{kbTriggerPrefix}tag:TagName your query)', and combinations such as '{kbTriggerPrefix}store:StoreName tag:TagName your query)'. ")
+        sb.Append("If store is omitted, all stores are searched. If query is omitted but store and/or tag is provided, the tool still performs a scoped retrieval. If everything is omitted, it performs a broad cross-store retrieval. ")
+
+        Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
+        If Not String.IsNullOrWhiteSpace(storeInventory) Then
+            sb.Append(storeInventory & " ")
+            sb.Append("Use the store names exactly as listed. ")
+        End If
+
+        sb.Append("Do NOT use this tool for public information or general knowledge — use your own knowledge or internet_search for that. ")
+        sb.Append("When citing results, mention the document name and store name.")
+
+        Return sb.ToString()
+    End Function
+
+    Private Function BuildKnowledgeToolTrigger(query As String, storeName As String, tagName As String, rawTrigger As String) As String
+        Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
+        Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
+
+        ' raw_trigger takes precedence — normalize and return as-is
+        If Not String.IsNullOrWhiteSpace(rawTrigger) Then
+            Dim normalized As String = rawTrigger.Trim()
+
+            If String.Equals(normalized, kbTrigger, StringComparison.OrdinalIgnoreCase) Then
+                Return kbTrigger
+            End If
+
+            If normalized.StartsWith(kbTriggerPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If Not normalized.EndsWith(")") Then
+                    normalized &= ")"
+                End If
+                Return normalized
+            End If
+
+            If normalized.StartsWith("(kb", StringComparison.OrdinalIgnoreCase) Then
+                If Not normalized.EndsWith(")") Then
+                    normalized &= ")"
+                End If
+                Return normalized
+            End If
+
+            Return kbTriggerPrefix & normalized.TrimEnd(")"c).Trim() & ")"
+        End If
+
+        ' Query-only (no store, no tag): use bare (kb) trigger.
+        ' The search query will be handled separately via KnowledgeQueryService
+        ' semantic search in ExecuteInternalKnowledgeTool, NOT embedded in the trigger.
+        ' This matches Freestyle behavior where "Nudging (kb)" loads all docs
+        ' and the query is used as the LLM prompt, not as a metadata filter.
+        If Not String.IsNullOrWhiteSpace(query) AndAlso
+       String.IsNullOrWhiteSpace(storeName) AndAlso
+       String.IsNullOrWhiteSpace(tagName) Then
+
+            Dim normalizedQuery As String = query.Trim()
+
+            ' If the query already IS or contains a trigger, return it directly
+            If String.Equals(normalizedQuery, kbTrigger, StringComparison.OrdinalIgnoreCase) Then
+                Return kbTrigger
+            End If
+
+            If normalizedQuery.IndexOf(kbTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return normalizedQuery
+            End If
+
+            If normalizedQuery.IndexOf(kbTriggerPrefix, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return normalizedQuery
+            End If
+
+            If normalizedQuery.StartsWith("(kb", StringComparison.OrdinalIgnoreCase) Then
+                If Not normalizedQuery.EndsWith(")") Then
+                    normalizedQuery &= ")"
+                End If
+                Return normalizedQuery
+            End If
+
+            ' Query-only: return bare (kb) — semantic search handles the query separately
+            Return kbTrigger
+        End If
+
+        ' Store and/or tag specified: build parameterized trigger
+        Dim parts As New List(Of String)()
+
+        If Not String.IsNullOrWhiteSpace(storeName) Then
+            parts.Add("store:" & storeName.Trim())
+        End If
+
+        If Not String.IsNullOrWhiteSpace(tagName) Then
+            parts.Add("tag:" & tagName.Trim())
+        End If
+
+        If Not String.IsNullOrWhiteSpace(query) Then
+            parts.Add(query.Trim())
+        End If
+
+        If parts.Count = 0 Then
+            Return kbTrigger
+        End If
+
+        Return kbTriggerPrefix & String.Join(" ", parts).Trim() & ")"
+    End Function
+
+
+    Private Function GetToolArgumentString(arguments As Dictionary(Of String, Object), key As String) As String
+        If arguments Is Nothing OrElse Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then
+            Return ""
+        End If
+
+        Dim value = arguments(key)
+
+        If TypeOf value Is JValue Then
+            Return DirectCast(value, JValue).ToString().Trim()
+        End If
+
+        Return value.ToString().Trim()
+    End Function
+
+    Private Sub TrySetLateBoundProperty(target As Object, propertyName As String, value As Object)
+        If target Is Nothing Then Return
+
+        Try
+            Dim prop = target.GetType().GetProperty(
+            propertyName,
+            BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
+
+            If prop Is Nothing OrElse Not prop.CanWrite Then Return
+
+            Dim convertedValue As Object = value
+
+            If value IsNot Nothing Then
+                Dim targetType = If(Nullable.GetUnderlyingType(prop.PropertyType), prop.PropertyType)
+                convertedValue = System.Convert.ChangeType(value, targetType, Globalization.CultureInfo.InvariantCulture)
+            End If
+
+            prop.SetValue(target, convertedValue, Nothing)
+        Catch
+        End Try
+    End Sub
+
+    Private Function TryGetLateBoundString(target As Object, propertyName As String) As String
+        If target Is Nothing Then
+            Return ""
+        End If
+
+        Try
+            Dim prop = target.GetType().GetProperty(
+            propertyName,
+            BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
+
+            If prop Is Nothing OrElse Not prop.CanRead Then
+                Return ""
+            End If
+
+            Dim value = prop.GetValue(target, Nothing)
+            Return If(value, "").ToString()
+        Catch
+            Return ""
+        End Try
     End Function
 
     ''' <summary>
@@ -2070,14 +2360,14 @@ Partial Public Class ThisAddIn
     ''' <returns>Internal knowledge search tool configuration.</returns>
     Public Function GetInternalKnowledgeTool() As ModelConfig
         Return New ModelConfig() With {
-            .ToolName = InternalKnowledgeToolName,
-            .ToolInstructionsPrompt = InternalKnowledgeToolInstructionsPrompt,
-            .ToolDefinition = InternalKnowledgeToolDefinition,
-            .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 997,
-            .ToolErrorHandling = "skip"
-        }
+        .ToolName = InternalKnowledgeToolName,
+        .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(),
+        .ToolDefinition = BuildInternalKnowledgeToolDefinition(),
+        .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,
+        .Tool = True,
+        .ToolPriority = 997,
+        .ToolErrorHandling = "skip"
+    }
     End Function
 
     ''' <summary>
@@ -2679,24 +2969,24 @@ Partial Public Class ThisAddIn
     ''' <returns>Tool response containing relevant document content or an error.</returns>
     Private Async Function ExecuteInternalKnowledgeTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
         Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
 
         Try
-            ' ── Extract parameters ──
-            Dim query As String = ""
-            If toolCall.Arguments.ContainsKey("query") Then
-                query = If(toolCall.Arguments("query")?.ToString(), "").Trim()
-            End If
+            Dim availableStoreNames As List(Of String) = GetAvailableKnowledgeStoreNames()
 
-            If String.IsNullOrWhiteSpace(query) Then
+            If availableStoreNames.Count = 0 Then
                 response.Success = False
-                response.ErrorMessage = "No search query provided."
-                ToolingFileLogger.LogWarn("Internal knowledge tool: empty query.",
-                    details:=$"CallId={toolCall.CallId}; Args={Newtonsoft.Json.JsonConvert.SerializeObject(toolCall.Arguments)}")
+                response.ErrorMessage = "No active knowledge stores are currently available."
+                ToolingFileLogger.LogWarn("Internal knowledge tool: no active stores available.")
                 Return response
             End If
+
+            Dim query As String = GetToolArgumentString(toolCall.Arguments, "query")
+            Dim storeName As String = GetToolArgumentString(toolCall.Arguments, "store")
+            Dim tagName As String = GetToolArgumentString(toolCall.Arguments, "tag")
+            Dim rawTrigger As String = GetToolArgumentString(toolCall.Arguments, "raw_trigger")
 
             Dim maxResults As Integer = 5
             If toolCall.Arguments.ContainsKey("max_results") Then
@@ -2706,15 +2996,96 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            context.Log($"Knowledge search: ""{If(query.Length > 60, query.Substring(0, 60) & "...", query)}""")
+            If String.IsNullOrWhiteSpace(rawTrigger) AndAlso
+           String.IsNullOrWhiteSpace(query) AndAlso
+           String.IsNullOrWhiteSpace(storeName) AndAlso
+           String.IsNullOrWhiteSpace(tagName) Then
+                rawTrigger = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
+            End If
 
-            ' ── Query via KnowledgeQueryService (Architecture A) ──
-            Dim knowledgeContext As String = SharedLibrary.SharedLibrary.KnowledgeQueryService.ResolveAndBuild(
-                query, _context, maxResults)
+            If Not String.IsNullOrWhiteSpace(storeName) Then
+                Dim resolvedStoreName As String =
+                availableStoreNames.FirstOrDefault(Function(s) String.Equals(s, storeName, StringComparison.OrdinalIgnoreCase))
+
+                If String.IsNullOrWhiteSpace(resolvedStoreName) Then
+                    response.Success = False
+                    response.ErrorMessage = $"Unknown knowledge store '{storeName}'. Available stores: {String.Join(", ", availableStoreNames)}."
+                    ToolingFileLogger.LogWarn("Internal knowledge tool: unknown store requested.",
+                    details:=$"Requested='{storeName}'; Available='{String.Join(", ", availableStoreNames)}'")
+                    Return response
+                End If
+
+                storeName = resolvedStoreName
+            End If
+
+            ' ── Semantic search shortcut ─────────────────────────────────
+            ' When the LLM provides a query but no store/tag/raw_trigger,
+            ' use KnowledgeQueryService directly for semantic vector search.
+            ' This avoids the TryParseKnowledgeTrigger metadata-only path
+            ' that treats single-word queries as tags (which rarely match).
+            ' This matches how Freestyle handles "(kb)" — but with targeted
+            ' semantic retrieval instead of loading all documents blindly.
+            If Not String.IsNullOrWhiteSpace(query) AndAlso
+               String.IsNullOrWhiteSpace(rawTrigger) AndAlso
+               String.IsNullOrWhiteSpace(tagName) Then
+
+                Dim semanticQuery As String = query.Trim()
+                If Not String.IsNullOrWhiteSpace(storeName) Then
+                    semanticQuery = $"store:{storeName} {semanticQuery}"
+                End If
+
+                context.Log($"Knowledge semantic search: '{semanticQuery}' (max_results={maxResults})")
+                ToolingFileLogger.LogStep($"Knowledge semantic search: '{semanticQuery}'; max_results={maxResults}")
+
+                Try
+                    Dim semanticContent As String = Await KnowledgeQueryService.ResolveAndBuildAsync(
+                        query:=semanticQuery,
+                        context:=_context,
+                        maxResults:=maxResults,
+                        maxTotalChars:=200000).ConfigureAwait(False)
+
+                    If Not String.IsNullOrWhiteSpace(semanticContent) Then
+                        context.Log($"Knowledge semantic search returned content ({semanticContent.Length:N0} chars).", "success")
+                        response.Success = True
+                        response.Response = semanticContent
+                        Return response
+                    Else
+                        context.Log("Knowledge semantic search returned no results; falling back to trigger-based resolution.", "warn")
+                        ToolingFileLogger.LogStep("Semantic search empty; falling back to trigger path.")
+                    End If
+                Catch ex As Exception
+                    context.LogWarn($"Knowledge semantic search failed: {ex.Message}; falling back to trigger-based resolution.", ex:=ex)
+                End Try
+            End If
+
+            ' ── Trigger-based resolution (fallback / store+tag / raw_trigger) ──
+            Dim knowledgeTriggerText As String = BuildKnowledgeToolTrigger(query, storeName, tagName, rawTrigger)
+
+            context.Log($"Knowledge search trigger: {knowledgeTriggerText}")
+            ToolingFileLogger.LogStep($"Knowledge search trigger: {knowledgeTriggerText}; max_results={maxResults}")
+
+            Dim kbRequest = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.TryParseKnowledgeTrigger(knowledgeTriggerText)
+
+            If kbRequest Is Nothing Then
+                response.Success = False
+                response.ErrorMessage = "Could not parse the knowledge search request."
+                ToolingFileLogger.LogWarn("Internal knowledge tool: trigger parsing returned Nothing.",
+                details:=$"Trigger='{knowledgeTriggerText}'")
+                Return response
+            End If
+
+            TrySetLateBoundProperty(kbRequest, "MaxResults", maxResults)
+
+            Dim kbResolved = Await SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+
+            Dim knowledgeContext As String = TryGetLateBoundString(kbResolved, "Content")
+            Dim statusMessage As String = TryGetLateBoundString(kbResolved, "StatusMessage")
 
             If String.IsNullOrWhiteSpace(knowledgeContext) Then
                 response.Success = True
-                response.Response = "No relevant documents found in the knowledge store for the given query."
+                response.Response = If(String.IsNullOrWhiteSpace(statusMessage),
+                                   "No relevant documents found in the knowledge store for the given query.",
+                                   statusMessage)
                 Return response
             End If
 
@@ -2731,6 +3102,8 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
+
+
 
     ''' <summary>
     ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
