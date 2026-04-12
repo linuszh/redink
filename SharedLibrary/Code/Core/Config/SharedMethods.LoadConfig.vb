@@ -403,6 +403,12 @@ Namespace SharedLibrary
 
                 End If
 
+                ' Knowledge Store settings
+                context.INI_KnowledgeStorePath = If(configDict.ContainsKey("KnowledgeStorePath"), configDict("KnowledgeStorePath"), "")
+                context.INI_KnowledgeStorePathLocal = If(configDict.ContainsKey("KnowledgeStorePathLocal"), configDict("KnowledgeStorePathLocal"), "")
+                context.INI_KnowledgeStoreOwner = If(configDict.ContainsKey("KnowledgeStoreOwner"), configDict("KnowledgeStoreOwner"), "")
+                context.INI_KnowledgeStoreUseLLMIndex = ParseBoolean(configDict, "KnowledgeStoreUseLLMIndex")
+
                 ' Process SecondAPI configuration if enabled.
                 context.INI_Endpoint_2 = "" ' Necessary for googleapi check (should not be null).
                 context.INI_SecondAPI = ParseBoolean(configDict, "SecondAPI")

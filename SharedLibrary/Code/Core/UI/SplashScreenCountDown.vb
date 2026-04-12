@@ -179,11 +179,24 @@ Namespace SharedLibrary
         ''' Closes the form, marshaling the call onto the form thread when required.
         ''' </summary>
         Public Shadows Sub Close()
-            If Me.InvokeRequired Then
-                Me.Invoke(New System.Action(Sub() MyBase.Close()))
-            Else
-                MyBase.Close()
-            End If
+            Try
+                If Not Me.IsHandleCreated OrElse Me.IsDisposed Then Return
+
+                If Me.InvokeRequired Then
+                    ' Use BeginInvoke instead of Invoke to avoid blocking and deadlocks,
+                    ' dropping the invocation call if the handle is lost during transit.
+                    Me.BeginInvoke(New System.Action(Sub()
+                                                         Try
+                                                             If Not Me.IsDisposed Then MyBase.Close()
+                                                         Catch
+                                                         End Try
+                                                     End Sub))
+                Else
+                    If Not Me.IsDisposed Then MyBase.Close()
+                End If
+            Catch
+                ' Silent fail on shutdown race conditions
+            End Try
         End Sub
 
         ''' <summary>
