@@ -987,6 +987,41 @@
       ]
     },
     {
+      "id": "knowledge_store",
+      "title": "Knowledge Store",
+      "description": "The Knowledge Store lets you index local documents (contracts, templates, guides) so they can be injected as context into LLM prompts using the (kb) or (kb:storename) trigger. Configure a central catalog for shared team resources and a local catalog for personal stores. Each catalog is a JSON file listing named Knowledge Stores with their source directories.",
+      "fields": [
+        {
+          "key": "KnowledgeStorePath",
+          "label": "Knowledge Store Catalog (Central)",
+          "type": "path",
+          "default": "",
+          "description": "Path to the shared Knowledge Store catalog JSON file. This file lists named Knowledge Stores that are available to all users. Each entry defines a store name, source directory, owner, role and active flag. Use a central network location for team-wide access. Example: N:\\AI\\Library\\knowledge-stores.json. [KnowledgeStorePath]"
+        },
+        {
+          "key": "KnowledgeStorePathLocal",
+          "label": "Knowledge Store Catalog (Local)",
+          "type": "path",
+          "default": "",
+          "description": "Path to the user's local Knowledge Store catalog JSON file. Local entries take precedence over central entries with the same store name. Personal stores are defined here. Example: %APPDATA%\\Microsoft\\Word\\knowledge-stores.json. [KnowledgeStorePathLocal]"
+        },
+        {
+          "key": "KnowledgeStoreUseLLMIndex",
+          "label": "Use LLM for Indexing",
+          "type": "boolean",
+          "default": "True",
+          "description": "When enabled, the Knowledge Store indexer uses the LLM to generate richer summaries and keywords for each indexed document. This improves search quality but consumes API credits during indexing. Disable this for cost-sensitive environments or when basic keyword extraction is sufficient. Example: True. [KnowledgeStoreUseLLMIndex]"
+        },
+        {
+          "key": "KnowledgeStoreOwner",
+          "label": "Default Store Owner",
+          "type": "string",
+          "default": "",
+          "description": "Default owner identity for locally created Knowledge Stores. When set, this value is used as the Owner field for new stores created through the UI. Leave empty to use the current Windows username (%USERNAME%). Example: jdoe. [KnowledgeStoreOwner]"
+        }
+      ]
+    },
+    {
       "id": "search",
       "title": "Internet Search (ISearch)",
       "description": "Configuration for Red Ink internet searching inside Freestyle. These values describe the search engine endpoint and how result links are extracted from its HTML.",

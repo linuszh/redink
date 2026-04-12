@@ -514,6 +514,10 @@ Namespace SharedLibrary
                                                        End If
                                                    Next
                                                    UpdateAppConfig(CapturedContext)
+
+                                                   ' Immediately apply the running background state without a restart
+                                                   KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+
                                                    CapturedContext.MenusAdded = False
                                                End Sub
 
@@ -610,7 +614,8 @@ Namespace SharedLibrary
                                                     {"DefaultPrefix", "DefaultPrefix"},
                                                     {"ReplaceText2Override", "ReplaceText2Override"},
                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
-                                                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"}
+                                                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                                                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -647,7 +652,14 @@ Namespace SharedLibrary
                                                    End If
 
                                                    Try
-                                                       My.Settings.Item(mySettingsKey) = currentValue
+                                                       Dim isBool As Boolean
+                                                       If Boolean.TryParse(currentValue, isBool) Then
+                                                           My.Settings.Item(mySettingsKey) = isBool
+                                                       ElseIf currentValue = "True" OrElse currentValue = "False" Then
+                                                           My.Settings.Item(mySettingsKey) = CBool(currentValue)
+                                                       Else
+                                                           My.Settings.Item(mySettingsKey) = currentValue
+                                                       End If
                                                    Catch
                                                        ' Ignore if the My.Settings entry does not exist
                                                    End Try
@@ -658,6 +670,9 @@ Namespace SharedLibrary
                                                    ' Ignore save errors silently
                                                End Try
                                            End If
+
+                                           ' Immediately apply the running background state without a restart
+                                           KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
 
                                            CapturedContext.MenusAdded = False
                                            settingsForm.Close()
@@ -799,7 +814,7 @@ Namespace SharedLibrary
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
-        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
+        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -1126,6 +1141,16 @@ Namespace SharedLibrary
                     Return context.INI_AssemblePath
                 Case "AssemblePathLocal"
                     Return context.INI_AssemblePathLocal
+                Case "KnowledgeStorePath"
+                    Return context.INI_KnowledgeStorePath
+                Case "KnowledgeStorePathLocal"
+                    Return context.INI_KnowledgeStorePathLocal
+                Case "KnowledgeStoreOwner"
+                    Return context.INI_KnowledgeStoreOwner
+                Case "KnowledgeStoreUseLLMIndex"
+                    Return context.INI_KnowledgeStoreUseLLMIndex.ToString()
+                Case "KnowledgeStoreBackgroundIndexing"
+                    Return context.INI_KnowledgeStoreBackgroundIndexing.ToString()
                 Case "AssembleExecMaxChars"
                     Return context.INI_AssembleExecMaxChars.ToString()
                 Case "AssembleMaxContextSummaryChars"
@@ -1450,6 +1475,16 @@ Namespace SharedLibrary
                     context.INI_AssemblePath = value
                 Case "AssemblePathLocal"
                     context.INI_AssemblePathLocal = value
+                Case "KnowledgeStorePath"
+                    context.INI_KnowledgeStorePath = value
+                Case "KnowledgeStorePathLocal"
+                    context.INI_KnowledgeStorePathLocal = value
+                Case "KnowledgeStoreOwner"
+                    context.INI_KnowledgeStoreOwner = value
+                Case "KnowledgeStoreUseLLMIndex"
+                    context.INI_KnowledgeStoreUseLLMIndex = Boolean.Parse(value)
+                Case "KnowledgeStoreBackgroundIndexing"
+                    context.INI_KnowledgeStoreBackgroundIndexing = Boolean.Parse(value)
                 Case "AssembleExecMaxChars"
                     context.INI_AssembleExecMaxChars = Integer.Parse(value)
                 Case "AssembleMaxContextSummaryChars"
@@ -1876,6 +1911,11 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
+                    {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
+                    {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
+                    {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"SP_Assemble_Plan", context.SP_Assemble_Plan},
@@ -1889,7 +1929,8 @@ Namespace SharedLibrary
                     {"DefaultPrefix", "DefaultPrefix"},
                     {"ReplaceText2Override", "ReplaceText2Override"},
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
-                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"}
+                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end
@@ -1988,7 +2029,14 @@ Namespace SharedLibrary
                 If pendingMySettings.Count > 0 Then
                     For Each kvp In pendingMySettings
                         ' Use late-bound access to avoid requiring strongly-typed settings properties
-                        My.Settings.Item(kvp.Key) = kvp.Value
+                        Dim isBool As Boolean
+                        If Boolean.TryParse(kvp.Value, isBool) Then
+                            My.Settings.Item(kvp.Key) = isBool
+                        ElseIf kvp.Value = "True" OrElse kvp.Value = "False" Then
+                            My.Settings.Item(kvp.Key) = CBool(kvp.Value)
+                        Else
+                            My.Settings.Item(kvp.Key) = kvp.Value
+                        End If
                     Next
                     My.Settings.Save()
                 End If
@@ -2357,6 +2405,12 @@ Namespace SharedLibrary
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
+                    {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
+                    {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
+                    {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
+                    {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"BrandingName", context.INI_BrandingName},
@@ -3170,6 +3224,10 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("AssemblePath", context.INI_AssemblePath)
             variableValues.Add("AssemblePathLocal", context.INI_AssemblePathLocal)
+            variableValues.Add("KnowledgeStorePath", context.INI_KnowledgeStorePath)
+            variableValues.Add("KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal)
+            variableValues.Add("KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner)
+            variableValues.Add("KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex)
             variableValues.Add("AssembleExecMaxChars", context.INI_AssembleExecMaxChars)
             variableValues.Add("AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
@@ -3545,6 +3603,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
                 If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
                 If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
+                If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
+                If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
+                If updatedValues.ContainsKey("KnowledgeStoreUseLLMIndex") Then context.INI_KnowledgeStoreUseLLMIndex = CBool(updatedValues("KnowledgeStoreUseLLMIndex"))
                 If updatedValues.ContainsKey("AssembleExecMaxChars") Then context.INI_AssembleExecMaxChars = CInt(updatedValues("AssembleExecMaxChars"))
                 If updatedValues.ContainsKey("AssembleMaxContextSummaryChars") Then context.INI_AssembleMaxContextSummaryChars = CInt(updatedValues("AssembleMaxContextSummaryChars"))
                 If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))

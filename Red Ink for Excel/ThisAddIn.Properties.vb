@@ -2535,4 +2535,41 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property INI_KnowledgeStorePath As String
+        Get
+            Return _context.INI_KnowledgeStorePath
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStorePath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStorePathLocal As String
+        Get
+            Return _context.INI_KnowledgeStorePathLocal
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStorePathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreOwner As String
+        Get
+            Return _context.INI_KnowledgeStoreOwner
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStoreOwner = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreUseLLMIndex As Boolean
+        Get
+            Return _context.INI_KnowledgeStoreUseLLMIndex
+        End Get
+        Set(value As Boolean)
+            _context.INI_KnowledgeStoreUseLLMIndex = value
+        End Set
+    End Property
+
 End Class

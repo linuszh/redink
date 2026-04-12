@@ -713,6 +713,35 @@ Namespace SharedLibrary
                                     Dim root As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse(responseText)
                                     LogTokenSpending(root, TokenCountString, AddUserPrompt)
 
+                                    ' Safely bypass HandleObject for float array extraction if ResponseKey dictates
+                                    If Not String.IsNullOrEmpty(ResponseKey) AndAlso ResponseKey.StartsWith("array:", StringComparison.OrdinalIgnoreCase) Then
+                                        ' Strip "array:" prefix (e.g., leaving "data.0.embedding" or "predictions[0].embeddings.values")
+                                        Dim arrayPath As String = ResponseKey.Substring(6).Trim()
+
+                                        ' Replace dot notation integers with bracket notation to help SelectToken
+                                        arrayPath = System.Text.RegularExpressions.Regex.Replace(arrayPath, "\.(\d+)", "[$1]")
+
+                                        Dim arrayToken As Newtonsoft.Json.Linq.JToken = root.SelectToken(arrayPath)
+                                        If arrayToken IsNot Nothing AndAlso arrayToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                                            ' Convert the float array to a pipe-separated string (immune to culture commas)
+                                            Dim floats As New List(Of String)()
+                                            For Each t In arrayToken
+                                                floats.Add(t.Value(Of Single)().ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                            Next
+                                            Dim resultString As String = String.Join("|", floats)
+                                            If context.INI_APIDebug Then
+                                                System.Diagnostics.Debug.WriteLine($"[Array Extractor] Target Path: '{arrayPath}'")
+                                                System.Diagnostics.Debug.WriteLine($"[Array Extractor] Extracted {floats.Count} float nodes.")
+                                                System.Diagnostics.Debug.WriteLine($"[Array Extractor] Value Preview: {If(resultString.Length > 100, resultString.Substring(0, 100) & "...", resultString)}")
+                                            End If
+                                            Return resultString
+                                        Else
+                                            If context.INI_APIDebug Then WriteDebugError("Expected JSON array at path: " & arrayPath, Endpoint, requestBody, responseText)
+                                            Return ""
+                                        End If
+                                    End If
+
+
                                     Select Case root.Type
                                         Case Newtonsoft.Json.Linq.JTokenType.Object
                                             Returnvalue = HandleObject(CType(root, Newtonsoft.Json.Linq.JObject), ResponseKey, responseText, RKMode, DetectToolCall, binaryOutputDirectory, Hidesplash)
@@ -815,6 +844,7 @@ Namespace SharedLibrary
                             ElseIf result.StatusCode = 429 Then
                                 If attempt = maxRetries Then
                                     Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: This error is typically either because (1) the server resource is exhausted on the side of the provider (retry it later or reduce the work load; {AN} already tried to slow down and wait, but this could not overcome the overload condition), or (2) you have not yet correctly configured your service account (e.g., with OpenAI API, you have to have a credit card registered and an amount entered before you generate your API key)."
+                                    System.Diagnostics.Debug.WriteLine($"[LLM FATAL] " & errMsg)
                                     If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody)
                                     If Not Hidesplash Then ShowCustomMessageBox(errMsg) Else Return errMsg
                                     Return ""
@@ -822,6 +852,7 @@ Namespace SharedLibrary
                                 Continue For
                             Else
                                 Dim errMsg As String = $"HTTP Error {result.StatusCode} when accessing the LLM endpoint: {result.Body}"
+                                System.Diagnostics.Debug.WriteLine($"[LLM FATAL] " & errMsg)
                                 If context.INI_APIDebug Then WriteDebugError(errMsg, Endpoint, requestBody, result.Body)
                                 If Not Hidesplash Then ShowCustomMessageBox(errMsg)
                                 Return ""
@@ -997,6 +1028,37 @@ Namespace SharedLibrary
 
                         Else
                             ' POST-only processing.
+
+                            ' Safely bypass HandleObject for float array extraction if ResponseKey dictates
+                            If Not String.IsNullOrEmpty(ResponseKey) AndAlso ResponseKey.StartsWith("array:", StringComparison.OrdinalIgnoreCase) Then
+                                ' Strip "array:" prefix (e.g., leaving "data.0.embedding" or "predictions[0].embeddings.values")
+                                Dim arrayPath As String = ResponseKey.Substring(6).Trim()
+
+                                ' Replace dot notation integers with bracket notation to help SelectToken
+                                arrayPath = System.Text.RegularExpressions.Regex.Replace(arrayPath, "\.(\d+)", "[$1]")
+
+                                Dim arrayToken As Newtonsoft.Json.Linq.JToken = root.SelectToken(arrayPath)
+                                If arrayToken IsNot Nothing AndAlso arrayToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                                    ' Convert the float array to a pipe-separated string (immune to culture commas)
+                                    Dim floats As New List(Of String)()
+                                    For Each t In arrayToken
+                                        floats.Add(t.Value(Of Single)().ToString(System.Globalization.CultureInfo.InvariantCulture))
+                                    Next
+
+                                    Dim resultString As String = String.Join("|", floats)
+                                    If context.INI_APIDebug Then
+                                        System.Diagnostics.Debug.WriteLine($"[Array Extractor] Target Path: '{arrayPath}'")
+                                        System.Diagnostics.Debug.WriteLine($"[Array Extractor] Extracted {floats.Count} float nodes.")
+                                        System.Diagnostics.Debug.WriteLine($"[Array Extractor] Value Preview: {If(resultString.Length > 100, resultString.Substring(0, 100) & "...", resultString)}")
+                                    End If
+
+                                    Return resultString
+                                Else
+                                    If context.INI_APIDebug Then WriteDebugError("Expected JSON array at path: " & arrayPath, Endpoint, requestBody, responseText)
+                                    Return ""
+                                End If
+                            End If
+
                             Select Case root.Type
                                 Case Newtonsoft.Json.Linq.JTokenType.Object
                                     Dim jsonObject As Newtonsoft.Json.Linq.JObject = CType(root, Newtonsoft.Json.Linq.JObject)
@@ -1191,6 +1253,9 @@ PostProcess:
                         Return (CInt(resp.StatusCode), responseBody, resp.ContentType)
                     End Using
 
+                Catch webEx As System.Net.WebException When webEx.Status = System.Net.WebExceptionStatus.RequestCanceled
+                    ' Safely throw generic TaskCanceled to be picked up cleanly by the outer loop
+                    Throw New System.Threading.Tasks.TaskCanceledException()
                 Catch webEx As System.Net.WebException When webEx.Response IsNot Nothing
                     caughtWebEx = webEx
                 End Try

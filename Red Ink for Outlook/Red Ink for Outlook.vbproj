@@ -493,6 +493,8 @@
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
+    <Compile Include="ThisAddIn.KnowledgeStoreWiring.vb" />
+    <Compile Include="ThisAddIn.Processing.KnowledgeRAG.vb" />
     <Compile Include="ThisAddIn.Tooling.vb" />
     <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
