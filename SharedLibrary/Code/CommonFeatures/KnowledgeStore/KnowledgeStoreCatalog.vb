@@ -101,6 +101,9 @@ Namespace SharedLibrary
         ''' <summary>Subfolder inside each store's SourcePath that holds index metadata and wiki pages.</summary>
         Public Const MetadataFolder As String = ".redink"
 
+        ''' <summary>Default filename used when a configured catalog path points to a directory only.</summary>
+        Public Const DefaultCatalogFileName As String = "redink-ks-catalog.json"
+
         ''' <summary>Manifest file inside .redink/ listing all indexed documents.</summary>
         Public Const ManifestFile As String = "manifest.json"
 
@@ -154,6 +157,50 @@ Namespace SharedLibrary
         End Function
 
         ''' <summary>
+        ''' Resolves a configured catalog path. When a directory path is supplied instead
+        ''' of a JSON filename, the default catalog filename is appended automatically.
+        ''' </summary>
+        Friend Shared Function ResolveCatalogPath(rawPath As String) As String
+            If String.IsNullOrWhiteSpace(rawPath) Then Return ""
+
+            Dim cleaned = StripQuotes(rawPath)
+            If String.IsNullOrWhiteSpace(cleaned) Then Return ""
+
+            Dim expanded = ExpandEnvironmentVariables(cleaned.Trim())
+            If String.IsNullOrWhiteSpace(expanded) Then Return ""
+
+            Dim endsWithSeparator =
+                expanded.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) OrElse
+                expanded.EndsWith(Path.AltDirectorySeparatorChar.ToString(), StringComparison.Ordinal)
+
+            Dim lastSegment As String = ""
+            Try
+                lastSegment = Path.GetFileName(expanded.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            Catch
+                lastSegment = ""
+            End Try
+
+            Dim treatAsDirectory =
+                endsWithSeparator OrElse
+                Directory.Exists(expanded) OrElse
+                String.IsNullOrWhiteSpace(Path.GetExtension(lastSegment))
+
+            If Not treatAsDirectory Then
+                Return expanded
+            End If
+
+            Dim basePath = expanded
+            If endsWithSeparator Then
+                basePath = basePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                If basePath.EndsWith(":", StringComparison.Ordinal) Then
+                    basePath &= Path.DirectorySeparatorChar
+                End If
+            End If
+
+            Return Path.Combine(basePath, DefaultCatalogFileName)
+        End Function
+
+        ''' <summary>
         ''' Ensures a catalog file exists. If the path is configured but the file is missing,
         ''' auto-creates it with an empty JSON array (local only). If the file exists but
         ''' contains invalid JSON, logs an error and resets it (local only).
@@ -162,7 +209,7 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(rawPath) Then Return
 
             Try
-                Dim expanded = ExpandEnvironmentVariables(rawPath.Trim())
+                Dim expanded = ResolveCatalogPath(rawPath)
                 If String.IsNullOrWhiteSpace(expanded) Then Return
 
                 ' Auto-create missing file (local catalog only — central is admin-managed)
@@ -264,7 +311,7 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(rawPath) Then Return result
 
             Try
-                Dim expanded = ExpandEnvironmentVariables(rawPath.Trim())
+                Dim expanded = ResolveCatalogPath(rawPath)
                 If String.IsNullOrWhiteSpace(expanded) OrElse Not File.Exists(expanded) Then Return result
 
                 Dim json = File.ReadAllText(expanded, System.Text.Encoding.UTF8)
@@ -316,7 +363,7 @@ Namespace SharedLibrary
                 Throw New InvalidOperationException("KnowledgeStorePathLocal is not configured.")
             End If
 
-            Dim expanded = ExpandEnvironmentVariables(context.INI_KnowledgeStorePathLocal.Trim())
+            Dim expanded = ResolveCatalogPath(context.INI_KnowledgeStorePathLocal)
             If String.IsNullOrWhiteSpace(expanded) Then
                 Throw New InvalidOperationException("KnowledgeStorePathLocal could not be expanded.")
             End If
