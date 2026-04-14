@@ -41,6 +41,7 @@
 Option Strict On
 Option Explicit On
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary
@@ -396,12 +397,25 @@ Partial Public Class ThisAddIn
                                             If filePathByIndex.TryGetValue(lineKey, fullPath) Then
                                                 ' Single file index — replace with clickable hyperlink showing filename
                                                 Dim displayName As String = Path.GetFileName(fullPath)
-                                                ws.Hyperlinks.Add(
-                                                    Anchor:=cell,
-                                                    Address:=fullPath,
-                                                    TextToDisplay:=displayName)
-                                                ' Ensure the cell text shows the filename, not the number
-                                                cell.Value = displayName
+                                                Try
+                                                    ' Excel Hyperlinks.Add fails (0x800A03EC) when the address
+                                                    ' exceeds ~255 chars or contains characters Excel cannot handle.
+                                                    Dim safeAddress As String = fullPath
+                                                    If safeAddress.Length > 255 Then
+                                                        ' Too long for Excel hyperlink — just show the filename
+                                                        cell.Value = displayName
+                                                    Else
+                                                        ws.Hyperlinks.Add(
+                                                Anchor:=cell,
+                                                Address:="file:///" & safeAddress.Replace("\", "/"),
+                                                TextToDisplay:=displayName)
+                                                        cell.Value = displayName
+                                                    End If
+                                                Catch exLink As Exception
+                                                    ' Hyperlink creation failed — fall back to plain filename
+                                                    cell.Value = displayName
+                                                    Debug.WriteLine($"Hyperlink failed for '{fullPath}': {exLink.Message}")
+                                                End Try
                                             Else
                                                 ' Try as a range key (e.g. "3-5") from diagnostic/error rows,
                                                 ' or as a bare integer that wasn't in the dictionary

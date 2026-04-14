@@ -1332,10 +1332,10 @@ Partial Public Class ThisAddIn
                 AddItem("kbrefreshvectors", "Rebuild embeddings from existing wiki pages only (use after changing the embedding model).")
                 AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
                 AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
+                AddItem("kbschema", "Open the selected Knowledge Store schema in the internal JSON editor.")
                 AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
                 AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
-
                 ' TOOLS / SOURCES
                 AddItem("setsources", "Select sources/tools available For tooling-capable models (session scope).")
                 AddItem("loadurl", "Retrieve the text Of a particular URL given.")
@@ -1486,6 +1486,51 @@ Partial Public Class ThisAddIn
                 SP_MergePrompt_Cached = SP_MergePrompt
 
                 Dim response = ShowCustomWindow("Here is the health report of the Knowledge Store you have selected:", report, "You can copy it to the clipboard, if you wish.", "{AN} Knowledge Store")
+
+                Return
+            End If
+
+            If OtherPrompt.Equals("kbschema", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStore As KnowledgeStoreCatalog.KnowledgeStoreDefinition = stores(0)
+
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store schema to open:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+
+                    selectedStore = stores(chosen - 1)
+                End If
+
+                If String.IsNullOrWhiteSpace(selectedStore.ResolvedSourcePath) Then
+                    ShowCustomMessageBox("The selected Knowledge Store does not have a valid source path.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                KnowledgeStoreSchema.LoadOrCreate(selectedStore.ResolvedSourcePath)
+
+                Dim schemaPath = KnowledgeStoreSchema.GetSchemaPath(selectedStore.ResolvedSourcePath)
+                If String.IsNullOrWhiteSpace(schemaPath) Then
+                    ShowCustomMessageBox("Could not resolve the schema path for the selected Knowledge Store.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                SharedMethods.ShowTextFileEditor(
+                    schemaPath,
+                    $"Edit schema for Knowledge Store '{selectedStore.Name}'.",
+                    ForceJson:=True,
+                    _context:=_context)
 
                 Return
             End If
