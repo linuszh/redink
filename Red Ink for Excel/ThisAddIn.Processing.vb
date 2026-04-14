@@ -581,10 +581,6 @@ Partial Public Class ThisAddIn
             .Calculation = Excel.XlCalculation.xlCalculationManual
         End With
 
-        Dim normalStyle As Excel.Style = app.ActiveWorkbook.Styles("Normal")
-        Dim defaultFontColor As Long = CLng(normalStyle.Font.Color)
-        Dim defaultInteriorColor As Long = CLng(normalStyle.Interior.Color)
-
         Try
             Dim rawVals As Object = CellRange.Value2
             Dim vals(,) As Object
@@ -611,6 +607,8 @@ Partial Public Class ThisAddIn
                     Dim addr As String = cell.Address(False, False)
 
                     Dim shouldProcess As Boolean = False
+                    Dim hasCustomFontColor As Boolean = False
+                    Dim hasCustomFillColor As Boolean = False
 
                     If raw IsNot Nothing Then
                         shouldProcess = True
@@ -637,15 +635,20 @@ Partial Public Class ThisAddIn
                         End Try
                     End If
 
-                    If Not shouldProcess AndAlso DoColor Then
-                        Dim hasFill As Boolean = False
+                    If DoColor Then
                         Try
-                            hasFill = (CLng(cell.Interior.ColorIndex) <> Excel.XlColorIndex.xlColorIndexNone)
+                            hasCustomFontColor = (CLng(cell.Font.ColorIndex) <> CLng(Excel.XlColorIndex.xlColorIndexAutomatic))
                         Catch
                         End Try
-                        If hasFill Then
-                            shouldProcess = True
-                        End If
+
+                        Try
+                            hasCustomFillColor = (CLng(cell.Interior.ColorIndex) <> CLng(Excel.XlColorIndex.xlColorIndexNone))
+                        Catch
+                        End Try
+                    End If
+
+                    If Not shouldProcess AndAlso DoColor AndAlso (hasCustomFontColor OrElse hasCustomFillColor) Then
+                        shouldProcess = True
                     End If
 
                     If shouldProcess Then
@@ -701,18 +704,55 @@ Partial Public Class ThisAddIn
                                         Dim formulaResolved As Boolean = False
 
                                         If formula1.StartsWith("="c) Then
-                                            ' Handle INDIRECT/INDIREKT formulas first
-                                            Dim upperFormula As String = formula1.ToUpperInvariant()
-                                            If upperFormula.Contains("INDIRECT") OrElse upperFormula.Contains("INDIREKT") Then
+                                            ' Handle INDIRECT validations first, language-independently
+                                            Dim normalizedFormulaEnglish As String = formula1
+
+                                            Try
+                                                Dim detectionOriginalHasFormula As Boolean = CBool(cell.HasFormula)
+                                                Dim detectionOriginalFormulaLocal As String = If(detectionOriginalHasFormula, CStr(cell.FormulaLocal), "")
+                                                Dim detectionOriginalValue As Object = If(Not detectionOriginalHasFormula, cell.Value2, Nothing)
+
+                                                Try
+                                                    cell.NumberFormat = "General"
+                                                    cell.ClearContents()
+                                                    cell.FormulaLocal = formula1
+                                                    normalizedFormulaEnglish = CStr(cell.Formula)
+                                                Catch
+                                                    normalizedFormulaEnglish = formula1
+                                                Finally
+                                                    Try
+                                                        If detectionOriginalHasFormula Then
+                                                            cell.FormulaLocal = detectionOriginalFormulaLocal
+                                                        ElseIf detectionOriginalValue IsNot Nothing Then
+                                                            cell.ClearContents()
+                                                            cell.Value2 = detectionOriginalValue
+                                                        Else
+                                                            cell.ClearContents()
+                                                        End If
+                                                    Catch
+                                                    End Try
+                                                End Try
+                                            Catch
+                                            End Try
+
+                                            If Regex.IsMatch(
+                                                normalizedFormulaEnglish,
+                                                "^\s*=\s*INDIRECT\s*\(.+\)\s*$",
+                                                RegexOptions.IgnoreCase) Then
                                                 Try
                                                     Dim oldCalc As Excel.XlCalculation = app.Calculation
                                                     app.Calculation = Excel.XlCalculation.xlCalculationAutomatic
 
                                                     Try
-                                                        ' Extract the argument inside INDIREKT(...)
-                                                        Dim m As Match = Regex.Match(formula1, "=\s*INDIREKT?\s*\((.+)\)\s*$", RegexOptions.IgnoreCase)
-                                                        If m.Success Then
-                                                            Dim innerFormula As String = "=" & m.Groups(1).Value
+                                                        ' Extract the argument from the original local formula so nested localized functions stay intact
+                                                        Dim openParenIndex As Integer = formula1.IndexOf("("c)
+                                                        Dim closeParenIndex As Integer = formula1.LastIndexOf(")"c)
+
+                                                        If openParenIndex > 0 AndAlso closeParenIndex > openParenIndex Then
+                                                            Dim innerFormula As String =
+                                                                "=" & formula1.Substring(
+                                                                    openParenIndex + 1,
+                                                                    closeParenIndex - openParenIndex - 1)
 
                                                             ' Store original cell state
                                                             Dim originalHasFormula As Boolean = CBool(cell.HasFormula)
@@ -822,8 +862,8 @@ Partial Public Class ThisAddIn
                                                                             Try
                                                                                 cell.ClearContents()
                                                                                 cell.FormulaLocal = validationFormula1
-                                                                                valFormulaEnglish = cell.Formula      ' English (commas)
-                                                                                valFormulaLocal = cell.FormulaLocal   ' Local (semicolons, localized names)
+                                                                                valFormulaEnglish = cell.Formula
+                                                                                valFormulaLocal = cell.FormulaLocal
                                                                             Catch
                                                                                 ' If translation fails, assume capture was correct as-is
                                                                             End Try
@@ -850,16 +890,12 @@ Partial Public Class ThisAddIn
 
                                                                         If validationType = Excel.XlDVType.xlValidateList Then
                                                                             Try
-                                                                                ' Use Placeholder pattern for stability
                                                                                 cell.Validation.Add(
                                                                                     Type:=Excel.XlDVType.xlValidateList,
                                                                                     AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
                                                                                     Operator:=Excel.XlFormatConditionOperator.xlBetween,
                                                                                     Formula1:="placeholder")
 
-                                                                                ' OPTIMIZED: Try LOCAL formula first.
-                                                                                ' Your environment uses Semicolons/German. Validation.Modify works best with Local syntax.
-                                                                                ' DisplayAlerts=False allows it to pass even if the reference is currently #N/A.
                                                                                 Try
                                                                                     cell.Validation.Modify(
                                                                                         Type:=Excel.XlDVType.xlValidateList,
@@ -867,7 +903,6 @@ Partial Public Class ThisAddIn
                                                                                         Operator:=Excel.XlFormatConditionOperator.xlBetween,
                                                                                         Formula1:=valFormulaLocal)
                                                                                 Catch exLocal As Exception
-                                                                                    ' Fallback: Try English only if Local failed
                                                                                     Debug.WriteLine($"Modify Local failed ({exLocal.Message}), retrying English: {valFormulaEnglish}")
                                                                                     cell.Validation.Modify(
                                                                                         Type:=Excel.XlDVType.xlValidateList,
@@ -882,7 +917,6 @@ Partial Public Class ThisAddIn
                                                                                 Debug.WriteLine($"List Validation failed completely: {ex.Message}")
                                                                             End Try
                                                                         Else
-                                                                            ' Non-list validation
                                                                             Try
                                                                                 cell.Validation.Add(
                                                                                     Type:=CType(validationType, Excel.XlDVType),
@@ -964,15 +998,17 @@ Partial Public Class ThisAddIn
                                             Marshal.ReleaseComObject(refRange)
                                         ElseIf Not formulaResolved Then
                                             ' ORIGINAL: Fallback - split by comma
-                                            If formula1.StartsWith("="c) Then
-                                                options.AddRange(formula1.Substring(1) _
-                                                .Split(","c) _
-                                                .Select(Function(s) s.Trim()))
-                                            Else
-                                                options.AddRange(formula1 _
-                                                .Split(","c) _
-                                                .Select(Function(s) s.Trim()))
-                                            End If
+                                            Dim listSeparator As String = ","
+                                            Try
+                                                listSeparator = CStr(app.International(Excel.XlApplicationInternational.xlListSeparator))
+                                            Catch
+                                            End Try
+
+                                            Dim listText As String = If(formula1.StartsWith("="c), formula1.Substring(1), formula1)
+
+                                            options.AddRange(listText.Split(
+                                                        New String() {listSeparator},
+                                                        StringSplitOptions.None).Select(Function(s) s.Trim()))
                                         End If
 
                                         sb.AppendLine($"- Dropdown options (separated by §) {String.Join("§", options)}")
@@ -984,7 +1020,7 @@ Partial Public Class ThisAddIn
                             End Try
 
                             If DoColor Then
-                                If CLng(cell.Font.Color) <> defaultFontColor Then
+                                If hasCustomFontColor Then
                                     Try
                                         Dim fc As System.Drawing.Color = System.Drawing.ColorTranslator.FromOle(CInt(cell.Font.Color))
                                         sb.AppendLine($"- FontColor #{fc.R:X2}{fc.G:X2}{fc.B:X2} (rgb {fc.R},{fc.G},{fc.B})")
@@ -993,7 +1029,7 @@ Partial Public Class ThisAddIn
                                     End Try
                                 End If
 
-                                If CLng(cell.Interior.Color) <> defaultInteriorColor Then
+                                If hasCustomFillColor Then
                                     Try
                                         Dim bc As System.Drawing.Color = System.Drawing.ColorTranslator.FromOle(CInt(cell.Interior.Color))
                                         sb.AppendLine($"- BackgroundColor #{bc.R:X2}{bc.G:X2}{bc.B:X2} (rgb {bc.R},{bc.G},{bc.B})")

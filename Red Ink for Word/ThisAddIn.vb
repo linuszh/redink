@@ -539,6 +539,7 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+        'WriteDllLoadDiagnosticsIfEnabled()
         AddContextMenu()
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
     End Sub
@@ -584,6 +585,227 @@ Partial Public Class ThisAddIn
             automationObject = New BridgeSubs()
         End If
         Return automationObject
+    End Function
+
+    Private Sub WriteDllLoadDiagnosticsIfEnabled()
+        Try
+            If _context Is Nothing Then Return
+            If Not _context.INIloaded Then Return
+            If Not _context.INI_APIDebug Then Return
+
+            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+            If String.IsNullOrWhiteSpace(desktopPath) Then Return
+            If Not System.IO.Directory.Exists(desktopPath) Then Return
+
+            Dim outputPath As String = System.IO.Path.Combine(desktopPath, "RI_DLL_Loaded.txt")
+            Dim report As New System.Text.StringBuilder()
+
+            report.AppendLine("RI DLL Loaded Diagnostic Report")
+            report.AppendLine(New String("="c, 80))
+            report.AppendLine("Created: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture))
+            report.AppendLine("App: " & AN & " for Word")
+            report.AppendLine("Red Ink Version: " & Version)
+            report.AppendLine("RDV: " & If(_context.RDV, ""))
+            report.AppendLine("Machine: " & Environment.MachineName)
+            report.AppendLine("User: " & Environment.UserName)
+            report.AppendLine("OS Version: " & Environment.OSVersion.ToString())
+            report.AppendLine(".NET Version: " & Environment.Version.ToString())
+            report.AppendLine("64-bit OS: " & Environment.Is64BitOperatingSystem.ToString())
+            report.AppendLine("64-bit Process: " & Environment.Is64BitProcess.ToString())
+            report.AppendLine("Current Directory: " & SafeValue(Environment.CurrentDirectory))
+            report.AppendLine("Base Directory: " & SafeValue(AppDomain.CurrentDomain.BaseDirectory))
+            report.AppendLine("AppDomain Config File: " & SafeValue(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile))
+            report.AppendLine("API Debug Enabled: " & _context.INI_APIDebug.ToString())
+            report.AppendLine()
+
+            Try
+                Dim currentProcess = System.Diagnostics.Process.GetCurrentProcess()
+                report.AppendLine("Process Name: " & SafeValue(currentProcess.ProcessName))
+                report.AppendLine("Process Id: " & currentProcess.Id.ToString(CultureInfo.InvariantCulture))
+                Try
+                    report.AppendLine("Process Path: " & SafeValue(currentProcess.MainModule.FileName))
+                Catch ex As Exception
+                    report.AppendLine("Process Path: <error: " & ex.GetType().FullName & ": " & ex.Message & ">")
+                End Try
+            Catch ex As Exception
+                report.AppendLine("Process Info Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("CONFIGURATION")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                report.AppendLine("Active redink.ini Path: " & SafeValue(SharedMethods.GetActiveConfigFilePath(_context)))
+            Catch ex As Exception
+                report.AppendLine("Active redink.ini Path Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine("INI_LogPath: " & SafeValue(_context.INI_LogPath))
+            report.AppendLine("INI_UpdatePath: " & SafeValue(_context.INI_UpdatePath))
+            report.AppendLine()
+
+            report.AppendLine("KEY ASSEMBLIES")
+            report.AppendLine(New String("-"c, 80))
+            AppendAssemblyInfo(report, "ThisAddIn Assembly", Me.GetType().Assembly)
+            AppendAssemblyInfo(report, "SharedLibrary Assembly", GetType(SharedMethods).Assembly)
+            AppendAssemblyInfo(report, "Newtonsoft.Json / JToken Assembly", GetType(Newtonsoft.Json.Linq.JToken).Assembly)
+
+            report.AppendLine()
+            report.AppendLine("JTOKEN METHOD CHECK")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                Dim jTokenType As System.Type = GetType(Newtonsoft.Json.Linq.JToken)
+                Dim formattingType As System.Type = GetType(Newtonsoft.Json.Formatting)
+                Dim formattingMethod As System.Reflection.MethodInfo = jTokenType.GetMethod("ToString", New System.Type() {formattingType})
+
+                report.AppendLine("JToken Type AssemblyQualifiedName: " & SafeValue(jTokenType.AssemblyQualifiedName))
+                If formattingMethod Is Nothing Then
+                    report.AppendLine("Reflection Lookup: JToken.ToString(Newtonsoft.Json.Formatting) = NOT FOUND")
+                Else
+                    report.AppendLine("Reflection Lookup: " & formattingMethod.ToString())
+                End If
+            Catch ex As Exception
+                report.AppendLine("Reflection Lookup Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("RUNTIME PROBE")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                Dim probeToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse("{""x"":1}")
+                Dim probeText As String = probeToken.ToString(Newtonsoft.Json.Formatting.Indented)
+
+                report.AppendLine("Probe Result: SUCCESS")
+                report.AppendLine("Probe Output:")
+                report.AppendLine(probeText)
+            Catch ex As Exception
+                report.AppendLine("Probe Result: FAILED")
+                report.AppendLine("Exception Type: " & ex.GetType().FullName)
+                report.AppendLine("Exception Message: " & ex.Message)
+                report.AppendLine("Stack Trace:")
+                report.AppendLine(If(ex.StackTrace, ""))
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("LOADED ASSEMBLIES OF INTEREST")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                For Each loadedAssembly As System.Reflection.Assembly In AppDomain.CurrentDomain.GetAssemblies()
+                    Dim assemblyName As String = ""
+                    Try
+                        assemblyName = loadedAssembly.GetName().Name
+                    Catch
+                    End Try
+
+                    If String.Equals(assemblyName, "Newtonsoft.Json", StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(assemblyName, "SharedLibrary", StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(assemblyName, Me.GetType().Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase) Then
+
+                        AppendAssemblyInfo(report, "Loaded Assembly", loadedAssembly)
+                        report.AppendLine()
+                    End If
+                Next
+            Catch ex As Exception
+                report.AppendLine("Loaded Assembly Scan Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine("APP.CONFIG NEWTONSOFT SNIPPET")
+            report.AppendLine(New String("-"c, 80))
+            AppendConfigSnippet(report, AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, "Newtonsoft.Json")
+
+            report.AppendLine()
+            report.AppendLine("DONE")
+            report.AppendLine(New String("="c, 80))
+
+            System.IO.File.WriteAllText(outputPath, report.ToString(), New System.Text.UTF8Encoding(False))
+        Catch
+            ' Intentionally silent: diagnostics must never break startup.
+        End Try
+    End Sub
+
+    Private Shared Sub AppendAssemblyInfo(report As System.Text.StringBuilder, title As String, assemblyValue As System.Reflection.Assembly)
+        report.AppendLine(title & ":")
+
+        If assemblyValue Is Nothing Then
+            report.AppendLine("  <nothing>")
+            Return
+        End If
+
+        Try
+            report.AppendLine("  FullName: " & SafeValue(assemblyValue.FullName))
+        Catch ex As Exception
+            report.AppendLine("  FullName Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            report.AppendLine("  Location: " & SafeValue(assemblyValue.Location))
+        Catch ex As Exception
+            report.AppendLine("  Location Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            report.AppendLine("  ImageRuntimeVersion: " & SafeValue(assemblyValue.ImageRuntimeVersion))
+        Catch ex As Exception
+            report.AppendLine("  ImageRuntimeVersion Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            Dim fileVersion As String = ""
+            If Not String.IsNullOrWhiteSpace(assemblyValue.Location) AndAlso System.IO.File.Exists(assemblyValue.Location) Then
+                fileVersion = System.Diagnostics.FileVersionInfo.GetVersionInfo(assemblyValue.Location).FileVersion
+            End If
+            report.AppendLine("  FileVersion: " & SafeValue(fileVersion))
+        Catch ex As Exception
+            report.AppendLine("  FileVersion Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Sub AppendConfigSnippet(report As System.Text.StringBuilder, configPath As String, searchText As String)
+        Try
+            If String.IsNullOrWhiteSpace(configPath) Then
+                report.AppendLine("<no config path>")
+                Return
+            End If
+
+            report.AppendLine("Config Path: " & configPath)
+
+            If Not System.IO.File.Exists(configPath) Then
+                report.AppendLine("<config file not found>")
+                Return
+            End If
+
+            Dim lines As String() = System.IO.File.ReadAllLines(configPath)
+            Dim found As Boolean = False
+
+            For i As Integer = 0 To lines.Length - 1
+                If lines(i).IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    found = True
+                    Dim startIndex As Integer = Math.Max(0, i - 3)
+                    Dim endIndex As Integer = Math.Min(lines.Length - 1, i + 3)
+
+                    For j As Integer = startIndex To endIndex
+                        report.AppendLine((j + 1).ToString(CultureInfo.InvariantCulture).PadLeft(5) & ": " & lines(j))
+                    Next
+
+                    Exit For
+                End If
+            Next
+
+            If Not found Then
+                report.AppendLine("<search text not found in config>")
+            End If
+        Catch ex As Exception
+            report.AppendLine("Config Snippet Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Function SafeValue(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return "<empty>"
+        Return value
     End Function
 
 
