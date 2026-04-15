@@ -377,7 +377,7 @@ Partial Public Class ThisAddIn
             }
             paramsList.Add(pVoicemail)
             pVoicemailSender = New InputParameter() With {
-                .Name = "Voicemail sender address (e.g. noreply@combox.swisscom.ch)",
+                .Name = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
                 .Value = If(saved.VoicemailSenderAddress, "")
             }
             paramsList.Add(pVoicemailSender)

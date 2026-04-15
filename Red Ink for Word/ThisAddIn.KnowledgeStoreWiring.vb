@@ -40,10 +40,8 @@ Partial Public Class ThisAddIn
         Try
             If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
 
-            ' Initialize the shared service with the user's persisted preference
             KnowledgeStoreIdleService.Initialize(_context)
 
-            ' Set up the timer — it always runs, but OnIdleTickAsync is a no-op when disabled
             _ksTimer = New System.Windows.Forms.Timer()
             _ksTimer.Interval = KS_IDLE_INTERVAL_MS
             AddHandler _ksTimer.Tick, AddressOf KsTimer_Tick
@@ -58,6 +56,11 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Async Sub KsTimer_Tick(sender As Object, e As EventArgs)
         Try
+            If Not KnowledgeStoreIdleService.CanRunNow(_context) Then
+                Debug.WriteLine("KS Wiring: Skipping tick — outside configured Knowledge Store processing window.")
+                Return
+            End If
+
             Debug.WriteLine("KS Wiring: Timer tick fired (60s).")
             Await KnowledgeStoreIdleService.OnIdleTickAsync().ConfigureAwait(False)
         Catch
@@ -83,6 +86,7 @@ Partial Public Class ThisAddIn
             Else
                 msg = $"Indexing complete. Indexed: {result.IndexedFiles}, Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}."
             End If
+
             ShowCustomMessageBox(msg, $"{AN} Knowledge Store")
         Catch ex As Exception
             ShowCustomMessageBox($"Error during foreground indexing: {ex.Message}", $"{AN} Knowledge Store")
@@ -100,6 +104,7 @@ Partial Public Class ThisAddIn
                 _ksTimer.Dispose()
                 _ksTimer = Nothing
             End If
+
             KnowledgeStoreIdleService.Shutdown()
         Catch
         End Try

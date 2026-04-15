@@ -1592,27 +1592,27 @@ Partial Public Class ThisAddIn
                 Dim selectedStoreName As String = ""
 
                 If stores.Count = 1 Then
-                    selectedStoreName = stores(0).Name
+                    selectedStoreName = stores(0).StoreId
                 Else
                     Dim items As New List(Of SLib.SelectionItem)()
                     items.Add(New SLib.SelectionItem("All active Knowledge Stores", 1))
 
                     Dim idx As Integer = 2
                     For Each s In stores
-                        items.Add(New SLib.SelectionItem($"{s.Name} ({s.ResolvedSourcePath})", idx))
+                        items.Add(New SLib.SelectionItem(KnowledgeStoreCatalog.GetDisplayLabel(s), idx))
                         idx += 1
                     Next
 
                     Dim chosen As Integer = SLib.SelectValue(
-                        items,
-                        1,
-                        "Select which Knowledge Store(s) to index:",
-                        "Knowledge Store")
+                                        items,
+                                        1,
+                                        "Select which Knowledge Store(s) to index:",
+                                        "Knowledge Store")
 
                     If chosen <= 0 Then Return
 
                     If chosen > 1 Then
-                        selectedStoreName = stores(chosen - 2).Name
+                        selectedStoreName = stores(chosen - 2).StoreId
                     End If
                 End If
 

@@ -28,11 +28,11 @@ Partial Public Class ThisAddIn
 
     Private _ksTimer As System.Windows.Forms.Timer
     Private Const KS_IDLE_INTERVAL_MS As Integer = 60000
+
     Public Sub InitializeKnowledgeStoreService()
         Try
             If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
 
-            ' Initialize the shared service with the user's persisted preference natively
             KnowledgeStoreIdleService.Initialize(_context)
 
             _ksTimer = New System.Windows.Forms.Timer()
@@ -45,31 +45,50 @@ Partial Public Class ThisAddIn
     End Sub
 
     ''' <summary>
-    ''' Returns True when the host is genuinely idle — no AutoPilot processing,
-    ''' no chat LLM jobs, no chat agent execution, and no power transitions.
+    ''' Returns True when AutoPilot is currently doing real work that should block
+    ''' Knowledge Store background processing.
+    ''' </summary>
+    Private Function IsAutoPilotBusy() As Boolean
+        If Not _apActive Then
+            Return False
+        End If
+
+        If Not String.IsNullOrWhiteSpace(_apCurrentProcessingEntryId) Then
+            Return True
+        End If
+
+        If _apMailQueue.Count > 0 Then
+            Return True
+        End If
+
+        If System.Threading.Interlocked.CompareExchange(_apSchedulerCheckRunning, 0, 0) <> 0 Then
+            Return True
+        End If
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Returns True when the host is genuinely idle — no active AutoPilot mail/voicemail/scheduler
+    ''' work, no chat LLM jobs, no chat agent execution, and no power transitions.
     ''' </summary>
     Private Function IsOutlookIdle() As Boolean
-        ' Power transition in progress
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
             Return False
         End If
 
-        ' AutoPilot is actively processing e-mails
-        If _apActive Then
+        If IsAutoPilotBusy() Then
             Return False
         End If
 
-        ' Chat agent tooling job is executing
         If _chatAgentActive Then
             Return False
         End If
 
-        ' Chat LLM jobs are in flight (local chat or tooling loop)
         If System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0) > 0 Then
             Return False
         End If
 
-        ' Active tooling context means a tooling loop is running
         If _activeToolingContext IsNot Nothing Then
             Return False
         End If
@@ -79,9 +98,13 @@ Partial Public Class ThisAddIn
 
     Private Async Sub KsTimer_Tick(sender As Object, e As EventArgs)
         Try
-            ' Skip background indexing when Outlook is not idle
+            If Not KnowledgeStoreIdleService.CanRunNow(_context) Then
+                Debug.WriteLine("KS Wiring: Skipping tick — outside configured Knowledge Store processing window.")
+                Return
+            End If
+
             If Not IsOutlookIdle() Then
-                Debug.WriteLine("KS Wiring: Skipping tick — Outlook is busy (AutoPilot, Chat, or Agent active).")
+                Debug.WriteLine("KS Wiring: Skipping tick — Outlook is busy (active AutoPilot work, Chat, or Agent).")
                 Return
             End If
 
@@ -92,7 +115,6 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-
     Public Sub ShutdownKnowledgeStoreService()
         Try
             If _ksTimer IsNot Nothing Then
@@ -101,6 +123,7 @@ Partial Public Class ThisAddIn
                 _ksTimer.Dispose()
                 _ksTimer = Nothing
             End If
+
             KnowledgeStoreIdleService.Shutdown()
         Catch
         End Try

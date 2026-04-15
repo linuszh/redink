@@ -73,6 +73,7 @@ Namespace SharedLibrary
         ''' </summary>
         Public Class PendingFile
             Public Property FilePath As String = ""
+            Public Property StoreId As String = ""
             Public Property StoreName As String = ""
             Public Property DetectedUtc As DateTime = DateTime.UtcNow
         End Class
@@ -115,20 +116,20 @@ Namespace SharedLibrary
 
                 Try
                     Dim watcher As New FileSystemWatcher() With {
-                        .Path = store.ResolvedSourcePath,
-                        .IncludeSubdirectories = store.ScanSubdirectories,
-                        .NotifyFilter = NotifyFilters.FileName Or NotifyFilters.LastWrite Or NotifyFilters.CreationTime,
-                        .InternalBufferSize = 16384,
-                        .EnableRaisingEvents = True
-                    }
+                .Path = store.ResolvedSourcePath,
+                .IncludeSubdirectories = store.ScanSubdirectories,
+                .NotifyFilter = NotifyFilters.FileName Or NotifyFilters.LastWrite Or NotifyFilters.CreationTime,
+                .InternalBufferSize = 16384,
+                .EnableRaisingEvents = True
+            }
 
-                    Dim storeName = store.Name
+                    Dim storeSnapshot = store
 
-                    AddHandler watcher.Created, Sub(s, e) OnFileDetected(e.FullPath, storeName)
-                    AddHandler watcher.Changed, Sub(s, e) OnFileDetected(e.FullPath, storeName)
-                    AddHandler watcher.Renamed, Sub(s, e) OnFileDetected(e.FullPath, storeName)
+                    AddHandler watcher.Created, Sub(s, e) OnFileDetected(e.FullPath, storeSnapshot)
+                    AddHandler watcher.Changed, Sub(s, e) OnFileDetected(e.FullPath, storeSnapshot)
+                    AddHandler watcher.Renamed, Sub(s, e) OnFileDetected(e.FullPath, storeSnapshot)
                     AddHandler watcher.Error, Sub(s, e)
-                                                  Debug.WriteLine($"KSWatcher error on '{storeName}': {e.GetException().Message}")
+                                                  Debug.WriteLine($"KSWatcher error on '{KnowledgeStoreCatalog.GetDisplayLabel(storeSnapshot)}': {e.GetException().Message}")
                                               End Sub
 
                     _watchers.Add(watcher)
@@ -160,25 +161,28 @@ Namespace SharedLibrary
 
 #Region "File Detection"
 
-        Private Sub OnFileDetected(filePath As String, storeName As String)
+        Private Sub OnFileDetected(filePath As String, store As KnowledgeStoreCatalog.KnowledgeStoreDefinition)
             Try
+                If store Is Nothing Then Return
                 If IsMetadataPath(filePath) Then Return
 
                 Dim ext = Path.GetExtension(filePath)
                 If String.IsNullOrWhiteSpace(ext) Then Return
                 If Not SupportedExtensions.Contains(ext.ToLowerInvariant()) Then Return
 
-                ' Debounce: skip if already in queue
                 Dim normalizedPath = filePath.ToUpperInvariant()
-                If _pendingFiles.Any(Function(p) p.FilePath.ToUpperInvariant() = normalizedPath) Then Return
+                If _pendingFiles.Any(Function(p) p.FilePath.ToUpperInvariant() = normalizedPath AndAlso
+                                         String.Equals(p.StoreId, store.StoreId, StringComparison.OrdinalIgnoreCase)) Then
+                    Return
+                End If
 
                 _pendingFiles.Enqueue(New PendingFile With {
-                    .FilePath = filePath,
-                    .StoreName = storeName,
-                    .DetectedUtc = DateTime.UtcNow
-                })
+            .FilePath = filePath,
+            .StoreId = store.StoreId,
+            .StoreName = store.Name,
+            .DetectedUtc = DateTime.UtcNow
+        })
             Catch
-                ' Watcher callbacks must never throw
             End Try
         End Sub
 
@@ -232,12 +236,12 @@ Namespace SharedLibrary
                             End If
 
                             If entry Is Nothing Then
-                                OnFileDetected(filePath, store.Name)
+                                OnFileDetected(filePath, store)
                             Else
                                 Try
                                     Dim lastWrite = File.GetLastWriteTimeUtc(filePath)
                                     If lastWrite > entry.IndexedDate.ToUniversalTime() Then
-                                        OnFileDetected(filePath, store.Name)
+                                        OnFileDetected(filePath, store)
                                     End If
                                 Catch
                                 End Try
@@ -301,7 +305,15 @@ Namespace SharedLibrary
                             Continue While
                         End If
 
-                        Dim store = KnowledgeStoreCatalog.GetStoreByName(pending.StoreName, _context)
+                        Dim store = KnowledgeStoreCatalog.GetStoreById(pending.StoreId, _context)
+
+                        If store Is Nothing AndAlso Not String.IsNullOrWhiteSpace(pending.StoreName) Then
+                            Dim matches = KnowledgeStoreCatalog.GetStoresByName(pending.StoreName, _context)
+                            If matches.Count = 1 Then
+                                store = matches(0)
+                            End If
+                        End If
+
                         If store Is Nothing OrElse Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
                             result.ErrorMessage = "Store not found or not writable."
                             results.Add(result)
@@ -328,10 +340,12 @@ Namespace SharedLibrary
 
                     Catch ex As Exception
                         result.ErrorMessage = ex.Message
+                        ' In ProcessPendingAsync, replace the LogWikiError call
+
                         KnowledgeWikiService.LogWikiError(
-                            KnowledgeStoreCatalog.GetStoreByName(pending.StoreName, _context)?.ResolvedSourcePath,
-                            pending.FilePath,
-                            ex.Message)
+                        KnowledgeStoreCatalog.GetStoreById(pending.StoreId, _context)?.ResolvedSourcePath,
+                        pending.FilePath,
+                        ex.Message)
                     End Try
 
                     results.Add(result)

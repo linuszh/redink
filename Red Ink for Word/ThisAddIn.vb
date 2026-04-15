@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 12.4.2026
+' 15.4.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -47,9 +47,11 @@ Imports System.Globalization
 
 Partial Public Class ThisAddIn
 
+    Private Const DLLDIAGNOSTICS = False ' Whether to show diagnostics for loading native DLLs
+
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.120426" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.150426" & SharedMethods.VersionQualifier
 
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
@@ -539,7 +541,7 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
-        'WriteDllLoadDiagnosticsIfEnabled()
+        If DLLDIAGNOSTICS Then WriteDllLoadDiagnosticsIfEnabled()
         AddContextMenu()
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
     End Sub
