@@ -2036,7 +2036,8 @@ Partial Public Class ThisAddIn
                         {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
                         {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
                         {"KnowledgeStoreOwner", "Knowledge store: Default owner"},
-                        {"KnowledgeStoreBackgroundIndexing", "Knowledge store: Background indexing"}
+                        {"KnowledgeStoreBackgroundIndexing", "Knowledge store: Background indexing"},
+                        {"KnowledgeStoreBackgroundIndexingWindow", "Knowledge store: Background processing window"}
                     }
 
         Dim SettingsTips As New Dictionary(Of String, String) From {
@@ -2072,7 +2073,8 @@ Partial Public Class ThisAddIn
                         {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
                         {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
                         {"KnowledgeStoreOwner", "Default owner identity for locally created stores (empty = current Windows username)"},
-                        {"KnowledgeStoreBackgroundIndexing", "When enabled, new or changed documents in active stores are indexed automatically in the background"}
+                        {"KnowledgeStoreBackgroundIndexing", "When enabled, new or changed documents in active stores are indexed automatically in the background"},
+                        {"KnowledgeStoreBackgroundIndexingWindow", "Optional local-time processing window for background indexing. Leave empty to allow any time. Examples: '22:00-06:00' (only at night), 'allow:22:00-06:00;12:00-13:00', 'deny:08:00-18:00'."}
                 }
 
         ShowSettingsWindow(Settings, SettingsTips)

@@ -615,7 +615,8 @@ Namespace SharedLibrary
                                                     {"ReplaceText2Override", "ReplaceText2Override"},
                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                                                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
-                                                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"}
+                                                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
+                                                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -1151,6 +1152,8 @@ Namespace SharedLibrary
                     Return context.INI_KnowledgeStoreUseLLMIndex.ToString()
                 Case "KnowledgeStoreBackgroundIndexing"
                     Return context.INI_KnowledgeStoreBackgroundIndexing.ToString()
+                Case "KnowledgeStoreBackgroundIndexingWindow"
+                    Return context.INI_KnowledgeStoreBackgroundIndexingWindow
                 Case "AssembleExecMaxChars"
                     Return context.INI_AssembleExecMaxChars.ToString()
                 Case "AssembleMaxContextSummaryChars"
@@ -1485,6 +1488,8 @@ Namespace SharedLibrary
                     context.INI_KnowledgeStoreUseLLMIndex = Boolean.Parse(value)
                 Case "KnowledgeStoreBackgroundIndexing"
                     context.INI_KnowledgeStoreBackgroundIndexing = Boolean.Parse(value)
+                Case "KnowledgeStoreBackgroundIndexingWindow"
+                    context.INI_KnowledgeStoreBackgroundIndexingWindow = value
                 Case "AssembleExecMaxChars"
                     context.INI_AssembleExecMaxChars = Integer.Parse(value)
                 Case "AssembleMaxContextSummaryChars"
@@ -1916,6 +1921,7 @@ Namespace SharedLibrary
                     {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
                     {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
+                    {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow},
                     {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"SP_Assemble_Plan", context.SP_Assemble_Plan},
@@ -1930,7 +1936,8 @@ Namespace SharedLibrary
                     {"ReplaceText2Override", "ReplaceText2Override"},
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
-                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"}
+                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
+                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end

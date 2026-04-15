@@ -2626,6 +2626,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_KnowledgeStoreBackgroundIndexingWindow As String
+        Get
+            Return _context.INI_KnowledgeStoreBackgroundIndexingWindow
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStoreBackgroundIndexingWindow = value
+        End Set
+    End Property
+
     ''' <summary>
     ''' Returns the supplied <paramref name="OverrideValue"/> when it is not null, empty,
     ''' or whitespace; otherwise returns the original string value unchanged.

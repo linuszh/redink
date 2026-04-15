@@ -290,6 +290,7 @@ Namespace SharedLibrary
             Property INI_KnowledgeStoreUseLLMIndex As Boolean
             Property INI_KnowledgeStoreOwner As String
             Property INI_KnowledgeStoreBackgroundIndexing As Boolean
+            Property INI_KnowledgeStoreBackgroundIndexingWindow As String
             Property INI_DocStylePath As String
             Property INI_DocStylePathLocal As String
             Property INI_PromptLibPath_Transcript As String
@@ -619,6 +620,7 @@ Namespace SharedLibrary
         Public Property INI_KnowledgeStoreOwner As String Implements ISharedContext.INI_KnowledgeStoreOwner
 
         Public Property INI_KnowledgeStoreBackgroundIndexing As Boolean Implements ISharedContext.INI_KnowledgeStoreBackgroundIndexing
+        Public Property INI_KnowledgeStoreBackgroundIndexingWindow As String Implements ISharedContext.INI_KnowledgeStoreBackgroundIndexingWindow
         Public Property INI_DocStylePath As String Implements ISharedContext.INI_DocStylePath
         Public Property INI_DocStylePathLocal As String Implements ISharedContext.INI_DocStylePathLocal
         Public Property INI_PromptLibPath_Transcript As String Implements ISharedContext.INI_PromptLibPath_Transcript

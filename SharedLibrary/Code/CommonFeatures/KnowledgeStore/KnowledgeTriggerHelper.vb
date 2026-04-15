@@ -395,26 +395,24 @@ Namespace SharedLibrary
             Dim resolvedStoreFromTag As Boolean = False
 
             If Not String.IsNullOrWhiteSpace(request.StoreName) Then
-                ' Explicit store: prefix
-                Dim match = stores.FirstOrDefault(Function(s) s.Name.Equals(request.StoreName, StringComparison.OrdinalIgnoreCase))
-                If match IsNot Nothing Then
-                    targetStores = New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) From {match}
+                Dim matches = KnowledgeStoreCatalog.GetStoresByName(request.StoreName, context)
+                If matches.Count > 0 Then
+                    targetStores = matches
                 Else
                     Return ("", $"Knowledge Store '{request.StoreName}' not found.")
                 End If
             ElseIf request.Tags IsNot Nothing AndAlso request.Tags.Length = 1 AndAlso Not request.LoadAll Then
-                ' Single value in (kb:xxx) — check if it's a store name first
                 Dim singleVal = request.Tags(0)
-                Dim storeMatch = stores.FirstOrDefault(Function(s) s.Name.Equals(singleVal, StringComparison.OrdinalIgnoreCase))
-                If storeMatch IsNot Nothing Then
-                    targetStores = New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) From {storeMatch}
+                Dim storeMatches = KnowledgeStoreCatalog.GetStoresByName(singleVal, context)
+
+                If storeMatches.Count > 0 Then
+                    targetStores = storeMatches
                     resolvedStoreFromTag = True
-                    ' Clear tags since it was actually a store name
                     request = New KnowledgeRequest() With {
-                        .LoadAll = True,
-                        .StoreName = singleVal,
-                        .RawTrigger = request.RawTrigger
-                    }
+            .LoadAll = True,
+            .StoreName = singleVal,
+            .RawTrigger = request.RawTrigger
+        }
                 End If
             End If
 

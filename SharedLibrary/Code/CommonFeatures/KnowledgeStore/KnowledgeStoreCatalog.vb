@@ -92,6 +92,13 @@ Namespace SharedLibrary
             ''' <summary>Expanded, resolved SourcePath (computed at load time).</summary>
             <JsonIgnore>
             Public Property ResolvedSourcePath As String = ""
+
+
+            <JsonIgnore>
+            Public Property StoreId As String = ""
+
+            <JsonIgnore>
+            Public Property DisplayLabel As String = ""
         End Class
 
 #End Region
@@ -128,32 +135,167 @@ Namespace SharedLibrary
         ''' Local definitions override central ones with the same Name (case-insensitive).
         ''' Auto-creates missing local catalog files with an empty array.
         ''' </summary>
+        ' Replace LoadAll and add the helper methods below it.
+
         Public Shared Function LoadAll(context As ISharedContext) As List(Of KnowledgeStoreDefinition)
             Dim merged As New List(Of KnowledgeStoreDefinition)()
-            Dim seenNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            ' Ensure catalog files exist (auto-create local; validate both)
             EnsureCatalogFile(context.INI_KnowledgeStorePathLocal, isLocal:=True)
             EnsureCatalogFile(context.INI_KnowledgeStorePath, isLocal:=False)
 
-            ' Local catalog first (takes precedence)
-            Dim localDefs = LoadCatalogFile(context.INI_KnowledgeStorePathLocal, isFromCentral:=False)
-            For Each def In localDefs
-                If String.IsNullOrWhiteSpace(def.Name) Then Continue For
-                merged.Add(def)
-                seenNames.Add(def.Name)
+            merged.AddRange(LoadConfiguredStores(context.INI_KnowledgeStorePathLocal, isFromCentral:=False, context:=context))
+            merged.AddRange(LoadConfiguredStores(context.INI_KnowledgeStorePath, isFromCentral:=True, context:=context))
+
+            ApplyRuntimeMetadata(merged)
+
+            Dim deduped As New List(Of KnowledgeStoreDefinition)()
+            Dim seenIds As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each def In merged
+                Dim id = If(def.StoreId, "").Trim()
+                If id <> "" AndAlso seenIds.Contains(id) Then Continue For
+                If id <> "" Then seenIds.Add(id)
+                deduped.Add(def)
             Next
 
-            ' Central catalog — skip duplicates
-            Dim centralDefs = LoadCatalogFile(context.INI_KnowledgeStorePath, isFromCentral:=True)
-            For Each def In centralDefs
-                If String.IsNullOrWhiteSpace(def.Name) Then Continue For
-                If seenNames.Contains(def.Name) Then Continue For
-                merged.Add(def)
-                seenNames.Add(def.Name)
+            ApplyRuntimeMetadata(deduped)
+            Return deduped
+        End Function
+
+        Private Shared Function LoadConfiguredStores(rawPath As String,
+                                             isFromCentral As Boolean,
+                                             context As ISharedContext) As List(Of KnowledgeStoreDefinition)
+            Dim defs = LoadCatalogFile(rawPath, isFromCentral)
+            If defs.Count > 0 Then Return defs
+
+            Dim directPath = ExpandEnvironmentVariables(StripQuotes(rawPath))
+            If String.IsNullOrWhiteSpace(directPath) OrElse Not Directory.Exists(directPath) Then
+                Return defs
+            End If
+
+            Dim owner As String = ""
+            If context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.INI_KnowledgeStoreOwner) Then
+                owner = context.INI_KnowledgeStoreOwner.Trim()
+            End If
+
+            Dim defaultName = Path.GetFileName(directPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            If String.IsNullOrWhiteSpace(defaultName) Then
+                defaultName = If(isFromCentral, "Central Knowledge Store", "Local Knowledge Store")
+            End If
+
+            defs.Add(New KnowledgeStoreDefinition() With {
+        .Name = defaultName.Trim(),
+        .SourcePath = StripQuotes(rawPath),
+        .Owner = owner,
+        .Role = If(isFromCentral, "shared", "personal"),
+        .Active = True,
+        .ScanSubdirectories = True,
+        .IsFromCentralCatalog = isFromCentral,
+        .ResolvedSourcePath = directPath
+    })
+
+            Return defs
+        End Function
+
+        Private Shared Sub ApplyRuntimeMetadata(definitions As IEnumerable(Of KnowledgeStoreDefinition))
+            If definitions Is Nothing Then Return
+
+            Dim nameCounts As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+
+            For Each def In definitions
+                If def Is Nothing Then Continue For
+
+                def.StoreId = BuildStoreId(def)
+
+                Dim cleanName = If(def.Name, "").Trim()
+                If cleanName <> "" Then
+                    If nameCounts.ContainsKey(cleanName) Then
+                        nameCounts(cleanName) += 1
+                    Else
+                        nameCounts.Add(cleanName, 1)
+                    End If
+                End If
             Next
 
-            Return merged
+            For Each def In definitions
+                If def Is Nothing Then Continue For
+
+                Dim cleanName = If(def.Name, "").Trim()
+                Dim sourceLabel = If(def.IsFromCentralCatalog, "Central", "Local")
+                Dim includePath As Boolean = False
+
+                If cleanName = "" Then
+                    def.DisplayLabel = If(String.IsNullOrWhiteSpace(def.ResolvedSourcePath), sourceLabel, $"{sourceLabel}: {def.ResolvedSourcePath}")
+                    Continue For
+                End If
+
+                If nameCounts.ContainsKey(cleanName) AndAlso nameCounts(cleanName) > 1 Then
+                    includePath = True
+                End If
+
+                If includePath AndAlso Not String.IsNullOrWhiteSpace(def.ResolvedSourcePath) Then
+                    def.DisplayLabel = $"{cleanName} ({sourceLabel}: {def.ResolvedSourcePath})"
+                Else
+                    def.DisplayLabel = $"{cleanName} ({sourceLabel})"
+                End If
+            Next
+        End Sub
+
+        Private Shared Function BuildStoreId(def As KnowledgeStoreDefinition) As String
+            If def Is Nothing Then Return ""
+
+            Dim sourceKey = NormalizeStorePathForId(def.ResolvedSourcePath)
+            If sourceKey = "" Then
+                sourceKey = NormalizeStorePathForId(def.SourcePath)
+            End If
+
+            Dim sourceKind = If(def.IsFromCentralCatalog, "CENTRAL", "LOCAL")
+            Dim namePart = If(def.Name, "").Trim().ToUpperInvariant()
+
+            Return $"{sourceKind}|{namePart}|{sourceKey}"
+        End Function
+
+        Private Shared Function NormalizeStorePathForId(pathValue As String) As String
+            Dim cleaned = ExpandEnvironmentVariables(StripQuotes(If(pathValue, "").Trim()))
+            If String.IsNullOrWhiteSpace(cleaned) Then Return ""
+
+            cleaned = cleaned.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+
+            Try
+                Return Path.GetFullPath(cleaned).ToUpperInvariant()
+            Catch
+                Return cleaned.ToUpperInvariant()
+            End Try
+        End Function
+
+        Public Shared Function GetDisplayLabel(def As KnowledgeStoreDefinition) As String
+            If def Is Nothing Then Return ""
+            If Not String.IsNullOrWhiteSpace(def.DisplayLabel) Then Return def.DisplayLabel
+            Return If(def.Name, "").Trim()
+        End Function
+
+        Public Shared Function GetStoreById(storeId As String, context As ISharedContext) As KnowledgeStoreDefinition
+            If String.IsNullOrWhiteSpace(storeId) Then Return Nothing
+
+            Return LoadAll(context).FirstOrDefault(
+        Function(d) String.Equals(d.StoreId, storeId, StringComparison.OrdinalIgnoreCase))
+        End Function
+
+        Public Shared Function GetStoresByName(name As String, context As ISharedContext) As List(Of KnowledgeStoreDefinition)
+            If String.IsNullOrWhiteSpace(name) Then
+                Return New List(Of KnowledgeStoreDefinition)()
+            End If
+
+            Dim value = name.Trim()
+
+            Return LoadAll(context).Where(
+        Function(d) String.Equals(If(d.Name, "").Trim(), value, StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(If(d.DisplayLabel, "").Trim(), value, StringComparison.OrdinalIgnoreCase) OrElse
+                    String.Equals(If(d.StoreId, "").Trim(), value, StringComparison.OrdinalIgnoreCase)).ToList()
+        End Function
+
+        Public Shared Function GetStoreByName(name As String, context As ISharedContext) As KnowledgeStoreDefinition
+            Return GetStoresByName(name, context).FirstOrDefault()
         End Function
 
         ''' <summary>
@@ -417,14 +559,6 @@ Namespace SharedLibrary
             Return LoadAll(context).Where(Function(d) d.Active).ToList()
         End Function
 
-        ''' <summary>
-        ''' Returns a specific store by name (case-insensitive).
-        ''' </summary>
-        Public Shared Function GetStoreByName(name As String, context As ISharedContext) As KnowledgeStoreDefinition
-            If String.IsNullOrWhiteSpace(name) Then Return Nothing
-            Return LoadAll(context).FirstOrDefault(
-                Function(d) d.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
-        End Function
 
         ''' <summary>
         ''' Returns True if the current user is allowed to write (index) to this store.

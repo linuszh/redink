@@ -71,8 +71,14 @@ Namespace SharedLibrary
             ' ── Collect target stores ──
             Dim stores = KnowledgeStoreCatalog.GetActiveStores(context)
             If Not String.IsNullOrWhiteSpace(storeName) Then
-                stores = stores.Where(
-                    Function(s) s.Name.Equals(storeName, StringComparison.OrdinalIgnoreCase)).ToList()
+                Dim exactStore = KnowledgeStoreCatalog.GetStoreById(storeName, context)
+
+                If exactStore IsNot Nothing Then
+                    stores = New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) From {exactStore}
+                Else
+                    stores = KnowledgeStoreCatalog.GetStoresByName(storeName, context).
+            Where(Function(s) s.Active).ToList()
+                End If
             End If
 
             If stores.Count = 0 Then Return result
