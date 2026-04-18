@@ -1,28 +1,26 @@
-﻿' Part of "Red Ink" (SharedLibrary)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: KnowledgeStoreForm.vb
-' Purpose: WinForms modal dialog for managing Knowledge Store index entries.
-'          Displays documents from catalog-based stores via per-store manifests.
-'          Supports add store/remove/tag/refresh operations.
+' File: KnowledgeStoreAdminForm.vb
+' Purpose: WinForms modal dialog for full Knowledge Store administration.
+'          Lists all configured stores, allows editing store parameters,
+'          displays per-store statistics, and triggers maintenance operations
+'          (index, reindex, health check, repair, revectorize).
 '
-' Architecture / How it works:
-'  - Reads active stores via KnowledgeStoreCatalog.GetActiveStores().
-'  - For each store, reads its manifest via KnowledgeStoreManifest.Load().
-'  - Displays entries in a DataGridView with columns: Title, Path, Store, Tags, Date.
-'  - "New Store" creates a new catalog entry.
-'  - "Add Document(s)" indexes selected files into the manifest of their store.
-'  - "Remove" deletes selected manifest entries (local stores only).
-'  - "Edit Tags" allows tagging entries for filtered retrieval via (kb:tag:...).
-'  - "Refresh" re-indexes a document whose content may have changed on disk.
+' Architecture:
+'  - Left panel: ListBox of all stores discovered from KnowledgeStoreCatalog.
+'  - Right panel: Details/editing area for the selected store, statistics,
+'    and action buttons for KB operations.
+'  - Callable from both Word and Outlook via SharedLibrary.
 '
 ' External Dependencies:
 '  - KnowledgeStoreCatalog for store definitions.
 '  - KnowledgeStoreManifest for per-store document manifests.
-'  - KnowledgeIndexer for document indexing.
+'  - KnowledgeStoreForegroundIndexer for indexing.
+'  - KnowledgeWikiService for health checks, repairs, and linting.
+'  - KnowledgeEmbeddingService for revectorization.
 '  - ISharedContext for path configuration.
-'  - SharedMethods for UI helpers (ShowCustomMessageBox, GetLogoBitmap).
+'  - SharedMethods for UI helpers.
 ' =============================================================================
 
 Option Strict On
@@ -37,49 +35,73 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Namespace SharedLibrary
 
     ''' <summary>
-    ''' Modal dialog for browsing, adding, removing, and tagging Knowledge Store documents.
+    ''' Modal dialog for full Knowledge Store administration: listing, editing,
+    ''' statistics, and maintenance operations.
     ''' </summary>
-    Public Class KnowledgeStoreForm
+    Public Class KnowledgeStoreAdminForm
         Inherits Form
 
         Private ReadOnly _context As ISharedContext
-        Private _entries As New List(Of ManifestRow)()
-        Private ReadOnly _grid As New DataGridView()
-        Private ReadOnly _btnAdd As New Button() With {.Text = "Add Document(s)", .AutoSize = True, .Margin = New Padding(4)}
-        Private ReadOnly _btnRemove As New Button() With {.Text = "Remove", .AutoSize = True, .Margin = New Padding(4)}
-        Private ReadOnly _btnEditTags As New Button() With {.Text = "Edit Tags", .AutoSize = True, .Margin = New Padding(4)}
-        Private ReadOnly _btnRefresh As New Button() With {.Text = "Refresh", .AutoSize = True, .Margin = New Padding(4)}
-        Private ReadOnly _btnClose As New Button() With {.Text = "Close", .AutoSize = True, .Margin = New Padding(4)}
+        Private _stores As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
+
+        ' ── Left panel: Store list ──
+        Private ReadOnly _lstStores As New ListBox()
+        Private ReadOnly _btnAddStore As New Button() With {.Text = "New Store", .Margin = New Padding(4)}
+        Private ReadOnly _btnDeleteStore As New Button() With {.Text = "Delete Store", .Margin = New Padding(4)}
+
+        ' ── Right panel: Detail editing ──
+        Private ReadOnly _txtName As New TextBox() With {.Width = 320}
+        Private ReadOnly _txtSourcePath As New TextBox() With {.Width = 420}
+        Private ReadOnly _btnBrowsePath As New Button() With {.Text = "Browse...", .Margin = New Padding(4)}
+        Private ReadOnly _txtOwner As New TextBox() With {.Width = 320}
+        Private ReadOnly _cboRole As New ComboBox() With {.Width = 180, .DropDownStyle = ComboBoxStyle.DropDownList}
+        Private ReadOnly _chkActive As New CheckBox() With {.Text = "Active", .AutoSize = True}
+        Private ReadOnly _chkScanSub As New CheckBox() With {.Text = "Scan subdirectories", .AutoSize = True}
+        Private ReadOnly _btnSave As New Button() With {.Text = "Save Changes", .Margin = New Padding(4)}
+
+        ' ── Statistics ──
+        Private ReadOnly _lblStats As New Label() With {
+            .AutoSize = False,
+            .Width = 420,
+            .Height = 124,
+            .BorderStyle = BorderStyle.FixedSingle,
+            .Padding = New Padding(6),
+            .BackColor = SystemColors.Info,
+            .ForeColor = SystemColors.InfoText
+        }
+
+        ' ── Operation buttons ──
+        Private ReadOnly _btnIndex As New Button() With {.Text = "Index", .Margin = New Padding(4)}
+        Private ReadOnly _btnReindex As New Button() With {.Text = "Full Re-Index", .Margin = New Padding(4)}
+        Private ReadOnly _btnHealthCheck As New Button() With {.Text = "Health Check", .Margin = New Padding(4)}
+        Private ReadOnly _btnRepair As New Button() With {.Text = "Repair", .Margin = New Padding(4)}
+        Private ReadOnly _btnRevectorize As New Button() With {.Text = "Rebuild Embeddings", .Margin = New Padding(4)}
+        Private ReadOnly _btnLint As New Button() With {.Text = "Lint Wiki", .Margin = New Padding(4)}
+        Private ReadOnly _btnEditSchema As New Button() With {.Text = "Edit Schema", .Margin = New Padding(4)}
+        Private ReadOnly _btnClose As New Button() With {.Text = "Close", .Margin = New Padding(4)}
+
+        ' ── Status bar ──
         Private ReadOnly _lblStatus As New Label() With {.AutoSize = True, .Dock = DockStyle.Bottom, .Padding = New Padding(8)}
-        Private ReadOnly _btnAddStore As New Button() With {.Text = "New Store", .AutoSize = True, .Margin = New Padding(4)}
-        Private _isDirty As Boolean = False
 
         ''' <summary>
-        ''' Couples a manifest entry with the store it belongs to.
-        ''' </summary>
-        Private Class ManifestRow
-            Public Property Store As KnowledgeStoreCatalog.KnowledgeStoreDefinition
-            Public Property Entry As KnowledgeStoreManager.KnowledgeEntry
-        End Class
-
-        ''' <summary>
-        ''' Initializes the Knowledge Store management form.
+        ''' Initializes the Knowledge Store administration form.
         ''' </summary>
         Public Sub New(context As ISharedContext)
             _context = context
             InitializeForm()
-            LoadEntries()
+            LoadStores()
         End Sub
 
 #Region "Form Initialization"
 
-        ''' <summary>
-        ''' Builds the form layout with DataGridView and action buttons.
-        ''' </summary>
         Private Sub InitializeForm()
-            Me.Text = $"{AN} — Knowledge Store"
-            Me.Size = New Size(960, 580)
-            Me.MinimumSize = New Size(700, 400)
+            Me.SuspendLayout()
+
+            Me.Text = $"{AN} — Knowledge Store Administration"
+            Me.AutoScaleMode = AutoScaleMode.Dpi
+            Me.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
+            Me.Size = New Size(1120, 780)
+            Me.MinimumSize = New Size(980, 700)
             Me.StartPosition = FormStartPosition.CenterScreen
             Me.FormBorderStyle = FormBorderStyle.Sizable
             Me.KeyPreview = True
@@ -93,83 +115,356 @@ Namespace SharedLibrary
             Catch
             End Try
 
-            ' Configure DataGridView
-            _grid.ReadOnly = True
-            _grid.AllowUserToAddRows = False
-            _grid.AllowUserToDeleteRows = False
-            _grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect
-            _grid.MultiSelect = True
-            _grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill
-            _grid.RowHeadersVisible = False
-            _grid.BackgroundColor = SystemColors.Window
-            _grid.BorderStyle = BorderStyle.FixedSingle
-            _grid.AllowUserToResizeRows = False
-            _grid.ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing
-            _grid.ColumnHeadersHeight = CInt(Me.Font.Height * 2.0)
-            _grid.ColumnHeadersDefaultCellStyle = New DataGridViewCellStyle() With {
+            ConfigureStandardButton(_btnAddStore)
+            ConfigureStandardButton(_btnDeleteStore)
+            ConfigureStandardButton(_btnSave)
+            ConfigureStandardButton(_btnIndex)
+            ConfigureStandardButton(_btnReindex)
+            ConfigureStandardButton(_btnHealthCheck)
+            ConfigureStandardButton(_btnRepair)
+            ConfigureStandardButton(_btnRevectorize)
+            ConfigureStandardButton(_btnLint)
+            ConfigureStandardButton(_btnEditSchema)
+            ConfigureStandardButton(_btnClose)
+
+            ConfigureBrowseButton(_btnBrowsePath, _txtSourcePath)
+
+            ' ── Role combo items ──
+            _cboRole.Items.AddRange(New Object() {"personal", "shared", "readonly"})
+            _cboRole.SelectedIndex = 0
+
+            ' ── Left panel: store list ──
+            Dim leftPanel As New Panel() With {
+                .Dock = DockStyle.Left,
+                .Width = 260,
+                .Padding = New Padding(10)
+            }
+
+            Dim lblStores As New Label() With {
+                .Text = "Knowledge Stores",
                 .Font = New Font(Me.Font, FontStyle.Bold),
-                .Padding = New Padding(4, 2, 4, 2)
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Padding = New Padding(0, 0, 0, 4)
             }
-            _grid.DefaultCellStyle = New DataGridViewCellStyle() With {
-                .Padding = New Padding(4, 1, 4, 1)
-            }
-            _grid.RowTemplate.Height = CInt(Me.Font.Height * 1.5)
 
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Title", .HeaderText = "Title", .FillWeight = 25
-            })
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Path", .HeaderText = "Path", .FillWeight = 30
-            })
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Store", .HeaderText = "Store", .FillWeight = 12
-            })
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Tags", .HeaderText = "Tags", .FillWeight = 13
-            })
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Indexed", .HeaderText = "Indexed", .FillWeight = 10
-            })
-            _grid.Columns.Add(New DataGridViewTextBoxColumn() With {
-                .Name = "Source", .HeaderText = "Source", .FillWeight = 10
-            })
+            _lstStores.Dock = DockStyle.Fill
+            _lstStores.IntegralHeight = False
 
-            ' Grid panel with padding
-            Dim gridPanel As New Panel() With {
-                .Dock = DockStyle.Fill,
-                .Padding = New Padding(10, 10, 10, 6)
-            }
-            gridPanel.Controls.Add(_grid)
-            _grid.Dock = DockStyle.Fill
-
-            ' Button panel
-            Dim buttonPanel As New FlowLayoutPanel() With {
+            Dim leftBtnPanel As New FlowLayoutPanel() With {
                 .Dock = DockStyle.Bottom,
                 .FlowDirection = FlowDirection.LeftToRight,
                 .AutoSize = True,
+                .Padding = New Padding(0, 4, 0, 0)
+            }
+            leftBtnPanel.Controls.AddRange(New Control() {_btnAddStore, _btnDeleteStore})
+
+            leftPanel.Controls.Add(_lstStores)
+            leftPanel.Controls.Add(leftBtnPanel)
+            leftPanel.Controls.Add(lblStores)
+
+            ' ── Right panel: details + operations ──
+            Dim rightPanel As New Panel() With {
+                .Dock = DockStyle.Fill,
+                .Padding = New Padding(10),
+                .AutoScroll = True
+            }
+
+            Dim detailLayout As New TableLayoutPanel() With {
+                .Dock = DockStyle.Top,
+                .AutoSize = True,
+                .ColumnCount = 2,
+                .Padding = New Padding(0)
+            }
+            detailLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+            detailLayout.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+
+            Dim row As Integer = 0
+            AddLabeledRow(detailLayout, row, "Name:", _txtName) : row += 1
+
+            ' Source path with browse button
+            Dim pathPanel As New FlowLayoutPanel() With {
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .WrapContents = False,
+                .Margin = New Padding(0),
+                .AutoSizeMode = AutoSizeMode.GrowAndShrink
+            }
+            pathPanel.Controls.Add(_txtSourcePath)
+            pathPanel.Controls.Add(_btnBrowsePath)
+            AddLabeledRow(detailLayout, row, "Source Path:", pathPanel) : row += 1
+
+            AddLabeledRow(detailLayout, row, "Owner:", _txtOwner) : row += 1
+            AddLabeledRow(detailLayout, row, "Role:", _cboRole) : row += 1
+
+            Dim checkPanel As New FlowLayoutPanel() With {
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .WrapContents = False,
+                .Margin = New Padding(0)
+            }
+            checkPanel.Controls.Add(_chkActive)
+            checkPanel.Controls.Add(_chkScanSub)
+            AddLabeledRow(detailLayout, row, "", checkPanel) : row += 1
+
+            ' Save button
+            Dim savePanel As New FlowLayoutPanel() With {
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Padding = New Padding(0, 6, 0, 6)
+            }
+            savePanel.Controls.Add(_btnSave)
+
+            ' Statistics
+            Dim lblStatsHeader As New Label() With {
+                .Text = "Statistics",
+                .Font = New Font(Me.Font, FontStyle.Bold),
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Padding = New Padding(0, 8, 0, 4)
+            }
+
+            Dim statsPanel As New Panel() With {
+                .Dock = DockStyle.Top,
+                .Height = 132,
+                .Padding = New Padding(0, 0, 0, 4)
+            }
+            _lblStats.Dock = DockStyle.Fill
+            statsPanel.Controls.Add(_lblStats)
+
+            ' Operations
+            Dim lblOpsHeader As New Label() With {
+                .Text = "Operations",
+                .Font = New Font(Me.Font, FontStyle.Bold),
+                .AutoSize = True,
+                .Dock = DockStyle.Top,
+                .Padding = New Padding(0, 6, 0, 4)
+            }
+
+            Dim opsPanel As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Top,
+                .FlowDirection = FlowDirection.LeftToRight,
+                .AutoSize = True,
+                .WrapContents = True,
+                .Padding = New Padding(0, 0, 0, 4)
+            }
+            opsPanel.Controls.AddRange(New Control() {
+                _btnIndex, _btnReindex, _btnHealthCheck, _btnRepair,
+                _btnRevectorize, _btnLint, _btnEditSchema
+            })
+
+            ' Bottom close button
+            Dim bottomPanel As New FlowLayoutPanel() With {
+                .Dock = DockStyle.Bottom,
+                .FlowDirection = FlowDirection.RightToLeft,
+                .AutoSize = True,
                 .Padding = New Padding(8, 4, 8, 8)
             }
-            buttonPanel.Controls.AddRange(New Control() {_btnAddStore, _btnAdd, _btnRemove, _btnEditTags, _btnRefresh, _btnClose})
+            bottomPanel.Controls.Add(_btnClose)
+
+            ' Add right panel children in reverse dock order (bottom-up for Top docking)
+            rightPanel.Controls.Add(opsPanel)
+            rightPanel.Controls.Add(lblOpsHeader)
+            rightPanel.Controls.Add(statsPanel)
+            rightPanel.Controls.Add(lblStatsHeader)
+            rightPanel.Controls.Add(savePanel)
+            rightPanel.Controls.Add(detailLayout)
+
+            ' Splitter
+            Dim splitter As New Splitter() With {.Dock = DockStyle.Left, .Width = 4}
+
+            ' Add to form (order matters for docking)
+            Me.Controls.Add(rightPanel)
+            Me.Controls.Add(splitter)
+            Me.Controls.Add(leftPanel)
+            Me.Controls.Add(bottomPanel)
+            Me.Controls.Add(_lblStatus)
 
             ' Wire events
+            AddHandler _lstStores.SelectedIndexChanged, AddressOf OnStoreSelected
             AddHandler _btnAddStore.Click, AddressOf OnAddStore
-            AddHandler _btnAdd.Click, AddressOf OnAddDocuments
-            AddHandler _btnRemove.Click, AddressOf OnRemoveSelected
-            AddHandler _btnEditTags.Click, AddressOf OnEditTags
-            AddHandler _btnRefresh.Click, AddressOf OnRefreshSelected
-            AddHandler _btnClose.Click, Sub(s, e) Me.Close()
+            AddHandler _btnDeleteStore.Click, AddressOf OnDeleteStore
+            AddHandler _btnBrowsePath.Click, AddressOf OnBrowsePath
+            AddHandler _btnSave.Click, AddressOf OnSaveChanges
+            AddHandler _btnIndex.Click, AddressOf OnIndex
+            AddHandler _btnReindex.Click, AddressOf OnReindex
+            AddHandler _btnHealthCheck.Click, AddressOf OnHealthCheck
+            AddHandler _btnRepair.Click, AddressOf OnRepair
+            AddHandler _btnRevectorize.Click, AddressOf OnRevectorize
+            AddHandler _btnLint.Click, AddressOf OnLint
+            AddHandler _btnEditSchema.Click, AddressOf OnEditSchema
+            AddHandler _btnClose.Click, Sub(s, ev) Me.Close()
             AddHandler Me.KeyDown, AddressOf OnKeyDown
-            AddHandler Me.FormClosing, AddressOf OnFormClosing
+            Me.ResumeLayout(performLayout:=True)
+        End Sub
 
-            ' Add controls (order matters: bottom first, then fill)
-            Me.Controls.Add(gridPanel)
-            Me.Controls.Add(buttonPanel)
-            Me.Controls.Add(_lblStatus)
+        Private Shared Sub AddLabeledRow(table As TableLayoutPanel, row As Integer, labelText As String, control As Control)
+            table.RowCount = row + 1
+            table.RowStyles.Add(New RowStyle(SizeType.AutoSize))
+            If Not String.IsNullOrEmpty(labelText) Then
+                Dim lbl As New Label() With {
+                    .Text = labelText,
+                    .AutoSize = True,
+                    .Anchor = AnchorStyles.Left,
+                    .Margin = New Padding(0, 6, 8, 2)
+                }
+                table.Controls.Add(lbl, 0, row)
+            End If
+            control.Margin = New Padding(0, 4, 0, 2)
+            table.Controls.Add(control, 1, row)
+        End Sub
+
+        Private Shared Sub ConfigureStandardButton(button As Button)
+            button.AutoSize = True
+            button.AutoSizeMode = AutoSizeMode.GrowAndShrink
+            button.UseVisualStyleBackColor = True
+            button.Padding = New Padding(10, 4, 10, 4)
+            button.MinimumSize = New Size(0, 0)
+        End Sub
+
+        Private Shared Sub ConfigureBrowseButton(button As Button, relatedTextBox As TextBox)
+            button.AutoSize = False
+            button.UseVisualStyleBackColor = True
+            button.Padding = New Padding(10, 0, 10, 0)
+            button.Height = relatedTextBox.PreferredHeight + 2
+            button.Width = Math.Max(90, TextRenderer.MeasureText(button.Text, button.Font).Width + 24)
         End Sub
 
 #End Region
 
-#Region "Add Store"
+#Region "Store Loading"
+
+        Private Sub LoadStores()
+            _stores = KnowledgeStoreCatalog.LoadAll(_context)
+            _lstStores.Items.Clear()
+
+            For Each store In _stores
+                _lstStores.Items.Add(KnowledgeStoreCatalog.GetDisplayLabel(store))
+            Next
+
+            UpdateStatus()
+
+            If _lstStores.Items.Count > 0 Then
+                _lstStores.SelectedIndex = 0
+            Else
+                ClearDetails()
+            End If
+        End Sub
+
+        Private Sub UpdateStatus()
+            Dim total = _stores.Count
+            Dim active = _stores.Where(Function(s) s.Active).Count()
+            _lblStatus.Text = $"{total} store(s) configured, {active} active"
+        End Sub
+
+#End Region
+
+#Region "Store Selection & Details"
+
+        Private Sub OnStoreSelected(sender As Object, e As EventArgs)
+            Dim idx = _lstStores.SelectedIndex
+            If idx < 0 OrElse idx >= _stores.Count Then
+                ClearDetails()
+                Return
+            End If
+
+            Dim store = _stores(idx)
+            _txtName.Text = store.Name
+            _txtSourcePath.Text = store.SourcePath
+            _txtOwner.Text = store.Owner
+            _chkActive.Checked = store.Active
+            _chkScanSub.Checked = store.ScanSubdirectories
+
+            Dim roleIdx = _cboRole.Items.IndexOf(If(store.Role, "personal").ToLowerInvariant())
+            _cboRole.SelectedIndex = If(roleIdx >= 0, roleIdx, 0)
+
+            ' Enable/disable editing for central stores
+            Dim isLocal = Not store.IsFromCentralCatalog
+            _txtName.ReadOnly = Not isLocal
+            _txtSourcePath.ReadOnly = Not isLocal
+            _txtOwner.ReadOnly = Not isLocal
+            _cboRole.Enabled = isLocal
+            _chkActive.Enabled = isLocal
+            _chkScanSub.Enabled = isLocal
+            _btnBrowsePath.Enabled = isLocal
+            _btnSave.Enabled = isLocal
+            _btnDeleteStore.Enabled = isLocal
+
+            LoadStatistics(store)
+        End Sub
+
+        Private Sub ClearDetails()
+            _txtName.Text = ""
+            _txtSourcePath.Text = ""
+            _txtOwner.Text = ""
+            _cboRole.SelectedIndex = 0
+            _chkActive.Checked = False
+            _chkScanSub.Checked = False
+            _lblStats.Text = "No store selected."
+            _btnSave.Enabled = False
+            _btnDeleteStore.Enabled = False
+        End Sub
+
+        Private Sub LoadStatistics(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition)
+            Try
+                Dim manifest = KnowledgeStoreManifest.Load(store)
+                Dim docCount = manifest.Entries.Count
+                Dim lastIndexed As String = "Never"
+                If docCount > 0 Then
+                    Dim maxDate = manifest.Entries.Max(Function(e) e.IndexedDate)
+                    If maxDate <> Date.MinValue Then
+                        lastIndexed = maxDate.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture)
+                    End If
+                End If
+
+                Dim wikiPageCount As Integer = 0
+                Dim embeddingCount As Integer = 0
+                Dim sourceLabel = If(store.IsFromCentralCatalog, "Central", "Local")
+                Dim resolvedPath = If(store.ResolvedSourcePath, ExpandEnvironmentVariables(store.SourcePath))
+                Dim pathExists = Not String.IsNullOrWhiteSpace(resolvedPath) AndAlso Directory.Exists(resolvedPath)
+
+                If pathExists Then
+                    Dim wikiRoot = Path.Combine(resolvedPath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+                    If Directory.Exists(wikiRoot) Then
+                        wikiPageCount = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
+                            Where(Function(f)
+                                      Dim n = Path.GetFileName(f)
+                                      Return Not n.Equals("index.md", StringComparison.OrdinalIgnoreCase) AndAlso
+                                             Not n.Equals("log.md", StringComparison.OrdinalIgnoreCase) AndAlso
+                                             Not n.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) AndAlso
+                                             Not n.Equals("review_queue.md", StringComparison.OrdinalIgnoreCase)
+                                  End Function).Count()
+                    End If
+
+                    Dim embPath = Path.Combine(resolvedPath, ".redink", ".embeddings.json")
+                    If File.Exists(embPath) Then
+                        Try
+                            Dim embJson = File.ReadAllText(embPath, System.Text.Encoding.UTF8)
+                            Dim arr = Newtonsoft.Json.Linq.JArray.Parse(embJson)
+                            embeddingCount = arr.Count
+                        Catch
+                        End Try
+                    End If
+                End If
+
+                Dim canWrite = KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context)
+
+                _lblStats.Text =
+                    $"Source: {sourceLabel}  |  Path exists: {If(pathExists, "Yes", "No")}" & vbCrLf &
+                    $"Documents indexed: {docCount}" & vbCrLf &
+                    $"Wiki pages: {wikiPageCount}" & vbCrLf &
+                    $"Embedding vectors: {embeddingCount}" & vbCrLf &
+                    $"Last indexed: {lastIndexed}" & vbCrLf &
+                    $"Writable: {If(canWrite, "Yes", "No")}"
+            Catch ex As Exception
+                _lblStats.Text = $"Error loading statistics: {ex.Message}"
+            End Try
+        End Sub
+
+#End Region
+
+#Region "Add / Delete Store"
 
         Private Sub OnAddStore(sender As Object, e As EventArgs)
             If String.IsNullOrWhiteSpace(_context.INI_KnowledgeStorePathLocal) Then
@@ -196,6 +491,13 @@ Namespace SharedLibrary
                 If fbd.ShowDialog() <> DialogResult.OK Then Return
 
                 Try
+                    Dim resolvedPath = fbd.SelectedPath
+                    If Not Directory.Exists(resolvedPath) Then
+                        Directory.CreateDirectory(resolvedPath)
+                    End If
+
+                    KnowledgeWikiService.InitializeWikiStructure(resolvedPath)
+
                     Dim def = KnowledgeStoreCatalog.CreateDefinition(
                         storeName.Trim(), fbd.SelectedPath, _context)
 
@@ -204,11 +506,18 @@ Namespace SharedLibrary
                     KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
 
                     ShowCustomMessageBox(
-                        $"Knowledge Store '{def.Name}' created at:{vbCrLf}{def.ResolvedSourcePath}{vbCrLf}{vbCrLf}" &
-                        "Use 'kbindex' in Freestyle to index its documents, or enable background indexing in Settings.",
+                        $"Knowledge Store '{def.Name}' created at:{vbCrLf}{def.ResolvedSourcePath}",
                         $"{AN} Knowledge Store")
 
-                    LoadEntries()
+                    LoadStores()
+
+                    ' Select the newly added store
+                    For i = 0 To _stores.Count - 1
+                        If _stores(i).Name.Equals(storeName.Trim(), StringComparison.OrdinalIgnoreCase) Then
+                            _lstStores.SelectedIndex = i
+                            Exit For
+                        End If
+                    Next
 
                 Catch ex As Exception
                     ShowCustomMessageBox($"Error creating Knowledge Store: {ex.Message}", AN)
@@ -216,289 +525,418 @@ Namespace SharedLibrary
             End Using
         End Sub
 
-#End Region
+        Private Sub OnDeleteStore(sender As Object, e As EventArgs)
+            Dim idx = _lstStores.SelectedIndex
+            If idx < 0 OrElse idx >= _stores.Count Then Return
 
-#Region "Data Loading"
-
-        ''' <summary>
-        ''' Loads entries from all active stores' manifests.
-        ''' </summary>
-        Private Sub LoadEntries()
-            _entries.Clear()
-
-            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
-            For Each store In stores
-                Try
-                    Dim manifest = KnowledgeStoreManifest.Load(store)
-                    For Each entry In manifest.Entries
-                        _entries.Add(New ManifestRow() With {
-                            .Store = store,
-                            .Entry = entry
-                        })
-                    Next
-                Catch ex As Exception
-                    Debug.WriteLine($"KnowledgeStoreForm: Error loading manifest for '{store.Name}': {ex.Message}")
-                End Try
-            Next
-
-            PopulateGrid()
-            UpdateStatus()
-        End Sub
-
-        Private Sub PopulateGrid()
-            _grid.Rows.Clear()
-            For Each row In _entries
-                Dim tags As String = If(row.Entry.Tags IsNot Nothing, String.Join(", ", row.Entry.Tags), "")
-                Dim indexed As String = If(row.Entry.IndexedDate <> Date.MinValue,
-                                           row.Entry.IndexedDate.ToString("yyyy-MM-dd HH:mm", System.Globalization.CultureInfo.InvariantCulture),
-                                           "")
-                Dim source As String = If(row.Store.IsFromCentralCatalog, "Central", "Local")
-                _grid.Rows.Add(row.Entry.Title, row.Entry.FilePath, row.Store.Name, tags, indexed, source)
-            Next
-        End Sub
-
-        Private Sub UpdateStatus()
-            Dim total = _entries.Count
-            Dim storeCount = _entries.Select(Function(r) r.Store.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count()
-            _lblStatus.Text = $"{total} document(s) across {storeCount} store(s)"
-        End Sub
-
-#End Region
-
-#Region "Add Documents"
-
-        Private Async Sub OnAddDocuments(sender As Object, e As EventArgs)
-            ' Pick which store to add to
-            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context).
-                Where(Function(s) KnowledgeStoreCatalog.CanCurrentUserWrite(s, _context)).ToList()
-
-            If stores.Count = 0 Then
-                ShowCustomMessageBox("No writable Knowledge Stores found.", AN)
+            Dim store = _stores(idx)
+            If store.IsFromCentralCatalog Then
+                ShowCustomMessageBox("Central stores cannot be deleted from here. Contact your administrator.", AN)
                 Return
             End If
-
-            Dim targetStore As KnowledgeStoreCatalog.KnowledgeStoreDefinition = stores(0)
-            If stores.Count > 1 Then
-                Dim storeNames = stores.Select(Function(s) s.Name).ToList()
-                Dim chosen = ShowSelectionForm(
-                    "Select the store to add documents to:",
-                    $"{AN} — Add Documents", storeNames)
-                If String.IsNullOrWhiteSpace(chosen) Then Return
-                targetStore = stores.FirstOrDefault(
-                    Function(s) s.Name.Equals(chosen, StringComparison.OrdinalIgnoreCase))
-                If targetStore Is Nothing Then Return
-            End If
-
-            ' Use OpenFileDialog
-            Dim filesToIndex As New List(Of String)
-            Using ofd As New OpenFileDialog()
-                ofd.Filter = "Supported Files|*.txt;*.rtf;*.docx;*.pdf;*.xlsx;*.pptx;*.json;*.xml;*.html;*.htm;*.md;*.csv;*.yaml;*.yml;*.ini;*.log|All Files|*.*"
-                ofd.Multiselect = True
-                ofd.Title = $"Select documents to add to '{targetStore.Name}'"
-                If ofd.ShowDialog() <> DialogResult.OK Then Return
-                filesToIndex.AddRange(ofd.FileNames)
-            End Using
-
-            If filesToIndex.Count = 0 Then Return
-
-            Dim addedCount As Integer = 0
-            Dim manifest = KnowledgeStoreManifest.Load(targetStore)
-
-            For Each filePath In filesToIndex
-                Try
-                    Dim entry = Await KnowledgeIndexer.IndexDocumentAsync(
-                        filePath, targetStore.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
-                    If entry IsNot Nothing Then
-                        manifest.AddOrUpdate(entry)
-                        addedCount += 1
-                    End If
-                Catch ex As Exception
-                    Debug.WriteLine($"Error indexing '{filePath}': {ex.Message}")
-                End Try
-            Next
-
-            If addedCount > 0 Then
-                manifest.Save(targetStore)
-                LoadEntries()
-            End If
-        End Sub
-
-#End Region
-
-#Region "Remove Documents"
-
-        Private Sub OnRemoveSelected(sender As Object, e As EventArgs)
-            If _grid.SelectedRows.Count = 0 Then
-                ShowCustomMessageBox("Please select one or more entries to remove.", AN)
-                Return
-            End If
-
-            Dim hasProtected As Boolean = False
-            Dim toRemove As New List(Of ManifestRow)()
-
-            For Each gridRow As DataGridViewRow In _grid.SelectedRows
-                Dim idx = gridRow.Index
-                If idx >= 0 AndAlso idx < _entries.Count Then
-                    If _entries(idx).Store.IsFromCentralCatalog Then
-                        hasProtected = True
-                    Else
-                        toRemove.Add(_entries(idx))
-                    End If
-                End If
-            Next
-
-            If hasProtected AndAlso toRemove.Count = 0 Then
-                ShowCustomMessageBox("The selected entries are from a central store and cannot be removed locally.", AN)
-                Return
-            End If
-            If hasProtected Then
-                ShowCustomMessageBox(
-                    "Some selected entries are from a central store and will be skipped. " &
-                    "Only local entries will be removed.", AN)
-            End If
-
-            If toRemove.Count = 0 Then Return
 
             Dim answer = ShowCustomYesNoBox(
-                $"Remove {toRemove.Count} entry/entries from the Knowledge Store?",
-                "Yes, remove", "Cancel")
+                $"Delete the Knowledge Store definition '{store.Name}'?{vbCrLf}" &
+                $"(Source files at '{store.ResolvedSourcePath}' will NOT be deleted.)",
+                "Yes, delete", "Cancel")
             If answer <> 1 Then Return
 
-            ' Group by store, remove from each manifest, save
-            For Each grp In toRemove.GroupBy(Function(r) r.Store.Name, StringComparer.OrdinalIgnoreCase)
-                Dim store = grp.First().Store
-                Dim manifest = KnowledgeStoreManifest.Load(store)
-                For Each item In grp
-                    manifest.RemoveByPath(If(item.Entry.FilePath, ""))
-                Next
-                manifest.Save(store)
-            Next
+            Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
+            allDefs.RemoveAll(Function(d)
+                                  Return Not d.IsFromCentralCatalog AndAlso
+                                         String.Equals(d.StoreId, store.StoreId, StringComparison.OrdinalIgnoreCase)
+                              End Function)
+            KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
 
-            LoadEntries()
+            LoadStores()
         End Sub
 
 #End Region
 
-#Region "Edit Tags"
+#Region "Edit & Save"
 
-        Private Sub OnEditTags(sender As Object, e As EventArgs)
-            If _grid.SelectedRows.Count = 0 Then
-                ShowCustomMessageBox("Please select one or more entries to tag.", AN)
-                Return
-            End If
-
-            Dim firstIdx = _grid.SelectedRows(0).Index
-            If firstIdx < 0 OrElse firstIdx >= _entries.Count Then Return
-
-            Dim currentTags As String = ""
-            If _entries(firstIdx).Entry.Tags IsNot Nothing Then
-                currentTags = String.Join(", ", _entries(firstIdx).Entry.Tags)
-            End If
-
-            Dim newTags = ShowCustomInputBox(
-                "Enter tags separated by commas (e.g., contracts, employment, NDA):",
-                $"{AN} — Edit Tags", True, currentTags)
-
-            If newTags Is Nothing OrElse newTags.Equals("esc", StringComparison.OrdinalIgnoreCase) Then Return
-
-            Dim tagList As String() = newTags.Split(","c).
-                Select(Function(t) t.Trim()).
-                Where(Function(t) Not String.IsNullOrWhiteSpace(t)).
-                ToArray()
-
-            ' Group modified entries by store for batch save
-            Dim modified As New Dictionary(Of String, KnowledgeStoreCatalog.KnowledgeStoreDefinition)(StringComparer.OrdinalIgnoreCase)
-
-            For Each gridRow As DataGridViewRow In _grid.SelectedRows
-                Dim idx = gridRow.Index
-                If idx >= 0 AndAlso idx < _entries.Count Then
-                    Dim row = _entries(idx)
-                    If row.Store.IsFromCentralCatalog Then Continue For
-                    row.Entry.Tags = If(tagList.Length > 0, tagList, Nothing)
-                    If Not modified.ContainsKey(row.Store.Name) Then
-                        modified(row.Store.Name) = row.Store
+        Private Sub OnBrowsePath(sender As Object, e As EventArgs)
+            Using fbd As New FolderBrowserDialog()
+                fbd.Description = "Select the root directory for this Knowledge Store"
+                fbd.ShowNewFolderButton = True
+                If Not String.IsNullOrWhiteSpace(_txtSourcePath.Text) Then
+                    Dim expanded = ExpandEnvironmentVariables(_txtSourcePath.Text)
+                    If Directory.Exists(expanded) Then
+                        fbd.SelectedPath = expanded
                     End If
                 End If
-            Next
-
-            ' Save each affected manifest
-            For Each store In modified.Values
-                Dim manifest = KnowledgeStoreManifest.Load(store)
-                ' Re-apply tags from _entries for this store
-                For Each row In _entries.Where(Function(r) r.Store.Name.Equals(store.Name, StringComparison.OrdinalIgnoreCase))
-                    manifest.AddOrUpdate(row.Entry)
-                Next
-                manifest.Save(store)
-            Next
-
-            If modified.Count > 0 Then
-                PopulateGrid()
-            Else
-                ShowCustomMessageBox("No local entries were modified. Central entries cannot be tagged locally.", AN)
-            End If
+                If fbd.ShowDialog() = DialogResult.OK Then
+                    _txtSourcePath.Text = fbd.SelectedPath
+                End If
+            End Using
         End Sub
 
-#End Region
+        Private Sub OnSaveChanges(sender As Object, e As EventArgs)
+            Dim idx = _lstStores.SelectedIndex
+            If idx < 0 OrElse idx >= _stores.Count Then Return
 
-#Region "Refresh Documents"
-
-        Private Async Sub OnRefreshSelected(sender As Object, e As EventArgs)
-            If _grid.SelectedRows.Count = 0 Then
-                ShowCustomMessageBox("Please select one or more entries to refresh.", AN)
+            Dim store = _stores(idx)
+            If store.IsFromCentralCatalog Then
+                ShowCustomMessageBox("Central store definitions cannot be modified here.", AN)
                 Return
             End If
 
-            Dim refreshedStores As New Dictionary(Of String, KnowledgeStoreCatalog.KnowledgeStoreDefinition)(StringComparer.OrdinalIgnoreCase)
-            Dim refreshed As Integer = 0
-
-            For Each gridRow As DataGridViewRow In _grid.SelectedRows
-                Dim idx = gridRow.Index
-                If idx >= 0 AndAlso idx < _entries.Count Then
-                    Dim row = _entries(idx)
-                    If row.Store.IsFromCentralCatalog Then Continue For
-
-                    Dim expandedPath = ExpandEnvironmentVariables(If(row.Entry.FilePath, ""))
-                    If Not File.Exists(expandedPath) Then Continue For
-
-                    Try
-                        Dim updated = Await KnowledgeIndexer.IndexDocumentAsync(
-                            expandedPath, row.Store.ResolvedSourcePath, _context, _context.INI_KnowledgeStoreUseLLMIndex)
-                        If updated IsNot Nothing Then
-                            updated.Tags = row.Entry.Tags ' Preserve tags
-                            row.Entry = updated
-                            If Not refreshedStores.ContainsKey(row.Store.Name) Then
-                                refreshedStores(row.Store.Name) = row.Store
-                            End If
-                            refreshed += 1
-                        End If
-                    Catch ex As Exception
-                        Debug.WriteLine($"Error refreshing '{expandedPath}': {ex.Message}")
-                    End Try
-                End If
-            Next
-
-            ' Save each affected manifest
-            For Each store In refreshedStores.Values
-                Dim manifest = KnowledgeStoreManifest.Load(store)
-                For Each row In _entries.Where(Function(r) r.Store.Name.Equals(store.Name, StringComparison.OrdinalIgnoreCase))
-                    manifest.AddOrUpdate(row.Entry)
-                Next
-                manifest.Save(store)
-            Next
-
-            If refreshed > 0 Then
-                PopulateGrid()
-                UpdateStatus()
+            If String.IsNullOrWhiteSpace(_txtName.Text) Then
+                ShowCustomMessageBox("Store name cannot be empty.", AN)
+                Return
             End If
+
+            If String.IsNullOrWhiteSpace(_txtSourcePath.Text) Then
+                ShowCustomMessageBox("Source path cannot be empty.", AN)
+                Return
+            End If
+
+            ' Update the in-memory definition
+            store.Name = _txtName.Text.Trim()
+            store.SourcePath = KnowledgeStoreCatalog.StripQuotes(_txtSourcePath.Text)
+            store.Owner = _txtOwner.Text.Trim()
+            store.Role = If(_cboRole.SelectedItem IsNot Nothing, _cboRole.SelectedItem.ToString(), "personal")
+            store.Active = _chkActive.Checked
+            store.ScanSubdirectories = _chkScanSub.Checked
+            store.ResolvedSourcePath = ExpandEnvironmentVariables(store.SourcePath)
+
+            ' Save back to local catalog
+            Try
+                Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
+
+                ' Find and replace the matching local definition
+                Dim found = False
+                For i = 0 To allDefs.Count - 1
+                    If Not allDefs(i).IsFromCentralCatalog AndAlso
+                       String.Equals(allDefs(i).StoreId, store.StoreId, StringComparison.OrdinalIgnoreCase) Then
+                        allDefs(i) = store
+                        found = True
+                        Exit For
+                    End If
+                Next
+
+                If Not found Then
+                    ' Match by old name if StoreId changed
+                    For i = 0 To allDefs.Count - 1
+                        If Not allDefs(i).IsFromCentralCatalog AndAlso
+                           String.Equals(allDefs(i).Name, _stores(idx).Name, StringComparison.OrdinalIgnoreCase) Then
+                            allDefs(i) = store
+                            found = True
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
+
+                ShowCustomMessageBox($"Store '{store.Name}' saved successfully.", AN)
+
+                ' Reload to reflect changes
+                Dim selectedName = store.Name
+                LoadStores()
+                For i = 0 To _stores.Count - 1
+                    If _stores(i).Name.Equals(selectedName, StringComparison.OrdinalIgnoreCase) Then
+                        _lstStores.SelectedIndex = i
+                        Exit For
+                    End If
+                Next
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error saving store: {ex.Message}", AN)
+            End Try
         End Sub
 
 #End Region
 
-#Region "Save & Close"
+#Region "Operations"
 
-        Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
-            ' All mutations are saved immediately to manifests — no pending dirty state
+        Private Function GetSelectedStore() As KnowledgeStoreCatalog.KnowledgeStoreDefinition
+            Dim idx = _lstStores.SelectedIndex
+            If idx < 0 OrElse idx >= _stores.Count Then
+                ShowCustomMessageBox("Please select a Knowledge Store first.", AN)
+                Return Nothing
+            End If
+            Return _stores(idx)
+        End Function
+
+        Private Async Sub OnIndex(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
+                ShowCustomMessageBox($"You do not have write permission to '{store.Name}'.", AN)
+                Return
+            End If
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
+                    _context, storeName:=store.StoreId, forceReindex:=False)
+
+                ShowCustomMessageBox(
+                    $"Indexing complete for '{store.Name}':{vbCrLf}" &
+                    $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
+                    $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
+                    If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during indexing: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
         End Sub
+
+        Private Async Sub OnReindex(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
+                ShowCustomMessageBox($"You do not have write permission to '{store.Name}'.", AN)
+                Return
+            End If
+
+            Dim answer = ShowCustomYesNoBox(
+                $"This will force a full re-index of '{store.Name}', regenerating all metadata and Wiki summaries. " &
+                "This may take a while and use API credits. Continue?",
+                "Yes, re-index", "No, cancel")
+            If answer <> 1 Then Return
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
+                    _context, storeName:=store.StoreId, forceReindex:=True)
+
+                ShowCustomMessageBox(
+                    $"Re-indexing complete for '{store.Name}':{vbCrLf}" &
+                    $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
+                    $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
+                    If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during re-indexing: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
+        End Sub
+
+        Private Async Sub OnHealthCheck(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim report = Await KnowledgeWikiService.LintWikiAsync(
+                    kbRootPath:=store.ResolvedSourcePath,
+                    context:=_context,
+                    autoApply:=False)
+
+                ShowCustomWindow(
+                    $"Health check report for '{store.Name}':",
+                    report,
+                    "You can copy this report to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during health check: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
+        End Sub
+
+        Private Async Sub OnRepair(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
+                ShowCustomMessageBox($"You do not have write permission to '{store.Name}'.", AN)
+                Return
+            End If
+
+            Dim answer = ShowCustomYesNoBox(
+                $"This will run automatic repairs on '{store.Name}', including LLM-assisted fixes. Continue?",
+                "Yes, repair", "No, cancel")
+            If answer <> 1 Then Return
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim summary = Await KnowledgeWikiService.ApplyWikiHealthFixesAsync(
+                    kbRootPath:=store.ResolvedSourcePath,
+                    context:=_context,
+                    includeLlmRepairs:=True)
+
+                ShowCustomWindow(
+                    $"Repair summary for '{store.Name}':",
+                    summary,
+                    "You can copy this summary to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during repair: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
+        End Sub
+
+        Private Async Sub OnRevectorize(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            ' Count embeddable wiki pages
+            Dim wikiRoot = Path.Combine(store.ResolvedSourcePath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+            If Not Directory.Exists(wikiRoot) Then
+                ShowCustomMessageBox("No wiki pages found to rebuild embeddings for.", AN)
+                Return
+            End If
+
+            Dim wikiPages = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
+                Where(Function(f)
+                          Dim n = Path.GetFileName(f)
+                          Return Not n.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) AndAlso
+                                 Not n.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) AndAlso
+                                 Not n.Equals("health_report.md", StringComparison.OrdinalIgnoreCase)
+                      End Function).ToList()
+
+            If wikiPages.Count = 0 Then
+                ShowCustomMessageBox("No wiki pages found to rebuild embeddings for.", AN)
+                Return
+            End If
+
+            Dim answer = ShowCustomYesNoBox(
+                $"This will rebuild the embedding index for '{store.Name}' from {wikiPages.Count} existing wiki page(s) " &
+                "using the currently configured embedding model. Continue?",
+                "Yes, rebuild embeddings", "No, cancel")
+            If answer <> 1 Then Return
+
+            SetOperationButtonsEnabled(False)
+            Try
+                ProgressBarModule.GlobalProgressValue = 0
+                ProgressBarModule.GlobalProgressMax = wikiPages.Count
+                ProgressBarModule.GlobalProgressLabel = "Preparing embedding rebuild..."
+                ProgressBarModule.CancelOperation = False
+                ProgressBarModule.ShowProgressBarInSeparateThread(
+                    $"{AN} Knowledge Store — Embeddings",
+                    "Refreshing embeddings...")
+
+                Dim rebuiltPages = Await KnowledgeEmbeddingService.RebuildAllWikiEmbeddingsAsync(
+                    kbRootPath:=store.ResolvedSourcePath,
+                    context:=_context,
+                    progressPrefix:=store.Name,
+                    progressOffset:=0,
+                    progressTotal:=wikiPages.Count)
+
+                Dim wasCancelled = ProgressBarModule.CancelOperation
+                ProgressBarModule.CancelOperation = True
+
+                ShowCustomMessageBox(
+                    If(wasCancelled,
+                       $"Embedding rebuild cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
+                       $"Embedding rebuild complete. Refreshed {rebuiltPages} wiki page embedding set(s)."),
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ProgressBarModule.CancelOperation = True
+                ShowCustomMessageBox($"Error during embedding rebuild: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
+        End Sub
+
+        Private Async Sub OnLint(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim report = Await KnowledgeWikiService.LintWikiAsync(
+                    kbRootPath:=store.ResolvedSourcePath,
+                    context:=_context,
+                    autoApply:=True)
+
+                ShowCustomWindow(
+                    $"Lint report for '{store.Name}':",
+                    report,
+                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+            End Try
+        End Sub
+
+        Private Sub OnEditSchema(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            Try
+                KnowledgeStoreSchema.LoadOrCreate(store.ResolvedSourcePath)
+
+                Dim schemaPath = KnowledgeStoreSchema.GetSchemaPath(store.ResolvedSourcePath)
+                If String.IsNullOrWhiteSpace(schemaPath) Then
+                    ShowCustomMessageBox("Could not resolve the schema path for the selected store.", AN)
+                    Return
+                End If
+
+                ShowTextFileEditor(
+                    schemaPath,
+                    $"Edit schema for Knowledge Store '{store.Name}'.",
+                    ForceJson:=True,
+                    _context:=_context)
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error opening schema: {ex.Message}", AN)
+            End Try
+        End Sub
+
+        Private Sub SetOperationButtonsEnabled(enabled As Boolean)
+            _btnIndex.Enabled = enabled
+            _btnReindex.Enabled = enabled
+            _btnHealthCheck.Enabled = enabled
+            _btnRepair.Enabled = enabled
+            _btnRevectorize.Enabled = enabled
+            _btnLint.Enabled = enabled
+            _btnEditSchema.Enabled = enabled
+            _btnAddStore.Enabled = enabled
+            _btnDeleteStore.Enabled = enabled
+            _btnSave.Enabled = enabled
+            _lstStores.Enabled = enabled
+        End Sub
+
+#End Region
+
+#Region "Key Handling"
 
         Private Sub OnKeyDown(sender As Object, e As KeyEventArgs)
             If e.KeyCode = Keys.Escape Then

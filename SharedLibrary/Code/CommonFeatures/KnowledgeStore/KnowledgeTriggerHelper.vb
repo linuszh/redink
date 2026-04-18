@@ -157,6 +157,7 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Parses the parameter string inside (kb:...).
         ''' Supports: "store:X", "tag:Y", "store:X tag:Y", plain CSV tags/store names.
+        ''' Store and tag values may be quoted to allow spaces: store:"My Store"
         ''' </summary>
         Private Shared Function ParseParameter(parameter As String, rawTrigger As String) As KnowledgeRequest
             Dim req As New KnowledgeRequest() With {
@@ -171,19 +172,20 @@ Namespace SharedLibrary
             req.HasExplicitTagFilter = hasTagPrefix
 
             If hasStorePrefix OrElse hasTagPrefix Then
-                Dim parts = parameter.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
-                For Each part In parts
-                    If part.StartsWith(StorePrefix, StringComparison.OrdinalIgnoreCase) Then
-                        req.StoreName = part.Substring(StorePrefix.Length).Trim()
-                    ElseIf part.StartsWith(TagPrefix, StringComparison.OrdinalIgnoreCase) Then
-                        Dim tagVal = part.Substring(TagPrefix.Length).Trim()
+                ' Tokenize respecting quoted values: store:"My Store" tag:"Some Tag" free text
+                Dim tokens = TokenizeWithQuotes(parameter)
+                For Each token In tokens
+                    If token.StartsWith(StorePrefix, StringComparison.OrdinalIgnoreCase) Then
+                        req.StoreName = Unquote(token.Substring(StorePrefix.Length)).Trim()
+                    ElseIf token.StartsWith(TagPrefix, StringComparison.OrdinalIgnoreCase) Then
+                        Dim tagVal = Unquote(token.Substring(TagPrefix.Length)).Trim()
                         Dim tagParts = tagVal.Split(","c).
                             Select(Function(t) t.Trim()).
                             Where(Function(t) Not String.IsNullOrWhiteSpace(t)).
                             ToArray()
                         req.Tags = tagParts
                     Else
-                        req.SearchQuery = If(String.IsNullOrWhiteSpace(req.SearchQuery), part, req.SearchQuery & " " & part)
+                        req.SearchQuery = If(String.IsNullOrWhiteSpace(req.SearchQuery), token, req.SearchQuery & " " & token)
                     End If
                 Next
 
@@ -201,6 +203,46 @@ Namespace SharedLibrary
             End If
 
             Return req
+        End Function
+
+        ''' <summary>
+        ''' Splits a string by spaces but keeps quoted segments (double quotes) as single tokens.
+        ''' E.g. <c>store:"My Store" hello</c> → <c>{"store:My Store", "hello"}</c>.
+        ''' The prefix (e.g. "store:") is preserved and the quotes are stripped from the value portion.
+        ''' </summary>
+        Public Shared Function TokenizeWithQuotes(input As String) As List(Of String)
+            Dim result As New List(Of String)()
+            If String.IsNullOrWhiteSpace(input) Then Return result
+
+            ' Match: prefix:"quoted value" | prefix:'quoted value' | unquoted_token
+            Dim pattern As String = "(\w+:""[^""]*""|\w+:'[^']*'|\S+)"
+            For Each m As Match In Regex.Matches(input, pattern)
+                Dim token = m.Value
+
+                ' For prefixed tokens like store:"My Store", strip the quotes from the value part
+                Dim colonIdx = token.IndexOf(":"c)
+                If colonIdx >= 0 AndAlso colonIdx < token.Length - 1 Then
+                    Dim prefix = token.Substring(0, colonIdx + 1)
+                    Dim value = token.Substring(colonIdx + 1)
+                    result.Add(prefix & Unquote(value))
+                Else
+                    result.Add(token)
+                End If
+            Next
+
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Removes surrounding double or single quotes from a string if present.
+        ''' </summary>
+        Private Shared Function Unquote(value As String) As String
+            If String.IsNullOrEmpty(value) OrElse value.Length < 2 Then Return value
+            If (value.StartsWith("""", StringComparison.Ordinal) AndAlso value.EndsWith("""", StringComparison.Ordinal)) OrElse
+               (value.StartsWith("'", StringComparison.Ordinal) AndAlso value.EndsWith("'", StringComparison.Ordinal)) Then
+                Return value.Substring(1, value.Length - 2)
+            End If
+            Return value
         End Function
 
         ''' <summary>
@@ -338,9 +380,15 @@ Namespace SharedLibrary
                     If trimmed.StartsWith("- ", StringComparison.Ordinal) Then
                         Dim value = trimmed.Substring(2).Trim()
                         If value.StartsWith("""", StringComparison.Ordinal) AndAlso
-                           value.EndsWith("""", StringComparison.Ordinal) AndAlso
-                           value.Length >= 2 Then
+                               value.EndsWith("""", StringComparison.Ordinal) AndAlso
+                               value.Length >= 2 Then
                             value = value.Substring(1, value.Length - 2)
+                        End If
+                        ' Strip surrounding single quotes (YAML single-quoted scalars)
+                        If value.StartsWith("'", StringComparison.Ordinal) AndAlso
+                               value.EndsWith("'", StringComparison.Ordinal) AndAlso
+                               value.Length >= 2 Then
+                            value = value.Substring(1, value.Length - 2).Replace("''", "'")
                         End If
                         If Not String.IsNullOrWhiteSpace(value) Then result.Add(value)
                     ElseIf trimmed.Contains(":"c) Then
@@ -551,7 +599,7 @@ Namespace SharedLibrary
                     .WikiPagePath = wikiPath,
                     .Title = If(entry.Title, Path.GetFileNameWithoutExtension(If(entry.FilePath, "Unknown"))),
                     .Summary = If(entry.Summary, ""),
-                    .SourcePath = If(entry.FilePath, ""),
+                    .SourcePath = ResolveSourcePath(entry.FilePath, stores.FirstOrDefault(Function(s) s.Name.Equals(sName, StringComparison.OrdinalIgnoreCase))),
                     .MatchReason = "kb-trigger"
                 })
             Next
@@ -573,6 +621,26 @@ Namespace SharedLibrary
 #End Region
 
 #Region "Helpers"
+
+        ''' <summary>
+        ''' Resolves a potentially relative source file path against the store's root directory.
+        ''' Returns the original path if it is already absolute or the store is unavailable.
+        ''' </summary>
+        Private Shared Function ResolveSourcePath(filePath As String, store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As String
+            If String.IsNullOrWhiteSpace(filePath) Then Return ""
+            Try
+                If Path.IsPathRooted(filePath) AndAlso File.Exists(filePath) Then
+                    Return filePath
+                End If
+                If store IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                    Dim combined = Path.GetFullPath(Path.Combine(store.ResolvedSourcePath, filePath))
+                    If File.Exists(combined) Then Return combined
+                End If
+                Return filePath
+            Catch
+                Return filePath
+            End Try
+        End Function
 
         Private Shared Function SanitizeFileName(name As String) As String
             Dim invalid = Path.GetInvalidFileNameChars()

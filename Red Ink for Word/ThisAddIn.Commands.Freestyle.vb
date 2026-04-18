@@ -1804,10 +1804,11 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
-                ShowKnowledgeStore()
+                Using frm As New KnowledgeStoreAdminForm(_context)
+                    frm.ShowDialog()
+                End Using
                 Return
             End If
-
 
             ' Decode serial 
             If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then
@@ -2918,7 +2919,25 @@ Partial Public Class ThisAddIn
                             OtherPrompt = strippedPrompt
                         End If
 
-                        Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        ' Show splash while querying the Knowledge Store
+                        Dim kbSplash As New SLib.SplashScreen("Querying Knowledge Store...   ")
+                        kbSplash.Show()
+                        System.Windows.Forms.Application.DoEvents()
+
+                        Dim kbResolved As (Content As String, StatusMessage As String)
+                        Try
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        Finally
+                            If kbSplash.InvokeRequired Then
+                                kbSplash.Invoke(Sub()
+                                                    kbSplash.Close()
+                                                    kbSplash.Dispose()
+                                                End Sub)
+                            Else
+                                kbSplash.Close()
+                                kbSplash.Dispose()
+                            End If
+                        End Try
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             ' Inject knowledge context into system prompt

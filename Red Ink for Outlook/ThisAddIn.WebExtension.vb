@@ -2397,6 +2397,9 @@ Partial Public Class ThisAddIn
                                                 snapshotTaken = False
                                             End If
 
+                                            ' Remove knowledge-store source files not cited by the LLM
+                                            RemoveUncitedKnowledgeSourceCopies(localOutput)
+
                                             ' Collect outputs to Desktop\Inky\...
                                             Dim outputFiles = ChatAgentCollectAndCopyOutputs()
                                             If outputFiles IsNot Nothing AndAlso outputFiles.Count > 0 Then

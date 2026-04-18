@@ -206,6 +206,7 @@ Partial Public Class ThisAddIn
         _apCurrentAttachments = Nothing
         _apCurrentMailInfo = Nothing
         _apCurrentToolCallLog = Nothing
+        _apKnowledgeSourceCopies.Clear()
         ' Ensure temp dir is cleaned up (covers cancellation / exception paths
         ' where ChatAgentCollectAndCopyOutputs was never reached)
         CleanupChatAgentTempDir()
@@ -216,11 +217,9 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
-    ''' Collects output files from the agent session, copies them to
-    ''' Desktop\Inky\yymmdd_hh-mm\, and opens the folder in Explorer.
-    ''' Returns the list of copied file paths (for the assistant message).
-    ''' After collection, deletes the entire temp directory so no temp files
-    ''' remain on disk — only the Desktop output folder survives.
+    ''' Collects output files from the agent session, filters to only those
+    ''' cited by the LLM, copies them to Desktop\Inky\yymmdd_hh-mm\, and
+    ''' opens the folder in Explorer.
     ''' </summary>
     Private Function ChatAgentCollectAndCopyOutputs() As List(Of String)
         Dim copiedFiles As New List(Of String)()

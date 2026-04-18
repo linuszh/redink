@@ -42,6 +42,10 @@ Namespace SharedLibrary
     ''' Per-store schema that steers ingest, linking, linting, and query behavior.
     ''' Persisted as .redink\schema.json inside each Knowledge Store root.
     ''' </summary>
+    ''' <summary>
+    ''' Per-store schema that steers ingest, linking, linting, and query behavior.
+    ''' Persisted as .redink\schema.json inside each Knowledge Store root.
+    ''' </summary>
     Public Class KnowledgeStoreSchema
 
         Public Property SchemaVersion As Integer = 1
@@ -79,6 +83,15 @@ Namespace SharedLibrary
         Public Property QueryFilingEnabled As Boolean = False
         Public Property IgnoredTopics As String() = {}
         Public Property AdditionalInstructions As String = ""
+        Public Property StoreName As String = ""
+
+        ''' <summary>
+        ''' Free-text description of the store's content and purpose, surfaced to the LLM
+        ''' in tooling mode so it can decide when to query this store. Example:
+        ''' "Contains internal compliance policies, anti-money-laundering procedures,
+        ''' and client onboarding checklists for VISCHER AG."
+        ''' </summary>
+        Public Property ToolingDescription As String = ""
 
         Public Shared Function GetSchemaPath(kbRootPath As String) As String
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return ""
