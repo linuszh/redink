@@ -13,7 +13,7 @@
 ; DefaultPath = the default path to be used if none is use (will be expanded)
 ; DefaultFileName = the default filename of the file on the target
 ;
-; 13 February 2026
+; 20 April 2026
 
 Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %APPDATA%\microsoft\word; promptlib.txt
 
@@ -60,4 +60,6 @@ Snapshot Library (Local); ; Word; SnapshotLibPathLocal; True; %APPDATA%\microsof
 Mail Mover Rules; {AppsUrl}{AppsUrlDir}mailmover.txt; Word, Outlook; MailMoverPath; True; %APPDATA%\microsoft\word; mailmover.txt
 
 Mail Mover Rules (Local); ; Word, Outlook; MailMoverPathLocal; True; %APPDATA%\microsoft\word; mailmoverlocal.txt
+
+Knowledge Store (Local); ; Word, Outlook; KnowledgeStorePathLocal; True; %APPDATA%\microsoft\word; redink-ks-catalog.json
 

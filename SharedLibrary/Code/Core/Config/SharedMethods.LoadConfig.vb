@@ -355,6 +355,8 @@ Namespace SharedLibrary
                 context.INI_DocStylePathLocal = If(configDict.ContainsKey("DocStylePathLocal"), configDict("DocStylePathLocal"), "")
                 context.INI_PromptLibPath_Transcript = If(configDict.ContainsKey("PromptLib_Transcript"), configDict("PromptLib_Transcript"), "")
 
+                context.INI_FormulaInstruction = My.Settings.FormulaInstruction
+
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")
                 context.INI_LogoPathMedium = If(configDict.ContainsKey("LogoPathMedium"), configDict("LogoPathMedium"), "")
@@ -408,6 +410,7 @@ Namespace SharedLibrary
                 context.INI_KnowledgeStorePathLocal = If(configDict.ContainsKey("KnowledgeStorePathLocal"), configDict("KnowledgeStorePathLocal"), "")
                 context.INI_KnowledgeStoreOwner = If(configDict.ContainsKey("KnowledgeStoreOwner"), configDict("KnowledgeStoreOwner"), "")
                 context.INI_KnowledgeStoreUseLLMIndex = ParseBoolean(configDict, "KnowledgeStoreUseLLMIndex")
+
 
                 ' Process SecondAPI configuration if enabled.
                 context.INI_Endpoint_2 = "" ' Necessary for googleapi check (should not be null).

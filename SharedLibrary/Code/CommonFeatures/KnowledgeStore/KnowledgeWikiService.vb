@@ -138,6 +138,253 @@ Namespace SharedLibrary
             Public Property LlmRepairedPages As Integer = 0
         End Class
 
+#Region "Schema-driven helpers"
+
+        Private Shared ReadOnly BuiltInPageKinds As String() = {"Source", "Entity", "Concept", "Analysis"}
+        Private Shared ReadOnly DefaultAnalyticalSections As String() = {"## Key Claims", "## Evidence", "## Contradictions", "## Open Questions"}
+
+        Private Shared Function GetEffectivePageKinds(schema As KnowledgeStoreSchema) As List(Of String)
+            Dim list As New List(Of String)()
+            If schema IsNot Nothing AndAlso schema.PreferredPageKinds IsNot Nothing Then
+                For Each k In schema.PreferredPageKinds
+                    Dim v = If(k, "").Trim()
+                    If v.Length > 0 AndAlso Not list.Any(Function(x) x.Equals(v, StringComparison.OrdinalIgnoreCase)) Then
+                        list.Add(v)
+                    End If
+                Next
+            End If
+            For Each b In BuiltInPageKinds
+                If Not list.Any(Function(x) x.Equals(b, StringComparison.OrdinalIgnoreCase)) Then
+                    list.Add(b)
+                End If
+            Next
+            Return list
+        End Function
+
+        Private Shared Function GetEffectiveRequiredSections(schema As KnowledgeStoreSchema) As List(Of String)
+            Dim list As New List(Of String)()
+            Dim hasSchemaSections As Boolean = schema IsNot Nothing AndAlso
+                                               schema.RequiredSections IsNot Nothing AndAlso
+                                               schema.RequiredSections.Length > 0
+
+            If hasSchemaSections Then
+                For Each s In schema.RequiredSections
+                    Dim v = If(s, "").Trim()
+                    If v.Length = 0 Then Continue For
+                    If v.Equals("Summary", StringComparison.OrdinalIgnoreCase) Then Continue For
+                    If v.Equals("Title", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    Dim heading = If(v.StartsWith("#"), v, "## " & v)
+                    If Not list.Any(Function(x) x.Equals(heading, StringComparison.OrdinalIgnoreCase)) Then
+                        list.Add(heading)
+                    End If
+                Next
+            Else
+                list.AddRange(DefaultAnalyticalSections)
+            End If
+
+            ' Ensure the four analytical backbone headings are present.
+            ' Resolve against the list we just built — NOT via Get*Heading()
+            ' to avoid infinite recursion (those call back into this method).
+            Dim analyticalDefaults As New List(Of (SearchTerms As String(), DefaultHeading As String)) From {
+                (New String() {"key claims", "key provisions", "key points", "claims", "provisions", "obligations", "requirements", "controls"}, "## Key Claims"),
+                (New String() {"evidence", "support", "supporting evidence", "basis", "justification", "authority", "supporting material"}, "## Evidence"),
+                (New String() {"open questions", "questions", "gaps", "unknowns", "follow-up"}, "## Open Questions")
+            }
+
+            If schema Is Nothing OrElse schema.DetectContradictions Then
+                analyticalDefaults.Add(
+                    (New String() {"contradictions", "conflicts", "disputes", "exceptions"}, "## Contradictions"))
+            End If
+
+            For Each entry In analyticalDefaults
+                ' Check whether any existing heading in the list already covers this concept.
+                Dim alreadyCovered As Boolean = False
+                For Each existing In list
+                    Dim clean = Regex.Replace(existing, "^\s*#+\s*", "").Trim().ToLowerInvariant()
+                    For Each term In entry.SearchTerms
+                        If clean.Contains(term) Then
+                            alreadyCovered = True
+                            Exit For
+                        End If
+                    Next
+                    If alreadyCovered Then Exit For
+                Next
+
+                If Not alreadyCovered Then
+                    If Not list.Any(Function(x) x.Equals(entry.DefaultHeading, StringComparison.OrdinalIgnoreCase)) Then
+                        list.Add(entry.DefaultHeading)
+                    End If
+                End If
+            Next
+
+            If schema Is Nothing OrElse schema.AlwaysAddSourceLinks Then
+                If Not list.Any(Function(x) x.Equals("## Sources", StringComparison.OrdinalIgnoreCase)) Then
+                    list.Add("## Sources")
+                End If
+            End If
+
+            If schema Is Nothing OrElse schema.AlwaysCreateCrossLinks Then
+                If Not list.Any(Function(x) x.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase)) Then
+                    list.Add("## Related Pages")
+                End If
+            End If
+
+            Return list
+        End Function
+
+        Private Shared Function PluralizeKindName(kind As String) As String
+            Dim v = If(kind, "").Trim()
+            If v.Length = 0 Then Return "Concepts"
+            If v.Equals("Analysis", StringComparison.OrdinalIgnoreCase) Then Return "Analyses"
+            If v.Equals("Entity", StringComparison.OrdinalIgnoreCase) Then Return "Entities"
+            If v.Equals("Policy", StringComparison.OrdinalIgnoreCase) Then Return "Policies"
+            If v.EndsWith("y", StringComparison.OrdinalIgnoreCase) AndAlso v.Length > 1 Then
+                Dim beforeY = v.Chars(v.Length - 2)
+                If "aeiouAEIOU".IndexOf(beforeY) < 0 Then Return v.Substring(0, v.Length - 1) & "ies"
+            End If
+            If v.EndsWith("s", StringComparison.OrdinalIgnoreCase) OrElse
+               v.EndsWith("x", StringComparison.OrdinalIgnoreCase) OrElse
+               v.EndsWith("sh", StringComparison.OrdinalIgnoreCase) OrElse
+               v.EndsWith("ch", StringComparison.OrdinalIgnoreCase) Then
+                Return v & "es"
+            End If
+            Return v & "s"
+        End Function
+
+        Private Shared Function FormatKindList(kinds As IEnumerable(Of String)) As String
+            If kinds Is Nothing Then Return "Source|Entity|Concept|Analysis"
+            Dim joined = String.Join("|", kinds.Where(Function(k) Not String.IsNullOrWhiteSpace(k)))
+            If String.IsNullOrWhiteSpace(joined) Then Return "Source|Entity|Concept|Analysis"
+            Return joined
+        End Function
+
+        Private Shared Function BuildSchemaSectionsGuidance(schema As KnowledgeStoreSchema) As String
+            Dim sections = GetEffectiveRequiredSections(schema)
+            Dim sb As New StringBuilder()
+            sb.AppendLine("REQUIRED BODY SECTIONS (use these exact ## headings, in this order):")
+            For Each s In sections
+                sb.AppendLine("- " & s)
+            Next
+            Return sb.ToString().TrimEnd()
+        End Function
+
+        Private Shared Function ResolvePreferredAnalyticalHeading(schema As KnowledgeStoreSchema,
+                                                                  defaultHeading As String,
+                                                                  ParamArray searchTerms As String()) As String
+            Dim sections = GetEffectiveRequiredSections(schema)
+
+            For Each heading In sections
+                Dim cleanHeading = Regex.Replace(heading, "^\s*#+\s*", "").Trim().ToLowerInvariant()
+
+                For Each term In searchTerms
+                    Dim cleanTerm = If(term, "").Trim().ToLowerInvariant()
+                    If cleanTerm.Length > 0 AndAlso cleanHeading.Contains(cleanTerm) Then
+                        Return heading
+                    End If
+                Next
+            Next
+
+            Return defaultHeading
+        End Function
+
+        Private Shared Function GetClaimsHeading(schema As KnowledgeStoreSchema) As String
+            Return ResolvePreferredAnalyticalHeading(
+                schema,
+                "## Key Claims",
+                "key claims",
+                "key provisions",
+                "key points",
+                "claims",
+                "provisions",
+                "obligations",
+                "requirements",
+                "controls")
+        End Function
+
+        Private Shared Function GetEvidenceHeading(schema As KnowledgeStoreSchema) As String
+            Return ResolvePreferredAnalyticalHeading(
+                schema,
+                "## Evidence",
+                "evidence",
+                "support",
+                "supporting evidence",
+                "basis",
+                "justification",
+                "authority",
+                "supporting material")
+        End Function
+
+        Private Shared Function GetContradictionsHeading(schema As KnowledgeStoreSchema) As String
+            Return ResolvePreferredAnalyticalHeading(
+                schema,
+                "## Contradictions",
+                "contradictions",
+                "conflicts",
+                "disputes",
+                "exceptions")
+        End Function
+
+        Private Shared Function GetOpenQuestionsHeading(schema As KnowledgeStoreSchema) As String
+            Return ResolvePreferredAnalyticalHeading(
+                schema,
+                "## Open Questions",
+                "open questions",
+                "questions",
+                "gaps",
+                "unknowns",
+                "follow-up")
+        End Function
+
+        Private Shared Function GetDefaultQueryPageKind(schema As KnowledgeStoreSchema) As String
+            Dim kinds = GetEffectivePageKinds(schema)
+
+            Dim analysisKind = kinds.FirstOrDefault(
+                Function(k) k.Equals("Analysis", StringComparison.OrdinalIgnoreCase))
+            If Not String.IsNullOrWhiteSpace(analysisKind) Then
+                Return analysisKind
+            End If
+
+            Dim firstNonSource = kinds.FirstOrDefault(
+                Function(k) Not k.Equals("Source", StringComparison.OrdinalIgnoreCase))
+            If Not String.IsNullOrWhiteSpace(firstNonSource) Then
+                Return firstNonSource
+            End If
+
+            Return "Analysis"
+        End Function
+
+        Private Shared Function GetDefaultSectionBullet(heading As String,
+                                                        schema As KnowledgeStoreSchema) As String
+            If heading.Equals(GetClaimsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                Return "- No durable claims extracted yet."
+            End If
+
+            If heading.Equals(GetEvidenceHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                Return "- None recorded yet."
+            End If
+
+            If heading.Equals(GetContradictionsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                Return "- None noted."
+            End If
+
+            If heading.Equals(GetOpenQuestionsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                Return "- None noted."
+            End If
+
+            If heading.Equals("## Sources", StringComparison.OrdinalIgnoreCase) Then
+                Return "- None recorded yet."
+            End If
+
+            If heading.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase) Then
+                Return "- None recorded yet."
+            End If
+
+            Return "- _Not yet provided._"
+        End Function
+
+#End Region
+
         Public Shared Sub InitializeWikiStructure(kbRootPath As String)
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return
 
@@ -147,8 +394,10 @@ Namespace SharedLibrary
             If Not Directory.Exists(wikiRoot) Then Directory.CreateDirectory(wikiRoot)
             If Not Directory.Exists(rawPath) Then Directory.CreateDirectory(rawPath)
 
-            For Each folder In New String() {"Sources", "Entities", "Concepts", "Analyses"}
-                Dim folderPath = Path.Combine(wikiRoot, folder)
+            ' Ensure folder for every schema-preferred kind + built-ins.
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            For Each kind In GetEffectivePageKinds(schema)
+                Dim folderPath = Path.Combine(wikiRoot, GetKindFolderName(kind))
                 If Not Directory.Exists(folderPath) Then
                     Directory.CreateDirectory(folderPath)
                 End If
@@ -169,10 +418,52 @@ Namespace SharedLibrary
                                   "> Chronological record of ingestions, updates, queries, and lint operations." & vbCrLf & vbCrLf,
                                   Encoding.UTF8)
             End If
-
-            KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            GenerateMkDocsConfig(kbRootPath)
         End Sub
 
+
+        ''' <summary>
+        ''' Creates or updates .redink/mkdocs.yml so that mkdocs can serve the wiki.
+        ''' </summary>
+        Private Shared Sub GenerateMkDocsConfig(kbRootPath As String)
+            Try
+                If String.IsNullOrWhiteSpace(kbRootPath) Then Return
+
+                Dim redinkDir = Path.Combine(kbRootPath, ".redink")
+                If Not Directory.Exists(redinkDir) Then Directory.CreateDirectory(redinkDir)
+
+                Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+
+                ' Resolve site name: StoreName > Domain > directory name > fallback.
+                Dim siteName = ""
+                If schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.StoreName) Then
+                    siteName = schema.StoreName.Trim()
+                ElseIf schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.Domain) Then
+                    siteName = schema.Domain.Trim() & " Wiki"
+                End If
+
+                If String.IsNullOrWhiteSpace(siteName) Then
+                    Dim dirName = New DirectoryInfo(kbRootPath).Name
+                    siteName = If(String.IsNullOrWhiteSpace(dirName), "Knowledge Store", dirName) & " Wiki"
+                End If
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine($"site_name: {siteName}")
+                sb.AppendLine()
+                sb.AppendLine($"docs_dir: {KnowledgeStoreCatalog.WikiFolder}")
+                sb.AppendLine()
+                sb.AppendLine("theme:")
+                sb.AppendLine("  name: material")
+                sb.AppendLine()
+                sb.AppendLine("plugins:")
+                sb.AppendLine("  - search")
+                sb.AppendLine("  - roamlinks")
+
+                Dim mkdocsPath = Path.Combine(redinkDir, "mkdocs.yml")
+                File.WriteAllText(mkdocsPath, sb.ToString().Trim() & vbLf, Encoding.UTF8)
+            Catch
+            End Try
+        End Sub
 
         Private Shared Sub AppendToLog(kbRootPath As String, action As String, details As String)
             Dim logPath = Path.Combine(kbRootPath, ".redink", KnowledgeStoreCatalog.WikiFolder, KnowledgeStoreCatalog.LogFile)
@@ -194,16 +485,40 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function GetKindFolderName(kind As String) As String
-            Select Case NormalizePageKind(kind, "Concept")
+            Dim normalized = If(kind, "").Trim()
+
+            If normalized.Length = 0 Then
+                normalized = "Concept"
+            End If
+
+            Select Case normalized
                 Case "Source"
                     Return "Sources"
                 Case "Entity"
                     Return "Entities"
                 Case "Analysis"
                     Return "Analyses"
-                Case Else
+                Case "Concept"
                     Return "Concepts"
+                Case Else
+                    Return PluralizeKindName(normalized)
             End Select
+        End Function
+
+        Private Shared Function NormalizePageKind(kind As String, fallbackKind As String) As String
+            Return NormalizePageKind(kind, fallbackKind, Nothing)
+        End Function
+
+        Private Shared Function NormalizePageKind(kind As String, fallbackKind As String, schema As KnowledgeStoreSchema) As String
+            Dim value = If(kind, "").Trim()
+            If value.Length = 0 Then Return If(String.IsNullOrWhiteSpace(fallbackKind), "Concept", fallbackKind)
+
+            Dim effective = GetEffectivePageKinds(schema)
+            For Each allowed In effective
+                If value.Equals(allowed, StringComparison.OrdinalIgnoreCase) Then Return allowed
+            Next
+
+            Return If(String.IsNullOrWhiteSpace(fallbackKind), "Concept", fallbackKind)
         End Function
 
         Private Shared Function GetPageDirectoryForKind(kbRootPath As String, kind As String) As String
@@ -323,7 +638,7 @@ Namespace SharedLibrary
                 sourceFilePath:="",
                 defaultKind:="Analysis",
                 relatedCandidates:=candidatePages,
-                actionName:="clipboard").ConfigureAwait(False)
+                actionName:="clipboard", schema:=schema).ConfigureAwait(False)
         End Function
 
         Public Shared Async Function IngestSourceAsync(kbRootPath As String,
@@ -396,7 +711,7 @@ Namespace SharedLibrary
                 sourceFilePath:=sourceFilePath,
                 defaultKind:="Source",
                 relatedCandidates:=candidatePages,
-                actionName:="ingest").ConfigureAwait(False)
+                actionName:="ingest", schema:=schema).ConfigureAwait(False)
 
             If Not primarySaved Then
                 Return False
@@ -481,19 +796,20 @@ Namespace SharedLibrary
                 seenTitles.Add(draft.Title.Trim())
 
                 Dim syntheticAgentResponse = ComposeSyntheticAgentResponse(
-                    title:=draft.Title,
-                    summary:=draft.Summary,
-                    kind:=NormalizePageKind(draft.Kind, "Concept"),
-                    body:=draft.Body)
+                            title:=draft.Title,
+                            summary:=draft.Summary,
+                            kind:=draft.Kind,
+                            body:=draft.Body,
+                            schema:=schema)
 
                 Dim saved = Await ParseAndSaveAgentResponseAsync(
                     kbRootPath:=kbRootPath,
                     agentResponse:=syntheticAgentResponse,
                     context:=context,
                     sourceFilePath:=sourceFilePath,
-                    defaultKind:=NormalizePageKind(draft.Kind, "Concept"),
+                    defaultKind:=NormalizePageKind(draft.Kind, "Concept", schema),
                     relatedCandidates:=candidatePages,
-                    actionName:="supplemental-update").ConfigureAwait(False)
+                    actionName:="supplemental-update", schema:=schema).ConfigureAwait(False)
 
                 If saved Then
                     savedCount += 1
@@ -512,10 +828,11 @@ Namespace SharedLibrary
                                                              wikiIndex As String,
                                                              candidatePages As List(Of WikiPageInfo)) As String
             Dim sb As New StringBuilder()
+            Dim kindsList = FormatKindList(GetEffectivePageKinds(schema).
+                                           Where(Function(k) Not k.Equals("Source", StringComparison.OrdinalIgnoreCase)))
 
             sb.AppendLine("You are an autonomous Wiki Maintainer.")
             sb.AppendLine("Your job is to identify additional durable wiki pages that should be created or updated based on the source.")
-            sb.AppendLine("These supplemental pages should usually be entity pages, concept pages, or focused analysis pages.")
             sb.AppendLine("Do NOT restate the main source page. Only produce pages that add long-term structure to the wiki.")
             sb.AppendLine()
             sb.AppendLine("OUTPUT FORMAT:")
@@ -523,7 +840,7 @@ Namespace SharedLibrary
             sb.AppendLine("<PAGE>")
             sb.AppendLine("TITLE: ...")
             sb.AppendLine("SUMMARY: ...")
-            sb.AppendLine("KIND: Entity|Concept|Analysis")
+            sb.AppendLine($"KIND: {kindsList}")
             sb.AppendLine()
             sb.AppendLine("<markdown body>")
             sb.AppendLine("</PAGE>")
@@ -536,8 +853,9 @@ Namespace SharedLibrary
             sb.AppendLine("3. Preserve contradictions and uncertainty.")
             sb.AppendLine("4. Do not invent sources.")
             sb.AppendLine("5. Only create pages that are likely to remain useful after this source.")
-            sb.AppendLine("6. Prefer this body structure whenever possible: ## Key Claims, ## Evidence, ## Contradictions, ## Open Questions.")
-            sb.AppendLine("7. If the source conflicts with an existing page, update the relevant page rather than hiding the conflict.")
+            sb.AppendLine("6. If the source conflicts with an existing page, update the relevant page rather than hiding the conflict.")
+            sb.AppendLine()
+            sb.AppendLine(BuildSchemaSectionsGuidance(schema))
             sb.AppendLine()
 
             If schema IsNot Nothing Then
@@ -598,6 +916,8 @@ Namespace SharedLibrary
 
             Dim candidatePages = FindCandidateWikiPages(kbRootPath, queryText & " " & answerMarkdown, 8)
             Dim wikiIndex = LoadIndexText(kbRootPath)
+            Dim queryKind = GetDefaultQueryPageKind(schema)
+            Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
             Dim systemPrompt As New StringBuilder()
             systemPrompt.AppendLine("You are an autonomous Wiki Maintainer.")
@@ -608,17 +928,18 @@ Namespace SharedLibrary
             systemPrompt.AppendLine("OUTPUT FORMAT REQUIREMENTS:")
             systemPrompt.AppendLine("1. First line: TITLE: <concise title>")
             systemPrompt.AppendLine("2. Second line: SUMMARY: <one-sentence summary>")
-            systemPrompt.AppendLine("3. Third line: KIND: Analysis")
+            systemPrompt.AppendLine($"3. Third line: KIND: <{kindsList}>")
             systemPrompt.AppendLine("4. Start the markdown body after a blank line.")
             systemPrompt.AppendLine("5. Use standard markdown links, not wiki syntax.")
             systemPrompt.AppendLine("6. Preserve source citations and keep them clickable.")
-            systemPrompt.AppendLine("7. Prefer this body structure whenever possible:")
-            systemPrompt.AppendLine("   - ## Key Claims")
-            systemPrompt.AppendLine("   - ## Evidence")
-            systemPrompt.AppendLine("   - ## Contradictions")
-            systemPrompt.AppendLine("   - ## Open Questions")
-            systemPrompt.AppendLine("8. If the answer conflicts with existing pages, record the disagreement explicitly under ## Contradictions.")
             systemPrompt.AppendLine()
+            systemPrompt.AppendLine(BuildSchemaSectionsGuidance(schema))
+            systemPrompt.AppendLine()
+
+            If schema IsNot Nothing AndAlso schema.DetectContradictions Then
+                systemPrompt.AppendLine($"If the answer conflicts with existing pages, record the disagreement explicitly under {GetContradictionsHeading(schema)}.")
+                systemPrompt.AppendLine()
+            End If
 
             If schema IsNot Nothing Then
                 systemPrompt.AppendLine(schema.ToPromptBlock())
@@ -644,6 +965,9 @@ Namespace SharedLibrary
                 Next
             End If
 
+            systemPrompt.AppendLine()
+            systemPrompt.AppendLine($"Default page kind if unclear: {queryKind}")
+
             Dim userPrompt As New StringBuilder()
             userPrompt.AppendLine($"QUERY: {queryText}")
             userPrompt.AppendLine()
@@ -665,7 +989,7 @@ Namespace SharedLibrary
                 hideSplash:=True).ConfigureAwait(False)
 
             If String.IsNullOrWhiteSpace(agentResponse) Then
-                agentResponse = BuildFallbackQueryAgentResponse(queryText, answerMarkdown, preferredTitle)
+                agentResponse = BuildFallbackQueryAgentResponse(queryText, answerMarkdown, preferredTitle, schema)
             ElseIf Not String.IsNullOrWhiteSpace(preferredTitle) AndAlso
                    agentResponse.IndexOf("TITLE:", StringComparison.OrdinalIgnoreCase) >= 0 Then
                 agentResponse = OverrideAgentTitle(agentResponse, preferredTitle)
@@ -676,10 +1000,11 @@ Namespace SharedLibrary
                 agentResponse:=agentResponse,
                 context:=context,
                 sourceFilePath:="",
-                defaultKind:="Analysis",
+                defaultKind:=queryKind,
                 relatedCandidates:=candidatePages,
                 actionName:="query-file",
-                additionalSourcePaths:=sourceList).ConfigureAwait(False)
+                additionalSourcePaths:=sourceList,
+                schema:=schema).ConfigureAwait(False)
 
             If saved Then
                 AppendToLog(kbRootPath, "query-file", queryText)
@@ -690,7 +1015,8 @@ Namespace SharedLibrary
 
         Private Shared Function BuildFallbackQueryAgentResponse(queryText As String,
                                                                 answerMarkdown As String,
-                                                                preferredTitle As String) As String
+                                                                preferredTitle As String,
+                                                                Optional schema As KnowledgeStoreSchema = Nothing) As String
             Dim title = preferredTitle.Trim()
             If String.IsNullOrWhiteSpace(title) Then
                 title = BuildQueryTitle(queryText)
@@ -701,27 +1027,39 @@ Namespace SharedLibrary
                 summary = "Filed analysis generated from a knowledge store query."
             End If
 
+            Dim queryKind = GetDefaultQueryPageKind(schema)
+            Dim sections = GetEffectiveRequiredSections(schema)
+
             Dim sb As New StringBuilder()
             sb.AppendLine($"TITLE: {title}")
             sb.AppendLine($"SUMMARY: {summary}")
-            sb.AppendLine("KIND: Analysis")
+            sb.AppendLine($"KIND: {queryKind}")
             sb.AppendLine()
-            sb.AppendLine("## Key Claims")
-            sb.AppendLine()
-            sb.AppendLine("- Derived from the filed query and answer below.")
-            sb.AppendLine()
-            sb.AppendLine("## Evidence")
-            sb.AppendLine()
-            sb.AppendLine("- Evidence currently comes from the answer text and linked source paths.")
-            sb.AppendLine()
-            sb.AppendLine("## Contradictions")
-            sb.AppendLine()
-            sb.AppendLine("- None noted.")
-            sb.AppendLine()
-            sb.AppendLine("## Open Questions")
-            sb.AppendLine()
-            sb.AppendLine("- Should this analysis be merged into an existing concept or entity page?")
-            sb.AppendLine()
+
+            For Each heading In sections
+                If heading.Equals("## Sources", StringComparison.OrdinalIgnoreCase) OrElse
+                   heading.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+
+                sb.AppendLine(heading)
+                sb.AppendLine()
+
+                If heading.Equals(GetClaimsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine("- Derived from the filed query and answer below.")
+                ElseIf heading.Equals(GetEvidenceHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine("- Evidence currently comes from the answer text and linked source paths.")
+                ElseIf heading.Equals(GetContradictionsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine("- None noted.")
+                ElseIf heading.Equals(GetOpenQuestionsHeading(schema), StringComparison.OrdinalIgnoreCase) Then
+                    sb.AppendLine("- Should this analysis be merged into an existing page?")
+                Else
+                    sb.AppendLine(GetDefaultSectionBullet(heading, schema))
+                End If
+
+                sb.AppendLine()
+            Next
+
             sb.AppendLine("## Query")
             sb.AppendLine()
             sb.AppendLine(queryText.Trim())
@@ -911,25 +1249,27 @@ Namespace SharedLibrary
                                                  candidatePages As List(Of WikiPageInfo),
                                                  defaultKind As String) As String
             Dim sb As New StringBuilder()
+            Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
             sb.AppendLine(roleDescription)
             sb.AppendLine()
             sb.AppendLine("OUTPUT FORMAT REQUIREMENTS:")
             sb.AppendLine("1. First line: TITLE: <concise title>")
             sb.AppendLine("2. Second line: SUMMARY: <one-sentence summary>")
-            sb.AppendLine("3. Third line: KIND: <Source|Entity|Concept|Analysis>")
+            sb.AppendLine($"3. Third line: KIND: <{kindsList}>")
             sb.AppendLine("4. Start the markdown body after a blank line.")
             sb.AppendLine("5. Use standard markdown links, not wiki syntax.")
             sb.AppendLine("6. Preserve nuance, contradictions, and explicit uncertainty.")
             sb.AppendLine("7. Create meaningful cross-links to relevant existing pages whenever possible.")
             sb.AppendLine("8. Do not invent sources.")
-            sb.AppendLine("9. Prefer this body structure whenever possible:")
-            sb.AppendLine("   - ## Key Claims")
-            sb.AppendLine("   - ## Evidence")
-            sb.AppendLine("   - ## Contradictions")
-            sb.AppendLine("   - ## Open Questions")
-            sb.AppendLine("10. If evidence conflicts with existing pages, keep both positions and record the conflict explicitly under ## Contradictions.")
             sb.AppendLine()
+            sb.AppendLine(BuildSchemaSectionsGuidance(schema))
+            sb.AppendLine()
+
+            If schema IsNot Nothing AndAlso schema.DetectContradictions Then
+                sb.AppendLine("If evidence conflicts with existing pages, keep both positions and record the conflict explicitly.")
+                sb.AppendLine()
+            End If
 
             If schema IsNot Nothing Then
                 sb.AppendLine(schema.ToPromptBlock())
@@ -956,7 +1296,7 @@ Namespace SharedLibrary
             End If
 
             sb.AppendLine()
-            sb.AppendLine($"Default page kind if unclear: {defaultKind}")
+            sb.AppendLine($"Default page kind if unclear: {NormalizePageKind(defaultKind, "Concept", schema)}")
 
             Return sb.ToString().Trim()
         End Function
@@ -1013,14 +1353,17 @@ Namespace SharedLibrary
                                                                      defaultKind As String,
                                                                      relatedCandidates As List(Of WikiPageInfo),
                                                                      actionName As String,
-                                                                     Optional additionalSourcePaths As IEnumerable(Of String) = Nothing) As Task(Of Boolean)
+                                                                     Optional additionalSourcePaths As IEnumerable(Of String) = Nothing,
+                                                                     Optional schema As KnowledgeStoreSchema = Nothing) As Task(Of Boolean)
+
+            If schema Is Nothing Then schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
 
             Dim parsed = ParseAgentResponse(agentResponse, defaultKind)
             If String.IsNullOrWhiteSpace(parsed.Body) Then Return False
 
             Dim finalTitle = parsed.Title
             Dim finalSummary = parsed.Summary
-            Dim finalKind = If(String.IsNullOrWhiteSpace(parsed.Kind), defaultKind, NormalizePageKind(parsed.Kind, defaultKind))
+            Dim finalKind = NormalizePageKind(parsed.Kind, defaultKind, schema)
             Dim finalBody = parsed.Body
 
             Dim existingPagePath = FindExistingWikiPagePath(kbRootPath, finalTitle)
@@ -1063,20 +1406,21 @@ Namespace SharedLibrary
 
                 Dim mergedResponse = Await ExecuteKnowledgeStoreLlmAsync(
                     context:=context,
-                    promptSystem:=BuildMergePrompt(),
+                    promptSystem:=BuildMergePrompt(schema),
                     promptUser:=BuildMergeUserPrompt(
                         existingContent:=existingContent,
                         newContent:=finalBody,
                         relatedCandidates:=relatedCandidates,
                         kbRootPath:=kbRootPath,
-                        currentPagePath:=finalPath),
+                        currentPagePath:=finalPath,
+                        schema:=schema),
                     hideSplash:=True).ConfigureAwait(False)
 
                 If Not String.IsNullOrWhiteSpace(mergedResponse) Then
                     Dim merged = ParseAgentResponse(mergedResponse, finalKind)
                     finalTitle = merged.Title
                     finalSummary = merged.Summary
-                    finalKind = NormalizePageKind(merged.Kind, finalKind)
+                    finalKind = NormalizePageKind(merged.Kind, finalKind, schema)
                     finalBody = merged.Body
                 End If
             End If
@@ -1085,9 +1429,10 @@ Namespace SharedLibrary
                 body:=finalBody,
                 currentPagePath:=finalPath,
                 sourcePaths:=mergedSourcePaths,
-                relatedCandidates:=relatedCandidates)
+                relatedCandidates:=relatedCandidates,
+                schema:=schema)
 
-            Dim pageState = ComputePageComputedState(finalBody, mergedSourcePaths)
+            Dim pageState = ComputePageComputedState(finalBody, mergedSourcePaths, schema)
 
             If isUpdate AndAlso
                existingPageInfo IsNot Nothing AndAlso
@@ -1116,6 +1461,7 @@ Namespace SharedLibrary
 
             Try
                 File.WriteAllText(finalPath, fullDocument, Encoding.UTF8)
+                CopySourceFilesToPageDirectory(finalPath, mergedSourcePaths)
                 Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(kbRootPath, finalPath, fullDocument, context).ConfigureAwait(False)
                 RebuildIndex(kbRootPath)
                 RefreshReviewArtifacts(kbRootPath)
@@ -1124,7 +1470,7 @@ Namespace SharedLibrary
                 AppendToLog(
                     kbRootPath,
                     logAction,
-                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}")
+                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Kind={finalKind}; Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}")
 
                 Return True
             Catch ex As Exception
@@ -1132,8 +1478,6 @@ Namespace SharedLibrary
                 Return False
             End Try
         End Function
-
-
 
         Private Shared Function ParseAgentResponse(agentResponse As String, defaultKind As String) As ParsedAgentResponse
             Dim result As New ParsedAgentResponse()
@@ -1219,15 +1563,57 @@ Namespace SharedLibrary
                                                   currentPagePath As String,
                                                   sourcePaths As IEnumerable(Of String),
                                                   relatedCandidates As List(Of WikiPageInfo)) As String
-            Dim normalized = If(body, "").Trim()
+            Return NormalizePageBody(body, currentPagePath, sourcePaths, relatedCandidates, Nothing)
+        End Function
 
-            normalized = EnsureKeyClaimsSection(normalized)
-            normalized = EnsureEvidenceSection(normalized)
-            normalized = EnsureContradictionsSection(normalized)
-            normalized = EnsureOpenQuestionsSection(normalized)
-            normalized = NormalizeClaimsAndEvidenceSections(normalized)
-            normalized = EnsureSourcesSection(normalized, "", sourcePaths)
-            normalized = EnsureRelatedSection(normalized, currentPagePath, relatedCandidates)
+        Private Shared Function NormalizePageBody(body As String,
+                                                  currentPagePath As String,
+                                                  sourcePaths As IEnumerable(Of String),
+                                                  relatedCandidates As List(Of WikiPageInfo),
+                                                  schema As KnowledgeStoreSchema) As String
+            Dim normalized = If(body, "").Trim()
+            Dim sections = GetEffectiveRequiredSections(schema)
+
+            ' Ensure each schema-required section exists (with a neutral placeholder bullet).
+            For Each heading In sections
+                If heading.Equals("## Sources", StringComparison.OrdinalIgnoreCase) Then Continue For
+                If heading.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase) Then Continue For
+                normalized = EnsureSection(normalized, heading, "- _Not yet provided._")
+            Next
+
+            Dim analyticalHeadings As New List(Of String) From {
+                GetClaimsHeading(schema),
+                GetEvidenceHeading(schema),
+                GetOpenQuestionsHeading(schema)
+            }
+
+            If schema Is Nothing OrElse schema.DetectContradictions Then
+                analyticalHeadings.Add(GetContradictionsHeading(schema))
+            End If
+
+            analyticalHeadings = analyticalHeadings.
+                Where(Function(x) Not String.IsNullOrWhiteSpace(x)).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+            For Each analytical In analyticalHeadings
+                If sections.Any(Function(x) x.Equals(analytical, StringComparison.OrdinalIgnoreCase)) Then
+                    normalized = NormalizeMarkdownListSection(
+                        normalized,
+                        analytical,
+                        GetDefaultSectionBullet(analytical, schema))
+                End If
+            Next
+
+            Dim alwaysSourceLinks As Boolean = schema Is Nothing OrElse schema.AlwaysAddSourceLinks
+            Dim alwaysCrossLinks As Boolean = schema Is Nothing OrElse schema.AlwaysCreateCrossLinks
+
+            If alwaysSourceLinks Then
+                normalized = EnsureSourcesSection(normalized, "", sourcePaths)
+            End If
+            If alwaysCrossLinks Then
+                normalized = EnsureRelatedSection(normalized, currentPagePath, relatedCandidates)
+            End If
 
             Return normalized.Trim()
         End Function
@@ -1253,32 +1639,6 @@ Namespace SharedLibrary
             Return sb.ToString().Trim()
         End Function
 
-        Private Shared Function EnsureKeyClaimsSection(body As String) As String
-            Return EnsureSection(body, "## Key Claims", "- No durable claims extracted yet.")
-        End Function
-
-        Private Shared Function EnsureEvidenceSection(body As String) As String
-            Return EnsureSection(body, "## Evidence", "- None recorded yet.")
-        End Function
-
-        Private Shared Function EnsureContradictionsSection(body As String) As String
-            Return EnsureSection(body, "## Contradictions", "- None noted.")
-        End Function
-
-        Private Shared Function EnsureOpenQuestionsSection(body As String) As String
-            Return EnsureSection(body, "## Open Questions", "- None noted.")
-        End Function
-
-        Private Shared Function NormalizeClaimsAndEvidenceSections(body As String) As String
-            Dim normalized = body
-
-            normalized = NormalizeMarkdownListSection(normalized, "## Key Claims", "- No durable claims extracted yet.")
-            normalized = NormalizeMarkdownListSection(normalized, "## Evidence", "- None recorded yet.")
-            normalized = NormalizeMarkdownListSection(normalized, "## Contradictions", "- None noted.")
-            normalized = NormalizeMarkdownListSection(normalized, "## Open Questions", "- None noted.")
-
-            Return normalized
-        End Function
 
         Private Shared Function NormalizeMarkdownListSection(markdown As String,
                                                              heading As String,
@@ -1455,28 +1815,44 @@ Namespace SharedLibrary
 
         Private Shared Function ComputePageComputedState(body As String,
                                                          sourcePaths As IEnumerable(Of String)) As WikiComputedState
+            Return ComputePageComputedState(body, sourcePaths, Nothing)
+        End Function
+
+        Private Shared Function ComputePageComputedState(body As String,
+                                                         sourcePaths As IEnumerable(Of String),
+                                                         schema As KnowledgeStoreSchema) As WikiComputedState
             Dim result As New WikiComputedState()
             Dim mergedSourcePaths = MergeSourcePaths("", sourcePaths)
-            Dim meaningfulEvidence = ExtractSectionBulletItems(body, "## Evidence").
+
+            Dim claimsHeading = GetClaimsHeading(schema)
+            Dim evidenceHeading = GetEvidenceHeading(schema)
+            Dim contradictionsHeading = GetContradictionsHeading(schema)
+
+            Dim meaningfulEvidence = ExtractSectionBulletItems(body, evidenceHeading).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
 
-            Dim meaningfulContradictions = ExtractSectionBulletItems(body, "## Contradictions").
-                Where(Function(x) IsMeaningfulSectionItem(x)).
-                ToList()
+            Dim meaningfulContradictions As New List(Of String)()
+            If schema Is Nothing OrElse schema.DetectContradictions Then
+                meaningfulContradictions = ExtractSectionBulletItems(body, contradictionsHeading).
+                    Where(Function(x) IsMeaningfulSectionItem(x)).
+                    ToList()
+            End If
 
-            Dim meaningfulClaims = ExtractSectionBulletItems(body, "## Key Claims").
+            Dim meaningfulClaims = ExtractSectionBulletItems(body, claimsHeading).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
 
             result.SourceCount = mergedSourcePaths.Count
             result.ContradictionCount = meaningfulContradictions.Count
 
+            Dim hasSupport As Boolean = meaningfulEvidence.Count > 0 OrElse mergedSourcePaths.Count > 0
+
             If body.IndexOf("superseded", StringComparison.OrdinalIgnoreCase) >= 0 Then
                 result.Status = "superseded"
             ElseIf meaningfulContradictions.Count > 0 Then
                 result.Status = "disputed"
-            ElseIf meaningfulEvidence.Count = 0 OrElse meaningfulClaims.Count = 0 OrElse mergedSourcePaths.Count = 0 Then
+            ElseIf meaningfulClaims.Count = 0 OrElse Not hasSupport OrElse mergedSourcePaths.Count = 0 Then
                 result.Status = "tentative"
             Else
                 result.Status = "stable"
@@ -1490,32 +1866,33 @@ Namespace SharedLibrary
             Return result
         End Function
 
-        Private Shared Function NormalizePageStatus(status As String) As String
-            Dim value = If(status, "").Trim()
-
-            If value.Equals("stable", StringComparison.OrdinalIgnoreCase) Then Return "stable"
-            If value.Equals("tentative", StringComparison.OrdinalIgnoreCase) Then Return "tentative"
-            If value.Equals("disputed", StringComparison.OrdinalIgnoreCase) Then Return "disputed"
-            If value.Equals("superseded", StringComparison.OrdinalIgnoreCase) Then Return "superseded"
-
-            Return "stable"
+        Private Shared Function ExtractClaimsFromPage(page As WikiPageInfo) As List(Of WikiClaimInfo)
+            Return ExtractClaimsFromPage(page, Nothing)
         End Function
 
-        Private Shared Function ExtractClaimsFromPage(page As WikiPageInfo) As List(Of WikiClaimInfo)
+        Private Shared Function ExtractClaimsFromPage(page As WikiPageInfo,
+                                                      schema As KnowledgeStoreSchema) As List(Of WikiClaimInfo)
             Dim result As New List(Of WikiClaimInfo)()
             If page Is Nothing Then Return result
 
-            Dim claimItems = ExtractSectionBulletItems(page.Content, "## Key Claims").
+            Dim claimsHeading = GetClaimsHeading(schema)
+            Dim evidenceHeading = GetEvidenceHeading(schema)
+            Dim contradictionsHeading = GetContradictionsHeading(schema)
+
+            Dim claimItems = ExtractSectionBulletItems(page.Content, claimsHeading).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
 
-            Dim evidenceItems = ExtractSectionBulletItems(page.Content, "## Evidence").
+            Dim evidenceItems = ExtractSectionBulletItems(page.Content, evidenceHeading).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
 
-            Dim contradictionItems = ExtractSectionBulletItems(page.Content, "## Contradictions").
-                Where(Function(x) IsMeaningfulSectionItem(x)).
-                ToList()
+            Dim contradictionItems As New List(Of String)()
+            If schema Is Nothing OrElse schema.DetectContradictions Then
+                contradictionItems = ExtractSectionBulletItems(page.Content, contradictionsHeading).
+                    Where(Function(x) IsMeaningfulSectionItem(x)).
+                    ToList()
+            End If
 
             For Each claimItem In claimItems
                 Dim matchedEvidence = GetEvidenceItemsSupportingClaim(claimItem, evidenceItems)
@@ -1528,8 +1905,7 @@ Namespace SharedLibrary
                         Function(c) AreClaimsPotentiallyContradictory(claimItem, c)),
                     .NeedsReview = page.ReviewNeeded OrElse
                                    page.Status.Equals("disputed", StringComparison.OrdinalIgnoreCase) OrElse
-                                   matchedEvidence.Count = 0 OrElse
-                                   page.SourcePaths.Count = 0
+                                   (matchedEvidence.Count = 0 AndAlso page.SourcePaths.Count = 0)
                 }
 
                 result.Add(claim)
@@ -1539,20 +1915,57 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function CountClaimsWithoutEvidence(page As WikiPageInfo) As Integer
+            Return CountClaimsWithoutEvidence(page, Nothing)
+        End Function
+
+        Private Shared Function CountClaimsWithoutEvidence(page As WikiPageInfo,
+                                                           schema As KnowledgeStoreSchema) As Integer
             If page Is Nothing Then Return 0
 
-            Return ExtractClaimsFromPage(page).
+            Return ExtractClaimsFromPage(page, schema).
                 Where(Function(c) c.EvidenceItems Is Nothing OrElse c.EvidenceItems.Count = 0).
                 Count()
         End Function
 
         Private Shared Function CountContradictedClaims(page As WikiPageInfo) As Integer
+            Return CountContradictedClaims(page, Nothing)
+        End Function
+
+        Private Shared Function CountContradictedClaims(page As WikiPageInfo,
+                                                        schema As KnowledgeStoreSchema) As Integer
             If page Is Nothing Then Return 0
 
-            Return ExtractClaimsFromPage(page).
+            Return ExtractClaimsFromPage(page, schema).
                 Where(Function(c) c.IsContradicted).
                 Count()
         End Function
+
+        Private Shared Function CountClaimsWithoutSources(page As WikiPageInfo) As Integer
+            Return CountClaimsWithoutSources(page, Nothing)
+        End Function
+
+        Private Shared Function CountClaimsWithoutSources(page As WikiPageInfo,
+                                                          schema As KnowledgeStoreSchema) As Integer
+            If page Is Nothing Then Return 0
+
+            Dim claims = ExtractClaimsFromPage(page, schema)
+            If claims.Count = 0 Then Return 0
+            If page.SourcePaths Is Nothing OrElse page.SourcePaths.Count = 0 Then Return claims.Count
+
+            Return 0
+        End Function
+
+        Private Shared Function NormalizePageStatus(status As String) As String
+            Dim value = If(status, "").Trim()
+
+            If value.Equals("stable", StringComparison.OrdinalIgnoreCase) Then Return "stable"
+            If value.Equals("tentative", StringComparison.OrdinalIgnoreCase) Then Return "tentative"
+            If value.Equals("disputed", StringComparison.OrdinalIgnoreCase) Then Return "disputed"
+            If value.Equals("superseded", StringComparison.OrdinalIgnoreCase) Then Return "superseded"
+
+            Return "stable"
+        End Function
+
 
         Private Shared Function GetEvidenceItemsSupportingClaim(claimText As String,
                                                                 evidenceItems As List(Of String)) As List(Of String)
@@ -1599,15 +2012,7 @@ Namespace SharedLibrary
             Return result.Take(3).ToList()
         End Function
 
-        Private Shared Function CountClaimsWithoutSources(page As WikiPageInfo) As Integer
-            If page Is Nothing Then Return 0
 
-            Dim claims = ExtractClaimsFromPage(page)
-            If claims.Count = 0 Then Return 0
-            If page.SourcePaths Is Nothing OrElse page.SourcePaths.Count = 0 Then Return claims.Count
-
-            Return 0
-        End Function
 
         Private Shared Function FindPotentialSupersededPages(pages As List(Of WikiPageInfo)) As List(Of String)
             Dim result As New List(Of String)()
@@ -1706,8 +2111,10 @@ Namespace SharedLibrary
         Private Shared Function BuildRepairPromptUser(page As WikiPageInfo,
                                                       candidates As List(Of WikiPageInfo),
                                                       contradictionPairs As List(Of PotentialContradictionPair),
-                                                      kbRootPath As String) As String
+                                                      kbRootPath As String,
+                                                      Optional schema As KnowledgeStoreSchema = Nothing) As String
             Dim promptUser As New StringBuilder()
+            Dim contradictionsHeading = GetContradictionsHeading(schema)
 
             promptUser.AppendLine("CURRENT PAGE:")
             promptUser.AppendLine(page.Content)
@@ -1739,7 +2146,7 @@ Namespace SharedLibrary
                 promptUser.AppendLine("CONFLICTING PAGE EXCERPT:")
                 promptUser.AppendLine(TruncateForPrompt(RemoveFrontMatter(otherPage.Content), 1600))
                 promptUser.AppendLine()
-                promptUser.AppendLine("Repair goal: preserve the conflict explicitly if unresolved; do not smooth it away.")
+                promptUser.AppendLine($"Repair goal: preserve the conflict explicitly in {contradictionsHeading} if unresolved; do not smooth it away.")
                 promptUser.AppendLine()
             End If
 
@@ -1892,13 +2299,14 @@ Namespace SharedLibrary
                 Dim pages = GetAllWikiPages(kbRootPath)
                 If pages.Count = 0 Then Return
 
-                Dim contradictionPairs = FindPotentialContradictionPairs(pages)
+                Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+                Dim contradictionPairs = FindPotentialContradictionPairs(pages, schema)
                 Dim supersededCandidates = FindPotentialSupersededPages(pages)
 
                 Dim claimsWithoutEvidence = pages.
                     Select(
                         Function(p)
-                            Dim unsupportedCount = CountClaimsWithoutEvidence(p)
+                            Dim unsupportedCount = CountClaimsWithoutEvidence(p, schema)
                             Return Tuple.Create(p.RelativePath, unsupportedCount)
                         End Function).
                     Where(Function(x) x.Item2 > 0).
@@ -1908,7 +2316,7 @@ Namespace SharedLibrary
                 Dim claimsWithoutSources = pages.
                     Select(
                         Function(p)
-                            Dim unsourcedCount = CountClaimsWithoutSources(p)
+                            Dim unsourcedCount = CountClaimsWithoutSources(p, schema)
                             Return Tuple.Create(p.RelativePath, unsourcedCount)
                         End Function).
                     Where(Function(x) x.Item2 > 0).
@@ -1953,27 +2361,25 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function BuildMergePrompt() As String
+            Return BuildMergePrompt(Nothing)
+        End Function
+
+        Private Shared Function BuildMergePrompt(schema As KnowledgeStoreSchema) As String
             Dim sb As New StringBuilder()
+            Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
             sb.AppendLine("You are an autonomous Wiki Maintainer.")
             sb.AppendLine("Merge the existing page and the new extracted content into one improved page.")
             sb.AppendLine("Preserve valuable existing structure, integrate new findings, keep or improve cross-links, and explicitly retain contradictions when evidence conflicts.")
             sb.AppendLine("Never silently replace an older claim with a newer one when they materially conflict.")
-            sb.AppendLine("If evidence conflicts, record both positions explicitly in a ## Contradictions section and mention uncertainty in ## Evidence or ## Open Questions.")
             sb.AppendLine("Return exactly:")
             sb.AppendLine("TITLE: ...")
             sb.AppendLine("SUMMARY: ...")
-            sb.AppendLine("KIND: Source|Entity|Concept|Analysis")
+            sb.AppendLine($"KIND: {kindsList}")
             sb.AppendLine()
             sb.AppendLine("<markdown body>")
             sb.AppendLine()
-            sb.AppendLine("Preferred body structure:")
-            sb.AppendLine("## Key Claims")
-            sb.AppendLine("## Evidence")
-            sb.AppendLine("## Contradictions")
-            sb.AppendLine("## Open Questions")
-            sb.AppendLine("## Sources")
-            sb.AppendLine("## Related Pages")
+            sb.AppendLine(BuildSchemaSectionsGuidance(schema))
 
             Return sb.ToString().Trim()
         End Function
@@ -1982,7 +2388,8 @@ Namespace SharedLibrary
                                                      newContent As String,
                                                      relatedCandidates As List(Of WikiPageInfo),
                                                      kbRootPath As String,
-                                                     currentPagePath As String) As String
+                                                     currentPagePath As String,
+                                                     Optional schema As KnowledgeStoreSchema = Nothing) As String
             Dim sb As New StringBuilder()
 
             sb.AppendLine("=== EXISTING PAGE ===")
@@ -1992,18 +2399,21 @@ Namespace SharedLibrary
             sb.AppendLine(If(newContent, "").Trim())
             sb.AppendLine()
 
+            Dim claimsHeading = GetClaimsHeading(schema)
+            Dim contradictionsHeading = GetContradictionsHeading(schema)
+
             Dim strongestCandidate As WikiPageInfo = Nothing
             Dim strongestExistingClaim As String = ""
             Dim strongestCandidateClaim As String = ""
             Dim strongestScore As Integer = -1
 
-            Dim existingClaims = ExtractSectionBulletItems(existingContent, "## Key Claims").
+            Dim existingClaims = ExtractSectionBulletItems(existingContent, claimsHeading).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
 
             If existingClaims.Count = 0 Then
                 existingClaims.AddRange(
-                    ExtractSectionBulletItems(newContent, "## Key Claims").
+                    ExtractSectionBulletItems(newContent, claimsHeading).
                         Where(Function(x) IsMeaningfulSectionItem(x)).
                         Take(5))
             End If
@@ -2022,7 +2432,7 @@ Namespace SharedLibrary
                     sb.AppendLine(TruncateForPrompt(RemoveFrontMatter(candidate.Content), 1200))
                     sb.AppendLine()
 
-                    Dim candidateClaims = ExtractSectionBulletItems(candidate.Content, "## Key Claims").
+                    Dim candidateClaims = ExtractSectionBulletItems(candidate.Content, claimsHeading).
                         Where(Function(x) IsMeaningfulSectionItem(x)).
                         ToList()
 
@@ -2055,11 +2465,12 @@ Namespace SharedLibrary
                 sb.AppendLine("CONFLICTING PAGE EXCERPT:")
                 sb.AppendLine(TruncateForPrompt(RemoveFrontMatter(strongestCandidate.Content), 1600))
                 sb.AppendLine()
-                sb.AppendLine("Instruction: if the conflict is real and unresolved, preserve both positions explicitly under ## Contradictions.")
+                sb.AppendLine($"Instruction: if the conflict is real and unresolved, preserve both positions explicitly under {contradictionsHeading}.")
             End If
 
             Return sb.ToString().Trim()
         End Function
+
 
         Private Shared Function claimTokens(existingClaim As String, candidateClaim As String) As Integer
             Return Tokenize(existingClaim).
@@ -2129,13 +2540,20 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function FindPotentialContradictionPairs(pages As List(Of WikiPageInfo)) As List(Of PotentialContradictionPair)
+            Return FindPotentialContradictionPairs(pages, Nothing)
+        End Function
+
+        Private Shared Function FindPotentialContradictionPairs(pages As List(Of WikiPageInfo),
+                                                                schema As KnowledgeStoreSchema) As List(Of PotentialContradictionPair)
             Dim result As New List(Of PotentialContradictionPair)()
             If pages Is Nothing OrElse pages.Count = 0 Then Return result
+            If schema IsNot Nothing AndAlso Not schema.DetectContradictions Then Return result
 
+            Dim claimsHeading = GetClaimsHeading(schema)
             Dim seenKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
             For Each page In pages
-                Dim pageClaims = ExtractSectionBulletItems(page.Content, "## Key Claims").
+                Dim pageClaims = ExtractSectionBulletItems(page.Content, claimsHeading).
                     Where(Function(x) IsMeaningfulSectionItem(x)).
                     ToList()
 
@@ -2172,7 +2590,7 @@ Namespace SharedLibrary
                         Continue For
                     End If
 
-                    Dim candidateClaims = ExtractSectionBulletItems(candidate.Content, "## Key Claims").
+                    Dim candidateClaims = ExtractSectionBulletItems(candidate.Content, claimsHeading).
                         Where(Function(x) IsMeaningfulSectionItem(x)).
                         ToList()
 
@@ -2283,7 +2701,7 @@ Namespace SharedLibrary
             sb.AppendLine("source_paths:")
 
             For Each path In allSourcePaths
-                sb.AppendLine($"  - ""{EscapeYaml(path)}""")
+                sb.AppendLine($"  - '{EscapeYamlSingleQuote(path)}'")
             Next
 
             sb.AppendLine("---")
@@ -2293,6 +2711,10 @@ Namespace SharedLibrary
             Return sb.ToString().Trim() & vbCrLf
         End Function
 
+        Private Shared Function EscapeYamlSingleQuote(value As String) As String
+            ' In YAML single-quoted strings, the only escape is '' for a literal single quote.
+            Return If(value, "").Replace("'", "''")
+        End Function
 
 
         Private Shared Function EnsureSourcesSection(body As String,
@@ -2325,14 +2747,83 @@ Namespace SharedLibrary
             sb.AppendLine()
 
             For Each path In allSourcePaths
-                Dim uri = BuildFileUri(path)
-                If Not String.IsNullOrWhiteSpace(uri) Then
-                    sb.AppendLine($"- [{System.IO.Path.GetFileName(path)}]({uri})")
+                Dim fileName = System.IO.Path.GetFileName(path)
+                If Not String.IsNullOrWhiteSpace(fileName) Then
+                    sb.AppendLine($"- [{fileName}]({fileName})")
                 End If
             Next
 
             Return sb.ToString().Trim()
         End Function
+
+        ''' <summary>
+        ''' Copies each source file referenced in sourcePaths into the same directory
+        ''' as the wiki page so that relative markdown links resolve correctly.
+        ''' </summary>
+        Private Shared Sub CopySourceFilesToPageDirectory(pagePath As String,
+                                                          sourcePaths As IEnumerable(Of String))
+            If String.IsNullOrWhiteSpace(pagePath) OrElse sourcePaths Is Nothing Then Return
+
+            Dim pageDir = Path.GetDirectoryName(pagePath)
+            If String.IsNullOrWhiteSpace(pageDir) OrElse Not Directory.Exists(pageDir) Then Return
+
+            For Each sourcePath In sourcePaths
+                If String.IsNullOrWhiteSpace(sourcePath) Then Continue For
+                If Not File.Exists(sourcePath) Then Continue For
+
+                Try
+                    Dim targetPath = Path.Combine(pageDir, Path.GetFileName(sourcePath))
+
+                    ' Copy if missing or if the source is newer than the existing copy.
+                    If Not File.Exists(targetPath) OrElse
+                       File.GetLastWriteTimeUtc(sourcePath) > File.GetLastWriteTimeUtc(targetPath) Then
+                        File.Copy(sourcePath, targetPath, overwrite:=True)
+                    End If
+                Catch
+                    ' Best effort — do not break the pipeline for a copy failure.
+                End Try
+            Next
+        End Sub
+
+        ''' <summary>
+        ''' Removes non-.md files from wiki kind-folders that are not referenced
+        ''' by any page's source_paths front-matter list.
+        ''' </summary>
+        Private Shared Sub CleanupUnusedSourceCopies(kbRootPath As String)
+            Try
+                Dim wikiRoot = GetWikiRootPath(kbRootPath)
+                If Not Directory.Exists(wikiRoot) Then Return
+
+                ' Collect every filename referenced by at least one page.
+                Dim pages = GetAllWikiPages(kbRootPath)
+                Dim referencedFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+                For Each page In pages
+                    If page.SourcePaths Is Nothing Then Continue For
+                    For Each sp In page.SourcePaths
+                        If Not String.IsNullOrWhiteSpace(sp) Then
+                            referencedFileNames.Add(Path.GetFileName(sp))
+                        End If
+                    Next
+                Next
+
+                ' Walk every file in the wiki tree that is not a .md and not in the
+                ' root wiki directory (index.md, log.md, etc. live there).
+                For Each file In Directory.GetFiles(wikiRoot, "*.*", SearchOption.AllDirectories)
+                    Dim ext = Path.GetExtension(file)
+                    If ext.Equals(".md", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    Dim name = Path.GetFileName(file)
+                    If Not referencedFileNames.Contains(name) Then
+                        Try
+                            IO.File.Delete(file)
+                        Catch
+                        End Try
+                    End If
+                Next
+            Catch
+            End Try
+        End Sub
 
         Private Shared Function EnsureRelatedSection(body As String,
                                                      currentPagePath As String,
@@ -2395,14 +2886,17 @@ Namespace SharedLibrary
             Dim wikiRoot = GetWikiRootPath(kbRootPath)
             If Not Directory.Exists(wikiRoot) Then Return pages
 
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+
             For Each file In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
                 Dim name = Path.GetFileName(file)
                 If name.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) Then Continue For
                 If name.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) Then Continue For
                 If name.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) Then Continue For
+                If name.Equals("review_queue.md", StringComparison.OrdinalIgnoreCase) Then Continue For
 
                 Try
-                    pages.Add(ReadWikiPageInfo(kbRootPath, file))
+                    pages.Add(ReadWikiPageInfo(kbRootPath, file, schema))
                 Catch
                 End Try
             Next
@@ -2410,7 +2904,8 @@ Namespace SharedLibrary
             Return pages
         End Function
 
-        Private Shared Function ReadWikiPageInfo(kbRootPath As String, filePath As String) As WikiPageInfo
+        Private Shared Function ReadWikiPageInfo(kbRootPath As String, filePath As String,
+                                                 Optional schema As KnowledgeStoreSchema = Nothing) As WikiPageInfo
             Dim content = File.ReadAllText(filePath, Encoding.UTF8)
             Dim info As New WikiPageInfo() With {
                 .FilePath = filePath,
@@ -2443,7 +2938,8 @@ Namespace SharedLibrary
                 info.Kind = "Concept"
             End If
 
-            Dim computed = ComputePageComputedState(RemoveFrontMatter(content), info.SourcePaths)
+            If schema Is Nothing Then schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            Dim computed = ComputePageComputedState(RemoveFrontMatter(content), info.SourcePaths, schema)
 
             If String.IsNullOrWhiteSpace(rawStatus) Then
                 info.Status = computed.Status
@@ -2500,6 +2996,8 @@ Namespace SharedLibrary
                     Dim value = line.Substring(key.Length + 1).Trim()
                     If value.StartsWith("""") AndAlso value.EndsWith("""") AndAlso value.Length >= 2 Then
                         value = value.Substring(1, value.Length - 2)
+                    ElseIf value.StartsWith("'") AndAlso value.EndsWith("'") AndAlso value.Length >= 2 Then
+                        value = value.Substring(1, value.Length - 2).Replace("''", "'")
                     End If
                     Return value.Trim()
                 End If
@@ -2529,6 +3027,8 @@ Namespace SharedLibrary
                         Dim value = trimmed.Substring(2).Trim()
                         If value.StartsWith("""") AndAlso value.EndsWith("""") AndAlso value.Length >= 2 Then
                             value = value.Substring(1, value.Length - 2)
+                        ElseIf value.StartsWith("'") AndAlso value.EndsWith("'") AndAlso value.Length >= 2 Then
+                            value = value.Substring(1, value.Length - 2).Replace("''", "'")
                         End If
                         If Not String.IsNullOrWhiteSpace(value) Then result.Add(value)
                     ElseIf trimmed.Contains(":") Then
@@ -2635,6 +3135,8 @@ Namespace SharedLibrary
 
             Dim indexPath = Path.Combine(wikiRoot, KnowledgeStoreCatalog.IndexFile)
             File.WriteAllText(indexPath, sb.ToString().Trim() & vbCrLf, Encoding.UTF8)
+
+            GenerateMkDocsConfig(kbRootPath)
         End Sub
 
         Private Shared Function BuildFallbackSummary(text As String) As String
@@ -2708,6 +3210,8 @@ Namespace SharedLibrary
             Dim claimsWithoutSources As New List(Of String)()
             Dim contradictedClaims As New List(Of String)()
 
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+
             For Each page In pages
                 inboundCounts(page.RelativePath) = 0
             Next
@@ -2723,23 +3227,24 @@ Namespace SharedLibrary
                     End If
                 Next
 
-                If page.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
+                If (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
+                   page.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
                    (page.SourcePaths Is Nothing OrElse page.SourcePaths.Count = 0) AndAlso
                    page.Content.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0 Then
                     missingSources.Add(page.RelativePath)
                 End If
 
-                Dim unsupportedClaims = CountClaimsWithoutEvidence(page)
+                Dim unsupportedClaims = CountClaimsWithoutEvidence(page, schema)
                 If unsupportedClaims > 0 Then
                     claimsWithoutEvidence.Add($"{page.RelativePath} — Unsupported claims={unsupportedClaims}")
                 End If
 
-                Dim unsourcedClaims = CountClaimsWithoutSources(page)
+                Dim unsourcedClaims = CountClaimsWithoutSources(page, schema)
                 If unsourcedClaims > 0 Then
                     claimsWithoutSources.Add($"{page.RelativePath} — Unsourced claims={unsourcedClaims}")
                 End If
 
-                Dim contradictedClaimCount = CountContradictedClaims(page)
+                Dim contradictedClaimCount = CountContradictedClaims(page, schema)
                 If contradictedClaimCount > 0 Then
                     contradictedClaims.Add($"{page.RelativePath} — Contradicted claims={contradictedClaimCount}")
                 End If
@@ -2757,7 +3262,7 @@ Namespace SharedLibrary
                 End If
             Next
 
-            Dim contradictionPairs = FindPotentialContradictionPairs(pages)
+            Dim contradictionPairs = FindPotentialContradictionPairs(pages, schema)
             Dim supersededCandidates = FindPotentialSupersededPages(pages)
 
             Dim report As New StringBuilder()
@@ -2869,7 +3374,6 @@ Namespace SharedLibrary
             End If
             report.AppendLine()
 
-            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim promptUser As New StringBuilder()
 
             If schema IsNot Nothing Then
@@ -2954,6 +3458,7 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return ""
             InitializeWikiStructure(kbRootPath)
 
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim pages = GetAllWikiPages(kbRootPath)
             If pages.Count = 0 Then Return "No wiki pages found."
 
@@ -2963,32 +3468,20 @@ Namespace SharedLibrary
 
             For Each page In pages
                 Dim originalContent = page.Content
-                Dim updatedBody = RemoveFrontMatter(originalContent).Trim()
-
-                updatedBody = EnsureKeyClaimsSection(updatedBody)
-                updatedBody = EnsureEvidenceSection(updatedBody)
-                updatedBody = EnsureContradictionsSection(updatedBody)
-                updatedBody = EnsureOpenQuestionsSection(updatedBody)
-                updatedBody = NormalizeClaimsAndEvidenceSections(updatedBody)
-
-                Dim withSources = EnsureSourcesSection(updatedBody, "", page.SourcePaths)
-                If Not String.Equals(withSources, updatedBody, StringComparison.Ordinal) Then
-                    result.AddedSourcesSections += 1
-                    updatedBody = withSources
-                End If
 
                 Dim candidates = FindCandidateWikiPages(
                     kbRootPath,
-                    page.Title & " " & page.Summary & " " & RemoveFrontMatter(updatedBody),
+                    page.Title & " " & page.Summary & " " & RemoveFrontMatter(originalContent),
                     8).
                     Where(Function(p) Not p.FilePath.Equals(page.FilePath, StringComparison.OrdinalIgnoreCase)).
                     ToList()
 
-                Dim withRelated = EnsureRelatedSection(updatedBody, page.FilePath, candidates)
-                If Not String.Equals(withRelated, updatedBody, StringComparison.Ordinal) Then
-                    result.AddedRelatedSections += 1
-                    updatedBody = withRelated
-                End If
+                Dim updatedBody = NormalizePageBody(
+                    body:=RemoveFrontMatter(originalContent).Trim(),
+                    currentPagePath:=page.FilePath,
+                    sourcePaths:=page.SourcePaths,
+                    relatedCandidates:=candidates,
+                    schema:=schema)
 
                 Dim repairedLinksCount As Integer = 0
                 Dim withRepairedLinks = RepairResolvableMarkdownLinks(updatedBody, page.FilePath, kbRootPath, repairedLinksCount)
@@ -2997,7 +3490,19 @@ Namespace SharedLibrary
                     updatedBody = withRepairedLinks
                 End If
 
-                Dim pageState = ComputePageComputedState(updatedBody, page.SourcePaths)
+                If (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
+                   originalContent.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0 AndAlso
+                   updatedBody.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    result.AddedSourcesSections += 1
+                End If
+
+                If (schema Is Nothing OrElse schema.AlwaysCreateCrossLinks) AndAlso
+                   originalContent.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) < 0 AndAlso
+                   updatedBody.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    result.AddedRelatedSections += 1
+                End If
+
+                Dim pageState = ComputePageComputedState(updatedBody, page.SourcePaths, schema)
 
                 If potentialSupersededPagePaths.Contains(page.RelativePath) Then
                     pageState.ReviewNeeded = True
@@ -3039,6 +3544,7 @@ Namespace SharedLibrary
                 result.LlmRepairedPages = llmCount
             End If
 
+            CleanupUnusedSourceCopies(kbRootPath)
             RebuildIndex(kbRootPath)
             RefreshReviewArtifacts(kbRootPath)
 
@@ -3060,6 +3566,8 @@ Namespace SharedLibrary
 
         Private Shared Async Function ApplyLlmStructuralRepairsAsync(kbRootPath As String,
                                                                      context As ISharedContext) As Task(Of Integer)
+
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim pages = GetAllWikiPages(kbRootPath)
             If pages.Count = 0 Then Return 0
 
@@ -3079,8 +3587,8 @@ Namespace SharedLibrary
                 Next
             Next
 
-            Dim contradictionPairs = FindPotentialContradictionPairs(pages)
-            Dim problemPages = FindPagesNeedingLlmRepair(pages, inboundCounts)
+            Dim contradictionPairs = FindPotentialContradictionPairs(pages, schema)
+            Dim problemPages = FindPagesNeedingLlmRepair(pages, inboundCounts, schema)
 
             Dim repairedCount As Integer = 0
 
@@ -3096,27 +3604,21 @@ Namespace SharedLibrary
                 promptSystem.AppendLine("You are an autonomous Wiki Maintainer.")
                 promptSystem.AppendLine("Repair the provided wiki page so that it integrates better with the rest of the wiki.")
                 promptSystem.AppendLine("Preserve true facts, preserve source links, add or improve related-page links, and keep contradictions where relevant.")
-                promptSystem.AppendLine("If evidence conflicts, do not hide the conflict. Record it explicitly in ## Contradictions.")
-                promptSystem.AppendLine("If another page presents a stronger conflicting claim, preserve both sides unless the older page is clearly superseded.")
-                promptSystem.AppendLine("Prefer this body structure:")
-                promptSystem.AppendLine("## Key Claims")
-                promptSystem.AppendLine("## Evidence")
-                promptSystem.AppendLine("## Contradictions")
-                promptSystem.AppendLine("## Open Questions")
-                promptSystem.AppendLine("## Sources")
-                promptSystem.AppendLine("## Related Pages")
+                promptSystem.AppendLine("If evidence conflicts, do not hide the conflict.")
+                promptSystem.AppendLine()
+                promptSystem.AppendLine(BuildSchemaSectionsGuidance(schema))
                 promptSystem.AppendLine()
                 promptSystem.AppendLine("Return exactly:")
                 promptSystem.AppendLine("TITLE: ...")
                 promptSystem.AppendLine("SUMMARY: ...")
-                promptSystem.AppendLine("KIND: ...")
+                promptSystem.AppendLine($"KIND: {FormatKindList(GetEffectivePageKinds(schema))}")
                 promptSystem.AppendLine()
                 promptSystem.AppendLine("<markdown body>")
 
                 Dim repairedResponse = Await ExecuteKnowledgeStoreLlmAsync(
                     context:=context,
                     promptSystem:=promptSystem.ToString().Trim(),
-                    promptUser:=BuildRepairPromptUser(page, candidates, contradictionPairs, kbRootPath),
+                    promptUser:=BuildRepairPromptUser(page, candidates, contradictionPairs, kbRootPath, schema),
                     hideSplash:=True).ConfigureAwait(False)
 
                 If String.IsNullOrWhiteSpace(repairedResponse) Then
@@ -3131,7 +3633,7 @@ Namespace SharedLibrary
                     defaultKind:=page.Kind,
                     relatedCandidates:=candidates,
                     actionName:="repair-llm",
-                    additionalSourcePaths:=page.SourcePaths).ConfigureAwait(False)
+                    additionalSourcePaths:=page.SourcePaths, schema:=schema).ConfigureAwait(False)
 
                 If saved Then
                     repairedCount += 1
@@ -3142,19 +3644,25 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function FindPagesNeedingLlmRepair(pages As List(Of WikiPageInfo),
-                                                          inboundCounts As Dictionary(Of String, Integer)) As List(Of WikiPageInfo)
+                                                          inboundCounts As Dictionary(Of String, Integer),
+                                                          Optional schema As KnowledgeStoreSchema = Nothing) As List(Of WikiPageInfo)
             Return pages.
                 Where(
                     Function(p)
-                        Dim hasSourcesIssue = p.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
-                                              (p.SourcePaths Is Nothing OrElse p.SourcePaths.Count = 0) AndAlso
-                                              p.Content.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0
+                        Dim hasSourcesIssue =
+                            (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
+                            p.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
+                            (p.SourcePaths Is Nothing OrElse p.SourcePaths.Count = 0) AndAlso
+                            p.Content.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0
 
-                        Dim hasRelatedIssue = p.Content.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) < 0
+                        Dim hasRelatedIssue =
+                            (schema Is Nothing OrElse schema.AlwaysCreateCrossLinks) AndAlso
+                            p.Content.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) < 0
+
                         Dim isOrphan = inboundCounts.ContainsKey(p.RelativePath) AndAlso inboundCounts(p.RelativePath) = 0
                         Dim isDisputed = p.Status.Equals("disputed", StringComparison.OrdinalIgnoreCase)
                         Dim isTentative = p.Status.Equals("tentative", StringComparison.OrdinalIgnoreCase)
-                        Dim weakEvidence = CountClaimsWithoutEvidence(p) > 0
+                        Dim weakEvidence = CountClaimsWithoutEvidence(p, schema) > 0
                         Dim needsReview = p.ReviewNeeded
                         Dim hasContradictions = p.ContradictionCount > 0
 
@@ -3195,8 +3703,13 @@ Namespace SharedLibrary
 
             For Each match As Match In Regex.Matches(content, "\[\[([^\]]+)\]\]")
                 Dim target = match.Groups(1).Value.Trim()
-                If Not String.IsNullOrWhiteSpace(target) Then
-                    result.Add("Concepts/" & SanitizeFileName(target) & ".md")
+                If String.IsNullOrWhiteSpace(target) Then
+                    Continue For
+                End If
+
+                Dim existingPagePath = FindExistingWikiPagePath(kbRootPath, target)
+                If Not String.IsNullOrWhiteSpace(existingPagePath) Then
+                    result.Add(GetRelativeWikiPath(kbRootPath, existingPagePath))
                 End If
             Next
 
@@ -3286,26 +3799,24 @@ Namespace SharedLibrary
                                                               summary As String,
                                                               kind As String,
                                                               body As String) As String
+            Return ComposeSyntheticAgentResponse(title, summary, kind, body, Nothing)
+        End Function
+
+        Private Shared Function ComposeSyntheticAgentResponse(title As String,
+                                                              summary As String,
+                                                              kind As String,
+                                                              body As String,
+                                                              schema As KnowledgeStoreSchema) As String
             Dim sb As New StringBuilder()
             sb.AppendLine($"TITLE: {If(title, "").Trim()}")
             sb.AppendLine($"SUMMARY: {If(summary, "").Trim()}")
-            sb.AppendLine($"KIND: {NormalizePageKind(kind, "Concept")}")
+            sb.AppendLine($"KIND: {NormalizePageKind(kind, "Concept", schema)}")
             sb.AppendLine()
             sb.AppendLine(If(body, "").Trim())
-
             Return sb.ToString().Trim()
         End Function
 
-        Private Shared Function NormalizePageKind(kind As String, fallbackKind As String) As String
-            Dim value = If(kind, "").Trim()
 
-            If value.Equals("Source", StringComparison.OrdinalIgnoreCase) Then Return "Source"
-            If value.Equals("Entity", StringComparison.OrdinalIgnoreCase) Then Return "Entity"
-            If value.Equals("Concept", StringComparison.OrdinalIgnoreCase) Then Return "Concept"
-            If value.Equals("Analysis", StringComparison.OrdinalIgnoreCase) Then Return "Analysis"
-
-            Return fallbackKind
-        End Function
 
     End Class
 End Namespace

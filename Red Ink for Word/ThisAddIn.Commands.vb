@@ -981,32 +981,6 @@ Partial Public Class ThisAddIn
 
     End Sub
 
-    ''' <summary>
-    ''' Opens the Knowledge Store management form.
-    ''' </summary>
-    Public Sub ShowKnowledgeStore()
-        Try
-            If Not _context.INIloaded Then
-                ShowCustomMessageBox($"{AN} is not configured. Please configure {AN} first.", AN)
-                Return
-            End If
-
-            If Not SharedLibrary.SharedLibrary.KnowledgeStoreCatalog.IsConfigured(_context) Then
-                ShowCustomMessageBox(
-                    $"The Knowledge Store is not configured. " &
-                    $"Please set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration " &
-                    $"(Settings → Configuration Wizard → Knowledge Store).", AN)
-                Return
-            End If
-
-            Using frm As New SharedLibrary.SharedLibrary.KnowledgeStoreForm(_context)
-                frm.ShowDialog()
-            End Using
-        Catch ex As System.Exception
-            ShowCustomMessageBox($"Error opening Knowledge Store: {ex.Message}", AN)
-        End Try
-    End Sub
-
 
     Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
 

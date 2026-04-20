@@ -86,7 +86,7 @@ Namespace SharedLibrary
             Dim storeFilter As String = ""
             Dim freeTerms As New List(Of String)()
 
-            For Each token In query.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
+            For Each token In KnowledgeTriggerHelper.TokenizeWithQuotes(query)
                 If token.StartsWith("tag:", StringComparison.OrdinalIgnoreCase) Then
                     tagFilter = token.Substring(4).Trim()
                 ElseIf token.StartsWith("store:", StringComparison.OrdinalIgnoreCase) Then
@@ -127,7 +127,7 @@ Namespace SharedLibrary
                                          .WikiPagePath = page.FilePath,
                                          .Title = page.Title,
                                          .Summary = page.Summary,
-                                         .SourcePath = page.SourcePath,
+                                         .SourcePath = ResolveEntrySourcePath(page.SourcePath, store.ResolvedSourcePath),
                                          .MatchReason = "wiki-keyword"
                                      })
                 Next
@@ -160,7 +160,7 @@ Namespace SharedLibrary
                                                      .WikiPagePath = page.FilePath,
                                                      .Title = page.Title,
                                                      .Summary = page.Summary,
-                                                     .SourcePath = page.SourcePath,
+                                                     .SourcePath = ResolveEntrySourcePath(page.SourcePath, store.ResolvedSourcePath),
                                                      .MatchReason = "wiki-semantic"
                                                  })
                             End If
@@ -214,7 +214,7 @@ Namespace SharedLibrary
                                              .StoreName = store.Name,
                                              .Title = If(entry.Title, Path.GetFileNameWithoutExtension(entry.FilePath)),
                                              .Summary = If(entry.Summary, ""),
-                                             .SourcePath = entry.FilePath,
+                                             .SourcePath = ResolveEntrySourcePath(entry.FilePath, store.ResolvedSourcePath),
                                              .MatchReason = "manifest-fallback"
                                          })
                     End If
@@ -228,6 +228,23 @@ Namespace SharedLibrary
                 ToList()
         End Function
 
+        ''' <summary>
+        ''' Resolves a manifest entry file path to an absolute path using the store root.
+        ''' </summary>
+        Private Shared Function ResolveEntrySourcePath(filePath As String, storeRoot As String) As String
+            If String.IsNullOrWhiteSpace(filePath) Then Return ""
+            Try
+                If Path.IsPathRooted(filePath) AndAlso File.Exists(filePath) Then Return filePath
+                If Not String.IsNullOrWhiteSpace(storeRoot) Then
+                    Dim combined = Path.GetFullPath(Path.Combine(storeRoot, filePath))
+                    If File.Exists(combined) Then Return combined
+                End If
+                Return filePath
+            Catch
+                Return filePath
+            End Try
+        End Function
+
         Public Shared Function BuildKnowledgeContext(matches As List(Of KnowledgeMatch),
                                                      Optional maxTotalChars As Integer = 80000) As String
             If matches Is Nothing OrElse matches.Count = 0 Then Return ""
@@ -235,9 +252,9 @@ Namespace SharedLibrary
             Dim sb As New StringBuilder()
             sb.AppendLine("<KNOWLEDGESTORE>")
             sb.AppendLine("The following wiki pages and/or source documents have been provided for context.")
-            sb.AppendLine("IMPORTANT: When citing information, use clickable markdown citations whenever a path is explicitly provided in the KSDOCUMENT metadata.")
-            sb.AppendLine("Preferred citation format: [Source](sourcePath)")
-            sb.AppendLine("If a wikiPath is explicitly provided and is more helpful, you may also cite: [Wiki](wikiPath)")
+            sb.AppendLine("IMPORTANT: When citing information, ALWAYS prefer the original source file link over the wiki page link.")
+            sb.AppendLine("If a sourcePath is provided and non-empty, ALWAYS cite it as: [Source Title](sourcePath)")
+            sb.AppendLine("Only fall back to wikiPath if no sourcePath is available for that document.")
             sb.AppendLine("Do NOT invent links. Use only the explicit sourcePath or wikiPath values provided in the KSDOCUMENT attributes.")
             sb.AppendLine("Do not cite only the document name when an explicit clickable path is available.")
             sb.AppendLine()
@@ -550,10 +567,17 @@ Namespace SharedLibrary
                     Dim trimmed = line.Trim()
                     If trimmed.StartsWith("- ", StringComparison.Ordinal) Then
                         Dim value = trimmed.Substring(2).Trim()
+                        ' Strip surrounding double quotes
                         If value.StartsWith("""", StringComparison.Ordinal) AndAlso
                            value.EndsWith("""", StringComparison.Ordinal) AndAlso
                            value.Length >= 2 Then
                             value = value.Substring(1, value.Length - 2)
+                        End If
+                        ' Strip surrounding single quotes (YAML single-quoted scalars)
+                        If value.StartsWith("'", StringComparison.Ordinal) AndAlso
+                           value.EndsWith("'", StringComparison.Ordinal) AndAlso
+                           value.Length >= 2 Then
+                            value = value.Substring(1, value.Length - 2).Replace("''", "'")
                         End If
                         Return value
                     ElseIf trimmed.Contains(":"c) Then
@@ -568,9 +592,19 @@ Namespace SharedLibrary
         Private Shared Function BuildFileUri(filePath As String) As String
             If String.IsNullOrWhiteSpace(filePath) Then Return ""
             Try
-                Return New Uri(Path.GetFullPath(filePath)).AbsoluteUri
+                ' Use Uri to properly percent-encode spaces and special characters
+                ' so that the resulting file:/// link is clickable and valid.
+                Dim fullPath = Path.GetFullPath(filePath)
+                Dim uri As New Uri(fullPath)
+                Return uri.AbsoluteUri
             Catch
-                Return ""
+                ' Fallback: manually construct a file URI with spaces encoded
+                Try
+                    Dim fullPath = Path.GetFullPath(filePath)
+                    Return "file:///" & fullPath.Replace("\"c, "/"c).Replace(" ", "%20")
+                Catch
+                    Return ""
+                End Try
             End Try
         End Function
 

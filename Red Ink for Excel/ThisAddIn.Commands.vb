@@ -1326,6 +1326,7 @@ Partial Public Class ThisAddIn
         Else
             If Not NoSelectedCells Then
                 If DoRange Then
+                    FormulaInstruction = INI_FormulaInstruction
                     Dim result As Boolean = Await ProcessSelectedRange(SP_RangeOfCells, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS, BatchPath)
                 Else
                     Dim result As Boolean = Await ProcessSelectedRange(SP_FreestyleText, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS)
@@ -1373,7 +1374,8 @@ Partial Public Class ThisAddIn
             {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
             {"Location", "Location information to use, e.g., in 'Freestyle'"},
             {"KnowledgeStorePath", "Knowledge store file (central)"},
-            {"KnowledgeStorePathLocal", "Knowledge store file (local)"}
+            {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
+            {"FormulaInstruction", "Additional formula instructions:"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1392,7 +1394,8 @@ Partial Public Class ThisAddIn
             {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."},
             {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
             {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
-            {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"}
+            {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
+            {"FormulaInstruction", "This optional instruction will be added to the Freestyle system prompt for steering the creation of formulas (e.g., to have them created in a local language using local separators)."}
         }
         ShowSettingsWindow(Settings, SettingsTips)
         Dim splash As New SplashScreen("Updating menu following your changes ...")

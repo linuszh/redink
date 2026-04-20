@@ -994,29 +994,24 @@ Partial Public Class ThisAddIn
     Private Function EncodeToolToken(value As String) As String
         If String.IsNullOrWhiteSpace(value) Then Return ""
 
-        Return System.Convert.ToBase64String(Encoding.UTF8.GetBytes(value)).
-            TrimEnd("="c).
-            Replace("+"c, "-"c).
-            Replace("/"c, "_"c)
+        ' Use a SHA256 hash (hex, lowercase) to produce a fixed-length token
+        ' that is always valid for API function names and stays well under
+        ' the 128-character name limit imposed by model APIs (e.g. Gemini).
+        Using sha = System.Security.Cryptography.SHA256.Create()
+            Dim hashBytes = sha.ComputeHash(Encoding.UTF8.GetBytes(value))
+            Dim sb As New StringBuilder(hashBytes.Length * 2)
+            For Each b In hashBytes
+                sb.Append(b.ToString("x2"))
+            Next
+            Return sb.ToString()   ' 64 hex chars, always
+        End Using
     End Function
 
     Private Function DecodeToolToken(value As String) As String
-        If String.IsNullOrWhiteSpace(value) Then Return ""
-
-        Dim normalized As String = value.Replace("-"c, "+"c).Replace("_"c, "/"c)
-
-        Select Case normalized.Length Mod 4
-            Case 2
-                normalized &= "=="
-            Case 3
-                normalized &= "="
-        End Select
-
-        Try
-            Return Encoding.UTF8.GetString(System.Convert.FromBase64String(normalized))
-        Catch
-            Return ""
-        End Try
+        ' Hash-based tokens are one-way; decoding is no longer possible.
+        ' Callers must use GetKnowledgeStoreForToolName which matches
+        ' by recomputing hashes against known stores.
+        Return ""
     End Function
 
     Private Function IsInternalKnowledgeToolName(toolName As String) As Boolean
@@ -1028,20 +1023,68 @@ Partial Public Class ThisAddIn
         If store Is Nothing Then Return ""
         Return InternalKnowledgeToolNamePrefix & EncodeToolToken(store.StoreId)
     End Function
-
     Private Function GetKnowledgeStoreForToolName(toolName As String) As KnowledgeStoreCatalog.KnowledgeStoreDefinition
         If Not IsInternalKnowledgeToolName(toolName) Then
             Return Nothing
         End If
 
-        Dim encodedStoreId As String = toolName.Substring(InternalKnowledgeToolNamePrefix.Length)
-        Dim storeId As String = DecodeToolToken(encodedStoreId)
+        Dim encodedToken As String = toolName.Substring(InternalKnowledgeToolNamePrefix.Length)
 
-        If String.IsNullOrWhiteSpace(storeId) Then
-            Return Nothing
+        ' Hash-based tokens are one-way — match by recomputing the hash for
+        ' each known store and comparing against the token in the tool name.
+        Dim indexedStores = GetIndexedKnowledgeStores()
+        If indexedStores Is Nothing OrElse indexedStores.Count = 0 Then Return Nothing
+
+        ' Exact hash match
+        For Each store In indexedStores
+            Dim expectedHash = EncodeToolToken(store.StoreId)
+            If String.Equals(encodedToken, expectedHash, StringComparison.OrdinalIgnoreCase) Then
+                Return store
+            End If
+        Next
+
+        ' If there is only one knowledge store, return it directly — no ambiguity
+        If indexedStores.Count = 1 Then
+            ToolingFileLogger.LogWarn(
+                "Knowledge tool name did not match any store hash; " &
+                "falling back to the only available store.",
+                details:=$"ToolName='{toolName}', Token='{encodedToken}'")
+            Return indexedStores(0)
         End If
 
-        Return KnowledgeStoreCatalog.GetStoreById(storeId, _context)
+        ' Multiple stores: fuzzy match by longest common prefix of the token
+        ' (handles cases where the LLM truncates the hash)
+        Dim bestMatch As KnowledgeStoreCatalog.KnowledgeStoreDefinition = Nothing
+        Dim bestMatchLen As Integer = 0
+
+        For Each store In indexedStores
+            Dim expectedName = BuildInternalKnowledgeToolName(store)
+            If String.IsNullOrWhiteSpace(expectedName) Then Continue For
+
+            Dim commonLen = GetCommonPrefixLength(toolName, expectedName)
+            If commonLen > InternalKnowledgeToolNamePrefix.Length AndAlso commonLen > bestMatchLen Then
+                bestMatchLen = commonLen
+                bestMatch = store
+            End If
+        Next
+
+        If bestMatch IsNot Nothing Then
+            ToolingFileLogger.LogWarn(
+                $"Knowledge tool name partially matched store '{bestMatch.Name}' " &
+                $"(prefix match: {bestMatchLen} of {toolName.Length} chars).",
+                details:=$"ToolName='{toolName}', Token='{encodedToken}'")
+        End If
+
+        Return bestMatch
+    End Function
+
+    Private Shared Function GetCommonPrefixLength(a As String, b As String) As Integer
+        If a Is Nothing OrElse b Is Nothing Then Return 0
+        Dim maxLen = Math.Min(a.Length, b.Length)
+        For i As Integer = 0 To maxLen - 1
+            If Char.ToUpperInvariant(a(i)) <> Char.ToUpperInvariant(b(i)) Then Return i
+        Next
+        Return maxLen
     End Function
 
     Private Function GetIndexedKnowledgeStores() As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)
@@ -1075,10 +1118,17 @@ Partial Public Class ThisAddIn
         Dim displayLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
         Dim toolName As String = BuildInternalKnowledgeToolName(store)
 
+        ' Load schema to get the user-authored tooling description
+        Dim schema = KnowledgeStoreSchema.LoadOrCreate(store.ResolvedSourcePath)
+        Dim contentHint As String = ""
+        If schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.ToolingDescription) Then
+            contentHint = " " & schema.ToolingDescription.Trim()
+        End If
+
         Dim definition As New JObject(
             New JProperty("name", toolName),
             New JProperty("description",
-                $"Searches only the user's Knowledge Store '{displayLabel}'. Use this for the user's own materials in that source, not for public-web lookup."),
+                $"Searches only the user's Knowledge Store '{displayLabel}'.{contentHint} Use this for the user's own materials in that source, not for public-web lookup."),
             New JProperty("parameters",
                 New JObject(
                     New JProperty("type", "object"),
@@ -1115,7 +1165,14 @@ Partial Public Class ThisAddIn
     Private Function BuildInternalKnowledgeToolInstructionsPrompt(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As String
         Dim displayLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
 
-        Return $"Searches only the user's Knowledge Store '{displayLabel}'. " &
+        ' Load schema to get the user-authored tooling description
+        Dim schema = KnowledgeStoreSchema.LoadOrCreate(store.ResolvedSourcePath)
+        Dim contentHint As String = ""
+        If schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.ToolingDescription) Then
+            contentHint = " Content: " & schema.ToolingDescription.Trim()
+        End If
+
+        Return $"Searches only the user's Knowledge Store '{displayLabel}'.{contentHint} " &
             "Provide query (optional), tag (optional), and max_results (optional). " &
             "If query is omitted, the tool may return the most relevant documents from that store or all documents matching the tag. " &
             "Do NOT use this tool for public information or general knowledge. " &
@@ -1168,11 +1225,25 @@ Partial Public Class ThisAddIn
             Dim jDef As JObject = JObject.Parse(canonicalDefinition)
             Dim name As String = If(jDef("name")?.ToString(), "")
             Dim description As String = If(jDef("description")?.ToString(), "")
-            Dim parameters As String = If(jDef("parameters")?.ToString(), "{}")
 
+            ' Use Formatting.None to produce compact JSON for the parameters object.
+            ' JObject.ToString() defaults to Formatting.Indented, which injects literal
+            ' newlines and whitespace that bloat the payload and can break model API
+            ' templates that expect single-line JSON values.
+            Dim parametersToken As JToken = jDef("parameters")
+            Dim parameters As String = If(parametersToken IsNot Nothing,
+                parametersToken.ToString(Formatting.None), "{}")
+
+            ' JSON-escape name and description before injecting into the template.
+            ' JValue.ToString() returns the RAW unescaped string (e.g., embedded " or \
+            ' are not escaped). When the template places these inside JSON string
+            ' literals like "name":"{name}", unescaped characters produce invalid JSON.
+            ' This is especially critical when combining multiple tools — a single
+            ' malformed definition breaks the entire tools array and the API rejects
+            ' the request, causing LLM() to return an empty string.
             Dim result As String = template
-            result = result.Replace("{name}", name)
-            result = result.Replace("{description}", description)
+            result = result.Replace("{name}", EscapeJsonString(name))
+            result = result.Replace("{description}", EscapeJsonString(description))
             result = result.Replace("{parameters}", parameters)
 
             Return result
@@ -2462,74 +2533,64 @@ Partial Public Class ThisAddIn
             context.Log($"Knowledge store source: {storeLabel}")
             ToolingFileLogger.LogStep($"Knowledge store source: '{storeLabel}'; query='{query}'; tag='{tagName}'; max_results={maxResults}")
 
-            Dim manifest = KnowledgeStoreManifest.Load(boundStore)
+            ' Build the query for KnowledgeQueryService.
+            ' IMPORTANT: Do NOT use "store:<name>" prefix — ResolveQueryAsync splits tokens
+            ' by whitespace, so multi-word store names like "VISCHER Compliance" get truncated
+            ' to just the first word, causing a name mismatch and zero results.
+            ' Instead, pass only the tag filter (single-word) and the free-text query,
+            ' then filter the returned matches to the bound store afterward.
+            Dim resolveQuery As String = ""
 
-            If manifest Is Nothing OrElse manifest.Entries Is Nothing OrElse manifest.Entries.Count = 0 Then
-                response.Success = True
-                response.Response = $"No indexed documents are available in Knowledge Store '{storeLabel}'."
-                Return response
+            If Not String.IsNullOrWhiteSpace(tagName) Then
+                resolveQuery &= $"tag:{tagName} "
             End If
 
-            Dim matches As New List(Of KnowledgeQueryService.KnowledgeMatch)()
-            Dim queryLower As String = If(query, "").Trim().ToLowerInvariant()
-            Dim tagLower As String = If(tagName, "").Trim().ToLowerInvariant()
+            If Not String.IsNullOrWhiteSpace(query) Then
+                resolveQuery &= query
+            End If
 
-            For Each entry In manifest.Entries
-                If entry Is Nothing OrElse String.IsNullOrWhiteSpace(entry.FilePath) Then
-                    Continue For
-                End If
+            resolveQuery = resolveQuery.Trim()
 
-                Dim include As Boolean = False
-
-                If queryLower = "" AndAlso tagLower = "" Then
-                    include = True
+            If String.IsNullOrWhiteSpace(resolveQuery) Then
+                ' No query and no tag — pass just the store name as a broad keyword search
+                Dim storeName As String = If(boundStore.Name, "").Trim()
+                If Not String.IsNullOrWhiteSpace(storeName) Then
+                    resolveQuery = storeName
                 Else
-                    If tagLower <> "" AndAlso entry.Tags IsNot Nothing Then
-                        include = entry.Tags.Any(Function(t) Not String.IsNullOrWhiteSpace(t) AndAlso
-                                                             t.Equals(tagLower, StringComparison.OrdinalIgnoreCase))
-                    End If
-
-                    If Not include AndAlso queryLower <> "" Then
-                        Dim titleLower As String = If(entry.Title, "").ToLowerInvariant()
-                        Dim summaryLower As String = If(entry.Summary, "").ToLowerInvariant()
-
-                        If titleLower.Contains(queryLower) OrElse summaryLower.Contains(queryLower) Then
-                            include = True
-                        End If
-
-                        If Not include AndAlso entry.Keywords IsNot Nothing Then
-                            include = entry.Keywords.Any(Function(k) Not String.IsNullOrWhiteSpace(k) AndAlso
-                                                                     k.IndexOf(queryLower, StringComparison.OrdinalIgnoreCase) >= 0)
-                        End If
-
-                        If Not include AndAlso entry.Tags IsNot Nothing Then
-                            include = entry.Tags.Any(Function(t) Not String.IsNullOrWhiteSpace(t) AndAlso
-                                                                 t.IndexOf(queryLower, StringComparison.OrdinalIgnoreCase) >= 0)
-                        End If
-                    End If
+                    response.Success = True
+                    response.Response = $"No query provided for Knowledge Store '{storeLabel}'."
+                    Return response
                 End If
+            End If
 
-                If include Then
-                    matches.Add(New KnowledgeQueryService.KnowledgeMatch With {
-                        .Entry = entry,
-                        .StoreName = storeLabel,
-                        .Title = If(entry.Title, Path.GetFileNameWithoutExtension(entry.FilePath)),
-                        .Summary = If(entry.Summary, ""),
-                        .SourcePath = entry.FilePath,
-                        .MatchReason = "kb-tool-store-bound"
-                    })
-                End If
-            Next
+            context.Log($"Resolving knowledge query: '{resolveQuery}'")
+            ToolingFileLogger.LogStep($"KnowledgeQueryService query: '{resolveQuery}'")
 
-            Dim limitedMatches = matches.Take(maxResults).ToList()
+            ' Use the same semantic search path that Freestyle uses.
+            ' Request extra results so we have enough after filtering to the bound store.
+            Dim matches = Await KnowledgeQueryService.ResolveQueryAsync(resolveQuery, _context, maxResults * 4).ConfigureAwait(False)
 
-            If limitedMatches.Count = 0 Then
+            ' Filter to only the bound store (by Name match, case-insensitive)
+            Dim storeName2 As String = If(boundStore.Name, "").Trim()
+            If Not String.IsNullOrWhiteSpace(storeName2) AndAlso matches IsNot Nothing Then
+                matches = matches.
+                    Where(Function(m) Not String.IsNullOrWhiteSpace(m.StoreName) AndAlso
+                                      m.StoreName.Equals(storeName2, StringComparison.OrdinalIgnoreCase)).
+                    ToList()
+            End If
+
+            ' Apply the requested limit
+            If matches IsNot Nothing AndAlso matches.Count > maxResults Then
+                matches = matches.Take(maxResults).ToList()
+            End If
+
+            If matches Is Nothing OrElse matches.Count = 0 Then
                 response.Success = True
                 response.Response = $"No relevant documents found in Knowledge Store '{storeLabel}'."
                 Return response
             End If
 
-            Dim knowledgeContext As String = KnowledgeQueryService.BuildKnowledgeContext(limitedMatches, 200000)
+            Dim knowledgeContext As String = KnowledgeQueryService.BuildKnowledgeContext(matches, 200000)
 
             If String.IsNullOrWhiteSpace(knowledgeContext) Then
                 response.Success = True

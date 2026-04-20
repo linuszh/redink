@@ -616,7 +616,8 @@ Namespace SharedLibrary
                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                                                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
                                                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
-                                                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"}
+                                                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
+                                                    {"FormulaInstruction", "FormulaInstruction"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -1154,6 +1155,8 @@ Namespace SharedLibrary
                     Return context.INI_KnowledgeStoreBackgroundIndexing.ToString()
                 Case "KnowledgeStoreBackgroundIndexingWindow"
                     Return context.INI_KnowledgeStoreBackgroundIndexingWindow
+                Case "FormulaInstruction"
+                    Return context.INI_FormulaInstruction
                 Case "AssembleExecMaxChars"
                     Return context.INI_AssembleExecMaxChars.ToString()
                 Case "AssembleMaxContextSummaryChars"
@@ -1490,6 +1493,8 @@ Namespace SharedLibrary
                     context.INI_KnowledgeStoreBackgroundIndexing = Boolean.Parse(value)
                 Case "KnowledgeStoreBackgroundIndexingWindow"
                     context.INI_KnowledgeStoreBackgroundIndexingWindow = value
+                Case "FormulaInstruction"
+                    context.INI_FormulaInstruction = value
                 Case "AssembleExecMaxChars"
                     context.INI_AssembleExecMaxChars = Integer.Parse(value)
                 Case "AssembleMaxContextSummaryChars"
@@ -1922,6 +1927,7 @@ Namespace SharedLibrary
                     {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
                     {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
                     {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow},
+                    {"FormulaInstruction", context.INI_FormulaInstruction},
                     {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"SP_Assemble_Plan", context.SP_Assemble_Plan},
@@ -1937,7 +1943,8 @@ Namespace SharedLibrary
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
-                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"}
+                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
+                    {"FormulaInstruction", "FormulaInstruction"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end

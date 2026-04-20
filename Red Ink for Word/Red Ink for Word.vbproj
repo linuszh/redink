@@ -715,6 +715,7 @@
     <Compile Include="ThisAddIn.Processing.vb" />
     <Compile Include="ThisAddIn.Properties.vb" />
     <Compile Include="ThisAddIn.Redactions.vb" />
+    <Compile Include="ThisAddIn.Slides.Retemplate.vb" />
     <Compile Include="ThisAddIn.Slides.vb" />
     <Compile Include="ThisAddIn.SpecialServices.vb" />
     <Compile Include="ThisAddIn.TabularOverview.vb" />
