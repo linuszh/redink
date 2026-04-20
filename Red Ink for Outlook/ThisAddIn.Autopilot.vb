@@ -166,6 +166,7 @@ Partial Public Class ThisAddIn
     '  1693 Pro -- NO
     '  2058-2063 Special License for AutoPilot
 
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -180,6 +181,13 @@ Partial Public Class ThisAddIn
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
     Private _apSelectedTools As List(Of ModelConfig) = Nothing
     Private _apUseSecondApi As Boolean = False
+
+    ''' <summary>
+    ''' Paths of knowledge-store source files copied into the temp directory.
+    ''' Only these are candidates for citation-based filtering — tool outputs
+    ''' from process_word_document, merge_pdfs, etc. are never filtered.
+    ''' </summary>
+    Private _apKnowledgeSourceCopies As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
     Private Shared ReadOnly AP_AutoReplySubjectPatterns As String() = {
         "automatic reply:", "automatische antwort:", "réponse automatique:",
@@ -1990,8 +1998,12 @@ Partial Public Class ThisAddIn
                     response = StripInkyMemoryBlock(response)
                 End If
 
+                ' Remove knowledge-store source files not cited by the LLM
+                RemoveUncitedKnowledgeSourceCopies(response)
+
                 ' Collect result attachments from OutputFiles
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
+
                 If resultAttachments.Count > 0 Then
                     ApDashboardLog($"Result attachments to send: {resultAttachments.Count}", "info")
                     For Each ra In resultAttachments
@@ -2042,6 +2054,7 @@ Partial Public Class ThisAddIn
                 Catch
                 End Try
                 _apCurrentToolCallLog = Nothing
+                _apKnowledgeSourceCopies.Clear()
             End Try
 
         Catch ex As OperationCanceledException

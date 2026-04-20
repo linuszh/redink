@@ -1342,6 +1342,7 @@ Partial Public Class ThisAddIn
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
+                AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -1804,7 +1805,14 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
-                ShowKnowledgeStore()
+                Using frm As New KnowledgeStoreAdminForm(_context)
+                    frm.ShowDialog()
+                End Using
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
+                RetemplatePresentation_UI()
                 Return
             End If
 
@@ -2918,7 +2926,25 @@ Partial Public Class ThisAddIn
                             OtherPrompt = strippedPrompt
                         End If
 
-                        Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        ' Show splash while querying the Knowledge Store
+                        Dim kbSplash As New SLib.SplashScreen("Querying Knowledge Store...   ")
+                        kbSplash.Show()
+                        System.Windows.Forms.Application.DoEvents()
+
+                        Dim kbResolved As (Content As String, StatusMessage As String)
+                        Try
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        Finally
+                            If kbSplash.InvokeRequired Then
+                                kbSplash.Invoke(Sub()
+                                                    kbSplash.Close()
+                                                    kbSplash.Dispose()
+                                                End Sub)
+                            Else
+                                kbSplash.Close()
+                                kbSplash.Dispose()
+                            End If
+                        End Try
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             ' Inject knowledge context into system prompt

@@ -1,0 +1,44 @@
+﻿{
+  "SchemaVersion": 1,
+  "StoreName": "Legal Know-How on ABC",  
+  "Domain": "ABC Legal Know-How",
+  "ToolingDescription": "This knowledge store contains background knowledge on legal topics concerning ABC. Use it as an additional source on such topics. Download and provide the source materials referred to for more information.",
+  "EntityTypes": [
+    "LegalConcept",
+    "Doctrine",
+    "CourtDecision",
+    "Statute",
+    "LegalField",
+    "Author",
+    "Publication"
+  ],
+  "FocusAreas": [
+    "definition of terms",
+    "key legal principles",
+    "relevant case law",
+    "statutory provisions",
+    "practical implications",
+    "conflicting opinions"
+  ],
+  "RequiredSections": [
+    "Summary",
+    "Definition",
+    "Key Principles",
+    "Relevant Case Law",
+    "Relevant Statutes",
+    "Further Reading"
+  ],
+  "PreferredPageKinds": [
+    "Concept",
+    "Doctrine",
+    "CaseBrief",
+    "StatuteAnalysis",
+    "TopicSummary"
+  ],
+  "QueryFilingEnabled": false,
+  "AlwaysCreateCrossLinks": true,
+  "DetectContradictions": true,
+  "AlwaysAddSourceLinks": true,
+  "IgnoredTopics": [],
+  "AdditionalInstructions": ""
+}

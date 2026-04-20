@@ -110,7 +110,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.4.5.200</ApplicationVersion>
+    <ApplicationVersion>1.4.6.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
@@ -715,6 +715,7 @@
     <Compile Include="ThisAddIn.Processing.vb" />
     <Compile Include="ThisAddIn.Properties.vb" />
     <Compile Include="ThisAddIn.Redactions.vb" />
+    <Compile Include="ThisAddIn.Slides.Retemplate.vb" />
     <Compile Include="ThisAddIn.Slides.vb" />
     <Compile Include="ThisAddIn.SpecialServices.vb" />
     <Compile Include="ThisAddIn.TabularOverview.vb" />

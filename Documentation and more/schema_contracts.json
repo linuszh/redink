@@ -1,0 +1,42 @@
+﻿{
+  "SchemaVersion": 1,
+  "StoreName": "Contract Management Database",
+  "Domain": "ACME Contract Management",
+  "ToolingDescription": "Containts ACME's standard contractual clauses and sample boilerplate wordings for contracts.",
+  "EntityTypes": [
+    "ContractTemplate",
+    "Clause",
+    "ContractType",
+    "Industry",
+    "Jurisdiction",
+    "LegalRisk"
+  ],
+  "FocusAreas": [
+    "purpose of clause",
+    "negotiation points",
+    "alternative wording",
+    "associated risks",
+    "use cases",
+    "interdependencies with other clauses"
+  ],
+  "RequiredSections": [
+    "Summary",
+    "Clause Text",
+    "Purpose and Scope",
+    "Drafting Notes",
+    "Alternative Language",
+    "Related Clauses"
+  ],
+  "PreferredPageKinds": [
+    "Template",
+    "Clause",
+    "RiskAnalysis",
+    "NegotiationGuide"
+  ],
+  "QueryFilingEnabled": false,
+  "AlwaysCreateCrossLinks": true,
+  "DetectContradictions": true,
+  "AlwaysAddSourceLinks": true,
+  "IgnoredTopics": [],
+  "AdditionalInstructions": ""
+}

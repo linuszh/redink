@@ -2539,16 +2539,34 @@ Public Class DiscussInky
                             cleanedUserText = strippedUserText
                         End If
 
-                        Dim kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        ' Show splash while querying the Knowledge Store
+                        Dim kbSplash As New SharedMethods.SplashScreen("Querying Knowledge Store...   ")
+                        kbSplash.Show()
+                        System.Windows.Forms.Application.DoEvents()
+
+                        Dim kbResolved As (Content As String, StatusMessage As String)
+                        Try
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                        Finally
+                            If kbSplash.InvokeRequired Then
+                                kbSplash.Invoke(Sub()
+                                                    kbSplash.Close()
+                                                    kbSplash.Dispose()
+                                                End Sub)
+                            Else
+                                kbSplash.Close()
+                                kbSplash.Dispose()
+                            End If
+                        End Try
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
                             kbContext = kbResolved.Content
 
                             systemPrompt &= " The following documents from the user's knowledge store are provided as reference material. " &
                                             "Use them to answer the user's question. " &
-                                            "When citing information, prefer clickable markdown citations. " &
-                                            "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
-                                            "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                                            "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
+                                            "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
+                                            "Only fall back to wikiPath if no sourcePath is available for that document. " &
                                             "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata."
 
                             AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")
@@ -2584,9 +2602,9 @@ Public Class DiscussInky
                 sb.AppendLine("<Knowledge Store Results>")
                 sb.AppendLine("The following documents from the user's knowledge store are provided as reference material. " &
                               "Use them as additional reference material alongside any loaded knowledge. " &
-                              "When citing information, prefer clickable markdown citations. " &
-                              "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
-                              "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                              "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
+                              "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
+                              "Only fall back to wikiPath if no sourcePath is available for that document. " &
                               "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata.")
                 sb.AppendLine(kbContext)
                 sb.AppendLine("</Knowledge Store Results>")
