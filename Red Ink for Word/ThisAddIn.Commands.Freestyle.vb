@@ -1342,6 +1342,7 @@ Partial Public Class ThisAddIn
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
                 AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
+                AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
 
                 ' PRIVACY / TRANSFORMS
                 AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
@@ -1809,6 +1810,12 @@ Partial Public Class ThisAddIn
                 End Using
                 Return
             End If
+
+            If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
+                RetemplatePresentation_UI()
+                Return
+            End If
+
 
             ' Decode serial 
             If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then

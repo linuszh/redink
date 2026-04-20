@@ -68,7 +68,7 @@ Partial Public Class ThisAddIn
 
         Try
             Using presDoc As DocumentFormat.OpenXml.Packaging.PresentationDocument =
-            DocumentFormat.OpenXml.Packaging.PresentationDocument.Open(pptxPath, False)
+                DocumentFormat.OpenXml.Packaging.PresentationDocument.Open(pptxPath, False)
 
                 Dim presPart As DocumentFormat.OpenXml.Packaging.PresentationPart = presDoc.PresentationPart
                 If presPart Is Nothing OrElse presPart.Presentation Is Nothing Then
@@ -82,7 +82,6 @@ Partial Public Class ThisAddIn
                     .Layouts = New List(Of LayoutJson)()
                 }
 
-                ' Extract slide dimensions
                 If presPart.Presentation.SlideSize IsNot Nothing AndAlso
                    presPart.Presentation.SlideSize.Cx IsNot Nothing AndAlso
                    presPart.Presentation.SlideSize.Cy IsNot Nothing Then
@@ -92,58 +91,81 @@ Partial Public Class ThisAddIn
                     }
                 End If
 
-                ' Check for existing slides
                 Dim slideIdList = presPart.Presentation.SlideIdList
                 Dim hasSlides As Boolean =
-                    (slideIdList IsNot Nothing AndAlso slideIdList.ChildElements _
-                        .OfType(Of DocumentFormat.OpenXml.Presentation.SlideId)().Any())
+                    (slideIdList IsNot Nothing AndAlso
+                     slideIdList.ChildElements.OfType(Of DocumentFormat.OpenXml.Presentation.SlideId)().Any())
+
+                Dim jsonOptions As New System.Text.Json.JsonSerializerOptions With {
+                    .WriteIndented = True
+                }
 
                 If Not hasSlides Then
-                    ' Gather layouts from masters even if there are no slides
                     Try
                         For Each sm As DocumentFormat.OpenXml.Packaging.SlideMasterPart In presPart.SlideMasterParts
                             If sm Is Nothing Then Continue For
+
                             Dim masterName As System.String = GetMasterName(sm)
+
                             For Each layoutPart As DocumentFormat.OpenXml.Packaging.SlideLayoutPart In sm.SlideLayoutParts
                                 If layoutPart Is Nothing OrElse layoutPart.Uri Is Nothing Then Continue For
+
                                 Dim name As System.String = GetLayoutName(layoutPart)
                                 Dim layoutUri As System.String = layoutPart.Uri.ToString()
                                 Dim relId As System.String = System.String.Empty
+                                Dim placeholderDetails As New List(Of PlaceholderJson)
+
                                 Try
                                     relId = sm.GetIdOfPart(layoutPart)
                                 Catch
                                 End Try
 
+                                If layoutPart.SlideLayout IsNot Nothing AndAlso
+                                   layoutPart.SlideLayout.CommonSlideData IsNot Nothing AndAlso
+                                   layoutPart.SlideLayout.CommonSlideData.ShapeTree IsNot Nothing Then
+
+                                    CollectDetailedPlaceholdersFromShapeTree(
+                                        layoutPart.SlideLayout.CommonSlideData.ShapeTree,
+                                        placeholderDetails,
+                                        includeText:=False)
+
+                                    MarkPrimaryBodyPlaceholder(
+                                        placeholderDetails,
+                                        preferText:=False)
+                                End If
+
                                 result.Layouts.Add(New LayoutJson With {
                                     .Name = name,
                                     .LayoutId = layoutUri,
-                                    .LayoutRelId = relId
+                                    .LayoutRelId = relId,
+                                    .Master = masterName,
+                                    .PlaceholderDetails = placeholderDetails
                                 })
                             Next
                         Next
                     Catch
                     End Try
 
-                    Return System.Text.Json.JsonSerializer.Serialize(
-                        result,
-                        New System.Text.Json.JsonSerializerOptions With {.WriteIndented = True}
-                    )
+                    Return System.Text.Json.JsonSerializer.Serialize(result, jsonOptions)
                 End If
 
-                ' Enumerate slides safely
                 Try
                     Dim idx As Integer = 0
+
                     For Each sid As DocumentFormat.OpenXml.Presentation.SlideId In
                         slideIdList.ChildElements.OfType(Of DocumentFormat.OpenXml.Presentation.SlideId)()
 
                         If sid.RelationshipId Is Nothing Then Continue For
+
                         Dim sp As DocumentFormat.OpenXml.Packaging.SlidePart = Nothing
                         Try
-                            sp = TryCast(presPart.GetPartById(sid.RelationshipId),
-                                     DocumentFormat.OpenXml.Packaging.SlidePart)
+                            sp = TryCast(
+                                presPart.GetPartById(sid.RelationshipId),
+                                DocumentFormat.OpenXml.Packaging.SlidePart)
                         Catch
                             Continue For
                         End Try
+
                         If sp Is Nothing Then Continue For
 
                         Dim title As String = GetSlideTitle(sp)
@@ -163,13 +185,28 @@ Partial Public Class ThisAddIn
 
                         Dim placeholders As New List(Of String)
                         Dim content As New List(Of String)
+                        Dim placeholderDetails As New List(Of PlaceholderJson)
 
                         If sp.Slide IsNot Nothing AndAlso
                            sp.Slide.CommonSlideData IsNot Nothing AndAlso
                            sp.Slide.CommonSlideData.ShapeTree IsNot Nothing Then
 
-                            CollectPlaceholdersFromShapeTree(sp.Slide.CommonSlideData.ShapeTree, placeholders)
-                            CollectTextsFromShapeTree(sp.Slide.CommonSlideData.ShapeTree, content)
+                            CollectPlaceholdersFromShapeTree(
+                                sp.Slide.CommonSlideData.ShapeTree,
+                                placeholders)
+
+                            CollectTextsFromShapeTree(
+                                sp.Slide.CommonSlideData.ShapeTree,
+                                content)
+
+                            CollectDetailedPlaceholdersFromShapeTree(
+                                sp.Slide.CommonSlideData.ShapeTree,
+                                placeholderDetails,
+                                includeText:=True)
+
+                            MarkPrimaryBodyPlaceholder(
+                                placeholderDetails,
+                                preferText:=True)
                         End If
 
                         result.Slides.Add(New SlideJson With {
@@ -180,45 +217,62 @@ Partial Public Class ThisAddIn
                             .Layout = layoutName,
                             .Master = masterName,
                             .Placeholders = placeholders,
-                            .Content = content
+                            .Content = content,
+                            .PlaceholderDetails = placeholderDetails
                         })
+
                         idx += 1
                     Next
                 Catch
-                    ' Return partial results on error
-                    Return System.Text.Json.JsonSerializer.Serialize(
-                        result,
-                        New System.Text.Json.JsonSerializerOptions With {.WriteIndented = True}
-                    )
+                    Return System.Text.Json.JsonSerializer.Serialize(result, jsonOptions)
                 End Try
 
-                ' Enumerate layouts
                 Try
                     For Each sm As DocumentFormat.OpenXml.Packaging.SlideMasterPart In presPart.SlideMasterParts
                         If sm Is Nothing Then Continue For
+
+                        Dim masterName As String = GetMasterName(sm)
+
                         For Each layoutPart As DocumentFormat.OpenXml.Packaging.SlideLayoutPart In sm.SlideLayoutParts
                             If layoutPart Is Nothing OrElse layoutPart.Uri Is Nothing Then Continue For
+
                             Dim name As String = GetLayoutName(layoutPart)
                             Dim layoutUri As String = layoutPart.Uri.ToString()
                             Dim relId As String = String.Empty
+                            Dim placeholderDetails As New List(Of PlaceholderJson)
+
                             Try
                                 relId = sm.GetIdOfPart(layoutPart)
                             Catch
                             End Try
+
+                            If layoutPart.SlideLayout IsNot Nothing AndAlso
+                               layoutPart.SlideLayout.CommonSlideData IsNot Nothing AndAlso
+                               layoutPart.SlideLayout.CommonSlideData.ShapeTree IsNot Nothing Then
+
+                                CollectDetailedPlaceholdersFromShapeTree(
+                                    layoutPart.SlideLayout.CommonSlideData.ShapeTree,
+                                    placeholderDetails,
+                                    includeText:=False)
+
+                                MarkPrimaryBodyPlaceholder(
+                                    placeholderDetails,
+                                    preferText:=False)
+                            End If
+
                             result.Layouts.Add(New LayoutJson With {
                                 .Name = name,
                                 .LayoutId = layoutUri,
-                                .LayoutRelId = relId
+                                .LayoutRelId = relId,
+                                .Master = masterName,
+                                .PlaceholderDetails = placeholderDetails
                             })
                         Next
                     Next
                 Catch
                 End Try
 
-                Return System.Text.Json.JsonSerializer.Serialize(
-                    result,
-                    New System.Text.Json.JsonSerializerOptions With {.WriteIndented = True}
-                )
+                Return System.Text.Json.JsonSerializer.Serialize(result, jsonOptions)
             End Using
 
         Catch ex As System.IO.IOException
@@ -232,6 +286,323 @@ Partial Public Class ThisAddIn
             Return String.Empty
         End Try
     End Function
+
+
+    Private Shared Sub CollectDetailedPlaceholdersFromShapeTree(
+        ByVal tree As DocumentFormat.OpenXml.Presentation.ShapeTree,
+        ByVal placeholders As System.Collections.Generic.List(Of PlaceholderJson),
+        Optional ByVal includeText As System.Boolean = True)
+
+        If tree Is Nothing OrElse placeholders Is Nothing Then Return
+
+        Dim sourceOrder As Integer = 0
+
+        For Each child As DocumentFormat.OpenXml.OpenXmlElement In tree.ChildElements
+            CollectDetailedPlaceholdersFromElement(child, placeholders, includeText, sourceOrder)
+        Next
+    End Sub
+
+    Private Shared Sub CollectDetailedPlaceholdersFromElement(
+        ByVal child As DocumentFormat.OpenXml.OpenXmlElement,
+        ByVal placeholders As System.Collections.Generic.List(Of PlaceholderJson),
+        ByVal includeText As System.Boolean,
+        ByRef sourceOrder As Integer)
+
+        If child Is Nothing Then Return
+
+        If TypeOf child Is DocumentFormat.OpenXml.Presentation.GroupShape Then
+            Dim grp As DocumentFormat.OpenXml.Presentation.GroupShape =
+                CType(child, DocumentFormat.OpenXml.Presentation.GroupShape)
+
+            For Each inner As DocumentFormat.OpenXml.OpenXmlElement In grp.ChildElements
+                CollectDetailedPlaceholdersFromElement(inner, placeholders, includeText, sourceOrder)
+            Next
+
+            Return
+        End If
+
+        Dim ph As DocumentFormat.OpenXml.Presentation.PlaceholderShape = Nothing
+        Dim name As String = String.Empty
+        Dim shapeId As Nullable(Of UInteger) = Nothing
+        Dim kind As String = String.Empty
+        Dim x As Nullable(Of Long) = Nothing
+        Dim y As Nullable(Of Long) = Nothing
+        Dim cx As Nullable(Of Long) = Nothing
+        Dim cy As Nullable(Of Long) = Nothing
+
+        If TypeOf child Is DocumentFormat.OpenXml.Presentation.Shape Then
+            Dim shp As DocumentFormat.OpenXml.Presentation.Shape =
+                CType(child, DocumentFormat.OpenXml.Presentation.Shape)
+
+            ph = shp.NonVisualShapeProperties?.
+                ApplicationNonVisualDrawingProperties?.
+                PlaceholderShape
+
+            name = If(
+                shp.NonVisualShapeProperties?.
+                    NonVisualDrawingProperties?.
+                    Name?.
+                    Value,
+                String.Empty)
+
+            If shp.NonVisualShapeProperties IsNot Nothing AndAlso
+               shp.NonVisualShapeProperties.NonVisualDrawingProperties IsNot Nothing AndAlso
+               shp.NonVisualShapeProperties.NonVisualDrawingProperties.Id IsNot Nothing Then
+                shapeId = shp.NonVisualShapeProperties.NonVisualDrawingProperties.Id.Value
+            End If
+
+            kind = "shape"
+
+            Dim xfrm = shp.ShapeProperties?.Transform2D
+            If xfrm IsNot Nothing Then
+                If xfrm.Offset IsNot Nothing Then
+                    If xfrm.Offset.X IsNot Nothing Then x = xfrm.Offset.X.Value
+                    If xfrm.Offset.Y IsNot Nothing Then y = xfrm.Offset.Y.Value
+                End If
+                If xfrm.Extents IsNot Nothing Then
+                    If xfrm.Extents.Cx IsNot Nothing Then cx = xfrm.Extents.Cx.Value
+                    If xfrm.Extents.Cy IsNot Nothing Then cy = xfrm.Extents.Cy.Value
+                End If
+            End If
+
+        ElseIf TypeOf child Is DocumentFormat.OpenXml.Presentation.Picture Then
+            Dim pic As DocumentFormat.OpenXml.Presentation.Picture =
+                CType(child, DocumentFormat.OpenXml.Presentation.Picture)
+
+            ph = pic.NonVisualPictureProperties?.
+                ApplicationNonVisualDrawingProperties?.
+                PlaceholderShape
+
+            name = If(
+                pic.NonVisualPictureProperties?.
+                    NonVisualDrawingProperties?.
+                    Name?.
+                    Value,
+                String.Empty)
+
+            If pic.NonVisualPictureProperties IsNot Nothing AndAlso
+               pic.NonVisualPictureProperties.NonVisualDrawingProperties IsNot Nothing AndAlso
+               pic.NonVisualPictureProperties.NonVisualDrawingProperties.Id IsNot Nothing Then
+                shapeId = pic.NonVisualPictureProperties.NonVisualDrawingProperties.Id.Value
+            End If
+
+            kind = "picture"
+
+            Dim xfrm = pic.ShapeProperties?.Transform2D
+            If xfrm IsNot Nothing Then
+                If xfrm.Offset IsNot Nothing Then
+                    If xfrm.Offset.X IsNot Nothing Then x = xfrm.Offset.X.Value
+                    If xfrm.Offset.Y IsNot Nothing Then y = xfrm.Offset.Y.Value
+                End If
+                If xfrm.Extents IsNot Nothing Then
+                    If xfrm.Extents.Cx IsNot Nothing Then cx = xfrm.Extents.Cx.Value
+                    If xfrm.Extents.Cy IsNot Nothing Then cy = xfrm.Extents.Cy.Value
+                End If
+            End If
+
+        ElseIf TypeOf child Is DocumentFormat.OpenXml.Presentation.GraphicFrame Then
+            Dim gf As DocumentFormat.OpenXml.Presentation.GraphicFrame =
+                CType(child, DocumentFormat.OpenXml.Presentation.GraphicFrame)
+
+            ph = gf.NonVisualGraphicFrameProperties?.
+                ApplicationNonVisualDrawingProperties?.
+                PlaceholderShape
+
+            name = If(
+                gf.NonVisualGraphicFrameProperties?.
+                    NonVisualDrawingProperties?.
+                    Name?.
+                    Value,
+                String.Empty)
+
+            If gf.NonVisualGraphicFrameProperties IsNot Nothing AndAlso
+               gf.NonVisualGraphicFrameProperties.NonVisualDrawingProperties IsNot Nothing AndAlso
+               gf.NonVisualGraphicFrameProperties.NonVisualDrawingProperties.Id IsNot Nothing Then
+                shapeId = gf.NonVisualGraphicFrameProperties.NonVisualDrawingProperties.Id.Value
+            End If
+
+            kind = "graphicFrame"
+
+            Dim xfrm = gf.Transform
+            If xfrm IsNot Nothing Then
+                If xfrm.Offset IsNot Nothing Then
+                    If xfrm.Offset.X IsNot Nothing Then x = xfrm.Offset.X.Value
+                    If xfrm.Offset.Y IsNot Nothing Then y = xfrm.Offset.Y.Value
+                End If
+                If xfrm.Extents IsNot Nothing Then
+                    If xfrm.Extents.Cx IsNot Nothing Then cx = xfrm.Extents.Cx.Value
+                    If xfrm.Extents.Cy IsNot Nothing Then cy = xfrm.Extents.Cy.Value
+                End If
+            End If
+        End If
+
+        If ph Is Nothing Then Return
+
+        Dim textValue As String = String.Empty
+        If includeText Then
+            textValue = GetTextFromElementForJson(child)
+        End If
+
+        Dim area As Nullable(Of Long) = Nothing
+        If cx.HasValue AndAlso cy.HasValue Then
+            Dim rawArea As Double = CDbl(cx.Value) * CDbl(cy.Value)
+            area = If(rawArea > Long.MaxValue, Long.MaxValue, CLng(rawArea))
+        End If
+
+        placeholders.Add(New PlaceholderJson With {
+            .shapeId = shapeId,
+            .kind = kind,
+            .name = name,
+            .PlaceholderType = If(ph.Type IsNot Nothing, ph.Type.Value.ToString(), String.Empty),
+            .Index = If(ph.Index IsNot Nothing, CType(ph.Index.Value, Nullable(Of UInteger)), Nothing),
+            .Role = ResolvePlaceholderRoleForJson(ph, name),
+            .Text = textValue,
+            .TextLength = If(String.IsNullOrWhiteSpace(textValue), 0, textValue.Trim().Length),
+            .x = x,
+            .y = y,
+            .cx = cx,
+            .cy = cy,
+            .area = area,
+            .sourceOrder = sourceOrder,
+            .IsPrimaryBodyPlaceholder = False
+        })
+
+        sourceOrder += 1
+    End Sub
+
+    Private Shared Function GetTextFromElementForJson(
+        ByVal child As DocumentFormat.OpenXml.OpenXmlElement) As String
+
+        If child Is Nothing Then Return String.Empty
+
+        If TypeOf child Is DocumentFormat.OpenXml.Presentation.Shape Then
+            Dim shp As DocumentFormat.OpenXml.Presentation.Shape =
+                CType(child, DocumentFormat.OpenXml.Presentation.Shape)
+
+            If shp.TextBody IsNot Nothing Then
+                Return ExtractTextFromTextContainer(shp.TextBody)
+            End If
+        ElseIf TypeOf child Is DocumentFormat.OpenXml.Presentation.GraphicFrame Then
+            Dim gf As DocumentFormat.OpenXml.Presentation.GraphicFrame =
+                CType(child, DocumentFormat.OpenXml.Presentation.GraphicFrame)
+
+            Dim tbl As DocumentFormat.OpenXml.Drawing.Table =
+                gf.Graphic?.
+                   GraphicData?.
+                   GetFirstChild(Of DocumentFormat.OpenXml.Drawing.Table)()
+
+            If tbl IsNot Nothing Then
+                Dim content As New System.Collections.Generic.List(Of System.String)
+                ExtractTextFromTable(tbl, content)
+                Return System.String.Join(vbCrLf, content).Trim()
+            End If
+        End If
+
+        Return String.Empty
+    End Function
+
+    Private Shared Function ResolvePlaceholderRoleForJson(
+        ByVal ph As DocumentFormat.OpenXml.Presentation.PlaceholderShape,
+        ByVal name As String) As String
+
+        If ph Is Nothing Then Return "other"
+
+        If ph.Type IsNot Nothing Then
+            Select Case ph.Type.Value
+                Case DocumentFormat.OpenXml.Presentation.PlaceholderValues.Title,
+                     DocumentFormat.OpenXml.Presentation.PlaceholderValues.CenteredTitle
+                    Return "title"
+
+                Case DocumentFormat.OpenXml.Presentation.PlaceholderValues.SubTitle
+                    Return "subtitle"
+
+                Case DocumentFormat.OpenXml.Presentation.PlaceholderValues.Body,
+                     DocumentFormat.OpenXml.Presentation.PlaceholderValues.Object
+                    Return "body"
+
+                Case DocumentFormat.OpenXml.Presentation.PlaceholderValues.Footer,
+                     DocumentFormat.OpenXml.Presentation.PlaceholderValues.DateAndTime,
+                     DocumentFormat.OpenXml.Presentation.PlaceholderValues.SlideNumber,
+                     DocumentFormat.OpenXml.Presentation.PlaceholderValues.Header
+                    Return "metadata"
+
+                Case Else
+                    Return "other"
+            End Select
+        End If
+
+        If ph.Index IsNot Nothing Then
+            If ph.Index.Value = 0UI Then Return "title"
+
+            If ph.Index.Value = 1UI Then
+                If Not String.IsNullOrWhiteSpace(name) AndAlso
+                   name.IndexOf("subtitle", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    Return "subtitle"
+                End If
+
+                Return "body"
+            End If
+
+            If ph.Index.Value >= 2UI Then
+                Return "body"
+            End If
+        End If
+
+        If Not String.IsNullOrWhiteSpace(name) Then
+            If name.IndexOf("subtitle", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return "subtitle"
+            End If
+
+            If name.IndexOf("title", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return "title"
+            End If
+
+            If name.IndexOf("content", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               name.IndexOf("body", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Return "body"
+            End If
+        End If
+
+        Return "other"
+    End Function
+
+    Private Shared Sub MarkPrimaryBodyPlaceholder(
+        ByVal placeholders As System.Collections.Generic.List(Of PlaceholderJson),
+        ByVal preferText As System.Boolean)
+
+        If placeholders Is Nothing OrElse placeholders.Count = 0 Then Return
+
+        For Each ph In placeholders
+            ph.IsPrimaryBodyPlaceholder = False
+        Next
+
+        Dim bodies = placeholders.
+            Where(Function(p) String.Equals(p.Role, "body", StringComparison.OrdinalIgnoreCase)).
+            ToList()
+
+        If bodies.Count = 0 Then Return
+
+        Dim primary As PlaceholderJson = Nothing
+
+        If preferText Then
+            primary = bodies.
+                OrderByDescending(Function(p) p.TextLength).
+                ThenByDescending(Function(p) If(p.Area.HasValue, p.Area.Value, 0L)).
+                ThenBy(Function(p) p.SourceOrder).
+                FirstOrDefault()
+        Else
+            primary = bodies.
+                OrderByDescending(Function(p) If(p.Area.HasValue, p.Area.Value, 0L)).
+                ThenBy(Function(p) If(p.Index.HasValue, CLng(p.Index.Value), Long.MaxValue)).
+                ThenBy(Function(p) p.SourceOrder).
+                FirstOrDefault()
+        End If
+
+        If primary IsNot Nothing Then
+            primary.IsPrimaryBodyPlaceholder = True
+        End If
+    End Sub
+
 
     ''' <summary>
     ''' Collects placeholder type names from a shape tree.
@@ -506,6 +877,57 @@ Partial Public Class ThisAddIn
 #Region "JSON DTOs"
 
     ''' <summary>
+    ''' Represents a single placeholder with detailed metadata for JSON serialization.
+    ''' This is additive and does not replace the legacy slide-level placeholders/content arrays.
+    ''' </summary>
+    Public Class PlaceholderJson
+        <JsonPropertyName("shapeId")>
+        Public Property ShapeId As Nullable(Of UInteger)
+
+        <JsonPropertyName("kind")>
+        Public Property Kind As String
+
+        <JsonPropertyName("name")>
+        Public Property Name As String
+
+        <JsonPropertyName("type")>
+        Public Property PlaceholderType As String
+
+        <JsonPropertyName("index")>
+        Public Property Index As Nullable(Of UInteger)
+
+        <JsonPropertyName("role")>
+        Public Property Role As String
+
+        <JsonPropertyName("text")>
+        Public Property Text As String
+
+        <JsonPropertyName("textLength")>
+        Public Property TextLength As Integer
+
+        <JsonPropertyName("x")>
+        Public Property X As Nullable(Of Long)
+
+        <JsonPropertyName("y")>
+        Public Property Y As Nullable(Of Long)
+
+        <JsonPropertyName("cx")>
+        Public Property Cx As Nullable(Of Long)
+
+        <JsonPropertyName("cy")>
+        Public Property Cy As Nullable(Of Long)
+
+        <JsonPropertyName("area")>
+        Public Property Area As Nullable(Of Long)
+
+        <JsonPropertyName("sourceOrder")>
+        Public Property SourceOrder As Integer
+
+        <JsonPropertyName("isPrimaryBodyPlaceholder")>
+        Public Property IsPrimaryBodyPlaceholder As Boolean
+    End Class
+
+    ''' <summary>
     ''' Represents a single slide's metadata and content for JSON serialization.
     ''' </summary>
     Public Class SlideJson
@@ -532,8 +954,10 @@ Partial Public Class ThisAddIn
 
         <JsonPropertyName("content")>
         Public Property Content As List(Of String)
-    End Class
 
+        <JsonPropertyName("placeholderDetails")>
+        Public Property PlaceholderDetails As List(Of PlaceholderJson)
+    End Class
 
     ''' <summary>
     ''' Represents a slide layout's metadata for JSON serialization.
@@ -547,6 +971,12 @@ Partial Public Class ThisAddIn
 
         <JsonPropertyName("layoutRelId")>
         Public Property LayoutRelId As String
+
+        <JsonPropertyName("master")>
+        Public Property Master As String
+
+        <JsonPropertyName("placeholderDetails")>
+        Public Property PlaceholderDetails As List(Of PlaceholderJson)
     End Class
 
     ''' <summary>

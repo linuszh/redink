@@ -77,6 +77,7 @@ Namespace SharedLibrary
                 If value = _enabled Then
                     If _context IsNot Nothing Then
                         _context.INI_KnowledgeStoreBackgroundIndexing = value
+                        _context.INI_KnowledgeStoreBackgroundIndexingWindow = GetPersistedBackgroundWindow(_context)
                     End If
                     Return
                 End If

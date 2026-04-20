@@ -2635,6 +2635,25 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_KnowledgeStoreBackgroundIndexing As Boolean
+        Get
+            Return _context.INI_KnowledgeStoreBackgroundIndexing
+        End Get
+        Set(value As Boolean)
+            _context.INI_KnowledgeStoreBackgroundIndexing = value
+        End Set
+    End Property
+
+    Public Shared Property INI_FormulaInstruction As String
+        Get
+            Return _context.INI_FormulaInstruction
+        End Get
+        Set(value As String)
+            _context.INI_FormulaInstruction = value
+        End Set
+    End Property
+
+
     ''' <summary>
     ''' Returns the supplied <paramref name="OverrideValue"/> when it is not null, empty,
     ''' or whitespace; otherwise returns the original string value unchanged.
