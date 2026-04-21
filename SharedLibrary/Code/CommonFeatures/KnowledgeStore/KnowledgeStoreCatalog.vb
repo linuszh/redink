@@ -4,37 +4,20 @@
 ' =============================================================================
 ' File: KnowledgeStoreCatalog.vb
 ' Purpose:
-'   Manages the catalog of named Knowledge Stores, including loading, merging,
-'   validating, saving, and resolving store definitions from central and local
-'   catalog files.
+'   Manages the catalog of configured Knowledge Stores across central and local
+'   configuration sources.
 '
 ' Responsibilities:
-'   - Catalog loading and merge:
-'       * Load central stores from `INI_KnowledgeStorePath`.
-'       * Load user-local stores from `INI_KnowledgeStorePathLocal`.
-'       * Merge both catalogs with local definitions overriding central ones by
-'         case-insensitive store name.
-'   - Validation and recovery:
-'       * Auto-create missing local catalog files as empty JSON arrays.
-'       * Detect malformed or empty catalog files.
-'       * Recover from `.tmp` / `.bak` files where possible, and reset invalid
-'         local catalogs safely.
-'   - Store helpers:
-'       * Return active stores, resolve stores by name, and create new store
-'         definitions with default ownership metadata.
-'       * Resolve metadata and wiki folder paths under each store's `.redink`
-'         directory.
-'       * Evaluate whether the current user may write to a given store.
-'   - Persistence:
-'       * Save local-only store definitions back to the local catalog using
-'         atomic write semantics.
+'   - Load Knowledge Store definitions from central and user-local catalog files.
+'   - Merge catalogs into a single effective store list.
+'   - Resolve store metadata paths, wiki paths, and source-root paths.
+'   - Create new local store definitions with default metadata.
+'   - Save local catalog updates with safe write semantics.
+'   - Expose helper methods for lookup, labeling, and permission checks.
 '
 ' Notes:
-'   - Catalog files are JSON arrays of `KnowledgeStoreDefinition` objects.
-'   - Per-store runtime metadata lives under `.redink\` inside each store's
-'     resolved source path.
-'   - This class is the entry point for store discovery across the Knowledge
-'     Store subsystem.
+'   - Central and local catalogs are merged into the effective runtime view.
+'   - Per-store runtime artifacts live below each store's `.redink` directory.
 ' =============================================================================
 
 Option Strict On

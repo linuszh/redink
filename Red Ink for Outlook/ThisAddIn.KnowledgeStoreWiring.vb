@@ -3,18 +3,24 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.KnowledgeStoreWiring.vb
-' Purpose: Wires the Knowledge Store background indexing service into Outlook's
-'          startup, idle timer, and shutdown lifecycle.
+' Purpose:
+'   Wires Knowledge Store services into the Outlook add-in lifecycle.
+'
+' Responsibilities:
+'   - Initialize and shut down the shared Knowledge Store idle service.
+'   - Drive periodic background indexing only while Outlook is genuinely idle.
+'   - Register Outlook-specific host-idle logic with `KnowledgeStoreHostGate`
+'     so gated Knowledge Store AI work yields to AutoPilot, chat, tooling, and
+'     other active Outlook activity.
+'   - Prevent background Knowledge Store work from competing with higher-priority
+'     foreground automation on the same host.
 '
 ' Lifecycle:
-'  - Startup: InitializeKnowledgeStoreService() called from DelayedStartupTasks.
-'  - Idle: KsTimer_Tick fires every 60s and drives background indexing
-'          only when Outlook is genuinely idle (no AutoPilot, Chat, or Agent).
-'  - Shutdown: ShutdownKnowledgeStoreService() called from ThisAddIn_Shutdown.
-'
-' The user controls background indexing via My.Settings.EnableKBBackgroundIndexing
-' (default: False). The setting is toggled from the Settings UI.
+'   - Startup: `InitializeKnowledgeStoreService()` from delayed startup.
+'   - Idle: `KsTimer_Tick` drives background indexing when Outlook is idle.
+'   - Shutdown: `ShutdownKnowledgeStoreService()` clears timer and gate wiring.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict On
@@ -31,6 +37,8 @@ Partial Public Class ThisAddIn
 
     Public Sub InitializeKnowledgeStoreService()
         Try
+            KnowledgeStoreHostGate.RegisterHostIdleProvider("Outlook", Function() IsOutlookIdle())
+
             If Not KnowledgeStoreCatalog.IsConfigured(_context) Then Return
 
             KnowledgeStoreIdleService.Initialize(_context)
@@ -41,6 +49,22 @@ Partial Public Class ThisAddIn
             _ksTimer.Start()
         Catch ex As Exception
             Debug.WriteLine($"KS Wiring: Init error: {ex.Message}")
+        End Try
+    End Sub
+
+    Public Sub ShutdownKnowledgeStoreService()
+        Try
+            If _ksTimer IsNot Nothing Then
+                _ksTimer.Stop()
+                RemoveHandler _ksTimer.Tick, AddressOf KsTimer_Tick
+                _ksTimer.Dispose()
+                _ksTimer = Nothing
+            End If
+
+            KnowledgeStoreIdleService.Shutdown()
+        Catch
+        Finally
+            KnowledgeStoreHostGate.ClearHostIdleProvider()
         End Try
     End Sub
 
@@ -115,18 +139,6 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    Public Sub ShutdownKnowledgeStoreService()
-        Try
-            If _ksTimer IsNot Nothing Then
-                _ksTimer.Stop()
-                RemoveHandler _ksTimer.Tick, AddressOf KsTimer_Tick
-                _ksTimer.Dispose()
-                _ksTimer = Nothing
-            End If
 
-            KnowledgeStoreIdleService.Shutdown()
-        Catch
-        End Try
-    End Sub
 
 End Class

@@ -347,6 +347,7 @@
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreWatcher.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeTriggerHelper.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeWikiService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreHostGate.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.MyStyleHelpers.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.PromptLibrary.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.TextFileEditor.vb" />

@@ -8,18 +8,16 @@
 '   Stores with progress reporting and cancellation support.
 '
 ' Responsibilities:
-'   - Collect active Knowledge Stores, optionally restricted to a single store.
-'   - Build the file queue from supported source documents while skipping
-'     metadata files and, unless forced, already-indexed documents.
-'   - Drive the shared processing pipeline for each queued document.
-'   - Update progress UI via `ProgressBarModule` / `DPIProgressForm`.
-'   - Return aggregate run statistics such as indexed, skipped, failed, and
-'     cancelled file counts.
+'   - Collect target stores and enumerate supported source documents.
+'   - Skip metadata files and, unless forced, already up-to-date files.
+'   - Drive the shared document-processing pipeline for each queued file.
+'   - Update progress UI through `ProgressBarModule`.
+'   - Return aggregate indexing statistics including indexed, skipped, failed,
+'     and cancelled counts.
 '
 ' Notes:
-'   - This is the foreground, user-visible counterpart to background indexing.
-'   - Actual document processing is delegated to
-'     `KnowledgeStoreProcessingService`.
+'   - This is the user-visible counterpart to watcher-driven background indexing.
+'   - Per-file processing is delegated to `KnowledgeStoreProcessingService`.
 ' =============================================================================
 
 Option Strict On

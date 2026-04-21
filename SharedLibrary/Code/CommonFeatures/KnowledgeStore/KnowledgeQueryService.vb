@@ -5,27 +5,20 @@
 ' File: KnowledgeQueryService.vb
 ' Purpose:
 '   Resolves Knowledge Store queries across active stores and builds source-
-'   backed context blocks for downstream LLM use.
+'   backed context blocks for downstream prompt and LLM use.
 '
 ' Responsibilities:
-'   - Query parsing:
-'       * Parse optional `tag:` and `store:` filters from user queries.
-'       * Tokenize remaining free-text terms for ranking and matching.
-'   - Store traversal:
-'       * Enumerate active Knowledge Stores from `KnowledgeStoreCatalog`.
-'       * Respect store-level schema rules such as ignored topics.
-'   - Retrieval and ranking:
-'       * Search wiki pages first, then manifests/raw source documents.
-'       * Merge, score, and de-duplicate matches across stores.
-'       * Return ranked `KnowledgeMatch` results with source metadata.
-'   - Context assembly:
-'       * Build prompt-ready context text from the strongest matches.
-'       * Preserve document/store provenance so callers can cite sources.
+'   - Parse Knowledge Store queries including optional `tag:` and `store:`
+'     filters.
+'   - Enumerate active stores and respect store-level schema constraints.
+'   - Search wiki content, manifests, and source-backed content as appropriate.
+'   - Merge, rank, and de-duplicate matches across stores.
+'   - Build prompt-ready context blocks with clear document and store provenance.
 '
 ' Notes:
-'   - This service is the query-time retrieval layer for Knowledge Store usage.
-'   - It depends on `KnowledgeStoreCatalog`, `KnowledgeStoreSchema`, manifests,
-'     wiki content, and shared context configuration.
+'   - This is the query-time retrieval layer of the Knowledge Store subsystem.
+'   - It is used by Knowledge Store-enabled prompt flows and related retrieval
+'     helpers.
 ' =============================================================================
 
 Option Strict On

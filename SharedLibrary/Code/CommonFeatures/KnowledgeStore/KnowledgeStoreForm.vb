@@ -1,26 +1,26 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: KnowledgeStoreAdminForm.vb
-' Purpose: WinForms modal dialog for full Knowledge Store administration.
-'          Lists all configured stores, allows editing store parameters,
-'          displays per-store statistics, and triggers maintenance operations
-'          (index, reindex, health check, repair, revectorize).
+' File: KnowledgeStoreForm.vb
+' Purpose:
+'   WinForms administration dialog for configuring and maintaining Knowledge
+'   Stores.
 '
-' Architecture:
-'  - Left panel: ListBox of all stores discovered from KnowledgeStoreCatalog.
-'  - Right panel: Details/editing area for the selected store, statistics,
-'    and action buttons for KB operations.
-'  - Callable from both Word and Outlook via SharedLibrary.
+' Responsibilities:
+'   - List all configured stores discovered from `KnowledgeStoreCatalog`.
+'   - Edit local store metadata such as name, path, owner, role, and flags.
+'   - Display per-store statistics including indexed documents, wiki pages,
+'     embeddings, and writeability state.
+'   - Trigger maintenance actions such as index, re-index, health check,
+'     repair, revectorization, and schema editing.
+'   - Run long-running maintenance work asynchronously and surface progress via
+'     status text and tray notifications.
 '
-' External Dependencies:
-'  - KnowledgeStoreCatalog for store definitions.
-'  - KnowledgeStoreManifest for per-store document manifests.
-'  - KnowledgeStoreForegroundIndexer for indexing.
-'  - KnowledgeWikiService for health checks, repairs, and linting.
-'  - KnowledgeEmbeddingService for revectorization.
-'  - ISharedContext for path configuration.
-'  - SharedMethods for UI helpers.
+' Notes:
+'   - This dialog is shared between Word and Outlook.
+'   - Health Check, Lint Wiki, and Repair delegate into `KnowledgeWikiService`.
+'   - Foreground indexing delegates into `KnowledgeStoreForegroundIndexer`.
 ' =============================================================================
 
 Option Strict On
@@ -31,6 +31,7 @@ Imports System.IO
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports System.Threading.Tasks
 
 Namespace SharedLibrary
 
@@ -38,7 +39,7 @@ Namespace SharedLibrary
     ''' Modal dialog for full Knowledge Store administration: listing, editing,
     ''' statistics, and maintenance operations.
     ''' </summary>
-    Public Class KnowledgeStoreAdminForm
+    Public Class KnowledgeStoreForm
         Inherits Form
 
         Private ReadOnly _context As ISharedContext
@@ -649,6 +650,146 @@ Namespace SharedLibrary
 
 #Region "Operations"
 
+        Private Async Function RunMaintenanceJobAsync(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition,
+                                                      operationName As String,
+                                                      work As Func(Of Action(Of String), Task(Of String))) As Task(Of String)
+            Dim trayIcon As NotifyIcon = Nothing
+            Dim lastBalloonKey As String = ""
+
+            Try
+                Try
+                    trayIcon = New NotifyIcon() With {
+                        .Icon = SystemIcons.Information,
+                        .Visible = True
+                    }
+                Catch
+                    trayIcon = Nothing
+                End Try
+
+                UpdateMaintenanceStatusSafe(store.Name, operationName, "Queued as a background job.", trayIcon)
+                ShowMaintenanceBalloonSafe(
+                    trayIcon,
+                    $"{AN} Knowledge Store",
+                    $"{operationName} for '{store.Name}' started.")
+
+                Dim progressCallback As Action(Of String) =
+                    Sub(statusText)
+                        UpdateMaintenanceStatusSafe(store.Name, operationName, statusText, trayIcon)
+
+                        Dim nextBalloonKey As String = ""
+                        Dim nextBalloonText As String = ""
+
+                        If statusText.IndexOf("waiting for", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            nextBalloonKey = "wait"
+                            nextBalloonText = $"{operationName} for '{store.Name}' is waiting for {KnowledgeStoreHostGate.HostDisplayName} to become idle."
+                        ElseIf statusText.IndexOf("starting ai step", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                               statusText.IndexOf("continuing", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                            nextBalloonKey = "run"
+                            nextBalloonText = $"{operationName} for '{store.Name}' resumed."
+                        End If
+
+                        If nextBalloonKey <> "" AndAlso
+                           Not String.Equals(lastBalloonKey, nextBalloonKey, StringComparison.Ordinal) Then
+                            lastBalloonKey = nextBalloonKey
+                            ShowMaintenanceBalloonSafe(trayIcon, $"{AN} Knowledge Store", nextBalloonText)
+                        End If
+                    End Sub
+
+                Dim result = Await Task.Run(
+                    Async Function()
+                        Return Await work(progressCallback).ConfigureAwait(False)
+                    End Function)
+
+                UpdateMaintenanceStatusSafe(store.Name, operationName, "Completed.", trayIcon)
+                ShowMaintenanceBalloonSafe(
+                    trayIcon,
+                    $"{AN} Knowledge Store",
+                    $"{operationName} for '{store.Name}' completed.")
+
+                Return result
+            Catch ex As Exception
+                UpdateMaintenanceStatusSafe(store.Name, operationName, "Failed.", trayIcon)
+                ShowMaintenanceBalloonSafe(
+                    trayIcon,
+                    $"{AN} Knowledge Store",
+                    $"{operationName} for '{store.Name}' failed: {ex.Message}")
+                Throw
+            Finally
+                If trayIcon IsNot Nothing Then
+                    Try
+                        trayIcon.Visible = False
+                        trayIcon.Dispose()
+                    Catch
+                    End Try
+                End If
+            End Try
+        End Function
+
+        Private Sub UpdateMaintenanceStatusSafe(storeName As String,
+                                                operationName As String,
+                                                statusText As String,
+                                                trayIcon As NotifyIcon)
+            If Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(
+                        New Action(Of String, String, String, NotifyIcon)(AddressOf UpdateMaintenanceStatusSafe),
+                        storeName,
+                        operationName,
+                        statusText,
+                        trayIcon)
+                Catch
+                End Try
+                Return
+            End If
+
+            Dim fullText = $"{operationName} — {storeName}: {statusText}"
+            _lblStatus.Text = fullText
+
+            If trayIcon IsNot Nothing Then
+                Dim toolTipText = $"{operationName}: {statusText}"
+                If String.IsNullOrWhiteSpace(toolTipText) Then
+                    toolTipText = $"{operationName}: working..."
+                End If
+
+                If toolTipText.Length > 63 Then
+                    toolTipText = toolTipText.Substring(0, 60).TrimEnd() & "..."
+                End If
+
+                trayIcon.Text = toolTipText
+            End If
+        End Sub
+
+
+        Private Sub ShowMaintenanceBalloonSafe(trayIcon As NotifyIcon, title As String, text As String)
+            If trayIcon Is Nothing OrElse String.IsNullOrWhiteSpace(text) OrElse Me.IsDisposed Then
+                Return
+            End If
+
+            If Me.InvokeRequired Then
+                Try
+                    Me.BeginInvoke(
+                        New Action(Of NotifyIcon, String, String)(AddressOf ShowMaintenanceBalloonSafe),
+                        trayIcon,
+                        title,
+                        text)
+                Catch
+                End Try
+                Return
+            End If
+
+            Try
+                trayIcon.BalloonTipIcon = ToolTipIcon.Info
+                trayIcon.BalloonTipTitle = title
+                trayIcon.BalloonTipText = text
+                trayIcon.ShowBalloonTip(3000)
+            Catch
+            End Try
+        End Sub
+
         Private Function GetSelectedStore() As KnowledgeStoreCatalog.KnowledgeStoreDefinition
             Dim idx = _lstStores.SelectedIndex
             If idx < 0 OrElse idx >= _stores.Count Then
@@ -733,10 +874,16 @@ Namespace SharedLibrary
 
             SetOperationButtonsEnabled(False)
             Try
-                Dim report = Await KnowledgeWikiService.LintWikiAsync(
-                    kbRootPath:=store.ResolvedSourcePath,
-                    context:=_context,
-                    autoApply:=False)
+                Dim report = Await RunMaintenanceJobAsync(
+                    store:=store,
+                    operationName:="Health Check",
+                    work:=Function(progressCallback)
+                              Return KnowledgeWikiService.LintWikiAsync(
+                                  kbRootPath:=store.ResolvedSourcePath,
+                                  context:=_context,
+                                  autoApply:=False,
+                                  progressCallback:=progressCallback)
+                          End Function)
 
                 ShowCustomWindow(
                     $"Health check report for '{store.Name}':",
@@ -745,10 +892,12 @@ Namespace SharedLibrary
                     $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
+                UpdateStatus()
             Catch ex As Exception
                 ShowCustomMessageBox($"Error during health check: {ex.Message}", AN)
             Finally
                 SetOperationButtonsEnabled(True)
+                UpdateStatus()
             End Try
         End Sub
 
@@ -773,10 +922,17 @@ Namespace SharedLibrary
 
             SetOperationButtonsEnabled(False)
             Try
-                Dim summary = Await KnowledgeWikiService.ApplyWikiHealthFixesAsync(
-                    kbRootPath:=store.ResolvedSourcePath,
-                    context:=_context,
-                    includeLlmRepairs:=True)
+                Dim summary = Await RunMaintenanceJobAsync(
+                    store:=store,
+                    operationName:="Repair",
+                    work:=Function(progressCallback)
+                              Return KnowledgeWikiService.ApplyWikiHealthFixesAsync(
+                                  kbRootPath:=store.ResolvedSourcePath,
+                                  context:=_context,
+                                  includeLlmRepairs:=True,
+                                  progressCallback:=progressCallback,
+                                  operationName:="Repair")
+                          End Function)
 
                 ShowCustomWindow(
                     $"Repair summary for '{store.Name}':",
@@ -785,10 +941,50 @@ Namespace SharedLibrary
                     $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
+                UpdateStatus()
             Catch ex As Exception
                 ShowCustomMessageBox($"Error during repair: {ex.Message}", AN)
             Finally
                 SetOperationButtonsEnabled(True)
+                UpdateStatus()
+            End Try
+        End Sub
+
+        Private Async Sub OnLint(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            SetOperationButtonsEnabled(False)
+            Try
+                Dim report = Await RunMaintenanceJobAsync(
+                    store:=store,
+                    operationName:="Lint Wiki",
+                    work:=Function(progressCallback)
+                              Return KnowledgeWikiService.LintWikiAsync(
+                                  kbRootPath:=store.ResolvedSourcePath,
+                                  context:=_context,
+                                  autoApply:=True,
+                                  progressCallback:=progressCallback)
+                          End Function)
+
+                ShowCustomWindow(
+                    $"Lint report for '{store.Name}':",
+                    report,
+                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+                UpdateStatus()
+            Catch ex As Exception
+                ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
+            Finally
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
             End Try
         End Sub
 
@@ -862,35 +1058,7 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        Private Async Sub OnLint(sender As Object, e As EventArgs)
-            Dim store = GetSelectedStore()
-            If store Is Nothing Then Return
 
-            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
-                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
-                Return
-            End If
-
-            SetOperationButtonsEnabled(False)
-            Try
-                Dim report = Await KnowledgeWikiService.LintWikiAsync(
-                    kbRootPath:=store.ResolvedSourcePath,
-                    context:=_context,
-                    autoApply:=True)
-
-                ShowCustomWindow(
-                    $"Lint report for '{store.Name}':",
-                    report,
-                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
-                    $"{AN} Knowledge Store")
-
-                LoadStatistics(store)
-            Catch ex As Exception
-                ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
-            Finally
-                SetOperationButtonsEnabled(True)
-            End Try
-        End Sub
 
         Private Sub OnEditSchema(sender As Object, e As EventArgs)
             Dim store = GetSelectedStore()

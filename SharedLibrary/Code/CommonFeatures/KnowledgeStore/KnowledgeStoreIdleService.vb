@@ -4,20 +4,20 @@
 ' =============================================================================
 ' File: KnowledgeStoreIdleService.vb
 ' Purpose:
-'   Hosts the shared background-indexing lifecycle used by Office hosts
-'   (Word, Outlook, Excel) from their idle or timer callbacks.
+'   Hosts the shared background-indexing lifecycle used by Office hosts from
+'   their idle or timer callbacks.
 '
 ' Responsibilities:
-'   - Initialize and retain the shared Knowledge Store watcher instance.
-'   - Enable or disable background indexing based on persisted user settings.
-'   - Trigger periodic scans and incremental processing during idle ticks.
+'   - Initialize and retain the shared `KnowledgeStoreWatcher` instance.
+'   - Enable or disable background indexing based on persisted settings.
+'   - Trigger periodic scans and incremental queue processing during idle ticks.
 '   - Keep the shared context synchronized with the current enabled state.
 '   - Shut down watcher resources cleanly when the host closes.
 '
 ' Notes:
-'   - Hosts call `Initialize`, `SetEnabled`, `OnIdleTickAsync`, and `Shutdown`.
-'   - The host remains responsible for deciding when it is truly idle enough to
-'     call this service.
+'   - Hosts remain responsible for deciding when they are idle enough to call
+'     this service.
+'   - Word, Outlook, and Excel can all use this shared lifecycle service.
 ' =============================================================================
 
 Option Strict On

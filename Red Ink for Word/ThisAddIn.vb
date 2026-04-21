@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 20.4.2026
+' 21.4.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -44,6 +44,8 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
 Imports System.Globalization
+Imports SharedLibrary.SharedLibrary.SharedMethods
+
 
 Partial Public Class ThisAddIn
 
@@ -51,7 +53,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.200426" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.210426" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -591,12 +593,21 @@ Partial Public Class ThisAddIn
     Private Sub WriteDllLoadDiagnosticsIfEnabled()
         Try
             If _context Is Nothing Then Return
-            If Not _context.INIloaded Then Return
+            If Not _context.INIloaded Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the configuration could not be loaded.")
+                Return
+            End If
             If Not _context.INI_APIDebug Then Return
 
             Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-            If String.IsNullOrWhiteSpace(desktopPath) Then Return
-            If Not System.IO.Directory.Exists(desktopPath) Then Return
+            If String.IsNullOrWhiteSpace(desktopPath) Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the desktop path is invalid.")
+                Return
+            End If
+            If Not System.IO.Directory.Exists(desktopPath) Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because could not locate the desktop path.")
+                Return
+            End If
 
             Dim outputPath As String = System.IO.Path.Combine(desktopPath, "RI_DLL_Loaded.txt")
             Dim report As New System.Text.StringBuilder()
@@ -724,6 +735,7 @@ Partial Public Class ThisAddIn
 
             System.IO.File.WriteAllText(outputPath, report.ToString(), New System.Text.UTF8Encoding(False))
         Catch
+            ShowCustomMessageBox("Cannot generate RI DLL load diagnostics due to an error.")
             ' Intentionally silent: diagnostics must never break startup.
         End Try
     End Sub
