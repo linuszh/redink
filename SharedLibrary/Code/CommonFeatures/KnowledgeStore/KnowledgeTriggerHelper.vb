@@ -5,38 +5,23 @@
 ' File: KnowledgeTriggerHelper.vb
 ' Purpose:
 '   Parses Knowledge Store inline triggers such as `(kb)` and `(kb:...)`,
-'   resolves matching store content, and assembles prompt-ready knowledge blocks
-'   for LLM injection.
+'   resolves matching Knowledge Store content, and assembles prompt-ready
+'   knowledge blocks for injection into downstream AI workflows.
 '
 ' Responsibilities:
-'   - Trigger detection:
-'       * Detect simple and parameterized Knowledge Store triggers in prompts.
-'       * Distinguish between load-all, store-filtered, tag-filtered, and
-'         keyword-search requests.
-'   - Trigger parsing:
-'       * Parse `(kb)` and `(kb:...)` syntax into structured
-'         `KnowledgeRequest` objects.
-'       * Support store filters, tag filters, comma-separated values, and
-'         free-text fallback search semantics.
-'   - Prompt preparation:
-'       * Strip Knowledge Store trigger syntax from the original user prompt
-'         when needed.
-'       * Resolve the requested content from active stores using wiki content
-'         first and raw/manifests as fallback.
-'       * Wrap returned knowledge in dedicated markup blocks suitable for prompt
-'         injection.
-'   - Safety and limits:
-'       * Cap the number of included documents and total injected characters.
-'       * Avoid failures when stores, manifests, or source files are missing or
-'         inaccessible.
+'   - Detect simple and parameterized Knowledge Store triggers in user prompts.
+'   - Parse trigger syntax into structured Knowledge Store requests.
+'   - Resolve store-, tag-, and keyword-filtered content from active stores.
+'   - Remove or normalize trigger syntax in prompts where needed.
+'   - Return bounded, prompt-ready knowledge blocks with source context.
 '
 ' Notes:
-'   - This helper is the bridge between user-facing `(kb:...)` syntax and the
-'     underlying Knowledge Store retrieval pipeline.
-'   - It is used by prompt-processing flows such as Freestyle and other
-'     Knowledge Store-enabled entry points.
+'   - This helper bridges user-facing `(kb:...)` syntax and the underlying
+'     Knowledge Store retrieval pipeline.
+'   - It is used by flows such as Freestyle and other Knowledge Store-enabled
+'     prompt entry points.
 ' =============================================================================
-' =============================================================================
+
 
 Option Strict On
 Option Explicit On

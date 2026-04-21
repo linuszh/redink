@@ -1805,7 +1805,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
-                Using frm As New KnowledgeStoreAdminForm(_context)
+                Using frm As New KnowledgeStoreForm(_context)
                     frm.ShowDialog()
                 End Using
                 Return

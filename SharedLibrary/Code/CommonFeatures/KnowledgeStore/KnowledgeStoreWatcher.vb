@@ -9,23 +9,18 @@
 '
 ' Responsibilities:
 '   - Create and manage `FileSystemWatcher` instances for active stores.
-'   - Detect newly created or modified source documents.
-'   - Maintain an in-memory pending queue of files awaiting indexing.
-'   - Perform periodic scans to recover missed events and discover files not yet
-'     captured by watcher notifications.
-'   - Process a limited number of queued files per idle tick and return
-'     per-file indexing results.
-'   - Keep failures isolated so one bad file or watcher error does not stop the
-'     overall background indexing pipeline.
+'   - Detect newly created, changed, or renamed source files.
+'   - Maintain a pending in-memory queue of documents awaiting processing.
+'   - Run periodic scans to recover missed watcher events.
+'   - Process queued files in bounded batches.
+'   - Surface lightweight tray-icon feedback during background work.
 '
 ' Notes:
-'   - The queue is intentionally in-memory; missed items are recovered by later
-'     scans.
 '   - Actual document processing is delegated to
 '     `KnowledgeStoreProcessingService`.
-'   - Designed for use from host idle services such as
-'     `KnowledgeStoreIdleService`.
+'   - This component is typically driven by `KnowledgeStoreIdleService`.
 ' =============================================================================
+
 
 Option Strict On
 Option Explicit On

@@ -5,29 +5,18 @@
 ' File: KnowledgeIndexer.vb
 ' Purpose:
 '   Indexes source documents for a Knowledge Store by extracting readable text,
-'   deriving metadata, and optionally triggering wiki/embedding generation.
+'   deriving metadata, and optionally triggering wiki and embedding updates.
 '
 ' Responsibilities:
-'   - Document ingest:
-'       * Read supported source files via shared file-reading utilities.
-'       * Normalize extracted text and cap stored/raw summary sizes.
-'       * Skip unsupported or unreadable files safely.
-'   - Metadata generation:
-'       * Derive title, summary, and keywords from document content.
-'       * Optionally use the LLM-based indexing prompt for richer metadata.
-'   - Knowledge Store integration:
-'       * Return populated `KnowledgeStoreManager.KnowledgeEntry` objects
-'         ready for manifest persistence.
-'       * Optionally invoke agentic wiki generation and embedding refresh for
-'         the indexed document.
-'   - Diagnostics and safety:
-'       * Limit LLM input sizes.
-'       * Keep indexing resilient for background and foreground runs.
+'   - Read supported source file types through shared text-extraction helpers.
+'   - Normalize extracted document text and derive summary metadata.
+'   - Optionally use LLM-assisted indexing for richer metadata generation.
+'   - Produce populated `KnowledgeStoreManager.KnowledgeEntry` objects.
+'   - Coordinate optional downstream wiki generation and embedding refresh.
 '
 ' Notes:
-'   - Supported file types are defined by `SupportedExtensions`.
-'   - This service is used by the Knowledge Store watcher, foreground indexer,
-'     and other indexing workflows.
+'   - This service is used by both background and foreground indexing flows.
+'   - Supported source types are defined by `SupportedExtensions`.
 ' =============================================================================
 
 Option Strict On

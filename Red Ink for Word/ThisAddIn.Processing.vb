@@ -564,6 +564,19 @@ Partial Public Class ThisAddIn
         Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
         Dim currentdoc As Word.Document = selection.Document
 
+        Dim savedUiWindow As Word.Window = Nothing
+        Dim savedUiSelection As Word.Range = Nothing
+
+        Try
+            savedUiWindow = application.ActiveWindow
+            If application.Selection IsNot Nothing AndAlso application.Selection.Range IsNot Nothing Then
+                savedUiSelection = application.Selection.Range.Duplicate
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"Saving UI context failed: {ex.Message}")
+        End Try
+
+
         ' ============= ENSURE WE'RE IN MAIN STORY WITHOUT CHANGING SELECTION =============
         Try
             If currentdoc IsNot Nothing AndAlso selection IsNot Nothing Then
@@ -1082,6 +1095,10 @@ Partial Public Class ThisAddIn
                 Dim MarkdownInstruction As String = ""
                 If MarkupMethod = 2 Then MarkdownInstruction = " " & SP_Add_NoMarkdown
 
+                ' Restore the user's original UI context before the long-running model call.
+                ' The processing target is kept separately in rng / bookmarks.
+                RestoreUiContext(application, savedUiWindow, savedUiSelection)
+
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
                     LLMResult = Await ExecuteToolingLoop(
@@ -1161,6 +1178,11 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"6Range Start = {rng.Start} Selection Start = {selection.Start}")
                 Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
                 Debug.WriteLine(vbCrLf & Left(rng.Text, 400) & vbCrLf)
+
+                ' Re-bind Word's live Selection to the processing target before any writeback.
+                ActivateProcessingContext(rng)
+                selection = application.Selection
+                rng = selection.Range
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
 
@@ -1967,8 +1989,6 @@ Partial Public Class ThisAddIn
     ''' Restores the original view and selection afterwards.
     ''' Falls back to raw Range.Text when there are no revisions or on error.
     ''' </summary>
-    ''' <param name="src">Word range to extract visible text from.</param>
-    ''' <returns>Text with deletions omitted and insertions kept.</returns>
     Public Function GetVisibleText(ByVal src As Range) As String
         Try
             ' 1) Catch null/empty range
@@ -2046,6 +2066,105 @@ Partial Public Class ThisAddIn
                     Try
                         If Not Object.ReferenceEquals(origActiveWindow, docWindow) Then
                             origActiveWindow.Activate()
+                        End If
+                    Catch
+                    End Try
+                End Try
+
+            Catch ex As Exception
+                Debug.WriteLine($"Selection/Final-view approach failed: {ex.Message}")
+                Return raw
+            End Try
+
+        Catch ex As Exception
+            Debug.WriteLine($"Exception in GetVisibleText: {ex.Message}{vbCrLf}{ex.StackTrace}")
+            Try
+                Return If(src IsNot Nothing, src.Text, String.Empty)
+            Catch
+                Return String.Empty
+            End Try
+        End Try
+    End Function
+
+    ''' Returns the "accepted" view of a range's text by temporarily selecting it,
+    ''' switching to Final view, and reading Selection.Text 
+    ''' Restores the original view and selection afterwards.
+    ''' Falls back to raw Range.Text when there are no revisions or on error.
+    ''' </summary>
+    ''' <param name="src">Word range to extract visible text from.</param>
+    ''' <returns>Text with deletions omitted and insertions kept.</returns>
+    ''' Returns the "accepted" view of a range's text by temporarily selecting it,
+    ''' switching to Final view, and reading Selection.Text 
+    ''' Restores the original view and selection afterwards.
+    ''' Falls back to raw Range.Text when there are no revisions or on error.
+    ''' </summary>
+    Public Function newGetVisibleText(ByVal src As Range) As String
+        Try
+            If src Is Nothing Then Return String.Empty
+
+            Dim raw As String
+            Try
+                raw = src.Text
+                If String.IsNullOrEmpty(raw) Then Return String.Empty
+            Catch
+                Return String.Empty
+            End Try
+
+            Try
+                If src.Revisions.Count = 0 Then Return raw
+            Catch
+                Return raw
+            End Try
+
+            Try
+                Dim app As Microsoft.Office.Interop.Word.Application = src.Application
+                Dim srcDoc As Microsoft.Office.Interop.Word.Document = src.Document
+                Dim docWindow As Microsoft.Office.Interop.Word.Window = srcDoc.ActiveWindow
+                Dim view As Microsoft.Office.Interop.Word.View = docWindow.View
+
+                Dim origRevView As WdRevisionsView = view.RevisionsView
+                Dim origShowRevs As Boolean = view.ShowRevisionsAndComments
+
+                Dim origActiveWindow As Microsoft.Office.Interop.Word.Window = app.ActiveWindow
+                Dim switchedWindows As Boolean = Not Object.ReferenceEquals(origActiveWindow, docWindow)
+
+                Dim origSelectionRange As Word.Range = Nothing
+                Try
+                    If app.Selection IsNot Nothing Then
+                        origSelectionRange = app.Selection.Range.Duplicate
+                    End If
+                Catch
+                    origSelectionRange = Nothing
+                End Try
+
+                Try
+                    If switchedWindows Then
+                        docWindow.Activate()
+                    End If
+
+                    src.Select()
+
+                    view.RevisionsView = WdRevisionsView.wdRevisionsViewFinal
+                    view.ShowRevisionsAndComments = False
+
+                    Dim finalText As String = app.Selection.Text
+                    If finalText Is Nothing Then finalText = String.Empty
+                    Return finalText
+
+                Finally
+                    view.RevisionsView = origRevView
+                    view.ShowRevisionsAndComments = origShowRevs
+
+                    Try
+                        If switchedWindows AndAlso origActiveWindow IsNot Nothing Then
+                            origActiveWindow.Activate()
+                        End If
+                    Catch
+                    End Try
+
+                    Try
+                        If origSelectionRange IsNot Nothing Then
+                            origSelectionRange.Select()
                         End If
                     Catch
                     End Try
@@ -4065,5 +4184,40 @@ Partial Public Class ThisAddIn
 
         Return String.Empty
     End Function
+
+    Private Sub RestoreUiContext(ByVal app As Word.Application,
+                             ByVal savedWindow As Word.Window,
+                             ByVal savedSelection As Word.Range)
+        Try
+            If savedWindow IsNot Nothing Then
+                savedWindow.Activate()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreUiContext(window) failed: {ex.Message}")
+        End Try
+
+        Try
+            If savedSelection IsNot Nothing Then
+                savedSelection.Select()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreUiContext(selection) failed: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Sub ActivateProcessingContext(ByVal targetRange As Word.Range)
+        Try
+            If targetRange Is Nothing Then Return
+
+            Dim targetWindow As Word.Window = targetRange.Document.ActiveWindow
+            If targetWindow IsNot Nothing Then
+                targetWindow.Activate()
+            End If
+
+            targetRange.Select()
+        Catch ex As Exception
+            Debug.WriteLine($"ActivateProcessingContext failed: {ex.Message}")
+        End Try
+    End Sub
 
 End Class

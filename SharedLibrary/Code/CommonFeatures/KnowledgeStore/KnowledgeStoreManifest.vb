@@ -5,19 +5,18 @@
 ' File: KnowledgeStoreManifest.vb
 ' Purpose:
 '   Manages the per-store manifest file `.redink\manifest.json`, which tracks
-'   indexed documents and their metadata inside a single Knowledge Store.
+'   indexed documents and their metadata within a single Knowledge Store.
 '
 ' Responsibilities:
 '   - Load manifest entries for a specific store.
 '   - Tolerate missing, empty, locked, or malformed manifest files safely.
 '   - Add, update, remove, and locate manifest entries by normalized file path.
-'   - Persist manifest changes with atomic-write semantics.
+'   - Persist manifest changes using safe write semantics.
 '   - Preserve per-store indexing state independently from catalog metadata.
 '
 ' Notes:
-'   - This manifest is store-local and distinct from broader catalog/index
-'     configuration files.
-'   - Corrupted manifests are treated as empty and can be rebuilt on save.
+'   - The manifest is store-local and distinct from the global store catalog.
+'   - Corrupted manifests are treated defensively and can be rebuilt on save.
 ' =============================================================================
 
 Option Strict On

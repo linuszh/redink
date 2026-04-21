@@ -4,57 +4,32 @@
 ' =============================================================================
 ' File: KnowledgeWikiService.vb
 ' Purpose:
-'   Orchestrates the Knowledge Store wiki layer: page generation, page merging,
-'   supplemental-page creation, structural normalization, index rebuilding,
-'   health/lint analysis, and repair workflows.
+'   Central orchestration service for the Knowledge Store wiki layer.
 '
 ' Responsibilities:
-'   - Wiki structure and storage:
-'       * Initialize the physical wiki directory tree under `.redink\Wiki`.
-'       * Maintain core wiki artifacts such as `index.md`, `log.md`,
-'         `review_queue.md`, and `health_report.md`.
-'       * Persist markdown pages with YAML front matter containing page metadata
-'         such as title, summary, kind, status, source count, contradiction
-'         count, and review flags.
-'   - Agentic wiki ingestion:
-'       * Build schema-aware prompts for source ingestion, clipboard ingestion,
-'         query filing, page merging, and structural repair.
-'       * Route LLM calls through the optional `KnowledgeStore` special-task
-'         model when configured.
-'       * Support large-document chunking with rolling summarization for sources
-'         that exceed single-call prompt limits.
-'       * Parse structured agent responses and convert them into stable wiki
-'         pages.
-'   - Page maintenance and normalization:
-'       * Detect existing pages by title similarity and merge new content into
-'         existing pages when appropriate.
-'       * Ensure required page sections exist (`## Key Claims`, `## Evidence`,
-'         `## Contradictions`, `## Open Questions`, `## Sources`,
-'         `## Related Pages`).
-'       * Normalize section content, deduplicate near-duplicate bullets, repair
-'         resolvable markdown links, and preserve explicit contradictions.
-'       * Compute page state (`stable`, `tentative`, `disputed`,
-'         `superseded`) from evidence, sources, and contradiction signals.
-'   - Cross-linking and retrieval support:
-'       * Find candidate related pages from existing wiki content.
-'       * Add related-page links and source links to generated pages.
-'       * Refresh semantic embeddings for saved pages via
-'         `KnowledgeEmbeddingService`.
-'   - Diagnostics, linting, and repair:
-'       * Rebuild the wiki index and review queue after page updates.
-'       * Detect broken links, orphan pages, weakly-supported claims, unsourced
-'         claims, potential contradictions, and possible superseded pages.
-'       * Produce a health report and optionally apply deterministic and
-'         LLM-assisted structural repairs.
-'       * Log operational events and wiki-processing errors.
+'   - Initialize and maintain the physical wiki structure under `.redink\Wiki`.
+'   - Create, merge, normalize, and persist wiki pages with YAML front matter.
+'   - Build schema-aware prompts for ingestion, supplemental pages, repair,
+'     and health-analysis workflows.
+'   - Run deterministic wiki maintenance such as section normalization, link
+'     repair, review-queue refresh, and index rebuilding.
+'   - Run gated LLM-assisted health analysis and structural repair, coordinated
+'     through `KnowledgeStoreHostGate` so Knowledge Store AI work yields to
+'     higher-priority host activity.
+'   - Refresh embeddings and write operational diagnostics and repair logs.
+'
+' Key Artifacts:
+'   - `index.md`
+'   - `log.md`
+'   - `health_report.md`
+'   - `review_queue.md`
 '
 ' Notes:
-'   - This service is the central orchestration layer for the wiki-based side of
-'     the Knowledge Store subsystem.
+'   - This service is the main wiki-side engine of the Knowledge Store subsystem.
 '   - It depends on `KnowledgeStoreCatalog`, `KnowledgeStoreSchema`,
-'     `KnowledgeIndexer`, `KnowledgeEmbeddingService`, and `SharedMethods.LLM`.
-'   - The implementation favors durable, source-backed wiki pages and explicit
-'     preservation of uncertainty and conflicting evidence.
+'     `KnowledgeEmbeddingService`, `KnowledgeIndexer`, and `SharedMethods.LLM`.
+'   - The implementation favors source-backed, durable pages and explicit
+'     preservation of uncertainty, contradictions, and review signals.
 ' =============================================================================
 
 Option Strict On
@@ -135,6 +110,7 @@ Namespace SharedLibrary
             Public Property AddedSourcesSections As Integer = 0
             Public Property AddedRelatedSections As Integer = 0
             Public Property RepairedLinks As Integer = 0
+            Public Property RemovedBrokenLinks As Integer = 0
             Public Property LlmRepairedPages As Integer = 0
         End Class
 
@@ -854,6 +830,8 @@ Namespace SharedLibrary
             sb.AppendLine("4. Do not invent sources.")
             sb.AppendLine("5. Only create pages that are likely to remain useful after this source.")
             sb.AppendLine("6. If the source conflicts with an existing page, update the relevant page rather than hiding the conflict.")
+            sb.AppendLine("7. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
+            sb.AppendLine("8. If a useful concept does not yet have a page, mention it as plain text or under ## Open Questions, but do not create a broken page link.")
             sb.AppendLine()
             sb.AppendLine(BuildSchemaSectionsGuidance(schema))
             sb.AppendLine()
@@ -932,6 +910,9 @@ Namespace SharedLibrary
             systemPrompt.AppendLine("4. Start the markdown body after a blank line.")
             systemPrompt.AppendLine("5. Use standard markdown links, not wiki syntax.")
             systemPrompt.AppendLine("6. Preserve source citations and keep them clickable.")
+            systemPrompt.AppendLine("7. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
+            systemPrompt.AppendLine("8. If a useful concept does not yet have a page, mention it as plain text or under ## Open Questions, but do not create a broken page link.")
+            systemPrompt.AppendLine("9. Do not invent sources.")
             systemPrompt.AppendLine()
             systemPrompt.AppendLine(BuildSchemaSectionsGuidance(schema))
             systemPrompt.AppendLine()
@@ -1114,34 +1095,92 @@ Namespace SharedLibrary
                                                                              promptUser As String,
                                                                              useAlternateAPI As Boolean,
                                                                              hideSplash As Boolean,
-                                                                             isBackground As Boolean) As Task(Of String)
+                                                                             isBackground As Boolean,
+                                                                             Optional progressCallback As Action(Of String) = Nothing,
+                                                                             Optional operationName As String = "Knowledge Store AI step") As Task(Of String)
             Dim throttleMs As Integer = If(isBackground,
                                            IngestionLlmThrottleBackgroundMs,
                                            IngestionLlmThrottleForegroundMs)
 
             Dim maxAttempts As Integer = Math.Max(1, IngestionLlmEmptyRetryCount + 1)
+            Dim effectiveOperationName = If(String.IsNullOrWhiteSpace(operationName), "Knowledge Store AI step", operationName.Trim())
 
             If throttleMs > 0 Then
+                ReportMaintenanceProgress(progressCallback, $"{effectiveOperationName}: pacing request.")
                 Await Task.Delay(throttleMs).ConfigureAwait(False)
             End If
 
             For attempt As Integer = 1 To maxAttempts
-                Dim response = Await SharedMethods.LLM(
-                    context:=context,
-                    promptSystem:=promptSystem,
-                    promptUser:=promptUser,
-                    UseSecondAPI:=useAlternateAPI,
-                    Hidesplash:=hideSplash).ConfigureAwait(False)
+                If maxAttempts > 1 Then
+                    ReportMaintenanceProgress(progressCallback, $"{effectiveOperationName}: AI request attempt {attempt} of {maxAttempts}.")
+                End If
+
+                Dim heartbeatCts As Threading.CancellationTokenSource = Nothing
+                Dim heartbeatTask As Task = Nothing
+                Dim callStartedUtc = DateTime.UtcNow
+                Dim response As String = ""
+
+                Try
+                    heartbeatCts = New Threading.CancellationTokenSource()
+
+                    heartbeatTask = Task.Run(
+                        Async Function()
+                            While Not heartbeatCts.Token.IsCancellationRequested
+                                Await Task.Delay(5000, heartbeatCts.Token).ConfigureAwait(False)
+
+                                If heartbeatCts.Token.IsCancellationRequested Then
+                                    Exit While
+                                End If
+
+                                Dim runningSeconds = CInt(Math.Max(1, (DateTime.UtcNow - callStartedUtc).TotalSeconds))
+                                ReportMaintenanceProgress(
+                                    progressCallback,
+                                    $"{effectiveOperationName}: AI still running ({runningSeconds}s).")
+                            End While
+                        End Function,
+                        heartbeatCts.Token)
+
+                    response = Await SharedMethods.LLM(
+                        context:=context,
+                        promptSystem:=promptSystem,
+                        promptUser:=promptUser,
+                        UseSecondAPI:=useAlternateAPI,
+                        Hidesplash:=hideSplash).ConfigureAwait(False)
+
+                Finally
+                    If heartbeatCts IsNot Nothing Then
+                        heartbeatCts.Cancel()
+                    End If
+                End Try
+
+                If heartbeatTask IsNot Nothing Then
+                    Try
+                        Await heartbeatTask.ConfigureAwait(False)
+                    Catch ex As OperationCanceledException
+                    Catch ex As AggregateException When ex.InnerExceptions.All(Function(inner) TypeOf inner Is OperationCanceledException)
+                    End Try
+                End If
+
+                If heartbeatCts IsNot Nothing Then
+                    heartbeatCts.Dispose()
+                End If
+
+                Dim elapsedSeconds = CInt(Math.Max(1, (DateTime.UtcNow - callStartedUtc).TotalSeconds))
+                ReportMaintenanceProgress(
+                    progressCallback,
+                    $"{effectiveOperationName}: AI step finished ({elapsedSeconds}s).")
 
                 If Not String.IsNullOrWhiteSpace(response) Then
                     Return response.Trim()
                 End If
 
                 If attempt < maxAttempts AndAlso IngestionLlmEmptyRetryDelayMs > 0 Then
+                    ReportMaintenanceProgress(progressCallback, $"{effectiveOperationName}: empty AI response, retrying.")
                     Await Task.Delay(IngestionLlmEmptyRetryDelayMs).ConfigureAwait(False)
                 End If
             Next
 
+            ReportMaintenanceProgress(progressCallback, $"{effectiveOperationName}: no usable AI response returned.")
             Return ""
         End Function
 
@@ -1229,18 +1268,34 @@ Namespace SharedLibrary
                                                                     promptSystem As String,
                                                                     promptUser As String,
                                                                     Optional hideSplash As Boolean = True,
-                                                                    Optional isBackground As Boolean = False) As Task(Of String)
-            Return Await ExecuteKnowledgeStoreScopedAsync(
-                context,
-                Async Function(useAlternateAPI)
-                    Return Await ExecuteKnowledgeStoreLlmWithRetryAsync(
-                        context:=context,
-                        promptSystem:=promptSystem,
-                        promptUser:=promptUser,
-                        useAlternateAPI:=useAlternateAPI,
-                        hideSplash:=hideSplash,
-                        isBackground:=isBackground).ConfigureAwait(False)
-                End Function).ConfigureAwait(False)
+                                                                    Optional isBackground As Boolean = False,
+                                                                    Optional progressCallback As Action(Of String) = Nothing,
+                                                                    Optional operationName As String = "Knowledge Store AI step") As Task(Of String)
+            Dim gateLease As IDisposable = Nothing
+
+            Try
+                gateLease = Await KnowledgeStoreHostGate.EnterLlmExecutionAsync(
+                    operationName:=operationName,
+                    statusCallback:=progressCallback).ConfigureAwait(False)
+
+                Return Await ExecuteKnowledgeStoreScopedAsync(
+                    context,
+                    Async Function(useAlternateAPI)
+                        Return Await ExecuteKnowledgeStoreLlmWithRetryAsync(
+                            context:=context,
+                            promptSystem:=promptSystem,
+                            promptUser:=promptUser,
+                            useAlternateAPI:=useAlternateAPI,
+                            hideSplash:=hideSplash,
+                            isBackground:=isBackground,
+                            progressCallback:=progressCallback,
+                            operationName:=operationName).ConfigureAwait(False)
+                    End Function).ConfigureAwait(False)
+            Finally
+                If gateLease IsNot Nothing Then
+                    gateLease.Dispose()
+                End If
+            End Try
         End Function
 
         Private Shared Function BuildAgentPrompt(roleDescription As String,
@@ -1261,7 +1316,9 @@ Namespace SharedLibrary
             sb.AppendLine("5. Use standard markdown links, not wiki syntax.")
             sb.AppendLine("6. Preserve nuance, contradictions, and explicit uncertainty.")
             sb.AppendLine("7. Create meaningful cross-links to relevant existing pages whenever possible.")
-            sb.AppendLine("8. Do not invent sources.")
+            sb.AppendLine("8. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
+            sb.AppendLine("9. If a useful concept does not yet have a page, mention it as plain text or place it under ## Open Questions, but do not create a broken page link.")
+            sb.AppendLine("10. Do not invent sources.")
             sb.AppendLine()
             sb.AppendLine(BuildSchemaSectionsGuidance(schema))
             sb.AppendLine()
@@ -1432,6 +1489,12 @@ Namespace SharedLibrary
                 relatedCandidates:=relatedCandidates,
                 schema:=schema)
 
+            Dim repairedLinksCount As Integer = 0
+            finalBody = RepairResolvableMarkdownLinks(finalBody, finalPath, kbRootPath, repairedLinksCount)
+
+            Dim removedBrokenLinksCount As Integer = 0
+            finalBody = StripUnresolvableInternalLinks(finalBody, finalPath, kbRootPath, removedBrokenLinksCount)
+
             Dim pageState = ComputePageComputedState(finalBody, mergedSourcePaths, schema)
 
             If isUpdate AndAlso
@@ -1463,6 +1526,26 @@ Namespace SharedLibrary
                 File.WriteAllText(finalPath, fullDocument, Encoding.UTF8)
                 CopySourceFilesToPageDirectory(finalPath, mergedSourcePaths)
                 Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(kbRootPath, finalPath, fullDocument, context).ConfigureAwait(False)
+
+                Dim backfilledRelatedPages = Await BackfillRelatedLinksForExistingPagesAsync(
+                    kbRootPath:=kbRootPath,
+                    savedPage:=New WikiPageInfo With {
+                        .FilePath = finalPath,
+                        .FileName = Path.GetFileName(finalPath),
+                        .RelativePath = GetRelativeWikiPath(kbRootPath, finalPath),
+                        .Title = finalTitle,
+                        .Summary = finalSummary,
+                        .Kind = finalKind,
+                        .Status = pageState.Status,
+                        .ReviewNeeded = pageState.ReviewNeeded,
+                        .ContradictionCount = pageState.ContradictionCount,
+                        .SourceCount = pageState.SourceCount,
+                        .Content = fullDocument,
+                        .SourcePaths = mergedSourcePaths
+                    },
+                    context:=context,
+                    schema:=schema).ConfigureAwait(False)
+
                 RebuildIndex(kbRootPath)
                 RefreshReviewArtifacts(kbRootPath)
 
@@ -1470,7 +1553,7 @@ Namespace SharedLibrary
                 AppendToLog(
                     kbRootPath,
                     logAction,
-                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Kind={finalKind}; Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}")
+                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Kind={finalKind}; Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}; LinksRepaired={repairedLinksCount}; BrokenLinksRemoved={removedBrokenLinksCount}; BackfilledRelatedPages={backfilledRelatedPages}")
 
                 Return True
             Catch ex As Exception
@@ -1478,6 +1561,9 @@ Namespace SharedLibrary
                 Return False
             End Try
         End Function
+
+
+
 
         Private Shared Function ParseAgentResponse(agentResponse As String, defaultKind As String) As ParsedAgentResponse
             Dim result As New ParsedAgentResponse()
@@ -2829,34 +2915,60 @@ Namespace SharedLibrary
                                                      currentPagePath As String,
                                                      relatedCandidates As List(Of WikiPageInfo)) As String
             If relatedCandidates Is Nothing OrElse relatedCandidates.Count = 0 Then Return body
-            If body.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) >= 0 Then Return body
 
-            Dim relatedLines As New List(Of String)()
+            Dim mergedItems As New List(Of String)()
 
             For Each candidate In relatedCandidates
-                If String.IsNullOrWhiteSpace(candidate.FilePath) Then Continue For
-                If candidate.FilePath.Equals(currentPagePath, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                Dim relativeLink = NormalizeWikiRelativePath(GetRelativePathCompat(Path.GetDirectoryName(currentPagePath), candidate.FilePath))
-                If String.IsNullOrWhiteSpace(relativeLink) Then Continue For
-
-                relatedLines.Add($"- [{candidate.Title}]({relativeLink})")
+                Dim relatedItem = BuildRelatedPageSectionItem(currentPagePath, candidate)
+                If Not String.IsNullOrWhiteSpace(relatedItem) Then
+                    mergedItems.Add(relatedItem)
+                End If
             Next
 
-            relatedLines = relatedLines.Distinct(StringComparer.OrdinalIgnoreCase).Take(6).ToList()
-            If relatedLines.Count = 0 Then Return body
+            Dim existingItems = ExtractSectionBulletItems(body, "## Related Pages").
+                Select(Function(x) Regex.Replace(If(x, "").Trim(), "\s+", " ").Trim()).
+                Where(Function(x) IsMeaningfulSectionItem(x)).
+                ToList()
+
+            mergedItems.AddRange(existingItems)
+
+            mergedItems = mergedItems.
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                Take(6).
+                ToList()
+
+            If mergedItems.Count = 0 Then Return body
 
             Dim sb As New StringBuilder()
-            sb.AppendLine(body.Trim())
-            sb.AppendLine()
             sb.AppendLine("## Related Pages")
             sb.AppendLine()
-            For Each line In relatedLines
-                sb.AppendLine(line)
+
+            For Each item In mergedItems
+                sb.AppendLine("- " & item)
             Next
 
-            Return sb.ToString().Trim()
+            Return ReplaceMarkdownSection(body, "## Related Pages", sb.ToString().Trim())
         End Function
+
+
+        Private Shared Function BuildRelatedPageSectionItem(currentPagePath As String,
+                                                            candidate As WikiPageInfo) As String
+            If candidate Is Nothing Then Return ""
+            If String.IsNullOrWhiteSpace(candidate.FilePath) Then Return ""
+            If candidate.FilePath.Equals(currentPagePath, StringComparison.OrdinalIgnoreCase) Then Return ""
+
+            Dim currentDir = Path.GetDirectoryName(currentPagePath)
+            If String.IsNullOrWhiteSpace(currentDir) Then Return ""
+
+            Dim relativeLink = NormalizeWikiRelativePath(
+                GetRelativePathCompat(currentDir, candidate.FilePath))
+
+            If String.IsNullOrWhiteSpace(relativeLink) Then Return ""
+            If String.IsNullOrWhiteSpace(candidate.Title) Then Return ""
+
+            Return $"[{candidate.Title}]({relativeLink})"
+        End Function
+
 
         Private Shared Function FindExistingWikiPagePath(kbRootPath As String, title As String) As String
             Dim normalizedTitle = NormalizeWikiKey(title)
@@ -3194,7 +3306,9 @@ Namespace SharedLibrary
 
         Public Shared Async Function LintWikiAsync(kbRootPath As String,
                                                    context As ISharedContext,
-                                                   Optional autoApply As Boolean = False) As Task(Of String)
+                                                   Optional autoApply As Boolean = False,
+                                                   Optional progressCallback As Action(Of String) = Nothing) As Task(Of String)
+
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return "Invalid KB path."
 
             Dim pages = GetAllWikiPages(kbRootPath)
@@ -3211,6 +3325,9 @@ Namespace SharedLibrary
             Dim contradictedClaims As New List(Of String)()
 
             Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+
+            Dim operationLabel As String = If(autoApply, "Lint Wiki", "Health Check")
+            ReportMaintenanceProgress(progressCallback, $"{operationLabel}: analyzing wiki structure.")
 
             For Each page In pages
                 inboundCounts(page.RelativePath) = 0
@@ -3405,11 +3522,15 @@ Namespace SharedLibrary
                                "Identify duplicate concepts, contradictions, stale claims, weakly-supported claims, missing cross-links, worthwhile next questions, and possible superseded pages. " &
                                "Be explicit about which pages should be marked disputed, tentative, superseded, or review_needed."
 
+            ReportMaintenanceProgress(progressCallback, $"{operationLabel}: preparing AI structural analysis.")
+
             Dim llmAnalysis = Await ExecuteKnowledgeStoreLlmAsync(
                 context:=context,
                 promptSystem:=systemPrompt,
                 promptUser:=promptUser.ToString().Trim(),
-                hideSplash:=False).ConfigureAwait(False)
+                hideSplash:=False,
+                progressCallback:=progressCallback,
+                operationName:=operationLabel).ConfigureAwait(False)
 
             If Not String.IsNullOrWhiteSpace(llmAnalysis) Then
                 report.AppendLine("## AI Structural Analysis")
@@ -3419,10 +3540,14 @@ Namespace SharedLibrary
             End If
 
             If autoApply Then
+                ReportMaintenanceProgress(progressCallback, $"{operationLabel}: applying automatic fixes.")
+
                 Dim fixSummary = Await ApplyWikiHealthFixesAsync(
                     kbRootPath:=kbRootPath,
                     context:=context,
-                    includeLlmRepairs:=True).ConfigureAwait(False)
+                    includeLlmRepairs:=True,
+                    progressCallback:=progressCallback,
+                    operationName:=operationLabel).ConfigureAwait(False)
 
                 If Not String.IsNullOrWhiteSpace(fixSummary) Then
                     report.AppendLine("## Auto-Applied Fixes")
@@ -3449,12 +3574,16 @@ Namespace SharedLibrary
                 "lint",
                 $"Pages={pages.Count}; Orphans={orphanPages.Count}; BrokenLinks={brokenLinks.Count}; Reviews={reviewPages.Count}; PotentialContradictions={contradictionPairs.Count}; SupersededCandidates={supersededCandidates.Count}; AutoApplied={autoApply}")
 
+            ReportMaintenanceProgress(progressCallback, $"{operationLabel}: finished.")
+
             Return report.ToString()
         End Function
 
         Public Shared Async Function ApplyWikiHealthFixesAsync(kbRootPath As String,
                                                                context As ISharedContext,
-                                                               Optional includeLlmRepairs As Boolean = True) As Task(Of String)
+                                                               Optional includeLlmRepairs As Boolean = True,
+                                                               Optional progressCallback As Action(Of String) = Nothing,
+                                                               Optional operationName As String = "Repair") As Task(Of String)
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return ""
             InitializeWikiStructure(kbRootPath)
 
@@ -3466,7 +3595,16 @@ Namespace SharedLibrary
             Dim skippedRiskyWrites As Integer = 0
             Dim potentialSupersededPagePaths = GetPotentialSupersededPagePaths(pages)
 
+            ReportMaintenanceProgress(progressCallback, $"{operationName}: running deterministic repairs.")
+
+            Dim pageNumber As Integer = 0
+
             For Each page In pages
+                pageNumber += 1
+                ReportMaintenanceProgress(
+                    progressCallback,
+                    $"{operationName}: normalizing page {pageNumber} of {pages.Count}: {If(page.Title, page.RelativePath)}")
+
                 Dim originalContent = page.Content
 
                 Dim candidates = FindCandidateWikiPages(
@@ -3484,10 +3622,15 @@ Namespace SharedLibrary
                     schema:=schema)
 
                 Dim repairedLinksCount As Integer = 0
-                Dim withRepairedLinks = RepairResolvableMarkdownLinks(updatedBody, page.FilePath, kbRootPath, repairedLinksCount)
+                updatedBody = RepairResolvableMarkdownLinks(updatedBody, page.FilePath, kbRootPath, repairedLinksCount)
                 If repairedLinksCount > 0 Then
                     result.RepairedLinks += repairedLinksCount
-                    updatedBody = withRepairedLinks
+                End If
+
+                Dim removedBrokenLinksCount As Integer = 0
+                updatedBody = StripUnresolvableInternalLinks(updatedBody, page.FilePath, kbRootPath, removedBrokenLinksCount)
+                If removedBrokenLinksCount > 0 Then
+                    result.RemovedBrokenLinks += removedBrokenLinksCount
                 End If
 
                 If (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
@@ -3540,7 +3683,14 @@ Namespace SharedLibrary
             RefreshReviewArtifacts(kbRootPath)
 
             If includeLlmRepairs Then
-                Dim llmCount = Await ApplyLlmStructuralRepairsAsync(kbRootPath, context).ConfigureAwait(False)
+                ReportMaintenanceProgress(progressCallback, $"{operationName}: running LLM-assisted structural repairs.")
+
+                Dim llmCount = Await ApplyLlmStructuralRepairsAsync(
+                    kbRootPath,
+                    context,
+                    progressCallback,
+                    operationName).ConfigureAwait(False)
+
                 result.LlmRepairedPages = llmCount
             End If
 
@@ -3553,19 +3703,23 @@ Namespace SharedLibrary
             sb.AppendLine($"- Added Sources sections: {result.AddedSourcesSections}")
             sb.AppendLine($"- Added Related Pages sections: {result.AddedRelatedSections}")
             sb.AppendLine($"- Repaired markdown links: {result.RepairedLinks}")
+            sb.AppendLine($"- Removed broken internal links: {result.RemovedBrokenLinks}")
             sb.AppendLine($"- LLM-repaired pages: {result.LlmRepairedPages}")
             sb.AppendLine($"- Risky writes skipped: {skippedRiskyWrites}")
 
             AppendToLog(
                 kbRootPath,
                 "repair",
-                $"Updated={result.UpdatedPages}; Sources={result.AddedSourcesSections}; Related={result.AddedRelatedSections}; Links={result.RepairedLinks}; LlmPages={result.LlmRepairedPages}; Skipped={skippedRiskyWrites}")
+                $"Updated={result.UpdatedPages}; Sources={result.AddedSourcesSections}; Related={result.AddedRelatedSections}; Links={result.RepairedLinks}; BrokenLinksRemoved={result.RemovedBrokenLinks}; LlmPages={result.LlmRepairedPages}; Skipped={skippedRiskyWrites}")
 
+            ReportMaintenanceProgress(progressCallback, $"{operationName}: finished.")
             Return sb.ToString().Trim()
         End Function
 
         Private Shared Async Function ApplyLlmStructuralRepairsAsync(kbRootPath As String,
-                                                                     context As ISharedContext) As Task(Of Integer)
+                                                                     context As ISharedContext,
+                                                                     Optional progressCallback As Action(Of String) = Nothing,
+                                                                     Optional operationName As String = "Repair") As Task(Of Integer)
 
             Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim pages = GetAllWikiPages(kbRootPath)
@@ -3590,9 +3744,21 @@ Namespace SharedLibrary
             Dim contradictionPairs = FindPotentialContradictionPairs(pages, schema)
             Dim problemPages = FindPagesNeedingLlmRepair(pages, inboundCounts, schema)
 
+            If problemPages.Count = 0 Then
+                ReportMaintenanceProgress(progressCallback, $"{operationName}: no LLM repairs were needed.")
+                Return 0
+            End If
+
             Dim repairedCount As Integer = 0
+            Dim problemPageNumber As Integer = 0
 
             For Each page In problemPages
+                problemPageNumber += 1
+
+                ReportMaintenanceProgress(
+                    progressCallback,
+                    $"{operationName}: LLM repairing page {problemPageNumber} of {problemPages.Count}: {If(page.Title, page.RelativePath)}")
+
                 Dim candidates = FindCandidateWikiPages(
                     kbRootPath,
                     page.Title & " " & page.Summary & " " & RemoveFrontMatter(page.Content),
@@ -3608,6 +3774,8 @@ Namespace SharedLibrary
                 promptSystem.AppendLine()
                 promptSystem.AppendLine(BuildSchemaSectionsGuidance(schema))
                 promptSystem.AppendLine()
+                promptSystem.AppendLine("Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
+                promptSystem.AppendLine("If a useful concept does not yet have a page, mention it as plain text or under ## Open Questions, but do not create a broken page link.")
                 promptSystem.AppendLine("Return exactly:")
                 promptSystem.AppendLine("TITLE: ...")
                 promptSystem.AppendLine("SUMMARY: ...")
@@ -3619,7 +3787,9 @@ Namespace SharedLibrary
                     context:=context,
                     promptSystem:=promptSystem.ToString().Trim(),
                     promptUser:=BuildRepairPromptUser(page, candidates, contradictionPairs, kbRootPath, schema),
-                    hideSplash:=True).ConfigureAwait(False)
+                    hideSplash:=True,
+                    progressCallback:=progressCallback,
+                    operationName:=operationName).ConfigureAwait(False)
 
                 If String.IsNullOrWhiteSpace(repairedResponse) Then
                     Continue For
@@ -3633,7 +3803,8 @@ Namespace SharedLibrary
                     defaultKind:=page.Kind,
                     relatedCandidates:=candidates,
                     actionName:="repair-llm",
-                    additionalSourcePaths:=page.SourcePaths, schema:=schema).ConfigureAwait(False)
+                    additionalSourcePaths:=page.SourcePaths,
+                    schema:=schema).ConfigureAwait(False)
 
                 If saved Then
                     repairedCount += 1
@@ -3642,6 +3813,101 @@ Namespace SharedLibrary
 
             Return repairedCount
         End Function
+
+
+        Private Shared Async Function BackfillRelatedLinksForExistingPagesAsync(kbRootPath As String,
+                                                                                savedPage As WikiPageInfo,
+                                                                                context As ISharedContext,
+                                                                                Optional schema As KnowledgeStoreSchema = Nothing) As Task(Of Integer)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return 0
+            If savedPage Is Nothing OrElse String.IsNullOrWhiteSpace(savedPage.FilePath) Then Return 0
+
+            If schema Is Nothing Then
+                schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            End If
+
+            If schema IsNot Nothing AndAlso Not schema.AlwaysCreateCrossLinks Then
+                Return 0
+            End If
+
+            Dim seedText =
+                savedPage.Title & " " &
+                savedPage.Summary & " " &
+                RemoveFrontMatter(savedPage.Content)
+
+            Dim candidatePages = FindCandidateWikiPages(kbRootPath, seedText, 8).
+                Where(Function(p) Not p.FilePath.Equals(savedPage.FilePath, StringComparison.OrdinalIgnoreCase)).
+                ToList()
+
+            Dim updatedCount As Integer = 0
+
+            For Each candidate In candidatePages
+                Dim latestCandidate As WikiPageInfo = Nothing
+
+                Try
+                    latestCandidate = ReadWikiPageInfo(kbRootPath, candidate.FilePath, schema)
+                Catch
+                    Continue For
+                End Try
+
+                Dim originalContent = latestCandidate.Content
+                Dim updatedBody = NormalizePageBody(
+                    body:=RemoveFrontMatter(originalContent).Trim(),
+                    currentPagePath:=latestCandidate.FilePath,
+                    sourcePaths:=latestCandidate.SourcePaths,
+                    relatedCandidates:=New List(Of WikiPageInfo) From {savedPage},
+                    schema:=schema)
+
+                Dim repairedLinksCount As Integer = 0
+                updatedBody = RepairResolvableMarkdownLinks(
+                    updatedBody,
+                    latestCandidate.FilePath,
+                    kbRootPath,
+                    repairedLinksCount)
+
+                Dim removedBrokenLinksCount As Integer = 0
+                updatedBody = StripUnresolvableInternalLinks(
+                    updatedBody,
+                    latestCandidate.FilePath,
+                    kbRootPath,
+                    removedBrokenLinksCount)
+
+                Dim pageState = ComputePageComputedState(updatedBody, latestCandidate.SourcePaths, schema)
+
+                Dim recomposedContent = ComposePageDocument(
+                    title:=latestCandidate.Title,
+                    summary:=latestCandidate.Summary,
+                    kind:=latestCandidate.Kind,
+                    body:=updatedBody,
+                    sourceFilePath:="",
+                    additionalSourcePaths:=latestCandidate.SourcePaths,
+                    status:=pageState.Status,
+                    reviewNeeded:=pageState.ReviewNeeded,
+                    contradictionCount:=pageState.ContradictionCount,
+                    sourceCount:=pageState.SourceCount)
+
+                If Not String.Equals(originalContent, recomposedContent, StringComparison.Ordinal) Then
+                    File.WriteAllText(latestCandidate.FilePath, recomposedContent, Encoding.UTF8)
+                    Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(
+                        kbRootPath,
+                        latestCandidate.FilePath,
+                        recomposedContent,
+                        context).ConfigureAwait(False)
+
+                    updatedCount += 1
+                End If
+            Next
+
+            If updatedCount > 0 Then
+                AppendToLog(
+                    kbRootPath,
+                    "related-backfill",
+                    $"{savedPage.Title} | UpdatedExistingPages={updatedCount}")
+            End If
+
+            Return updatedCount
+        End Function
+
 
         Private Shared Function FindPagesNeedingLlmRepair(pages As List(Of WikiPageInfo),
                                                           inboundCounts As Dictionary(Of String, Integer),
@@ -3717,6 +3983,85 @@ Namespace SharedLibrary
                 Where(Function(x) Not String.IsNullOrWhiteSpace(x)).
                 Distinct(StringComparer.OrdinalIgnoreCase).
                 ToList()
+        End Function
+
+        Private Shared Function StripUnresolvableInternalLinks(content As String,
+                                                               currentPagePath As String,
+                                                               kbRootPath As String,
+                                                               ByRef removedCount As Integer) As String
+            removedCount = 0
+            If String.IsNullOrWhiteSpace(content) Then Return content
+
+            Dim localRemovedCount As Integer = 0
+
+            Dim updatedContent = Regex.Replace(
+                content,
+                "\[([^\]]+)\]\(([^)]+)\)",
+                Function(m)
+                    Dim linkText = m.Groups(1).Value.Trim()
+                    Dim rawTarget = m.Groups(2).Value.Trim()
+
+                    If String.IsNullOrWhiteSpace(rawTarget) Then
+                        Return m.Value
+                    End If
+
+                    If rawTarget.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+                       rawTarget.StartsWith("https://", StringComparison.OrdinalIgnoreCase) OrElse
+                       rawTarget.StartsWith("file://", StringComparison.OrdinalIgnoreCase) Then
+                        Return m.Value
+                    End If
+
+                    Dim target = rawTarget
+                    Dim fragmentIndex = target.IndexOf("#"c)
+                    If fragmentIndex >= 0 Then
+                        target = target.Substring(0, fragmentIndex).Trim()
+                    End If
+
+                    If Not target.EndsWith(".md", StringComparison.OrdinalIgnoreCase) Then
+                        Return m.Value
+                    End If
+
+                    Dim resolved = ResolveWikiLinkTarget(currentPagePath, target, kbRootPath)
+                    If String.IsNullOrWhiteSpace(resolved) Then
+                        localRemovedCount += 1
+                        Return If(String.IsNullOrWhiteSpace(linkText), target, linkText)
+                    End If
+
+                    Dim absoluteTarget = Path.Combine(GetWikiRootPath(kbRootPath), resolved.Replace("/"c, Path.DirectorySeparatorChar))
+                    If Not File.Exists(absoluteTarget) Then
+                        localRemovedCount += 1
+                        Return If(String.IsNullOrWhiteSpace(linkText), Path.GetFileNameWithoutExtension(target), linkText)
+                    End If
+
+                    Return m.Value
+                End Function)
+
+            updatedContent = Regex.Replace(
+                updatedContent,
+                "\[\[([^\]]+)\]\]",
+                Function(m)
+                    Dim target = m.Groups(1).Value.Trim()
+                    If String.IsNullOrWhiteSpace(target) Then
+                        Return m.Value
+                    End If
+
+                    Dim existingPagePath = FindExistingWikiPagePath(kbRootPath, target)
+                    If String.IsNullOrWhiteSpace(existingPagePath) Then
+                        localRemovedCount += 1
+                        Return target
+                    End If
+
+                    Dim relativeLink = NormalizeWikiRelativePath(GetRelativePathCompat(Path.GetDirectoryName(currentPagePath), existingPagePath))
+                    If String.IsNullOrWhiteSpace(relativeLink) Then
+                        localRemovedCount += 1
+                        Return target
+                    End If
+
+                    Return $"[{target}]({relativeLink})"
+                End Function)
+
+            removedCount = localRemovedCount
+            Return updatedContent
         End Function
 
         Private Shared Function RepairResolvableMarkdownLinks(content As String,
@@ -3816,6 +4161,18 @@ Namespace SharedLibrary
             Return sb.ToString().Trim()
         End Function
 
+
+
+        Private Shared Sub ReportMaintenanceProgress(progressCallback As Action(Of String), statusText As String)
+            If progressCallback Is Nothing OrElse String.IsNullOrWhiteSpace(statusText) Then
+                Return
+            End If
+
+            Try
+                progressCallback.Invoke(statusText.Trim())
+            Catch
+            End Try
+        End Sub
 
 
     End Class

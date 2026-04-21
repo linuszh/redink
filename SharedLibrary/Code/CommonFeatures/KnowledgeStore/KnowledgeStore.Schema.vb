@@ -8,26 +8,20 @@
 '   structure, linking, contradiction analysis, and query behavior.
 '
 ' Responsibilities:
-'   - Schema model:
-'       * Define configurable store-level guidance such as domain, focus areas,
-'         entity types, preferred page kinds, and required sections.
-'       * Expose feature flags for cross-linking, source-linking, contradiction
-'         detection, query filing, and ignored topics.
-'   - Persistence:
-'       * Store schema data in `.redink\schema.json` inside each Knowledge
-'         Store root.
-'       * Load existing schema files or create defaults on first use.
-'       * Save schema updates back to disk.
-'   - Runtime defaults:
-'       * Provide sensible baseline settings when no schema exists or loading
-'         fails.
+'   - Define store-level schema metadata such as domain, focus areas, entity
+'     types, page kinds, and required sections.
+'   - Expose feature flags for cross-linking, source-linking, contradiction
+'     detection, query filing, and ignored topics.
+'   - Load existing schema files or create defaults on first use.
+'   - Persist schema settings to `.redink\schema.json`.
+'   - Provide safe runtime defaults when schema loading fails.
 '
 ' Notes:
-'   - The schema is consumed by indexing, wiki generation, linting, and query
-'     workflows.
-'   - File name intentionally matches the existing project naming convention.
+'   - The schema is consumed by indexing, wiki generation, linting, repair,
+'     and query workflows.
+'   - The file name intentionally follows the existing project naming
+'     convention.
 ' =============================================================================
-
 
 Option Strict On
 Option Explicit On

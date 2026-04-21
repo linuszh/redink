@@ -4,22 +4,19 @@
 ' =============================================================================
 ' File: KnowledgeStoreManager.vb
 ' Purpose:
-'   Defines the core Knowledge Store entry model and manages persisted index
-'   files for document-level metadata across configured stores.
+'   Defines the core Knowledge Store entry model and manages persisted
+'   document-level index data across configured stores.
 '
 ' Responsibilities:
-'   - Provide the `KnowledgeEntry` data model used throughout indexing and
-'     retrieval workflows.
+'   - Provide the `KnowledgeEntry` data model used by indexing and retrieval.
 '   - Load Knowledge Store index files from disk.
-'   - Merge central and local index content with provenance tracking and
-'     de-duplication.
-'   - Save user-writable local index entries back to disk.
-'   - Expose basic configuration checks for Knowledge Store availability.
+'   - Merge central and local index data with de-duplication and provenance.
+'   - Save writable local index entries back to disk.
+'   - Expose basic helper checks for Knowledge Store availability and indexing.
 '
 ' Notes:
-'   - This file manages document-entry indexes, while per-store manifests are
-'     handled by `KnowledgeStoreManifest`.
-'   - Local entries override central ones on collisions by normalized file path.
+'   - This file manages document-entry index persistence.
+'   - Per-store manifest handling is delegated to `KnowledgeStoreManifest`.
 ' =============================================================================
 
 Option Strict On
