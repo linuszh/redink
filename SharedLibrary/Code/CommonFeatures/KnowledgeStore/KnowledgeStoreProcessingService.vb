@@ -5,23 +5,21 @@
 ' File: KnowledgeStoreProcessingService.vb
 ' Purpose:
 '   Provides the shared document-processing pipeline used by both foreground and
-'   background Knowledge Store indexing so both modes behave identically.
+'   background Knowledge Store indexing.
 '
 ' Responsibilities:
 '   - Validate store, source file, and write-permission preconditions.
 '   - Invoke `KnowledgeIndexer.IndexDocumentAsync` to build a
 '     `KnowledgeStoreManager.KnowledgeEntry`.
-'   - Load the target store manifest, upsert the processed entry, and save it.
-'   - Return a structured `ProcessResult` with success state, entry payload, and
-'     error details.
-'   - Log processing failures into the Knowledge Wiki error log.
+'   - Upsert processed entries into the target store manifest.
+'   - Return structured success and error information to callers.
+'   - Log indexing failures into Knowledge Store diagnostics.
 '
 ' Notes:
-'   - This file centralizes the indexing write path shared by
-'     `KnowledgeStoreForegroundIndexer` and watcher/idle-based background flows.
-'   - It does not enumerate files itself; callers supply the target document.
+'   - This service centralizes the indexing write path used by the foreground
+'     indexer and watcher-driven background workflows.
+'   - File enumeration is handled by callers, not by this service.
 ' =============================================================================
-
 
 Option Strict On
 Option Explicit On

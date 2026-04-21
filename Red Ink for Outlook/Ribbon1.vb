@@ -392,7 +392,7 @@ Public Class Ribbon2
 
     Private Sub RI_KnowledgeStores_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_KnowledgeStores.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "KnowledgeStores_Outlook invoked")
-        Using frm As New KnowledgeStoreAdminForm(ThisAddIn._context)
+        Using frm As New KnowledgeStoreForm(ThisAddIn._context)
             frm.ShowDialog()
         End Using
     End Sub

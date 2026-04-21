@@ -4,36 +4,21 @@
 ' =============================================================================
 ' File: KnowledgeEmbeddingService.vb
 ' Purpose:
-'   Provides embedding generation, chunk storage, and local semantic/keyword
+'   Provides embedding generation, embedding persistence, and local semantic
 '   search for Knowledge Store content.
 '
 ' Responsibilities:
-'   - Embedding acquisition:
-'       * Resolve and temporarily apply the configured special-task model
-'         "Embedding" from `INI_AlternateModelPath` when available.
-'       * Call `SharedMethods.LLM(...)` to retrieve embedding vectors.
-'       * Parse separator-delimited numeric responses into `Single()` vectors.
-'       * Fail safely when the API returns errors or non-vector content.
-'   - Chunking and persistence:
-'       * Split source text into paragraph-oriented chunks via `ChunkText`.
-'       * Remove YAML-style front matter before embedding generation.
-'       * Maintain `.redink\.embeddings.json` per Knowledge Store root.
-'       * Rebuild or update per-file embedding records using atomic writes.
-'   - Search:
-'       * Execute semantic vector search using cosine similarity when
-'         embeddings are available for the query.
-'       * Fall back to local Okapi BM25 keyword scoring when no embedding
-'         vector can be produced.
-'   - Rebuild support:
-'       * Recreate the embedding index from Knowledge Store wiki pages.
-'       * Report progress through `ProgressBarModule` during full rebuilds.
+'   - Acquire embeddings through the configured embedding model or special-task
+'     model override.
+'   - Split source and wiki content into chunks suitable for embedding.
+'   - Maintain `.redink\.embeddings.json` safely for each Knowledge Store root.
+'   - Rebuild or incrementally update embeddings for changed wiki pages.
+'   - Execute semantic retrieval with keyword fallback when necessary.
 '
 ' Notes:
-'   - Embedding updates are serialized via `EmbeddingUpdateLock` to avoid
-'     concurrent index corruption.
-'   - Search operates entirely on the local `.embeddings.json` cache.
-'   - This service depends on `KnowledgeStoreCatalog`, `KnowledgeWikiService`,
-'     `SharedMethods`, and the shared configuration context.
+'   - Embedding updates are serialized to avoid concurrent index corruption.
+'   - Search operates on the local embedding cache and does not require a live
+'     external vector database.
 ' =============================================================================
 
 Option Strict On
