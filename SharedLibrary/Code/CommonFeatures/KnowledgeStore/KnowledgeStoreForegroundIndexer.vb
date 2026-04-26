@@ -24,6 +24,7 @@ Option Strict On
 Option Explicit On
 
 Imports System.IO
+Imports System.Runtime.ExceptionServices
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary.SharedContext
@@ -137,38 +138,69 @@ Namespace SharedLibrary
 
             ' ── Process files ──
             Dim processed As Integer = 0
+            Dim cancelled As Boolean = False
 
-            For Each item In fileQueue
-                If ProgressBarModule.CancelOperation Then
-                    result.WasCancelled = True
-                    Exit For
+            ' Group by store so we can wrap one embedding batch per store.
+            ' Inner per-source batches (IngestSourceAsync, ApplyWikiHealthFixesAsync)
+            ' will simply nest into this outer batch, and embeddings will flush
+            ' exactly once per unique touched page when the store finishes.
+            For Each storeGroup In fileQueue.GroupBy(Function(x) x.Store)
+                If cancelled Then Exit For
+
+                Dim store = storeGroup.Key
+                Dim kbRootPath As String = If(store IsNot Nothing, store.ResolvedSourcePath, "")
+                Dim batchOpened As Boolean = False
+
+                If Not String.IsNullOrWhiteSpace(kbRootPath) Then
+                    KnowledgeWikiService.BeginEmbeddingBatch(kbRootPath)
+                    batchOpened = True
                 End If
 
-                processed += 1
-                Dim fileName = Path.GetFileName(item.FilePath)
-                ProgressBarModule.GlobalProgressLabel = $"({processed}/{fileQueue.Count}) {fileName}"
-                ProgressBarModule.GlobalProgressValue = processed
+                Dim captured As ExceptionDispatchInfo = Nothing
 
                 Try
-                    Try
-                        Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
-                        store:=item.Store,
-                        filePath:=item.FilePath,
-                        context:=context,
-                        useLlmIndex:=context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
-
-                        If Not processResult.Success OrElse processResult.Entry Is Nothing Then
-                            result.FailedFiles += 1
-                            Continue For
+                    For Each item In storeGroup
+                        If ProgressBarModule.CancelOperation Then
+                            result.WasCancelled = True
+                            cancelled = True
+                            Exit For
                         End If
 
-                        result.IndexedFiles += 1
-                    Catch
-                        result.FailedFiles += 1
-                    End Try
-                Catch
-                    result.FailedFiles += 1
+                        processed += 1
+                        Dim fileName = Path.GetFileName(item.FilePath)
+                        ProgressBarModule.GlobalProgressLabel = $"({processed}/{fileQueue.Count}) {fileName}"
+                        ProgressBarModule.GlobalProgressValue = processed
+
+                        Try
+                            Try
+                                Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
+                                    store:=item.Store,
+                                    filePath:=item.FilePath,
+                                    context:=context,
+                                    useLlmIndex:=context.INI_KnowledgeStoreUseLLMIndex).ConfigureAwait(False)
+
+                                If Not processResult.Success OrElse processResult.Entry Is Nothing Then
+                                    result.FailedFiles += 1
+                                    Continue For
+                                End If
+
+                                result.IndexedFiles += 1
+                            Catch
+                                result.FailedFiles += 1
+                            End Try
+                        Catch
+                            result.FailedFiles += 1
+                        End Try
+                    Next
+                Catch ex As Exception
+                    captured = ExceptionDispatchInfo.Capture(ex)
                 End Try
+
+                If batchOpened Then
+                    Await KnowledgeWikiService.EndEmbeddingBatchAsync(context).ConfigureAwait(False)
+                End If
+
+                If captured IsNot Nothing Then captured.Throw()
             Next
 
             ' ── Close progress UI ──
