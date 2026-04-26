@@ -77,6 +77,41 @@ Namespace SharedLibrary
         Public Property QueryFilingEnabled As Boolean = False
         Public Property IgnoredTopics As String() = {}
         Public Property AdditionalInstructions As String = ""
+
+        ''' <summary>
+        ''' Minimum number of supplemental wiki pages the LLM should aim to produce
+        ''' per ingested source (in addition to the primary source page). The model
+        ''' is told this is a soft floor; it may return fewer for genuinely thin
+        ''' sources. Set together with <see cref="MaxSupplementalPagesPerSource"/>
+        ''' to control fan-out cost during ingest.
+        ''' </summary>
+        Public Property MinSupplementalPagesPerSource As Integer = 2
+
+        ''' <summary>
+        ''' Hard upper bound on supplemental wiki pages applied to the wiki per
+        ''' ingested source. Drafts beyond this count are discarded after parsing.
+        ''' Set to 0 to disable supplemental page generation entirely (skips the
+        ''' supplemental LLM call as well, so it is also a cost optimization).
+        ''' </summary>
+        Public Property MaxSupplementalPagesPerSource As Integer = 15
+
+        ''' <summary>
+        ''' When True, contradiction and superseded-page scanning use a token→page
+        ''' inverted index to skip pair scoring for pages with no meaningful token
+        ''' overlap. Faster on large wikis, but pairs whose shared-token count is
+        ''' below <see cref="PairScanMinSharedTokens"/> are no longer considered.
+        ''' Defaults to False to preserve historical recall.
+        ''' </summary>
+        Public Property UseInvertedIndexPairScan As Boolean = False
+
+        ''' <summary>
+        ''' Minimum shared tokens required for two pages to be considered a
+        ''' candidate pair under the inverted-index pre-filter. Ignored when
+        ''' <see cref="UseInvertedIndexPairScan"/> is False. Lower values cost
+        ''' more CPU but lose less recall; 2 is a reasonable starting point.
+        ''' </summary>
+        Public Property PairScanMinSharedTokens As Integer = 2
+
         Public Property StoreName As String = ""
 
         ''' <summary>
@@ -174,6 +209,100 @@ Namespace SharedLibrary
 
             Return sb.ToString().Trim()
         End Function
+
+        Public Property SourceAccess As New SourceAccessOptions()
+        Public Property SourceRegistry As New SourceRegistryOptions()
+        Public Property PerClaimCitations As New PerClaimCitationOptions()
+
+        Public Property ConceptUrlTemplates As New List(Of ConceptUrlTemplate)()
+
+        Public Class SourceAccessOptions
+            Public Property FilesFolderName As String = "_files"
+            Public Property DeduplicateByHash As Boolean = True
+            Public Property MaxInlineFileSizeMB As Integer = 50
+            Public Property AllowedExtensions As String() = {".pdf", ".docx", ".doc", ".txt", ".md", ".html", ".htm", ".rtf", ".pptx", ".xlsx", ".png", ".jpg", ".jpeg"}
+        End Class
+
+        Public Class SourceRegistryOptions
+            Public Property Enabled As Boolean = True
+            Public Property FolderName As String = "Sources"          ' dossier folder
+            ' Front-matter fields the LLM is asked to populate on dossier pages.
+            Public Property MetadataFields As String() = {"citation", "author", "issued_date", "jurisdiction", "language", "doc_type"}
+        End Class
+
+        Public Class PerClaimCitationOptions
+            Public Property Enabled As Boolean = True
+            Public Property Style As String = "bracket-id"            ' bracket-id | footnote | none
+        End Class
+
+        ''' <summary>
+        ''' Free-form natural language identifier (e.g. "German", "de-CH", "English",
+        ''' "French"). When non-empty, all LLM-generated page content (titles, summaries,
+        ''' bullets, prose) is produced in this language. Technical identifiers (kind
+        ''' values, file names, [S#] markers, YAML keys) remain unchanged.
+        ''' </summary>
+        Public Property OutputLanguage As String = ""
+
+        ''' <summary>
+        ''' Optional explicit names for the four analytical roles. When set, these win
+        ''' over fuzzy detection from RequiredSections. Leave empty to use the
+        ''' RequiredSections-based fallback.
+        ''' </summary>
+        Public Property AnalyticalSections As New AnalyticalSectionsOptions()
+
+        ''' <summary>
+        ''' Visible UI labels that the wiki engine emits deterministically (section
+        ''' headings, badges, placeholder text). Keys are stable English identifiers;
+        ''' values are the desired display text. Missing keys fall back to the English
+        ''' default in code.
+        ''' </summary>
+        Public Property Labels As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+        ''' <summary>
+        ''' Returns the configured label for the given key, or the supplied English
+        ''' default when no override exists. The default is also returned if the
+        ''' configured value is whitespace-only.
+        ''' </summary>
+        Public Function GetLabel(key As String, defaultText As String) As String
+            If Labels IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(key) AndAlso
+               Labels.ContainsKey(key) AndAlso
+               Not String.IsNullOrWhiteSpace(Labels(key)) Then
+                Return Labels(key)
+            End If
+            Return defaultText
+        End Function
+
+        ''' <summary>
+        ''' Returns either an empty string or a ready-to-prepend prompt block that
+        ''' instructs the LLM to write in the configured OutputLanguage.
+        ''' </summary>
+        Public Function ResolveLanguageDirective() As String
+            If String.IsNullOrWhiteSpace(OutputLanguage) Then Return ""
+            Dim sb As New StringBuilder()
+            sb.AppendLine("LANGUAGE:")
+            sb.AppendLine($"- Write ALL page content (titles, summaries, headings, bullets, prose) in {OutputLanguage.Trim()}.")
+            sb.AppendLine("- Keep technical identifiers in their original form: kind values, file names, source paths, [S#] markers, YAML keys, dossier slugs.")
+            sb.AppendLine("- If the source is in another language, translate naturally; do not transliterate proper names or quoted legal text.")
+            sb.AppendLine($"- Use ONLY the section headings supplied in the REQUIRED BODY SECTIONS list. Do NOT add any additional sections, and do NOT include English fallback equivalents (e.g. ""Key Claims"", ""Evidence"", ""Open Questions"", ""Contradictions"", ""Sources"", ""Related Pages"") if they are not on that list.")
+            sb.AppendLine($"- For empty sections, write the empty-state placeholder in {OutputLanguage.Trim()} (e.g. German: ""- _Keine._""; French: ""- _Aucune._""; English: ""- _None._""). Never use English when the page language is not English.")
+            Return sb.ToString().TrimEnd() & vbCrLf & vbCrLf
+        End Function
+
+        Public Class AnalyticalSectionsOptions
+            Public Property Claims As String = ""
+            Public Property Evidence As String = ""
+            Public Property Contradictions As String = ""
+            Public Property OpenQuestions As String = ""
+        End Class
+
+
+        Public Class ConceptUrlTemplate
+            Public Property Match As String = ""        ' simple substring/regex on concept title
+            Public Property MatchKind As String = "contains" ' contains | regex
+            Public Property Url As String = ""          ' may contain {title} placeholder
+            Public Property Description As String = ""  ' "Use when the concept is a Swiss federal law on fedlex.admin.ch"
+        End Class
 
     End Class
 

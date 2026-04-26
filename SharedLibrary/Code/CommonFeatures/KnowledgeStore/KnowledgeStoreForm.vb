@@ -78,6 +78,7 @@ Namespace SharedLibrary
         Private ReadOnly _btnRepair As New Button() With {.Text = "Repair", .Margin = New Padding(4)}
         Private ReadOnly _btnRevectorize As New Button() With {.Text = "Rebuild Embeddings", .Margin = New Padding(4)}
         Private ReadOnly _btnLint As New Button() With {.Text = "Lint Wiki", .Margin = New Padding(4)}
+        Private ReadOnly _btnRepairPage As New Button() With {.Text = "Repair Page...", .Margin = New Padding(4)}
         Private ReadOnly _btnEditSchema As New Button() With {.Text = "Edit Schema", .Margin = New Padding(4)}
         Private ReadOnly _btnClose As New Button() With {.Text = "Close", .Margin = New Padding(4)}
 
@@ -92,6 +93,8 @@ Namespace SharedLibrary
             InitializeForm()
             LoadStores()
         End Sub
+
+        Private _runningOperations As Integer = 0
 
 #Region "Form Initialization"
 
@@ -123,6 +126,7 @@ Namespace SharedLibrary
             ConfigureStandardButton(_btnReindex)
             ConfigureStandardButton(_btnHealthCheck)
             ConfigureStandardButton(_btnRepair)
+            ConfigureStandardButton(_btnRepairPage)
             ConfigureStandardButton(_btnRevectorize)
             ConfigureStandardButton(_btnLint)
             ConfigureStandardButton(_btnEditSchema)
@@ -251,7 +255,7 @@ Namespace SharedLibrary
                 .Padding = New Padding(0, 0, 0, 4)
             }
             opsPanel.Controls.AddRange(New Control() {
-                _btnIndex, _btnReindex, _btnHealthCheck, _btnRepair,
+                _btnIndex, _btnReindex, _btnHealthCheck, _btnRepair, _btnRepairPage,
                 _btnRevectorize, _btnLint, _btnEditSchema
             })
 
@@ -292,12 +296,27 @@ Namespace SharedLibrary
             AddHandler _btnReindex.Click, AddressOf OnReindex
             AddHandler _btnHealthCheck.Click, AddressOf OnHealthCheck
             AddHandler _btnRepair.Click, AddressOf OnRepair
+            AddHandler _btnRepairPage.Click, AddressOf OnRepairPage
             AddHandler _btnRevectorize.Click, AddressOf OnRevectorize
             AddHandler _btnLint.Click, AddressOf OnLint
             AddHandler _btnEditSchema.Click, AddressOf OnEditSchema
             AddHandler _btnClose.Click, Sub(s, ev) Me.Close()
             AddHandler Me.KeyDown, AddressOf OnKeyDown
             Me.ResumeLayout(performLayout:=True)
+        End Sub
+
+        Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+            If _runningOperations > 0 Then
+                Dim answer = ShowCustomYesNoBox(
+                    "A maintenance operation is still running. Closing now will let it finish in the background, " &
+                    "but progress will no longer be shown. Close anyway?",
+                    "Yes, close", "No, keep open")
+                If answer <> 1 Then
+                    e.Cancel = True
+                    Return
+                End If
+            End If
+            MyBase.OnFormClosing(e)
         End Sub
 
         Private Shared Sub AddLabeledRow(table As TableLayoutPanel, row As Integer, labelText As String, control As Control)
@@ -729,7 +748,7 @@ Namespace SharedLibrary
                                                 operationName As String,
                                                 statusText As String,
                                                 trayIcon As NotifyIcon)
-            If Me.IsDisposed Then
+            If Me.IsDisposed OrElse Me.Disposing OrElse Not Me.IsHandleCreated Then
                 Return
             End If
 
@@ -746,20 +765,32 @@ Namespace SharedLibrary
                 Return
             End If
 
-            Dim fullText = $"{operationName} — {storeName}: {statusText}"
-            _lblStatus.Text = fullText
+            ' Avoid the duplicate "Lint Wiki: Lint Wiki: ..." (issue #3):
+            Dim prefix = operationName & ":"
+            ' Avoid duplicated "Lint Wiki: Lint Wiki: ..." style prefixing.
+            Dim cleaned = statusText
+            If cleaned IsNot Nothing AndAlso
+               cleaned.StartsWith(operationName, StringComparison.OrdinalIgnoreCase) Then
+                Dim rest = cleaned.Substring(operationName.Length)
+                If rest.Length = 0 OrElse "(: —-".IndexOf(rest(0)) >= 0 OrElse Char.IsWhiteSpace(rest(0)) Then
+                    cleaned = rest.TrimStart(":"c, " "c, ChrW(9))
+                End If
+            End If
+
+            _lblStatus.Text = $"{operationName} — {storeName}: {cleaned}"
 
             If trayIcon IsNot Nothing Then
-                Dim toolTipText = $"{operationName}: {statusText}"
+                Dim toolTipText = $"{operationName}: {cleaned}"
                 If String.IsNullOrWhiteSpace(toolTipText) Then
                     toolTipText = $"{operationName}: working..."
                 End If
-
                 If toolTipText.Length > 63 Then
                     toolTipText = toolTipText.Substring(0, 60).TrimEnd() & "..."
                 End If
-
-                trayIcon.Text = toolTipText
+                Try
+                    trayIcon.Text = toolTipText
+                Catch
+                End Try
             End If
         End Sub
 
@@ -809,9 +840,12 @@ Namespace SharedLibrary
             End If
 
             SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
                     _context, storeName:=store.StoreId, forceReindex:=False)
+
+                If Me.IsDisposed OrElse Me.Disposing Then Return
 
                 ShowCustomMessageBox(
                     $"Indexing complete for '{store.Name}':{vbCrLf}" &
@@ -822,9 +856,10 @@ Namespace SharedLibrary
 
                 LoadStatistics(store)
             Catch ex As Exception
-                ShowCustomMessageBox($"Error during indexing: {ex.Message}", AN)
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during indexing: {ex.Message}", AN)
             Finally
-                SetOperationButtonsEnabled(True)
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
             End Try
         End Sub
 
@@ -844,9 +879,12 @@ Namespace SharedLibrary
             If answer <> 1 Then Return
 
             SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
                     _context, storeName:=store.StoreId, forceReindex:=True)
+
+                If Me.IsDisposed OrElse Me.Disposing Then Return
 
                 ShowCustomMessageBox(
                     $"Re-indexing complete for '{store.Name}':{vbCrLf}" &
@@ -857,9 +895,10 @@ Namespace SharedLibrary
 
                 LoadStatistics(store)
             Catch ex As Exception
-                ShowCustomMessageBox($"Error during re-indexing: {ex.Message}", AN)
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during re-indexing: {ex.Message}", AN)
             Finally
-                SetOperationButtonsEnabled(True)
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
             End Try
         End Sub
 
@@ -873,6 +912,7 @@ Namespace SharedLibrary
             End If
 
             SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim report = Await RunMaintenanceJobAsync(
                     store:=store,
@@ -885,6 +925,8 @@ Namespace SharedLibrary
                                   progressCallback:=progressCallback)
                           End Function)
 
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
                 ShowCustomWindow(
                     $"Health check report for '{store.Name}':",
                     report,
@@ -894,12 +936,396 @@ Namespace SharedLibrary
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
-                ShowCustomMessageBox($"Error during health check: {ex.Message}", AN)
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during health check: {ex.Message}", AN)
             Finally
-                SetOperationButtonsEnabled(True)
-                UpdateStatus()
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then
+                    SetOperationButtonsEnabled(True)
+                    UpdateStatus()
+                End If
             End Try
         End Sub
+
+        Private Async Sub OnRepairPage(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
+                ShowCustomMessageBox($"You do not have write permission to '{store.Name}'.", AN)
+                Return
+            End If
+
+            Dim wikiRoot = Path.Combine(store.ResolvedSourcePath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+            If Not Directory.Exists(wikiRoot) Then
+                ShowCustomMessageBox("This store has no wiki yet. Index it first.", AN)
+                Return
+            End If
+
+            Dim reservedNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+                KnowledgeStoreCatalog.IndexFile, KnowledgeStoreCatalog.LogFile,
+                "health_report.md", "review_queue.md"
+            }
+
+            Dim allPages = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
+                Where(Function(f) Not reservedNames.Contains(Path.GetFileName(f))).
+                OrderBy(Function(f) f, StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+            If allPages.Count = 0 Then
+                ShowCustomMessageBox("No wiki pages found in this store.", AN)
+                Return
+            End If
+
+            Dim selected = ShowWikiPageSelector(wikiRoot, allPages)
+            If selected Is Nothing OrElse selected.Count = 0 Then Return
+
+            Dim confirm = ShowCustomYesNoBox(
+                $"Repair {selected.Count} wiki page(s) in '{store.Name}'?{vbCrLf}{vbCrLf}" &
+                "For each page the corresponding source document (if known) will be re-ingested by the LLM, " &
+                "overwriting the page. Pages without a known source will simply be deleted.",
+                "Yes, repair", "Cancel")
+            If confirm <> 1 Then Return
+
+            SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
+            Try
+                Dim summary = Await RunMaintenanceJobAsync(
+                    store:=store,
+                    operationName:="Repair Page",
+                    work:=Function(progressCallback) RepairWikiPagesAsync(store, selected, progressCallback))
+
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
+                ShowCustomWindow(
+                    $"Page repair summary for '{store.Name}':",
+                    summary,
+                    "You can copy this summary to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+                UpdateStatus()
+            Catch ex As Exception
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during page repair: {ex.Message}", AN)
+            Finally
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then
+                    SetOperationButtonsEnabled(True)
+                    UpdateStatus()
+                End If
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Modal multi-select dialog listing wiki page relative paths.
+        ''' Returns the selected absolute file paths, or Nothing on cancel.
+        ''' </summary>
+        Private Function ShowWikiPageSelector(wikiRoot As String, pages As List(Of String)) As List(Of String)
+            Using dlg As New Form()
+                dlg.Text = $"{AN} — Select Wiki Pages To Repair"
+                dlg.StartPosition = FormStartPosition.CenterParent
+                dlg.Size = New Size(720, 560)
+                dlg.MinimumSize = New Size(560, 400)
+                dlg.FormBorderStyle = FormBorderStyle.Sizable
+                dlg.MinimizeBox = False
+                dlg.MaximizeBox = True
+                dlg.ShowInTaskbar = False
+                dlg.Font = Me.Font
+                dlg.AutoScaleMode = AutoScaleMode.Dpi
+                dlg.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
+                dlg.BackColor = SystemColors.Control
+
+                ' Match main form icon
+                Try
+                    Dim bmp As New Bitmap(GetLogoBitmap(LogoType.Standard))
+                    dlg.Icon = Icon.FromHandle(bmp.GetHicon())
+                    bmp.Dispose()
+                Catch
+                End Try
+
+                ' Header label — auto-sized so it cannot be cut off
+                Dim header As New Label() With {
+                    .Text = "Select one or more wiki pages to repair." & vbCrLf &
+                            "Each selected page will be deleted and, if its source can be located, regenerated by the LLM.",
+                    .Dock = DockStyle.Top,
+                    .AutoSize = True,
+                    .MaximumSize = New Size(dlg.ClientSize.Width - 24, 0),
+                    .Padding = New Padding(12, 12, 12, 8),
+                    .Font = New Font(Me.Font, FontStyle.Regular),
+                    .BackColor = SystemColors.Control
+                }
+                AddHandler dlg.SizeChanged, Sub(s, ev) header.MaximumSize = New Size(dlg.ClientSize.Width - 24, 0)
+
+                ' Padded list container
+                Dim listHost As New Panel() With {
+                    .Dock = DockStyle.Fill,
+                    .Padding = New Padding(12, 4, 12, 8),
+                    .BackColor = SystemColors.Control
+                }
+                Dim list As New CheckedListBox() With {
+                    .Dock = DockStyle.Fill,
+                    .CheckOnClick = True,
+                    .IntegralHeight = False,
+                    .BorderStyle = BorderStyle.FixedSingle
+                }
+                For Each absPath In pages
+                    list.Items.Add(GetRelativePathSafe(wikiRoot, absPath))
+                Next
+                listHost.Controls.Add(list)
+
+                ' Select-all helpers
+                Dim btnAll As New Button() With {.Text = "Select All", .Margin = New Padding(4)}
+                Dim btnNone As New Button() With {.Text = "Clear", .Margin = New Padding(4)}
+                ConfigureStandardButton(btnAll)
+                ConfigureStandardButton(btnNone)
+                AddHandler btnAll.Click, Sub(s, ev)
+                                             For i = 0 To list.Items.Count - 1
+                                                 list.SetItemChecked(i, True)
+                                             Next
+                                         End Sub
+                AddHandler btnNone.Click, Sub(s, ev)
+                                              For i = 0 To list.Items.Count - 1
+                                                  list.SetItemChecked(i, False)
+                                              Next
+                                          End Sub
+
+                Dim btnOk As New Button() With {.Text = "Repair Selected", .DialogResult = DialogResult.OK, .Margin = New Padding(4)}
+                Dim btnCancel As New Button() With {.Text = "Cancel", .DialogResult = DialogResult.Cancel, .Margin = New Padding(4)}
+                ConfigureStandardButton(btnOk)
+                ConfigureStandardButton(btnCancel)
+
+                Dim btnPanel As New TableLayoutPanel() With {
+                    .Dock = DockStyle.Bottom,
+                    .AutoSize = True,
+                    .ColumnCount = 4,
+                    .Padding = New Padding(12, 8, 12, 12),
+                    .BackColor = SystemColors.Control
+                }
+                btnPanel.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+                btnPanel.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+                btnPanel.ColumnStyles.Add(New ColumnStyle(SizeType.Percent, 100.0F))
+                btnPanel.ColumnStyles.Add(New ColumnStyle(SizeType.AutoSize))
+                btnPanel.Controls.Add(btnAll, 0, 0)
+                btnPanel.Controls.Add(btnNone, 1, 0)
+                Dim spacer As New Panel() With {.Dock = DockStyle.Fill, .Height = 1}
+                btnPanel.Controls.Add(spacer, 2, 0)
+                Dim rightFlow As New FlowLayoutPanel() With {
+                    .FlowDirection = FlowDirection.RightToLeft,
+                    .AutoSize = True,
+                    .WrapContents = False
+                }
+                rightFlow.Controls.Add(btnCancel)
+                rightFlow.Controls.Add(btnOk)
+                btnPanel.Controls.Add(rightFlow, 3, 0)
+
+                ' Order matters for docking (Fill last among non-bottom/top)
+                dlg.Controls.Add(listHost)
+                dlg.Controls.Add(btnPanel)
+                dlg.Controls.Add(header)
+                dlg.AcceptButton = btnOk
+                dlg.CancelButton = btnCancel
+
+                If dlg.ShowDialog(Me) <> DialogResult.OK Then Return Nothing
+
+                Dim picked As New List(Of String)
+                For i = 0 To list.Items.Count - 1
+                    If list.GetItemChecked(i) Then picked.Add(pages(i))
+                Next
+                Return picked
+            End Using
+        End Function
+
+        Private Shared Function GetRelativePathSafe(root As String, fullPath As String) As String
+            Try
+                Dim rootUri As New Uri(If(root.EndsWith(Path.DirectorySeparatorChar), root, root & Path.DirectorySeparatorChar))
+                Dim fileUri As New Uri(fullPath)
+                Return Uri.UnescapeDataString(rootUri.MakeRelativeUri(fileUri).ToString()).Replace("/"c, Path.DirectorySeparatorChar)
+            Catch
+                Return fullPath
+            End Try
+        End Function
+
+        Private Async Function RepairWikiPagesAsync(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition,
+                                                    pageFullPaths As List(Of String),
+                                                    progressCallback As Action(Of String)) As Task(Of String)
+            Dim manifest = KnowledgeStoreManifest.Load(store)
+            Dim regenerated As Integer = 0
+            Dim deletedOnly As Integer = 0
+            Dim failed As New List(Of String)()
+            Dim total = pageFullPaths.Count
+            Dim idx = 0
+
+            For Each pagePath In pageFullPaths
+                idx += 1
+                Dim relForLog = GetRelativePathSafe(store.ResolvedSourcePath, pagePath)
+                progressCallback?.Invoke($"Repair Page ({idx}/{total}) {relForLog}: locating source...")
+
+                Dim sourcePath = TryResolveSourceForWikiPage(pagePath, manifest)
+
+                Try
+                    If File.Exists(pagePath) Then File.Delete(pagePath)
+                Catch ex As Exception
+                    failed.Add($"{relForLog} — could not delete: {ex.Message}")
+                    Continue For
+                End Try
+
+                If String.IsNullOrWhiteSpace(sourcePath) OrElse Not File.Exists(sourcePath) Then
+                    deletedOnly += 1
+                    failed.Add($"{relForLog} — no recoverable source path; page was deleted only.")
+                    Continue For
+                End If
+
+                ' Heartbeat so the status bar / tray keep moving while
+                ' IngestSourceAsync is inside the host gate or LLM call
+                ' (it does not accept a progressCallback of its own).
+                Dim heartbeatCts As New System.Threading.CancellationTokenSource()
+                Dim ingestStartedUtc = DateTime.UtcNow
+                Dim sourceName = Path.GetFileName(sourcePath)
+                progressCallback?.Invoke($"Repair Page ({idx}/{total}) {relForLog}: starting LLM ingest of '{sourceName}'.")
+
+                Dim heartbeatTask = Task.Run(
+                    Async Function()
+                        Try
+                            While Not heartbeatCts.Token.IsCancellationRequested
+                                Await Task.Delay(2000, heartbeatCts.Token).ConfigureAwait(False)
+                                If heartbeatCts.Token.IsCancellationRequested Then Exit While
+                                Dim elapsed = CInt(Math.Max(1, (DateTime.UtcNow - ingestStartedUtc).TotalSeconds))
+                                progressCallback?.Invoke(
+                                    $"Repair Page ({idx}/{total}) {relForLog}: still working ({elapsed}s) — waiting for LLM/host.")
+                            End While
+                        Catch
+                        End Try
+                    End Function,
+                    heartbeatCts.Token)
+
+                Dim ok As Boolean = False
+                Dim ingestError As String = Nothing
+                Try
+                    manifest.RemoveByPath(sourcePath)
+                    manifest.Save(store)
+
+                    ok = Await KnowledgeWikiService.IngestSourceAsync(
+                        kbRootPath:=store.ResolvedSourcePath,
+                        sourceFilePath:=sourcePath,
+                        context:=_context,
+                        isBackground:=False).ConfigureAwait(False)
+                Catch ex As Exception
+                    ingestError = ex.Message
+                End Try
+
+                ' Stop heartbeat (Await must live outside Finally in VB).
+                heartbeatCts.Cancel()
+                Try
+                    Await heartbeatTask.ConfigureAwait(False)
+                Catch
+                End Try
+                heartbeatCts.Dispose()
+
+                If ingestError IsNot Nothing Then
+                    failed.Add($"{relForLog} — {ingestError}")
+                ElseIf ok Then
+                    Dim elapsedTotal = CInt(Math.Max(1, (DateTime.UtcNow - ingestStartedUtc).TotalSeconds))
+                    progressCallback?.Invoke(
+                        $"Repair Page ({idx}/{total}) {relForLog}: regenerated in {elapsedTotal}s.")
+                    regenerated += 1
+                Else
+                    failed.Add($"{relForLog} — re-ingestion of '{sourcePath}' returned no content (LLM empty or host gate cancelled).")
+                End If
+            Next
+
+            Dim sb As New System.Text.StringBuilder()
+            sb.AppendLine($"# Page Repair — {store.Name}")
+            sb.AppendLine()
+            sb.AppendLine($"- Pages requested: {total}")
+            sb.AppendLine($"- Regenerated from source: {regenerated}")
+            sb.AppendLine($"- Deleted (no source available): {deletedOnly}")
+            sb.AppendLine($"- Failed: {failed.Count}")
+            If failed.Count > 0 Then
+                sb.AppendLine()
+                sb.AppendLine("## Failures")
+                For Each f In failed
+                    sb.AppendLine($"- {f}")
+                Next
+            End If
+            Return sb.ToString()
+        End Function
+
+        ''' <summary>
+        ''' Tries to recover the originating source file path for a wiki page.
+        ''' Order of preference:
+        '''   1. YAML front matter `source_paths:` (LLM-authored pages).
+        '''   2. `**Source:** \`...\`` line (auto summary pages).
+        '''   3. Manifest entry whose Title matches the page H1.
+        ''' </summary>
+        Private Shared Function TryResolveSourceForWikiPage(pagePath As String,
+                                                            manifest As KnowledgeStoreManifest) As String
+            Try
+                If Not File.Exists(pagePath) Then Return ""
+                Dim text = File.ReadAllText(pagePath, System.Text.Encoding.UTF8)
+
+                ' (1) YAML front matter: source_paths: \n  - 'path'  (or "path" or path)
+                Dim mFront = System.Text.RegularExpressions.Regex.Match(
+                    text, "\A---\s*\r?\n(?<fm>[\s\S]*?)\r?\n---\s*\r?\n")
+                If mFront.Success Then
+                    Dim fm = mFront.Groups("fm").Value
+                    Dim mList = System.Text.RegularExpressions.Regex.Match(
+                        fm, "(?ms)^source_paths\s*:\s*\r?\n(?<items>(?:[ \t]+-.*\r?\n?)+)")
+                    If mList.Success Then
+                        For Each line In mList.Groups("items").Value.
+                                Split(New String() {vbCrLf, vbLf}, StringSplitOptions.RemoveEmptyEntries)
+                            Dim m = System.Text.RegularExpressions.Regex.Match(
+                                line, "^\s*-\s*(?:'(?<v>(?:[^']|'')*)'|""(?<v>[^""]*)""|(?<v>.+?))\s*$")
+                            If m.Success Then
+                                Dim raw = m.Groups("v").Value.Replace("''", "'").Trim()
+                                Dim expanded = ExpandEnvironmentVariables(raw)
+                                If Not String.IsNullOrWhiteSpace(expanded) AndAlso File.Exists(expanded) Then
+                                    Return expanded
+                                End If
+                            End If
+                        Next
+                    End If
+
+                    ' Single-line variant: source_paths: ['x','y']  or  source_path: 'x'
+                    Dim mSingle = System.Text.RegularExpressions.Regex.Match(
+                        fm, "(?im)^source_path[s]?\s*:\s*(?<v>.+?)\s*$")
+                    If mSingle.Success Then
+                        Dim v = mSingle.Groups("v").Value.Trim().Trim("["c, "]"c)
+                        For Each part In v.Split(","c)
+                            Dim raw = part.Trim().Trim("'"c, """"c)
+                            Dim expanded = ExpandEnvironmentVariables(raw)
+                            If File.Exists(expanded) Then Return expanded
+                        Next
+                    End If
+                End If
+
+                ' (2) Legacy `**Source:**` line
+                Dim mSrc = System.Text.RegularExpressions.Regex.Match(
+                    text, "(?im)^\s*\*\*\s*Source\s*:\s*\*\*\s*`?([^`\r\n]+)`?\s*$")
+                If mSrc.Success Then
+                    Dim candidate = ExpandEnvironmentVariables(mSrc.Groups(1).Value.Trim())
+                    If File.Exists(candidate) Then Return candidate
+                End If
+
+                ' (3) Manifest title fallback
+                Dim mTitle = System.Text.RegularExpressions.Regex.Match(text, "(?m)^\s*#\s+(.+?)\s*$")
+                If mTitle.Success AndAlso manifest IsNot Nothing Then
+                    Dim title = mTitle.Groups(1).Value.Trim()
+                    Dim hit = manifest.Entries.FirstOrDefault(
+                        Function(en) Not String.IsNullOrWhiteSpace(en.Title) AndAlso
+                                     en.Title.Equals(title, StringComparison.OrdinalIgnoreCase))
+                    If hit IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(hit.FilePath) Then
+                        Dim expanded = ExpandEnvironmentVariables(hit.FilePath)
+                        If File.Exists(expanded) Then Return expanded
+                    End If
+                End If
+            Catch
+            End Try
+            Return ""
+        End Function
 
         Private Async Sub OnRepair(sender As Object, e As EventArgs)
             Dim store = GetSelectedStore()
@@ -921,6 +1347,7 @@ Namespace SharedLibrary
             If answer <> 1 Then Return
 
             SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim summary = Await RunMaintenanceJobAsync(
                     store:=store,
@@ -934,6 +1361,8 @@ Namespace SharedLibrary
                                   operationName:="Repair")
                           End Function)
 
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
                 ShowCustomWindow(
                     $"Repair summary for '{store.Name}':",
                     summary,
@@ -943,48 +1372,13 @@ Namespace SharedLibrary
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
-                ShowCustomMessageBox($"Error during repair: {ex.Message}", AN)
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during repair: {ex.Message}", AN)
             Finally
-                SetOperationButtonsEnabled(True)
-                UpdateStatus()
-            End Try
-        End Sub
-
-        Private Async Sub OnLint(sender As Object, e As EventArgs)
-            Dim store = GetSelectedStore()
-            If store Is Nothing Then Return
-
-            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
-                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
-                Return
-            End If
-
-            SetOperationButtonsEnabled(False)
-            Try
-                Dim report = Await RunMaintenanceJobAsync(
-                    store:=store,
-                    operationName:="Lint Wiki",
-                    work:=Function(progressCallback)
-                              Return KnowledgeWikiService.LintWikiAsync(
-                                  kbRootPath:=store.ResolvedSourcePath,
-                                  context:=_context,
-                                  autoApply:=True,
-                                  progressCallback:=progressCallback)
-                          End Function)
-
-                ShowCustomWindow(
-                    $"Lint report for '{store.Name}':",
-                    report,
-                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
-                    $"{AN} Knowledge Store")
-
-                LoadStatistics(store)
-                UpdateStatus()
-            Catch ex As Exception
-                ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
-            Finally
-                SetOperationButtonsEnabled(True)
-                UpdateStatus()
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then
+                    SetOperationButtonsEnabled(True)
+                    UpdateStatus()
+                End If
             End Try
         End Sub
 
@@ -997,7 +1391,6 @@ Namespace SharedLibrary
                 Return
             End If
 
-            ' Count embeddable wiki pages
             Dim wikiRoot = Path.Combine(store.ResolvedSourcePath, ".redink", KnowledgeStoreCatalog.WikiFolder)
             If Not Directory.Exists(wikiRoot) Then
                 ShowCustomMessageBox("No wiki pages found to rebuild embeddings for.", AN)
@@ -1024,6 +1417,7 @@ Namespace SharedLibrary
             If answer <> 1 Then Return
 
             SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 ProgressBarModule.GlobalProgressValue = 0
                 ProgressBarModule.GlobalProgressMax = wikiPages.Count
@@ -1043,6 +1437,8 @@ Namespace SharedLibrary
                 Dim wasCancelled = ProgressBarModule.CancelOperation
                 ProgressBarModule.CancelOperation = True
 
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
                 ShowCustomMessageBox(
                     If(wasCancelled,
                        $"Embedding rebuild cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
@@ -1052,11 +1448,57 @@ Namespace SharedLibrary
                 LoadStatistics(store)
             Catch ex As Exception
                 ProgressBarModule.CancelOperation = True
-                ShowCustomMessageBox($"Error during embedding rebuild: {ex.Message}", AN)
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during embedding rebuild: {ex.Message}", AN)
             Finally
-                SetOperationButtonsEnabled(True)
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
             End Try
         End Sub
+
+        Private Async Sub OnLint(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
+            Try
+                Dim report = Await RunMaintenanceJobAsync(
+                    store:=store,
+                    operationName:="Lint Wiki",
+                    work:=Function(progressCallback)
+                              Return KnowledgeWikiService.LintWikiAsync(
+                                  kbRootPath:=store.ResolvedSourcePath,
+                                  context:=_context,
+                                  autoApply:=True,
+                                  progressCallback:=progressCallback)
+                          End Function)
+
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
+                ShowCustomWindow(
+                    $"Lint report for '{store.Name}':",
+                    report,
+                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
+                    $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+                UpdateStatus()
+            Catch ex As Exception
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
+            Finally
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                If Not Me.IsDisposed Then
+                    SetOperationButtonsEnabled(True)
+                    UpdateStatus()
+                End If
+            End Try
+        End Sub
+
 
 
 
@@ -1084,6 +1526,7 @@ Namespace SharedLibrary
                     ForceJson:=True,
                     _context:=_context)
             Catch ex As Exception
+            Catch ex As Exception
                 ShowCustomMessageBox($"Error opening schema: {ex.Message}", AN)
             End Try
         End Sub
@@ -1093,6 +1536,7 @@ Namespace SharedLibrary
             _btnReindex.Enabled = enabled
             _btnHealthCheck.Enabled = enabled
             _btnRepair.Enabled = enabled
+            _btnRepairPage.Enabled = enabled
             _btnRevectorize.Enabled = enabled
             _btnLint.Enabled = enabled
             _btnEditSchema.Enabled = enabled

@@ -884,7 +884,7 @@ Partial Public Class ThisAddIn
                 ApDashboardLog("🎙 Generating podcast dialogue script via LLM...", "step")
 
                 HostName = "Alex"
-                GuestName = "Sam"
+                GuestName = "Lisa"
                 TargetAudience = "General audience"
                 Duration = podcastDuration
                 DialogueContext = If(String.IsNullOrWhiteSpace(podcastContext), "None", podcastContext)

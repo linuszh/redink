@@ -41,6 +41,7 @@ Imports System.Text
 Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary.SharedContext
+Imports System.Runtime.ExceptionServices
 
 Namespace SharedLibrary
     Public Class KnowledgeWikiService
@@ -97,6 +98,8 @@ Namespace SharedLibrary
             Public Property ClaimB As String = ""
             Public Property Reason As String = ""
         End Class
+
+
 
         Private Class SupplementalWikiPageDraft
             Public Property Title As String = ""
@@ -159,51 +162,81 @@ Namespace SharedLibrary
                 list.AddRange(DefaultAnalyticalSections)
             End If
 
-            ' Ensure the four analytical backbone headings are present.
-            ' Resolve against the list we just built — NOT via Get*Heading()
-            ' to avoid infinite recursion (those call back into this method).
-            Dim analyticalDefaults As New List(Of (SearchTerms As String(), DefaultHeading As String)) From {
-                (New String() {"key claims", "key provisions", "key points", "claims", "provisions", "obligations", "requirements", "controls"}, "## Key Claims"),
-                (New String() {"evidence", "support", "supporting evidence", "basis", "justification", "authority", "supporting material"}, "## Evidence"),
-                (New String() {"open questions", "questions", "gaps", "unknowns", "follow-up"}, "## Open Questions")
-            }
+            ' Helper: did the user already cover this analytical role, either explicitly
+            ' (via AnalyticalSections.<Role>) or implicitly (via a RequiredSections entry
+            ' whose text matches one of the English search tokens)?
+            Dim isAnalyticalRoleCovered As Func(Of String, String(), Boolean) =
+                Function(explicitOverride As String, searchTerms As String()) As Boolean
+                    Dim explicitClean = If(explicitOverride, "").Trim()
+                    If explicitClean.Length > 0 Then
+                        Dim explicitHeading = If(explicitClean.StartsWith("#"), explicitClean, "## " & explicitClean)
+                        Return list.Any(Function(x) x.Equals(explicitHeading, StringComparison.OrdinalIgnoreCase))
+                    End If
+                    For Each existing In list
+                        Dim clean = Regex.Replace(existing, "^\s*#+\s*", "").Trim().ToLowerInvariant()
+                        For Each term In searchTerms
+                            If clean.Contains(term) Then Return True
+                        Next
+                    Next
+                    Return False
+                End Function
 
+            ' Resolve each analytical role against the schema overrides first, then the
+            ' English fallback. Only append the English default if the role is genuinely
+            ' missing from the user's section list AND no override is configured.
+            Dim analyticalRoles As New List(Of (Override As String, SearchTerms As String(), DefaultHeading As String))()
+            Dim ovr = If(schema, New KnowledgeStoreSchema()).AnalyticalSections
+
+            analyticalRoles.Add((If(ovr, New KnowledgeStoreSchema.AnalyticalSectionsOptions()).Claims,
+                                 New String() {"key claims", "key provisions", "key points", "claims", "provisions", "obligations", "requirements", "controls"},
+                                 "## Key Claims"))
+            analyticalRoles.Add((If(ovr, New KnowledgeStoreSchema.AnalyticalSectionsOptions()).Evidence,
+                                 New String() {"evidence", "support", "supporting evidence", "basis", "justification", "authority", "supporting material"},
+                                 "## Evidence"))
+            analyticalRoles.Add((If(ovr, New KnowledgeStoreSchema.AnalyticalSectionsOptions()).OpenQuestions,
+                                 New String() {"open questions", "questions", "gaps", "unknowns", "follow-up"},
+                                 "## Open Questions"))
             If schema Is Nothing OrElse schema.DetectContradictions Then
-                analyticalDefaults.Add(
-                    (New String() {"contradictions", "conflicts", "disputes", "exceptions"}, "## Contradictions"))
+                analyticalRoles.Add((If(ovr, New KnowledgeStoreSchema.AnalyticalSectionsOptions()).Contradictions,
+                                     New String() {"contradictions", "conflicts", "disputes", "exceptions"},
+                                     "## Contradictions"))
             End If
 
-            For Each entry In analyticalDefaults
-                ' Check whether any existing heading in the list already covers this concept.
-                Dim alreadyCovered As Boolean = False
-                For Each existing In list
-                    Dim clean = Regex.Replace(existing, "^\s*#+\s*", "").Trim().ToLowerInvariant()
-                    For Each term In entry.SearchTerms
-                        If clean.Contains(term) Then
-                            alreadyCovered = True
-                            Exit For
-                        End If
-                    Next
-                    If alreadyCovered Then Exit For
-                Next
+            For Each role In analyticalRoles
+                If isAnalyticalRoleCovered(role.Override, role.SearchTerms) Then Continue For
 
-                If Not alreadyCovered Then
-                    If Not list.Any(Function(x) x.Equals(entry.DefaultHeading, StringComparison.OrdinalIgnoreCase)) Then
-                        list.Add(entry.DefaultHeading)
-                    End If
+                Dim toAppend As String
+                Dim explicitClean = If(role.Override, "").Trim()
+                If explicitClean.Length > 0 Then
+                    toAppend = If(explicitClean.StartsWith("#"), explicitClean, "## " & explicitClean)
+                Else
+                    toAppend = role.DefaultHeading
+                End If
+
+                If Not list.Any(Function(x) x.Equals(toAppend, StringComparison.OrdinalIgnoreCase)) Then
+                    list.Add(toAppend)
                 End If
             Next
 
+            ' Sources and Related Pages: honor the configured Labels override so the
+            ' English literal is never appended alongside a localized variant.
+            Dim sourcesHeading As String = "## Sources"
+            Dim relatedHeading As String = "## Related Pages"
+            If schema IsNot Nothing Then
+                sourcesHeading = schema.GetLabel("SourcesHeading", sourcesHeading)
+                relatedHeading = schema.GetLabel("RelatedPagesHeading", relatedHeading)
+            End If
+
             If schema Is Nothing OrElse schema.AlwaysAddSourceLinks Then
-                If Not list.Any(Function(x) x.Equals("## Sources", StringComparison.OrdinalIgnoreCase)) Then
-                    list.Add("## Sources")
-                End If
+                Dim hasSources = list.Any(Function(x) x.Equals(sourcesHeading, StringComparison.OrdinalIgnoreCase) OrElse
+                                                       x.Equals("## Sources", StringComparison.OrdinalIgnoreCase))
+                If Not hasSources Then list.Add(sourcesHeading)
             End If
 
             If schema Is Nothing OrElse schema.AlwaysCreateCrossLinks Then
-                If Not list.Any(Function(x) x.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase)) Then
-                    list.Add("## Related Pages")
-                End If
+                Dim hasRelated = list.Any(Function(x) x.Equals(relatedHeading, StringComparison.OrdinalIgnoreCase) OrElse
+                                                       x.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase))
+                If Not hasRelated Then list.Add(relatedHeading)
             End If
 
             Return list
@@ -264,52 +297,61 @@ Namespace SharedLibrary
             Return defaultHeading
         End Function
 
+        Private Shared Function ApplyExplicitAnalyticalOverride(rawValue As String) As String
+            Dim v = If(rawValue, "").Trim()
+            If v.Length = 0 Then Return ""
+            If v.StartsWith("#") Then Return v
+            Return "## " & v
+        End Function
+
         Private Shared Function GetClaimsHeading(schema As KnowledgeStoreSchema) As String
+            If schema IsNot Nothing AndAlso schema.AnalyticalSections IsNot Nothing Then
+                Dim explicitName = ApplyExplicitAnalyticalOverride(schema.AnalyticalSections.Claims)
+                If explicitName.Length > 0 Then Return explicitName
+            End If
+
             Return ResolvePreferredAnalyticalHeading(
                 schema,
                 "## Key Claims",
-                "key claims",
-                "key provisions",
-                "key points",
-                "claims",
-                "provisions",
-                "obligations",
-                "requirements",
-                "controls")
+                "key claims", "key provisions", "key points",
+                "claims", "provisions", "obligations", "requirements", "controls")
         End Function
 
         Private Shared Function GetEvidenceHeading(schema As KnowledgeStoreSchema) As String
+            If schema IsNot Nothing AndAlso schema.AnalyticalSections IsNot Nothing Then
+                Dim explicitName = ApplyExplicitAnalyticalOverride(schema.AnalyticalSections.Evidence)
+                If explicitName.Length > 0 Then Return explicitName
+            End If
+
             Return ResolvePreferredAnalyticalHeading(
                 schema,
                 "## Evidence",
-                "evidence",
-                "support",
-                "supporting evidence",
-                "basis",
-                "justification",
-                "authority",
-                "supporting material")
+                "evidence", "support", "supporting evidence",
+                "basis", "justification", "authority", "supporting material")
         End Function
 
         Private Shared Function GetContradictionsHeading(schema As KnowledgeStoreSchema) As String
+            If schema IsNot Nothing AndAlso schema.AnalyticalSections IsNot Nothing Then
+                Dim explicitName = ApplyExplicitAnalyticalOverride(schema.AnalyticalSections.Contradictions)
+                If explicitName.Length > 0 Then Return explicitName
+            End If
+
             Return ResolvePreferredAnalyticalHeading(
                 schema,
                 "## Contradictions",
-                "contradictions",
-                "conflicts",
-                "disputes",
-                "exceptions")
+                "contradictions", "conflicts", "disputes", "exceptions")
         End Function
 
         Private Shared Function GetOpenQuestionsHeading(schema As KnowledgeStoreSchema) As String
+            If schema IsNot Nothing AndAlso schema.AnalyticalSections IsNot Nothing Then
+                Dim explicitName = ApplyExplicitAnalyticalOverride(schema.AnalyticalSections.OpenQuestions)
+                If explicitName.Length > 0 Then Return explicitName
+            End If
+
             Return ResolvePreferredAnalyticalHeading(
                 schema,
                 "## Open Questions",
-                "open questions",
-                "questions",
-                "gaps",
-                "unknowns",
-                "follow-up")
+                "open questions", "questions", "gaps", "unknowns", "follow-up")
         End Function
 
         Private Shared Function GetDefaultQueryPageKind(schema As KnowledgeStoreSchema) As String
@@ -361,6 +403,223 @@ Namespace SharedLibrary
 
 #End Region
 
+#Region "Embedding batching"
+
+        ''' <summary>
+        ''' Per async-flow embedding batch. While active, page writes only mark
+        ''' files as "dirty"; embeddings are computed once per unique file when
+        ''' the outermost batch closes. Re-entrant via Depth.
+        ''' </summary>
+        Private Class EmbeddingBatch
+            Public Property KbRootPath As String = ""
+            Public Property Depth As Integer = 0
+            Public Property DirtyPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End Class
+
+        ' AsyncLocal so the batch flows naturally across Await boundaries
+        ' without bleeding into unrelated tasks.
+        Private Shared ReadOnly _currentBatch As New Threading.AsyncLocal(Of EmbeddingBatch)()
+
+        ''' <summary>
+        ''' Begins (or re-enters) an embedding batch scoped to <paramref name="kbRootPath"/>.
+        ''' During an active batch, page rewrites are coalesced and a single embedding
+        ''' update per unique file is performed when the outermost batch ends.
+        ''' Always pair with <see cref="EndEmbeddingBatchAsync"/> in a Finally block.
+        ''' </summary>
+        Friend Shared Sub BeginEmbeddingBatch(kbRootPath As String)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return
+
+            Dim batch = _currentBatch.Value
+            If batch Is Nothing Then
+                batch = New EmbeddingBatch With {.KbRootPath = kbRootPath, .Depth = 1}
+                _currentBatch.Value = batch
+                Return
+            End If
+
+            ' Same store: nest. Different store: do not silently merge — leave the
+            ' caller in immediate-write mode for the new path by ignoring nesting.
+            If String.Equals(batch.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                batch.Depth += 1
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Closes a batch level. On the outermost exit, flushes one embedding
+        ''' update per unique dirty page, reading the latest content from disk.
+        ''' </summary>
+        Friend Shared Async Function EndEmbeddingBatchAsync(context As ISharedContext) As Task
+            Dim batch = _currentBatch.Value
+            If batch Is Nothing Then Return
+
+            batch.Depth -= 1
+            If batch.Depth > 0 Then Return
+
+            Dim kbRootPath = batch.KbRootPath
+            Dim dirty = batch.DirtyPaths.ToArray()
+
+            ' Clear before awaiting so re-entrant calls during the flush do not
+            ' accidentally rejoin a half-closed batch.
+            _currentBatch.Value = Nothing
+
+            For Each filePath In dirty
+                Try
+                    If Not File.Exists(filePath) Then Continue For
+                    Dim content = File.ReadAllText(filePath, Encoding.UTF8)
+                    If String.IsNullOrWhiteSpace(content) Then Continue For
+
+                    Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(
+                        kbRootPath:=kbRootPath,
+                        filePath:=filePath,
+                        text:=content,
+                        context:=context).ConfigureAwait(False)
+                Catch ex As Exception
+                    LogWikiError(kbRootPath, filePath, $"Deferred embedding update failed: {ex.Message}")
+                End Try
+            Next
+        End Function
+
+        ''' <summary>
+        ''' If an embedding batch is active for <paramref name="kbRootPath"/>, queues
+        ''' the file for a deferred single embedding update. Otherwise updates
+        ''' immediately, preserving the legacy synchronous behavior.
+        ''' </summary>
+        Private Shared Async Function QueueOrUpdateEmbeddingAsync(kbRootPath As String,
+                                                                  filePath As String,
+                                                                  content As String,
+                                                                  context As ISharedContext) As Task
+            Dim batch = _currentBatch.Value
+            If batch IsNot Nothing AndAlso
+               String.Equals(batch.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                batch.DirtyPaths.Add(filePath)
+                Return
+            End If
+
+            Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(
+                kbRootPath:=kbRootPath,
+                filePath:=filePath,
+                text:=content,
+                context:=context).ConfigureAwait(False)
+        End Function
+
+#End Region
+
+#Region "Ingest scope (per-ingest snapshot cache & deferred maintenance)"
+
+        ''' <summary>
+        ''' Per async-flow ingest scope. While active:
+        '''   - GetAllWikiPages returns a cached snapshot (invalidated on every save),
+        '''     eliminating the repeated full-tree disk scan + front-matter parse.
+        '''   - KnowledgeStoreSchema is loaded once and reused.
+        '''   - RebuildIndex, RefreshReviewArtifacts, and the per-save related-link
+        '''     backfill are suppressed and run exactly once when the outermost
+        '''     scope ends, against the union of all saved pages.
+        ''' Re-entrant via Depth, scoped to a single kbRootPath.
+        ''' </summary>
+        Private Class IngestScope
+            Public Property KbRootPath As String = ""
+            Public Property Depth As Integer = 0
+            Public Property CachedPages As List(Of WikiPageInfo) = Nothing
+            Public Property CachedSchema As KnowledgeStoreSchema = Nothing
+            Public Property SavedPages As New List(Of WikiPageInfo)()
+        End Class
+
+        Private Shared ReadOnly _currentIngestScope As New Threading.AsyncLocal(Of IngestScope)()
+
+        Private Shared Sub BeginIngestScope(kbRootPath As String)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return
+
+            Dim scope = _currentIngestScope.Value
+            If scope Is Nothing Then
+                _currentIngestScope.Value = New IngestScope With {.KbRootPath = kbRootPath, .Depth = 1}
+                Return
+            End If
+
+            If String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                scope.Depth += 1
+            End If
+        End Sub
+
+        Private Shared Async Function EndIngestScopeAsync(context As ISharedContext) As Task
+            Dim scope = _currentIngestScope.Value
+            If scope Is Nothing Then Return
+
+            scope.Depth -= 1
+            If scope.Depth > 0 Then Return
+
+            Dim kbRootPath = scope.KbRootPath
+            Dim savedPages = scope.SavedPages.ToList()
+            Dim cachedSchema = scope.CachedSchema
+
+            ' Clear before awaiting so re-entrant calls during the flush do not
+            ' accidentally rejoin a half-closed scope.
+            _currentIngestScope.Value = Nothing
+
+            ' Deduplicate saved pages by file path; only the latest content matters.
+            Dim uniqueSaves = savedPages.
+                GroupBy(Function(p) p.FilePath, StringComparer.OrdinalIgnoreCase).
+                Select(Function(g) g.Last()).
+                ToList()
+
+            For Each saved In uniqueSaves
+                Try
+                    Await BackfillRelatedLinksForExistingPagesAsync(
+                        kbRootPath:=kbRootPath,
+                        savedPage:=saved,
+                        context:=context,
+                        schema:=cachedSchema).ConfigureAwait(False)
+                Catch ex As Exception
+                    LogWikiError(kbRootPath, saved.FilePath, $"Deferred related backfill failed: {ex.Message}")
+                End Try
+            Next
+
+            Try
+                RebuildIndex(kbRootPath)
+            Catch ex As Exception
+                LogWikiError(kbRootPath, "RebuildIndex", $"Deferred index rebuild failed: {ex.Message}")
+            End Try
+
+            Try
+                RefreshReviewArtifacts(kbRootPath)
+            Catch ex As Exception
+                LogWikiError(kbRootPath, "RefreshReviewArtifacts", $"Deferred review refresh failed: {ex.Message}")
+            End Try
+        End Function
+
+        Private Shared Function IsIngestScopeActive(kbRootPath As String) As Boolean
+            Dim scope = _currentIngestScope.Value
+            Return scope IsNot Nothing AndAlso
+                   String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Private Shared Function GetCachedSchema(kbRootPath As String) As KnowledgeStoreSchema
+            Dim scope = _currentIngestScope.Value
+            If scope IsNot Nothing AndAlso
+               String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                If scope.CachedSchema Is Nothing Then
+                    scope.CachedSchema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+                End If
+                Return scope.CachedSchema
+            End If
+            Return KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+        End Function
+
+        Private Shared Sub InvalidateIngestPageCache(kbRootPath As String)
+            Dim scope = _currentIngestScope.Value
+            If scope IsNot Nothing AndAlso
+               String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                scope.CachedPages = Nothing
+            End If
+        End Sub
+
+        Private Shared Sub TrackIngestSavedPage(kbRootPath As String, page As WikiPageInfo)
+            Dim scope = _currentIngestScope.Value
+            If scope Is Nothing Then Return
+            If Not String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then Return
+            scope.SavedPages.Add(page)
+        End Sub
+
+#End Region
+
         Public Shared Sub InitializeWikiStructure(kbRootPath As String)
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return
 
@@ -378,6 +637,20 @@ Namespace SharedLibrary
                     Directory.CreateDirectory(folderPath)
                 End If
             Next
+
+            Dim filesFolderName As String =
+                    If(schema IsNot Nothing AndAlso schema.SourceAccess IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(schema.SourceAccess.FilesFolderName),
+                       schema.SourceAccess.FilesFolderName, "_files")
+            Dim sourcesFolderName As String =
+                    If(schema IsNot Nothing AndAlso schema.SourceRegistry IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(schema.SourceRegistry.FolderName),
+                       schema.SourceRegistry.FolderName, "Sources")
+
+            Dim filesDir = Path.Combine(wikiRoot, filesFolderName)
+            If Not Directory.Exists(filesDir) Then Directory.CreateDirectory(filesDir)
+            Dim sourcesDir = Path.Combine(wikiRoot, sourcesFolderName)
+            If Not Directory.Exists(sourcesDir) Then Directory.CreateDirectory(sourcesDir)
 
             Dim indexPath = Path.Combine(wikiRoot, KnowledgeStoreCatalog.IndexFile)
             If Not File.Exists(indexPath) Then
@@ -428,6 +701,11 @@ Namespace SharedLibrary
                 sb.AppendLine()
                 sb.AppendLine($"docs_dir: {KnowledgeStoreCatalog.WikiFolder}")
                 sb.AppendLine()
+                sb.AppendLine("not_in_nav: |")
+                sb.AppendLine("  /_files/")
+                sb.AppendLine()
+                sb.AppendLine("# Allow non-md assets to be served verbatim.")
+                sb.AppendLine("# (mkdocs copies any non-md file under docs_dir into the build output.)")
                 sb.AppendLine("theme:")
                 sb.AppendLine("  name: material")
                 sb.AppendLine()
@@ -626,6 +904,37 @@ Namespace SharedLibrary
 
             InitializeWikiStructure(kbRootPath)
 
+            BeginEmbeddingBatch(kbRootPath)
+            BeginIngestScope(kbRootPath)
+
+            Dim succeeded As Boolean = False
+            Dim captured As ExceptionDispatchInfo = Nothing
+
+            Try
+                succeeded = Await IngestSourceCoreAsync(
+                    kbRootPath:=kbRootPath,
+                    sourceFilePath:=sourceFilePath,
+                    context:=context,
+                    isBackground:=isBackground).ConfigureAwait(False)
+            Catch ex As Exception
+                captured = ExceptionDispatchInfo.Capture(ex)
+            End Try
+
+            ' End ingest scope BEFORE the embedding batch:
+            ' the scope's flush triggers backfill writes that must still land
+            ' in the same embedding batch (one embedding update per file).
+            Await EndIngestScopeAsync(context).ConfigureAwait(False)
+            Await EndEmbeddingBatchAsync(context).ConfigureAwait(False)
+
+            If captured IsNot Nothing Then captured.Throw()
+            Return succeeded
+        End Function
+
+        Private Shared Async Function IngestSourceCoreAsync(kbRootPath As String,
+                                                            sourceFilePath As String,
+                                                            context As ISharedContext,
+                                                            isBackground As Boolean) As Task(Of Boolean)
+
             Dim sourceText As String = ""
             Try
                 sourceText = Await KnowledgeIndexer.ReadSourceTextAsync(sourceFilePath, context).ConfigureAwait(False)
@@ -709,7 +1018,6 @@ Namespace SharedLibrary
             Return True
         End Function
 
-
         Private Shared Async Function GenerateAndApplySupplementalPagesAsync(kbRootPath As String,
                                                                              sourceFilePath As String,
                                                                              sourceText As String,
@@ -720,6 +1028,17 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(kbRootPath) OrElse
                String.IsNullOrWhiteSpace(sourceFilePath) OrElse
                String.IsNullOrWhiteSpace(sourceText) Then
+                Return 0
+            End If
+
+            ' Schema-driven hard cap. If supplemental generation is disabled for
+            ' this store, skip the LLM round-trip entirely.
+            Dim maxSupplemental As Integer = 15
+            If schema IsNot Nothing Then
+                maxSupplemental = Math.Max(0, schema.MaxSupplementalPagesPerSource)
+            End If
+
+            If maxSupplemental <= 0 Then
                 Return 0
             End If
 
@@ -758,6 +1077,12 @@ Namespace SharedLibrary
             Dim drafts = ParseSupplementalPageDrafts(response)
             If drafts.Count = 0 Then Return 0
 
+            ' Defensive cap: even if the model ignored the prompt's upper bound,
+            ' never apply more than the configured maximum to the wiki.
+            If drafts.Count > maxSupplemental Then
+                drafts = drafts.Take(maxSupplemental).ToList()
+            End If
+
             Dim savedCount As Integer = 0
             Dim seenTitles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
@@ -793,20 +1118,21 @@ Namespace SharedLibrary
             Next
 
             If savedCount > 0 Then
-                AppendToLog(kbRootPath, "supplemental", $"{Path.GetFileName(sourceFilePath)} | Pages={savedCount}")
+                AppendToLog(kbRootPath, "supplemental", $"{Path.GetFileName(sourceFilePath)} | Pages={savedCount}; Cap={maxSupplemental}")
             End If
 
             Return savedCount
         End Function
-
 
         Private Shared Function BuildSupplementalPagesPrompt(schema As KnowledgeStoreSchema,
                                                              wikiIndex As String,
                                                              candidatePages As List(Of WikiPageInfo)) As String
             Dim sb As New StringBuilder()
             Dim kindsList = FormatKindList(GetEffectivePageKinds(schema).
-                                           Where(Function(k) Not k.Equals("Source", StringComparison.OrdinalIgnoreCase)))
+                                           Where(Function(k) Not k.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
+                                                             Not k.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)))
 
+            If schema IsNot Nothing Then sb.Append(schema.ResolveLanguageDirective())
             sb.AppendLine("You are an autonomous Wiki Maintainer.")
             sb.AppendLine("Your job is to identify additional durable wiki pages that should be created or updated based on the source.")
             sb.AppendLine("Do NOT restate the main source page. Only produce pages that add long-term structure to the wiki.")
@@ -832,6 +1158,53 @@ Namespace SharedLibrary
             sb.AppendLine("6. If the source conflicts with an existing page, update the relevant page rather than hiding the conflict.")
             sb.AppendLine("7. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
             sb.AppendLine("8. If a useful concept does not yet have a page, mention it as plain text or under ## Open Questions, but do not create a broken page link.")
+            sb.AppendLine()
+            Dim entityTypesList = ""
+            If schema IsNot Nothing AndAlso schema.EntityTypes IsNot Nothing AndAlso schema.EntityTypes.Length > 0 Then
+                entityTypesList = String.Join(", ", schema.EntityTypes.Where(Function(t) Not String.IsNullOrWhiteSpace(t)))
+            End If
+
+            Dim minSupplemental As Integer = 8
+            Dim maxSupplemental As Integer = 15
+            If schema IsNot Nothing Then
+                minSupplemental = Math.Max(0, schema.MinSupplementalPagesPerSource)
+                maxSupplemental = Math.Max(0, schema.MaxSupplementalPagesPerSource)
+                If maxSupplemental > 0 AndAlso minSupplemental > maxSupplemental Then
+                    minSupplemental = maxSupplemental
+                End If
+            End If
+
+            sb.AppendLine("PAGE-KIND DIVERSITY:")
+            sb.AppendLine($"- The available page kinds for this store are: {kindsList.Replace("|", ", ")}.")
+            sb.AppendLine("- Strongly prefer a MIX of these kinds across the supplemental batch. Do not default every supplemental page to the same one or two kinds.")
+            sb.AppendLine("- For each candidate page, pick the MOST SPECIFIC kind that fits its subject matter from the list above.")
+            sb.AppendLine("- Whenever the source mentions a recurring concept, role, named organization, system, jurisdiction, defined term, broader theme, or interpretive analysis that does not yet have a wiki page, that is a strong candidate for its own page under the most fitting kind.")
+            sb.AppendLine("- Do not use document-style kinds (such as ones representing codified directives, policies, regulations, or standalone source documents) for general concepts, roles, definitions, or themes; reserve those for pages that themselves represent a separate codified document.")
+            If Not String.IsNullOrWhiteSpace(entityTypesList) Then
+                sb.AppendLine($"- The store recognizes the following entity types: {entityTypesList}. Treat each as a candidate subject for its own page when applicable.")
+            End If
+
+            ' Schema-configurable fan-out guidance. The model is told the real
+            ' min/max so we don't have to lean on a hard-coded "8-15" any more.
+            If maxSupplemental <= 0 Then
+                sb.AppendLine("- Supplemental page generation is disabled for this store; return exactly: NONE")
+            ElseIf maxSupplemental = 1 Then
+                sb.AppendLine("- Return AT MOST 1 supplemental page, and only if it is clearly durable. Otherwise return: NONE")
+            Else
+                Dim softFloor As Integer = Math.Max(1, Math.Min(minSupplemental, maxSupplemental))
+                sb.AppendLine($"- Aim for roughly {softFloor}-{maxSupplemental} supplemental pages per non-trivial source, distributed across several kinds. Returning fewer is acceptable only when the source is genuinely thin. Do NOT exceed {maxSupplemental}.")
+                sb.AppendLine("- Before deciding what to return, internally enumerate every distinct concept, role, organization, system, jurisdiction, defined term, broader theme, and entity-type instance mentioned or strongly implied by the source. Then create a page for each one that meets the durability bar.")
+                sb.AppendLine("- Coverage check: if the source mentions an entity-type instance for which no wiki page exists yet, you SHOULD create one unless it is clearly trivial.")
+                sb.AppendLine("- It is normal and desirable to return many pages of varied kinds per source. Do not stop at one or two.")
+            End If
+
+            sb.AppendLine("SOURCE CITATION RULES:")
+            sb.AppendLine("- Refer to sources only by ID markers like [S1], [S2] embedded in Key Claims and Evidence bullets.")
+            sb.AppendLine("- DO NOT author the ## Sources section; it is generated deterministically.")
+            sb.AppendLine("- DO NOT write file paths, file:// URLs, or download links anywhere.")
+            If schema?.PerClaimCitations IsNot Nothing AndAlso schema.PerClaimCitations.Enabled Then
+                sb.AppendLine("- Every Key Claim and every Evidence bullet MUST end with at least one [S#] marker referring to the source it relies on.")
+            End If
             sb.AppendLine()
             sb.AppendLine(BuildSchemaSectionsGuidance(schema))
             sb.AppendLine()
@@ -898,6 +1271,7 @@ Namespace SharedLibrary
             Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
             Dim systemPrompt As New StringBuilder()
+            If schema IsNot Nothing Then systemPrompt.Append(schema.ResolveLanguageDirective())
             systemPrompt.AppendLine("You are an autonomous Wiki Maintainer.")
             systemPrompt.AppendLine("Convert the provided query and answer into a durable markdown wiki page.")
             systemPrompt.AppendLine("Preserve the substance of the answer, keep uncertainty where appropriate, add meaningful cross-links to existing wiki pages, and retain clickable markdown source links.")
@@ -913,6 +1287,13 @@ Namespace SharedLibrary
             systemPrompt.AppendLine("7. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
             systemPrompt.AppendLine("8. If a useful concept does not yet have a page, mention it as plain text or under ## Open Questions, but do not create a broken page link.")
             systemPrompt.AppendLine("9. Do not invent sources.")
+            systemPrompt.AppendLine("SOURCE CITATION RULES:")
+            systemPrompt.AppendLine("- Refer to sources only by ID markers like [S1], [S2] embedded in Key Claims and Evidence bullets.")
+            systemPrompt.AppendLine("- DO NOT author the ## Sources section; it is generated deterministically.")
+            systemPrompt.AppendLine("- DO NOT write file paths, file:// URLs, or download links anywhere.")
+            If schema?.PerClaimCitations IsNot Nothing AndAlso schema.PerClaimCitations.Enabled Then
+                systemPrompt.AppendLine("- Every Key Claim and every Evidence bullet MUST end with at least one [S#] marker referring to the source it relies on.")
+            End If
             systemPrompt.AppendLine()
             systemPrompt.AppendLine(BuildSchemaSectionsGuidance(schema))
             systemPrompt.AppendLine()
@@ -1306,6 +1687,7 @@ Namespace SharedLibrary
             Dim sb As New StringBuilder()
             Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
+            If schema IsNot Nothing Then sb.Append(schema.ResolveLanguageDirective())
             sb.AppendLine(roleDescription)
             sb.AppendLine()
             sb.AppendLine("OUTPUT FORMAT REQUIREMENTS:")
@@ -1319,6 +1701,13 @@ Namespace SharedLibrary
             sb.AppendLine("8. Only create clickable markdown page links to pages that already exist in the supplied wiki context.")
             sb.AppendLine("9. If a useful concept does not yet have a page, mention it as plain text or place it under ## Open Questions, but do not create a broken page link.")
             sb.AppendLine("10. Do not invent sources.")
+            sb.AppendLine("SOURCE CITATION RULES:")
+            sb.AppendLine("- Refer to sources only by ID markers like [S1], [S2] embedded in Key Claims and Evidence bullets.")
+            sb.AppendLine("- DO NOT author the ## Sources section; it is generated deterministically.")
+            sb.AppendLine("- DO NOT write file paths, file:// URLs, or download links anywhere.")
+            If schema?.PerClaimCitations IsNot Nothing AndAlso schema.PerClaimCitations.Enabled Then
+                sb.AppendLine("- Every Key Claim and every Evidence bullet MUST end with at least one [S#] marker referring to the source it relies on.")
+            End If
             sb.AppendLine()
             sb.AppendLine(BuildSchemaSectionsGuidance(schema))
             sb.AppendLine()
@@ -1373,9 +1762,12 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function FindCandidateWikiPages(kbRootPath As String,
-                                                       seedText As String,
-                                                       maxCandidates As Integer) As List(Of WikiPageInfo)
-            Dim pages = GetAllWikiPages(kbRootPath)
+                                               seedText As String,
+                                               maxCandidates As Integer) As List(Of WikiPageInfo)
+            Dim pages = GetAllWikiPages(kbRootPath).
+                Where(Function(p) Not p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)).
+                ToList()
+
             If String.IsNullOrWhiteSpace(seedText) OrElse pages.Count = 0 Then Return New List(Of WikiPageInfo)()
 
             Dim seedTokens = Tokenize(seedText)
@@ -1510,6 +1902,18 @@ Namespace SharedLibrary
                 Return False
             End If
 
+            ' Create dossiers and deterministically rewrite the Sources section
+            ' BEFORE composing/saving, so the file on disk reflects the rewrite.
+            Dim dossierRefs = EnsureDossiersForPage(kbRootPath, finalPath, finalTitle, mergedSourcePaths, schema)
+
+            If schema Is Nothing OrElse schema.AlwaysAddSourceLinks Then
+                finalBody = RebuildSourcesSectionDeterministically(finalBody, finalPath, kbRootPath, dossierRefs)
+            End If
+
+            ' Recompute computed state on the rewritten body so front-matter
+            ' source_count and status reflect the deterministic Sources block.
+            pageState = ComputePageComputedState(finalBody, mergedSourcePaths, schema)
+
             Dim fullDocument = ComposePageDocument(
                 title:=finalTitle,
                 summary:=finalSummary,
@@ -1524,36 +1928,49 @@ Namespace SharedLibrary
 
             Try
                 File.WriteAllText(finalPath, fullDocument, Encoding.UTF8)
-                CopySourceFilesToPageDirectory(finalPath, mergedSourcePaths)
-                Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(kbRootPath, finalPath, fullDocument, context).ConfigureAwait(False)
+                Await QueueOrUpdateEmbeddingAsync(kbRootPath, finalPath, fullDocument, context).ConfigureAwait(False)
 
-                Dim backfilledRelatedPages = Await BackfillRelatedLinksForExistingPagesAsync(
-                    kbRootPath:=kbRootPath,
-                    savedPage:=New WikiPageInfo With {
-                        .FilePath = finalPath,
-                        .FileName = Path.GetFileName(finalPath),
-                        .RelativePath = GetRelativeWikiPath(kbRootPath, finalPath),
-                        .Title = finalTitle,
-                        .Summary = finalSummary,
-                        .Kind = finalKind,
-                        .Status = pageState.Status,
-                        .ReviewNeeded = pageState.ReviewNeeded,
-                        .ContradictionCount = pageState.ContradictionCount,
-                        .SourceCount = pageState.SourceCount,
-                        .Content = fullDocument,
-                        .SourcePaths = mergedSourcePaths
-                    },
-                    context:=context,
-                    schema:=schema).ConfigureAwait(False)
+                Dim savedPageInfo As New WikiPageInfo With {
+                    .FilePath = finalPath,
+                    .FileName = Path.GetFileName(finalPath),
+                    .RelativePath = GetRelativeWikiPath(kbRootPath, finalPath),
+                    .Title = finalTitle,
+                    .Summary = finalSummary,
+                    .Kind = finalKind,
+                    .Status = pageState.Status,
+                    .ReviewNeeded = pageState.ReviewNeeded,
+                    .ContradictionCount = pageState.ContradictionCount,
+                    .SourceCount = pageState.SourceCount,
+                    .Content = fullDocument,
+                    .SourcePaths = mergedSourcePaths
+                }
 
-                RebuildIndex(kbRootPath)
-                RefreshReviewArtifacts(kbRootPath)
+                ' The wiki on disk has changed; force the next snapshot read to refresh.
+                InvalidateIngestPageCache(kbRootPath)
+
+                Dim backfilledRelatedPages As Integer = 0
+                Dim deferredMaintenance As Boolean = IsIngestScopeActive(kbRootPath)
+
+                If deferredMaintenance Then
+                    ' Inside an ingest scope: collapse N per-save maintenance passes
+                    ' into one outermost flush in EndIngestScopeAsync.
+                    TrackIngestSavedPage(kbRootPath, savedPageInfo)
+                Else
+                    backfilledRelatedPages = Await BackfillRelatedLinksForExistingPagesAsync(
+                        kbRootPath:=kbRootPath,
+                        savedPage:=savedPageInfo,
+                        context:=context,
+                        schema:=schema).ConfigureAwait(False)
+
+                    RebuildIndex(kbRootPath)
+                    RefreshReviewArtifacts(kbRootPath)
+                End If
 
                 Dim logAction = If(isUpdate, "update", actionName)
                 AppendToLog(
                     kbRootPath,
                     logAction,
-                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Kind={finalKind}; Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}; LinksRepaired={repairedLinksCount}; BrokenLinksRemoved={removedBrokenLinksCount}; BackfilledRelatedPages={backfilledRelatedPages}")
+                    $"{finalTitle}{If(String.IsNullOrWhiteSpace(sourceFilePath), "", " | " & Path.GetFileName(sourceFilePath))} | Kind={finalKind}; Status={pageState.Status}; Review={pageState.ReviewNeeded}; Contradictions={pageState.ContradictionCount}; LinksRepaired={repairedLinksCount}; BrokenLinksRemoved={removedBrokenLinksCount}; BackfilledRelatedPages={backfilledRelatedPages}{If(deferredMaintenance, "; Deferred=true", "")}")
 
                 Return True
             Catch ex As Exception
@@ -1563,6 +1980,40 @@ Namespace SharedLibrary
         End Function
 
 
+
+        Private Shared Function RebuildSourcesSectionDeterministically(body As String,
+                                                               currentPagePath As String,
+                                                               kbRootPath As String,
+                                                               dossiers As List(Of KnowledgeSourceDossierService.DossierRef)) As String
+            If dossiers Is Nothing OrElse dossiers.Count = 0 Then
+                ' Nothing to render; if a stub Sources section exists, leave it alone.
+                Return body
+            End If
+
+            Dim wikiRoot = GetWikiRootPath(kbRootPath)
+            Dim currentDir = Path.GetDirectoryName(currentPagePath)
+
+            Dim sb As New StringBuilder()
+            Dim sourcesHeading As String = "## Sources"
+            Dim wikiSchema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            If wikiSchema IsNot Nothing Then sourcesHeading = wikiSchema.GetLabel("SourcesHeading", sourcesHeading)
+            sb.AppendLine(sourcesHeading)
+            sb.AppendLine()
+
+            Dim idx As Integer = 1
+            For Each d In dossiers
+                Dim dossierAbs = Path.Combine(wikiRoot, d.DossierRelPath.Replace("/"c, Path.DirectorySeparatorChar))
+                Dim relFromPage = NormalizeWikiRelativePath(GetRelativePathCompat(currentDir, dossierAbs))
+                Dim blobAbs = Path.Combine(wikiRoot, d.BlobRelPath.Replace("/"c, Path.DirectorySeparatorChar))
+                Dim blobRelFromPage = NormalizeWikiRelativePath(GetRelativePathCompat(currentDir, blobAbs))
+
+                ' Format: [S1] [Title](dossier.md) — [download](../_files/hash.ext)
+                sb.AppendLine($"- [S{idx}] [{d.Title}]({relFromPage}) — [download]({blobRelFromPage})")
+                idx += 1
+            Next
+
+            Return ReplaceMarkdownSection(body, sourcesHeading, sb.ToString().Trim())
+        End Function
 
 
         Private Shared Function ParseAgentResponse(agentResponse As String, defaultKind As String) As ParsedAgentResponse
@@ -1660,11 +2111,31 @@ Namespace SharedLibrary
             Dim normalized = If(body, "").Trim()
             Dim sections = GetEffectiveRequiredSections(schema)
 
-            ' Ensure each schema-required section exists (with a neutral placeholder bullet).
+            ' Headings that are managed by the deterministic Sources / Related Pages
+            ' rewriters must NOT be added as placeholders here, regardless of which
+            ' label (English default or schema-configured) the user picked.
+            Dim sourcesHeadingForSkip As String = "## Sources"
+            Dim relatedHeadingForSkip As String = "## Related Pages"
+            If schema IsNot Nothing Then
+                sourcesHeadingForSkip = schema.GetLabel("SourcesHeading", sourcesHeadingForSkip)
+                relatedHeadingForSkip = schema.GetLabel("RelatedPagesHeading", relatedHeadingForSkip)
+            End If
+
+            Dim placeholderBullet As String = "- _Not yet provided._"
+            If schema IsNot Nothing Then
+                placeholderBullet = "- " & schema.GetLabel("PlaceholderNotProvided", "_Not yet provided._")
+            End If
+
+            ' Ensure each schema-required section exists (with a neutral placeholder bullet),
+            ' except those owned by the deterministic rewriters.
             For Each heading In sections
-                If heading.Equals("## Sources", StringComparison.OrdinalIgnoreCase) Then Continue For
-                If heading.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase) Then Continue For
-                normalized = EnsureSection(normalized, heading, "- _Not yet provided._")
+                If heading.Equals("## Sources", StringComparison.OrdinalIgnoreCase) OrElse
+                   heading.Equals(sourcesHeadingForSkip, StringComparison.OrdinalIgnoreCase) OrElse
+                   heading.Equals("## Related Pages", StringComparison.OrdinalIgnoreCase) OrElse
+                   heading.Equals(relatedHeadingForSkip, StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+                normalized = EnsureSection(normalized, heading, placeholderBullet)
             Next
 
             Dim analyticalHeadings As New List(Of String) From {
@@ -1691,14 +2162,18 @@ Namespace SharedLibrary
                 End If
             Next
 
-            Dim alwaysSourceLinks As Boolean = schema Is Nothing OrElse schema.AlwaysAddSourceLinks
             Dim alwaysCrossLinks As Boolean = schema Is Nothing OrElse schema.AlwaysCreateCrossLinks
 
-            If alwaysSourceLinks Then
-                normalized = EnsureSourcesSection(normalized, "", sourcePaths)
-            End If
+            ' NOTE: The Sources section is rendered exclusively by
+            ' RebuildSourcesSectionDeterministically (called from ParseAndSaveAgentResponseAsync
+            ' and from the lint migration block). The legacy EnsureSourcesSection is no longer
+            ' called here, because it (a) hard-codes "## Sources" in English regardless of the
+            ' configured SourcesHeading label and (b) writes non-clickable [name](name) links
+            ' that point at nothing. Calling it here used to produce a duplicate, broken
+            ' Sources block alongside the deterministic one in localized stores.
+
             If alwaysCrossLinks Then
-                normalized = EnsureRelatedSection(normalized, currentPagePath, relatedCandidates)
+                normalized = EnsureRelatedSection(normalized, currentPagePath, relatedCandidates, schema)
             End If
 
             Return normalized.Trim()
@@ -2099,24 +2574,39 @@ Namespace SharedLibrary
         End Function
 
 
-
         Private Shared Function FindPotentialSupersededPages(pages As List(Of WikiPageInfo)) As List(Of String)
+            Return FindPotentialSupersededPages(pages, Nothing)
+        End Function
+
+        Private Shared Function FindPotentialSupersededPages(pages As List(Of WikiPageInfo),
+                                                             schema As KnowledgeStoreSchema) As List(Of String)
             Dim result As New List(Of String)()
             If pages Is Nothing OrElse pages.Count = 0 Then Return result
 
             Dim seenKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            For Each page In pages
-                Dim pageSeed = page.Title & " " & page.Summary & " " & RemoveFrontMatter(page.Content)
+            ' Per-page ranked neighbor list. Score >= 3 mirrors the historical
+            ' threshold used by the legacy LINQ path.
+            Dim byPage As New Dictionary(Of String, List(Of Tuple(Of WikiPageInfo, Double)))(StringComparer.OrdinalIgnoreCase)
 
-                Dim candidates = pages.
-                    Where(Function(p) Not p.FilePath.Equals(page.FilePath, StringComparison.OrdinalIgnoreCase)).
-                    Select(
-                        Function(p)
-                            Dim score = ScoreTokens(Tokenize(pageSeed), Tokenize(p.Title & " " & p.Summary & " " & RemoveFrontMatter(p.Content)))
-                            Return Tuple.Create(p, score)
-                        End Function).
-                    Where(Function(x) x.Item2 >= 3).
+            For Each pair As CandidatePagePair In EnumerateCandidatePairs(pages, schema)
+                Dim pageA As WikiPageInfo = pair.PageA
+                Dim pageB As WikiPageInfo = pair.PageB
+
+                Dim seedA = pageA.Title & " " & pageA.Summary & " " & RemoveFrontMatter(pageA.Content)
+                Dim seedB = pageB.Title & " " & pageB.Summary & " " & RemoveFrontMatter(pageB.Content)
+                Dim score = ScoreTokens(Tokenize(seedA), Tokenize(seedB))
+                If score < 3 Then Continue For
+
+                AddRankedCandidate(byPage, pageA, pageB, score)
+                AddRankedCandidate(byPage, pageB, pageA, score)
+            Next
+
+            For Each page In pages
+                Dim ranked As List(Of Tuple(Of WikiPageInfo, Double)) = Nothing
+                If Not byPage.TryGetValue(page.FilePath, ranked) Then Continue For
+
+                Dim candidates = ranked.
                     OrderByDescending(Function(x) x.Item2).
                     Take(5).
                     Select(Function(x) x.Item1).
@@ -2162,10 +2652,17 @@ Namespace SharedLibrary
                 ToList()
         End Function
 
+
+
         Private Shared Function GetPotentialSupersededPagePaths(pages As List(Of WikiPageInfo)) As HashSet(Of String)
+            Return GetPotentialSupersededPagePaths(pages, Nothing)
+        End Function
+
+        Private Shared Function GetPotentialSupersededPagePaths(pages As List(Of WikiPageInfo),
+                                                                schema As KnowledgeStoreSchema) As HashSet(Of String)
             Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            For Each item In FindPotentialSupersededPages(pages)
+            For Each item In FindPotentialSupersededPages(pages, schema)
                 Dim marker = " may be superseded by "
                 Dim idx = item.IndexOf(marker, StringComparison.OrdinalIgnoreCase)
 
@@ -2387,7 +2884,7 @@ Namespace SharedLibrary
 
                 Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
                 Dim contradictionPairs = FindPotentialContradictionPairs(pages, schema)
-                Dim supersededCandidates = FindPotentialSupersededPages(pages)
+                Dim supersededCandidates = FindPotentialSupersededPages(pages, schema)
 
                 Dim claimsWithoutEvidence = pages.
                     Select(
@@ -2454,10 +2951,20 @@ Namespace SharedLibrary
             Dim sb As New StringBuilder()
             Dim kindsList = FormatKindList(GetEffectivePageKinds(schema))
 
+            If schema IsNot Nothing Then sb.Append(schema.ResolveLanguageDirective())
             sb.AppendLine("You are an autonomous Wiki Maintainer.")
             sb.AppendLine("Merge the existing page and the new extracted content into one improved page.")
             sb.AppendLine("Preserve valuable existing structure, integrate new findings, keep or improve cross-links, and explicitly retain contradictions when evidence conflicts.")
             sb.AppendLine("Never silently replace an older claim with a newer one when they materially conflict.")
+            sb.AppendLine()
+            sb.AppendLine("SOURCE CITATION RULES:")
+            sb.AppendLine("- Refer to sources only by ID markers like [S1], [S2] embedded in Key Claims and Evidence bullets.")
+            sb.AppendLine("- DO NOT author the ## Sources section; it is generated deterministically.")
+            sb.AppendLine("- DO NOT write file paths, file:// URLs, or download links anywhere.")
+            If schema?.PerClaimCitations IsNot Nothing AndAlso schema.PerClaimCitations.Enabled Then
+                sb.AppendLine("- Every Key Claim and every Evidence bullet MUST end with at least one [S#] marker referring to the source it relies on.")
+            End If
+            sb.AppendLine()
             sb.AppendLine("Return exactly:")
             sb.AppendLine("TITLE: ...")
             sb.AppendLine("SUMMARY: ...")
@@ -2625,6 +3132,101 @@ Namespace SharedLibrary
             Return False
         End Function
 
+
+        Private Class CandidatePagePair
+            Public Property PageA As WikiPageInfo = Nothing
+            Public Property PageB As WikiPageInfo = Nothing
+        End Class
+
+        ''' <summary>
+        ''' Generates the candidate (A, B) page pairs that the contradiction and
+        ''' superseded-page scanners should consider. When the schema enables
+        ''' <see cref="KnowledgeStoreSchema.UseInvertedIndexPairScan"/>, an
+        ''' inverted-index pre-filter prunes pairs whose shared-token count is
+        ''' below the configured minimum; otherwise the legacy O(N²) enumeration
+        ''' is used so behavior is identical to the historical code path.
+        ''' Each unordered pair is yielded at most once.
+        ''' </summary>
+        Private Shared Iterator Function EnumerateCandidatePairs(
+                pages As List(Of WikiPageInfo),
+                schema As KnowledgeStoreSchema) As IEnumerable(Of CandidatePagePair)
+
+            If pages Is Nothing OrElse pages.Count < 2 Then Return
+
+            If schema Is Nothing OrElse Not schema.UseInvertedIndexPairScan Then
+                For i As Integer = 0 To pages.Count - 2
+                    For j As Integer = i + 1 To pages.Count - 1
+                        Yield New CandidatePagePair With {.PageA = pages(i), .PageB = pages(j)}
+                    Next
+                Next
+                Return
+            End If
+
+            Dim minShared As Integer = Math.Max(1, schema.PairScanMinSharedTokens)
+            Dim postings As New Dictionary(Of String, List(Of Integer))(StringComparer.OrdinalIgnoreCase)
+            Dim pageTokens(pages.Count - 1) As HashSet(Of String)
+
+            For i As Integer = 0 To pages.Count - 1
+                Dim toks = Tokenize(
+                    pages(i).Title & " " &
+                    pages(i).Summary & " " &
+                    RemoveFrontMatter(pages(i).Content))
+                pageTokens(i) = toks
+                For Each t In toks
+                    Dim list As List(Of Integer) = Nothing
+                    If Not postings.TryGetValue(t, list) Then
+                        list = New List(Of Integer)()
+                        postings(t) = list
+                    End If
+                    list.Add(i)
+                Next
+            Next
+
+            ' Skip extremely common tokens to avoid quadratic blowups in the
+            ' candidate count. The cap scales with the wiki size.
+            Dim postingCap As Integer = Math.Max(50, pages.Count \ 4)
+
+            Dim emitted As New HashSet(Of Long)()
+            For i As Integer = 0 To pages.Count - 1
+                Dim counts As New Dictionary(Of Integer, Integer)()
+
+                For Each t In pageTokens(i)
+                    Dim list As List(Of Integer) = Nothing
+                    If Not postings.TryGetValue(t, list) Then Continue For
+                    If list.Count > postingCap Then Continue For
+
+                    For Each j In list
+                        If j <= i Then Continue For
+                        Dim c As Integer = 0
+                        counts.TryGetValue(j, c)
+                        counts(j) = c + 1
+                    Next
+                Next
+
+                For Each kv In counts
+                    If kv.Value < minShared Then Continue For
+                    Dim key As Long = (CLng(i) << 32) Or CLng(kv.Key)
+                    If emitted.Add(key) Then
+                        Yield New CandidatePagePair With {.PageA = pages(i), .PageB = pages(kv.Key)}
+                    End If
+                Next
+            Next
+        End Function
+
+        Private Shared Sub AddRankedCandidate(
+                byPage As Dictionary(Of String, List(Of Tuple(Of WikiPageInfo, Double))),
+                fromPage As WikiPageInfo,
+                toPage As WikiPageInfo,
+                score As Double)
+            Dim list As List(Of Tuple(Of WikiPageInfo, Double)) = Nothing
+            If Not byPage.TryGetValue(fromPage.FilePath, list) Then
+                list = New List(Of Tuple(Of WikiPageInfo, Double))()
+                byPage(fromPage.FilePath) = list
+            End If
+            list.Add(Tuple.Create(toPage, score))
+        End Sub
+
+
         Private Shared Function FindPotentialContradictionPairs(pages As List(Of WikiPageInfo)) As List(Of PotentialContradictionPair)
             Return FindPotentialContradictionPairs(pages, Nothing)
         End Function
@@ -2637,6 +3239,24 @@ Namespace SharedLibrary
 
             Dim claimsHeading = GetClaimsHeading(schema)
             Dim seenKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            ' Pre-compute candidate neighbors per page using the (optionally
+            ' inverted-index) pair generator. Behavior is identical to the
+            ' legacy code path when UseInvertedIndexPairScan is False.
+            Dim neighborRanking As New Dictionary(Of String, List(Of Tuple(Of WikiPageInfo, Double)))(StringComparer.OrdinalIgnoreCase)
+
+            For Each pair As CandidatePagePair In EnumerateCandidatePairs(pages, schema)
+                Dim pageA As WikiPageInfo = pair.PageA
+                Dim pageB As WikiPageInfo = pair.PageB
+
+                Dim seedA = pageA.Title & " " & pageA.Summary & " " & RemoveFrontMatter(pageA.Content)
+                Dim seedB = pageB.Title & " " & pageB.Summary & " " & RemoveFrontMatter(pageB.Content)
+                Dim score = ScoreTokens(Tokenize(seedA), Tokenize(seedB))
+                If score <= 0 Then Continue For
+
+                AddRankedCandidate(neighborRanking, pageA, pageB, score)
+                AddRankedCandidate(neighborRanking, pageB, pageA, score)
+            Next
 
             For Each page In pages
                 Dim pageClaims = ExtractSectionBulletItems(page.Content, claimsHeading).
@@ -2651,20 +3271,18 @@ Namespace SharedLibrary
                     Continue For
                 End If
 
-                Dim pageSeed = page.Title & " " & page.Summary & " " & RemoveFrontMatter(page.Content)
+                Dim ranked As List(Of Tuple(Of WikiPageInfo, Double)) = Nothing
+                Dim candidates As List(Of WikiPageInfo)
 
-                Dim candidates = pages.
-                    Where(Function(p) Not p.FilePath.Equals(page.FilePath, StringComparison.OrdinalIgnoreCase)).
-                    Select(
-                        Function(p)
-                            Dim score = ScoreTokens(Tokenize(pageSeed), Tokenize(p.Title & " " & p.Summary & " " & RemoveFrontMatter(p.Content)))
-                            Return Tuple.Create(p, score)
-                        End Function).
-                    Where(Function(x) x.Item2 > 0).
-                    OrderByDescending(Function(x) x.Item2).
-                    Take(6).
-                    Select(Function(x) x.Item1).
-                    ToList()
+                If neighborRanking.TryGetValue(page.FilePath, ranked) Then
+                    candidates = ranked.
+                        OrderByDescending(Function(x) x.Item2).
+                        Take(6).
+                        Select(Function(x) x.Item1).
+                        ToList()
+                Else
+                    candidates = New List(Of WikiPageInfo)()
+                End If
 
                 For Each candidate In candidates
                     Dim pairKey = String.Join(
@@ -2785,9 +3403,14 @@ Namespace SharedLibrary
             sb.AppendLine($"source_count: {Math.Max(allSourcePaths.Count, sourceCount)}")
             sb.AppendLine($"updated_utc: ""{DateTime.UtcNow.ToString("o")}""")
             sb.AppendLine("source_paths:")
-
             For Each path In allSourcePaths
                 sb.AppendLine($"  - '{EscapeYamlSingleQuote(path)}'")
+            Next
+
+            sb.AppendLine("source_refs:")
+            For Each path In allSourcePaths
+                Dim slug = SanitizeFileName(System.IO.Path.GetFileNameWithoutExtension(path))
+                sb.AppendLine($"  - '{EscapeYamlSingleQuote(slug)}'")
             Next
 
             sb.AppendLine("---")
@@ -2842,79 +3465,117 @@ Namespace SharedLibrary
             Return sb.ToString().Trim()
         End Function
 
-        ''' <summary>
-        ''' Copies each source file referenced in sourcePaths into the same directory
-        ''' as the wiki page so that relative markdown links resolve correctly.
-        ''' </summary>
-        Private Shared Sub CopySourceFilesToPageDirectory(pagePath As String,
-                                                          sourcePaths As IEnumerable(Of String))
-            If String.IsNullOrWhiteSpace(pagePath) OrElse sourcePaths Is Nothing Then Return
 
-            Dim pageDir = Path.GetDirectoryName(pagePath)
-            If String.IsNullOrWhiteSpace(pageDir) OrElse Not Directory.Exists(pageDir) Then Return
+        Private Shared Function EnsureDossiersForPage(kbRootPath As String,
+                                              pageFullPath As String,
+                                              pageTitle As String,
+                                              sourcePaths As IEnumerable(Of String),
+                                              schema As KnowledgeStoreSchema) As List(Of KnowledgeSourceDossierService.DossierRef)
+            Dim refs As New List(Of KnowledgeSourceDossierService.DossierRef)()
+            If sourcePaths Is Nothing Then Return refs
 
-            For Each sourcePath In sourcePaths
-                If String.IsNullOrWhiteSpace(sourcePath) Then Continue For
-                If Not File.Exists(sourcePath) Then Continue For
+            Dim wikiRoot = GetWikiRootPath(kbRootPath)
+            Dim pageRelFromWiki = NormalizeWikiRelativePath(GetRelativePathCompat(wikiRoot, pageFullPath))
 
+            For Each sp In sourcePaths.
+                    Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+                    Distinct(StringComparer.OrdinalIgnoreCase)
+                Dim ref = KnowledgeSourceDossierService.EnsureDossier(kbRootPath, sp, schema)
+                If ref Is Nothing Then Continue For
+                refs.Add(ref)
                 Try
-                    Dim targetPath = Path.Combine(pageDir, Path.GetFileName(sourcePath))
-
-                    ' Copy if missing or if the source is newer than the existing copy.
-                    If Not File.Exists(targetPath) OrElse
-                       File.GetLastWriteTimeUtc(sourcePath) > File.GetLastWriteTimeUtc(targetPath) Then
-                        File.Copy(sourcePath, targetPath, overwrite:=True)
-                    End If
-                Catch
-                    ' Best effort — do not break the pipeline for a copy failure.
+                    KnowledgeSourceDossierService.AddCitedBy(kbRootPath, ref, pageTitle, pageRelFromWiki)
+                Catch ex As Exception
+                    LogWikiError(kbRootPath, sp, "AddCitedBy failed: " & ex.Message)
                 End Try
             Next
-        End Sub
+            Return refs
+        End Function
 
         ''' <summary>
-        ''' Removes non-.md files from wiki kind-folders that are not referenced
-        ''' by any page's source_paths front-matter list.
+        ''' Removes blobs from Wiki/_files/ that no .md page references, plus any
+        ''' legacy non-md files that linger from the old per-page-copy layout.
         ''' </summary>
         Private Shared Sub CleanupUnusedSourceCopies(kbRootPath As String)
             Try
+                Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+
+                Dim filesFolderName As String =
+            If(schema IsNot Nothing AndAlso schema.SourceAccess IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(schema.SourceAccess.FilesFolderName),
+               schema.SourceAccess.FilesFolderName, "_files")
+
+                Dim sourcesFolderName As String =
+            If(schema IsNot Nothing AndAlso schema.SourceRegistry IsNot Nothing AndAlso
+               Not String.IsNullOrWhiteSpace(schema.SourceRegistry.FolderName),
+               schema.SourceRegistry.FolderName, "Sources")
+
                 Dim wikiRoot = GetWikiRootPath(kbRootPath)
-                If Not Directory.Exists(wikiRoot) Then Return
+                If String.IsNullOrWhiteSpace(wikiRoot) OrElse Not Directory.Exists(wikiRoot) Then Return
 
-                ' Collect every filename referenced by at least one page.
-                Dim pages = GetAllWikiPages(kbRootPath)
-                Dim referencedFileNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                Dim filesRoot = Path.Combine(wikiRoot, filesFolderName)
+                Dim sourcesRoot = Path.Combine(wikiRoot, sourcesFolderName)
 
-                For Each page In pages
-                    If page.SourcePaths Is Nothing Then Continue For
-                    For Each sp In page.SourcePaths
-                        If Not String.IsNullOrWhiteSpace(sp) Then
-                            referencedFileNames.Add(Path.GetFileName(sp))
-                        End If
+                ' 1) Collect blob filenames referenced by ANY markdown link or front-matter
+                '    pointing into the configured files folder. The regex tolerates "../"
+                '    prefixes from dossier-relative links.
+                Dim referenced As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                Dim escapedFolder = Regex.Escape(filesFolderName)
+                Dim blobPattern = "(?:^|[\s(""'/\\])" & escapedFolder & "/([^\s)""'\r\n]+)"
+
+                For Each md In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
+                    Dim text As String
+                    Try
+                        text = File.ReadAllText(md, Encoding.UTF8)
+                    Catch
+                        Continue For
+                    End Try
+
+                    For Each m As Match In Regex.Matches(text, blobPattern)
+                        Dim name = m.Groups(1).Value.Trim()
+                        ' Strip any URL fragment / query suffix.
+                        Dim cut = name.IndexOfAny(New Char() {"#"c, "?"c})
+                        If cut >= 0 Then name = name.Substring(0, cut)
+                        If Not String.IsNullOrWhiteSpace(name) Then referenced.Add(name)
                     Next
                 Next
 
-                ' Walk every file in the wiki tree that is not a .md and not in the
-                ' root wiki directory (index.md, log.md, etc. live there).
-                For Each file In Directory.GetFiles(wikiRoot, "*.*", SearchOption.AllDirectories)
-                    Dim ext = Path.GetExtension(file)
+                ' 2) Delete blobs nobody references.
+                If Directory.Exists(filesRoot) Then
+                    For Each blob In Directory.GetFiles(filesRoot)
+                        If Not referenced.Contains(Path.GetFileName(blob)) Then
+                            Try : File.Delete(blob) : Catch : End Try
+                        End If
+                    Next
+                End If
+
+                ' 3) Delete legacy per-page source copies: any non-.md file in the wiki
+                '    tree that does NOT live under the shared files folder. Skip the
+                '    Sources dossier folder (only .md belongs there anyway).
+                For Each f In Directory.GetFiles(wikiRoot, "*.*", SearchOption.AllDirectories)
+                    If Not String.IsNullOrWhiteSpace(filesRoot) AndAlso
+               f.StartsWith(filesRoot, StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                    Dim ext = Path.GetExtension(f)
                     If ext.Equals(".md", StringComparison.OrdinalIgnoreCase) Then Continue For
 
-                    Dim name = Path.GetFileName(file)
-                    If Not referencedFileNames.Contains(name) Then
-                        Try
-                            IO.File.Delete(file)
-                        Catch
-                        End Try
-                    End If
+                    Try : File.Delete(f) : Catch : End Try
                 Next
-            Catch
+            Catch ex As Exception
+                LogWikiError(kbRootPath, "CleanupUnusedSourceCopies", ex.Message)
             End Try
         End Sub
 
         Private Shared Function EnsureRelatedSection(body As String,
                                                      currentPagePath As String,
-                                                     relatedCandidates As List(Of WikiPageInfo)) As String
+                                                     relatedCandidates As List(Of WikiPageInfo),
+                                                     Optional schema As KnowledgeStoreSchema = Nothing) As String
             If relatedCandidates Is Nothing OrElse relatedCandidates.Count = 0 Then Return body
+
+            Dim relatedPagesHeading As String = "## Related Pages"
+            If schema IsNot Nothing Then
+                relatedPagesHeading = schema.GetLabel("RelatedPagesHeading", relatedPagesHeading)
+            End If
 
             Dim mergedItems As New List(Of String)()
 
@@ -2925,7 +3586,7 @@ Namespace SharedLibrary
                 End If
             Next
 
-            Dim existingItems = ExtractSectionBulletItems(body, "## Related Pages").
+            Dim existingItems = ExtractSectionBulletItems(body, relatedPagesHeading).
                 Select(Function(x) Regex.Replace(If(x, "").Trim(), "\s+", " ").Trim()).
                 Where(Function(x) IsMeaningfulSectionItem(x)).
                 ToList()
@@ -2940,14 +3601,14 @@ Namespace SharedLibrary
             If mergedItems.Count = 0 Then Return body
 
             Dim sb As New StringBuilder()
-            sb.AppendLine("## Related Pages")
+            sb.AppendLine(relatedPagesHeading)
             sb.AppendLine()
 
             For Each item In mergedItems
                 sb.AppendLine("- " & item)
             Next
 
-            Return ReplaceMarkdownSection(body, "## Related Pages", sb.ToString().Trim())
+            Return ReplaceMarkdownSection(body, relatedPagesHeading, sb.ToString().Trim())
         End Function
 
 
@@ -2972,7 +3633,13 @@ Namespace SharedLibrary
 
         Private Shared Function FindExistingWikiPagePath(kbRootPath As String, title As String) As String
             Dim normalizedTitle = NormalizeWikiKey(title)
-            Dim pages = GetAllWikiPages(kbRootPath)
+
+            ' Dossier pages are managed by KnowledgeSourceDossierService and must
+            ' never be treated as the existing page for a Concept/Analysis/etc. ingest,
+            ' or freshly-proposed pages would be merged on top of the dossier file.
+            Dim pages = GetAllWikiPages(kbRootPath).
+                Where(Function(p) Not p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)).
+                ToList()
 
             Dim exact = pages.FirstOrDefault(
                 Function(p) NormalizeWikiKey(p.Title) = normalizedTitle OrElse NormalizeWikiKey(Path.GetFileNameWithoutExtension(p.FileName)) = normalizedTitle)
@@ -2994,11 +3661,18 @@ Namespace SharedLibrary
         End Function
 
         Private Shared Function GetAllWikiPages(kbRootPath As String) As List(Of WikiPageInfo)
+            Dim scope = _currentIngestScope.Value
+            If scope IsNot Nothing AndAlso
+               String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) AndAlso
+               scope.CachedPages IsNot Nothing Then
+                Return scope.CachedPages
+            End If
+
             Dim pages As New List(Of WikiPageInfo)()
             Dim wikiRoot = GetWikiRootPath(kbRootPath)
             If Not Directory.Exists(wikiRoot) Then Return pages
 
-            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            Dim schema = GetCachedSchema(kbRootPath)
 
             For Each file In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
                 Dim name = Path.GetFileName(file)
@@ -3012,6 +3686,11 @@ Namespace SharedLibrary
                 Catch
                 End Try
             Next
+
+            If scope IsNot Nothing AndAlso
+               String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then
+                scope.CachedPages = pages
+            End If
 
             Return pages
         End Function
@@ -3028,6 +3707,12 @@ Namespace SharedLibrary
 
             Dim frontMatter = GetFrontMatter(content)
             Dim rawStatus = GetFrontMatterScalar(frontMatter, "status")
+
+            If info.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then
+                info.Status = "stable"
+                info.ReviewNeeded = False
+                info.ContradictionCount = 0
+            End If
 
             info.Title = GetFrontMatterScalar(frontMatter, "title")
             info.Summary = GetFrontMatterScalar(frontMatter, "summary")
@@ -3156,12 +3841,14 @@ Namespace SharedLibrary
             Dim wikiRoot = GetWikiRootPath(kbRootPath)
             If Not Directory.Exists(wikiRoot) Then Return
 
+            Dim schema = GetCachedSchema(kbRootPath)
+
             Dim pages = GetAllWikiPages(kbRootPath).
                 OrderBy(Function(p) p.Kind, StringComparer.OrdinalIgnoreCase).
                 ThenBy(Function(p) p.Title, StringComparer.OrdinalIgnoreCase).
                 ToList()
 
-            Dim potentialSupersededPagePaths = GetPotentialSupersededPagePaths(pages)
+            Dim potentialSupersededPagePaths = GetPotentialSupersededPagePaths(pages, schema)
 
             Dim sb As New StringBuilder()
             sb.AppendLine("# Knowledge Base Index")
@@ -3313,6 +4000,11 @@ Namespace SharedLibrary
 
             Dim pages = GetAllWikiPages(kbRootPath)
             If pages.Count = 0 Then Return "Wiki is empty or not initialized."
+
+            ' Exclude dossier pages from health-checks; they are managed deterministically.
+            pages = pages.
+                        Where(Function(p) Not p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)).
+                        ToList()
 
             Dim pageLookup = pages.ToDictionary(Function(p) p.RelativePath, StringComparer.OrdinalIgnoreCase)
             Dim inboundCounts As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
@@ -3587,6 +4279,83 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return ""
             InitializeWikiStructure(kbRootPath)
 
+            ' Same scope pattern as IngestSourceAsync: collapse the per-saved-page
+            ' RebuildIndex / RefreshReviewArtifacts / BackfillRelatedLinks work
+            ' (driven by ParseAndSaveAgentResponseAsync inside the repair loops)
+            ' into a single end-of-run flush. The explicit RebuildIndex /
+            ' RefreshReviewArtifacts calls already present inside
+            ' ApplyWikiHealthFixesCoreAsync remain — they are idempotent and the
+            ' final pair simply overlaps harmlessly with EndIngestScopeAsync.
+            BeginEmbeddingBatch(kbRootPath)
+            BeginIngestScope(kbRootPath)
+
+            Dim resultText As String = ""
+            Dim captured As ExceptionDispatchInfo = Nothing
+
+            Try
+                resultText = Await ApplyWikiHealthFixesCoreAsync(
+                    kbRootPath:=kbRootPath,
+                    context:=context,
+                    includeLlmRepairs:=includeLlmRepairs,
+                    progressCallback:=progressCallback,
+                    operationName:=operationName).ConfigureAwait(False)
+            Catch ex As Exception
+                captured = ExceptionDispatchInfo.Capture(ex)
+            End Try
+
+            ' End ingest scope BEFORE the embedding batch (same ordering as
+            ' IngestSourceAsync): the scope's deferred backfill rewrites must
+            ' still queue their embedding updates into the active batch.
+            Await EndIngestScopeAsync(context).ConfigureAwait(False)
+            Await EndEmbeddingBatchAsync(context).ConfigureAwait(False)
+
+            If captured IsNot Nothing Then captured.Throw()
+            Return resultText
+        End Function
+
+        Private Shared Async Function ApplyWikiHealthFixesCoreAsync(kbRootPath As String,
+                                                                    context As ISharedContext,
+                                                                    includeLlmRepairs As Boolean,
+                                                                    progressCallback As Action(Of String),
+                                                                    operationName As String) As Task(Of String)
+
+            ' Idempotent: safe to run on every auto-apply pass.
+            Dim migrationSchema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            ReportMaintenanceProgress(progressCallback, $"{operationName}: migrating sources to dossiers / shared _files folder.")
+            Dim migrated As Integer = 0
+            For Each page In GetAllWikiPages(kbRootPath)
+                If page.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then Continue For
+                If page.SourcePaths Is Nothing OrElse page.SourcePaths.Count = 0 Then Continue For
+
+                Dim refs = EnsureDossiersForPage(kbRootPath, page.FilePath, page.Title, page.SourcePaths, migrationSchema)
+                If refs.Count = 0 Then Continue For
+
+                Dim body = RemoveFrontMatter(page.Content).Trim()
+                body = RebuildSourcesSectionDeterministically(body, page.FilePath, kbRootPath, refs)
+
+                Dim state = ComputePageComputedState(body, page.SourcePaths, migrationSchema)
+                Dim recomposed = ComposePageDocument(
+                    title:=page.Title,
+                    summary:=page.Summary,
+                    kind:=page.Kind,
+                    body:=body,
+                    sourceFilePath:="",
+                    additionalSourcePaths:=page.SourcePaths,
+                    status:=state.Status,
+                    reviewNeeded:=state.ReviewNeeded,
+                    contradictionCount:=state.ContradictionCount,
+                    sourceCount:=state.SourceCount)
+
+                If Not String.Equals(page.Content, recomposed, StringComparison.Ordinal) Then
+                    File.WriteAllText(page.FilePath, recomposed, Encoding.UTF8)
+                    Await QueueOrUpdateEmbeddingAsync(kbRootPath, page.FilePath, recomposed, context).ConfigureAwait(False)
+                    migrated += 1
+                End If
+            Next
+            If migrated > 0 Then
+                AppendToLog(kbRootPath, "dossier-migration", $"PagesMigrated={migrated}")
+            End If
+
             Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim pages = GetAllWikiPages(kbRootPath)
             If pages.Count = 0 Then Return "No wiki pages found."
@@ -3601,6 +4370,11 @@ Namespace SharedLibrary
 
             For Each page In pages
                 pageNumber += 1
+
+                If page.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+
                 ReportMaintenanceProgress(
                     progressCallback,
                     $"{operationName}: normalizing page {pageNumber} of {pages.Count}: {If(page.Title, page.RelativePath)}")
@@ -3674,7 +4448,7 @@ Namespace SharedLibrary
 
                 If Not String.Equals(originalContent, recomposedContent, StringComparison.Ordinal) Then
                     File.WriteAllText(page.FilePath, recomposedContent, Encoding.UTF8)
-                    Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(kbRootPath, page.FilePath, recomposedContent, context).ConfigureAwait(False)
+                    Await QueueOrUpdateEmbeddingAsync(kbRootPath, page.FilePath, recomposedContent, context).ConfigureAwait(False)
                     result.UpdatedPages += 1
                 End If
             Next
@@ -3715,6 +4489,8 @@ Namespace SharedLibrary
             ReportMaintenanceProgress(progressCallback, $"{operationName}: finished.")
             Return sb.ToString().Trim()
         End Function
+
+
 
         Private Shared Async Function ApplyLlmStructuralRepairsAsync(kbRootPath As String,
                                                                      context As ISharedContext,
@@ -3767,6 +4543,7 @@ Namespace SharedLibrary
                     ToList()
 
                 Dim promptSystem As New StringBuilder()
+                If schema IsNot Nothing Then promptSystem.Append(schema.ResolveLanguageDirective())
                 promptSystem.AppendLine("You are an autonomous Wiki Maintainer.")
                 promptSystem.AppendLine("Repair the provided wiki page so that it integrates better with the rest of the wiki.")
                 promptSystem.AppendLine("Preserve true facts, preserve source links, add or improve related-page links, and keep contradictions where relevant.")
@@ -3836,12 +4613,15 @@ Namespace SharedLibrary
                 RemoveFrontMatter(savedPage.Content)
 
             Dim candidatePages = FindCandidateWikiPages(kbRootPath, seedText, 8).
-                Where(Function(p) Not p.FilePath.Equals(savedPage.FilePath, StringComparison.OrdinalIgnoreCase)).
-                ToList()
+                        Where(Function(p) Not p.FilePath.Equals(savedPage.FilePath, StringComparison.OrdinalIgnoreCase)).
+                        Where(Function(p) Not p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)).
+                        ToList()
 
             Dim updatedCount As Integer = 0
 
             For Each candidate In candidatePages
+                If candidate.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then Continue For
+
                 Dim latestCandidate As WikiPageInfo = Nothing
 
                 Try
@@ -3888,7 +4668,7 @@ Namespace SharedLibrary
 
                 If Not String.Equals(originalContent, recomposedContent, StringComparison.Ordinal) Then
                     File.WriteAllText(latestCandidate.FilePath, recomposedContent, Encoding.UTF8)
-                    Await KnowledgeEmbeddingService.UpdateFileEmbeddingsAsync(
+                    Await QueueOrUpdateEmbeddingAsync(
                         kbRootPath,
                         latestCandidate.FilePath,
                         recomposedContent,
@@ -3913,38 +4693,43 @@ Namespace SharedLibrary
                                                           inboundCounts As Dictionary(Of String, Integer),
                                                           Optional schema As KnowledgeStoreSchema = Nothing) As List(Of WikiPageInfo)
             Return pages.
-                Where(
-                    Function(p)
-                        Dim hasSourcesIssue =
-                            (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
-                            p.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
-                            (p.SourcePaths Is Nothing OrElse p.SourcePaths.Count = 0) AndAlso
-                            p.Content.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0
+                    Where(
+                        Function(p)
+                            ' Dossier pages are managed deterministically; never send them to the LLM.
+                            If p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then
+                                Return False
+                            End If
 
-                        Dim hasRelatedIssue =
-                            (schema Is Nothing OrElse schema.AlwaysCreateCrossLinks) AndAlso
-                            p.Content.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) < 0
+                            Dim hasSourcesIssue =
+                                (schema Is Nothing OrElse schema.AlwaysAddSourceLinks) AndAlso
+                                p.Kind.Equals("Source", StringComparison.OrdinalIgnoreCase) AndAlso
+                                (p.SourcePaths Is Nothing OrElse p.SourcePaths.Count = 0) AndAlso
+                                p.Content.IndexOf("## Sources", StringComparison.OrdinalIgnoreCase) < 0
 
-                        Dim isOrphan = inboundCounts.ContainsKey(p.RelativePath) AndAlso inboundCounts(p.RelativePath) = 0
-                        Dim isDisputed = p.Status.Equals("disputed", StringComparison.OrdinalIgnoreCase)
-                        Dim isTentative = p.Status.Equals("tentative", StringComparison.OrdinalIgnoreCase)
-                        Dim weakEvidence = CountClaimsWithoutEvidence(p, schema) > 0
-                        Dim needsReview = p.ReviewNeeded
-                        Dim hasContradictions = p.ContradictionCount > 0
+                            Dim hasRelatedIssue =
+                                (schema Is Nothing OrElse schema.AlwaysCreateCrossLinks) AndAlso
+                                p.Content.IndexOf("## Related Pages", StringComparison.OrdinalIgnoreCase) < 0
 
-                        Return hasSourcesIssue OrElse
-                               hasRelatedIssue OrElse
-                               isOrphan OrElse
-                               isDisputed OrElse
-                               isTentative OrElse
-                               weakEvidence OrElse
-                               needsReview OrElse
-                               hasContradictions
-                    End Function).
-                OrderByDescending(Function(p) If(p.ReviewNeeded, 1, 0)).
-                ThenByDescending(Function(p) p.ContradictionCount).
-                Take(12).
-                ToList()
+                            Dim isOrphan = inboundCounts.ContainsKey(p.RelativePath) AndAlso inboundCounts(p.RelativePath) = 0
+                            Dim isDisputed = p.Status.Equals("disputed", StringComparison.OrdinalIgnoreCase)
+                            Dim isTentative = p.Status.Equals("tentative", StringComparison.OrdinalIgnoreCase)
+                            Dim weakEvidence = CountClaimsWithoutEvidence(p, schema) > 0
+                            Dim needsReview = p.ReviewNeeded
+                            Dim hasContradictions = p.ContradictionCount > 0
+
+                            Return hasSourcesIssue OrElse
+                                   hasRelatedIssue OrElse
+                                   isOrphan OrElse
+                                   isDisputed OrElse
+                                   isTentative OrElse
+                                   weakEvidence OrElse
+                                   needsReview OrElse
+                                   hasContradictions
+                        End Function).
+                    OrderByDescending(Function(p) If(p.ReviewNeeded, 1, 0)).
+                    ThenByDescending(Function(p) p.ContradictionCount).
+                    Take(12).
+                    ToList()
         End Function
 
         Private Shared Function ExtractInternalMarkdownLinks(content As String,
