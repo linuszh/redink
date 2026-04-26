@@ -28,6 +28,7 @@ Option Explicit On
 Imports System.Collections.Concurrent
 Imports System.Drawing
 Imports System.IO
+Imports System.Runtime.ExceptionServices
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
@@ -279,73 +280,102 @@ Namespace SharedLibrary
                     End Try
                 End If
 
-                While processed < maxFiles AndAlso processed < startCount
+                ' Phase 1: drain up to maxFiles items from the queue into a working list.
+                ' We do this so we can group by store before processing, which lets us
+                ' open one embedding batch per store and flush exactly once per tick.
+                Dim drained As New List(Of PendingFile)()
+                While drained.Count < maxFiles AndAlso drained.Count < startCount
                     Dim pending As PendingFile = Nothing
                     If Not _pendingFiles.TryDequeue(pending) Then Exit While
+                    drained.Add(pending)
+                End While
 
-                    Dim safeFileName = Path.GetFileName(pending.FilePath)
+                ' Phase 2: process per store, with one embedding batch per store group.
+                For Each storeGroup In drained.GroupBy(Function(p) p.StoreId, StringComparer.OrdinalIgnoreCase)
+                    Dim resolvedStore As KnowledgeStoreCatalog.KnowledgeStoreDefinition = Nothing
+                    Dim sample = storeGroup.First()
 
-                    If trayIcon IsNot Nothing Then
-                        Dim statusText = $"Knowledge Store ({processed + 1}/{startCount}): {safeFileName}"
-                        trayIcon.Text = If(statusText.Length > 63, statusText.Substring(0, 60) & "...", statusText)
+                    resolvedStore = KnowledgeStoreCatalog.GetStoreById(sample.StoreId, _context)
+                    If resolvedStore Is Nothing AndAlso Not String.IsNullOrWhiteSpace(sample.StoreName) Then
+                        Dim matches = KnowledgeStoreCatalog.GetStoresByName(sample.StoreName, _context)
+                        If matches.Count = 1 Then resolvedStore = matches(0)
                     End If
 
-                    Dim result As New IndexResult() With {.FilePath = pending.FilePath}
+                    Dim kbRootPath As String = If(resolvedStore IsNot Nothing, resolvedStore.ResolvedSourcePath, "")
+                    Dim batchOpened As Boolean = False
+
+                    If Not String.IsNullOrWhiteSpace(kbRootPath) Then
+                        KnowledgeWikiService.BeginEmbeddingBatch(kbRootPath)
+                        batchOpened = True
+                    End If
+
+                    Dim captured As ExceptionDispatchInfo = Nothing
 
                     Try
-                        If Not File.Exists(pending.FilePath) Then
-                            result.ErrorMessage = "File no longer exists."
-                            results.Add(result)
-                            processed += 1
-                            Continue While
-                        End If
+                        For Each pending In storeGroup
+                            Dim safeFileName = Path.GetFileName(pending.FilePath)
 
-                        Dim store = KnowledgeStoreCatalog.GetStoreById(pending.StoreId, _context)
-
-                        If store Is Nothing AndAlso Not String.IsNullOrWhiteSpace(pending.StoreName) Then
-                            Dim matches = KnowledgeStoreCatalog.GetStoresByName(pending.StoreName, _context)
-                            If matches.Count = 1 Then
-                                store = matches(0)
+                            If trayIcon IsNot Nothing Then
+                                Dim statusText = $"Knowledge Store ({processed + 1}/{startCount}): {safeFileName}"
+                                trayIcon.Text = If(statusText.Length > 63, statusText.Substring(0, 60) & "...", statusText)
                             End If
-                        End If
 
-                        If store Is Nothing OrElse Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
-                            result.ErrorMessage = "Store not found or not writable."
-                            results.Add(result)
+                            Dim result As New IndexResult() With {.FilePath = pending.FilePath}
+
+                            Try
+                                If Not File.Exists(pending.FilePath) Then
+                                    result.ErrorMessage = "File no longer exists."
+                                    results.Add(result)
+                                    processed += 1
+                                    Continue For
+                                End If
+
+                                If resolvedStore Is Nothing OrElse Not KnowledgeStoreCatalog.CanCurrentUserWrite(resolvedStore, _context) Then
+                                    result.ErrorMessage = "Store not found or not writable."
+                                    results.Add(result)
+                                    processed += 1
+                                    Continue For
+                                End If
+
+                                Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
+                                    store:=resolvedStore,
+                                    filePath:=pending.FilePath,
+                                    context:=_context,
+                                    useLlmIndex:=_context.INI_KnowledgeStoreUseLLMIndex,
+                                    isBackground:=True).ConfigureAwait(False)
+
+                                If Not processResult.Success OrElse processResult.Entry Is Nothing Then
+                                    result.ErrorMessage = processResult.ErrorMessage
+                                    results.Add(result)
+                                    processed += 1
+                                    Continue For
+                                End If
+
+                                result.Success = True
+                                result.Title = processResult.Entry.Title
+                                results.Add(result)
+
+                            Catch ex As Exception
+                                result.ErrorMessage = ex.Message
+                                KnowledgeWikiService.LogWikiError(
+                                    If(kbRootPath, ""),
+                                    pending.FilePath,
+                                    ex.Message)
+                                results.Add(result)
+                            End Try
+
                             processed += 1
-                            Continue While
-                        End If
-
-                        Dim processResult = Await KnowledgeStoreProcessingService.ProcessDocumentAsync(
-                            store:=store,
-                            filePath:=pending.FilePath,
-                            context:=_context,
-                            useLlmIndex:=_context.INI_KnowledgeStoreUseLLMIndex,
-                            isBackground:=True).ConfigureAwait(False)
-
-                        If Not processResult.Success OrElse processResult.Entry Is Nothing Then
-                            result.ErrorMessage = processResult.ErrorMessage
-                            results.Add(result)
-                            processed += 1
-                            Continue While
-                        End If
-
-                        result.Success = True
-                        result.Title = processResult.Entry.Title
-
+                        Next
                     Catch ex As Exception
-                        result.ErrorMessage = ex.Message
-                        ' In ProcessPendingAsync, replace the LogWikiError call
-
-                        KnowledgeWikiService.LogWikiError(
-                        KnowledgeStoreCatalog.GetStoreById(pending.StoreId, _context)?.ResolvedSourcePath,
-                        pending.FilePath,
-                        ex.Message)
+                        captured = ExceptionDispatchInfo.Capture(ex)
                     End Try
 
-                    results.Add(result)
-                    processed += 1
-                End While
+                    If batchOpened Then
+                        Await KnowledgeWikiService.EndEmbeddingBatchAsync(_context).ConfigureAwait(False)
+                    End If
+
+                    If captured IsNot Nothing Then captured.Throw()
+                Next
 
             Finally
                 If trayIcon IsNot Nothing Then
