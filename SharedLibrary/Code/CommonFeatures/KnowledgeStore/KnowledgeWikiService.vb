@@ -948,6 +948,36 @@ Namespace SharedLibrary
                 Return False
             End If
 
+            ' ── Re-ingest guard ──────────────────────────────────────────────
+            ' If this exact source has already been ingested (i.e. at least one
+            ' wiki page lists it under source_paths) AND the extracted text
+            ' hash hasn't changed since last time, skip the entire LLM ingest.
+            ' This is what stops background re-scans (mtime drift, AV touches,
+            ' resync) from minting fresh supplemental pages every run.
+            Dim currentHash As String = ComputeSourceTextHash(sourceText)
+            Dim hashFilePath As String = GetSourceHashCachePath(kbRootPath, sourceFilePath)
+
+            Dim alreadyIngested As Boolean =
+                GetAllWikiPages(kbRootPath).
+                    Any(Function(p) p.SourcePaths IsNot Nothing AndAlso
+                                    p.SourcePaths.Any(Function(sp) String.Equals(sp, sourceFilePath, StringComparison.OrdinalIgnoreCase)))
+
+            Dim contentUnchanged As Boolean = False
+            Try
+                If File.Exists(hashFilePath) Then
+                    Dim previousHash = File.ReadAllText(hashFilePath, Encoding.UTF8).Trim()
+                    contentUnchanged = String.Equals(previousHash, currentHash, StringComparison.OrdinalIgnoreCase)
+                End If
+            Catch
+                contentUnchanged = False
+            End Try
+
+            If alreadyIngested AndAlso contentUnchanged Then
+                AppendToLog(kbRootPath, "ingest-skip", $"{Path.GetFileName(sourceFilePath)} | unchanged content")
+                Return True
+            End If
+            ' ─────────────────────────────────────────────────────────────────
+
             Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim wikiIndex = LoadIndexText(kbRootPath)
             Dim candidatePages = FindCandidateWikiPages(kbRootPath, Path.GetFileNameWithoutExtension(sourceFilePath) & " " & sourceText, 8)
@@ -1002,20 +1032,65 @@ Namespace SharedLibrary
                 Return False
             End If
 
+            ' Only run the expensive supplemental fan-out the FIRST time we see
+            ' this source. On any later re-ingest the primary page is merged in
+            ' place above and we skip the 8-15 extra LLM-generated pages that
+            ' otherwise accumulate every background run.
+            If Not alreadyIngested Then
+                Try
+                    Await GenerateAndApplySupplementalPagesAsync(
+                        kbRootPath:=kbRootPath,
+                        sourceFilePath:=sourceFilePath,
+                        sourceText:=sourceText,
+                        context:=context,
+                        schema:=schema,
+                        candidatePages:=candidatePages,
+                        isBackground:=isBackground).ConfigureAwait(False)
+                Catch ex As Exception
+                    LogWikiError(kbRootPath, sourceFilePath, $"Supplemental page generation failed: {ex.Message}")
+                End Try
+            End If
+
+            ' Record the content hash so the next run can short-circuit cleanly.
             Try
-                Await GenerateAndApplySupplementalPagesAsync(
-                    kbRootPath:=kbRootPath,
-                    sourceFilePath:=sourceFilePath,
-                    sourceText:=sourceText,
-                    context:=context,
-                    schema:=schema,
-                    candidatePages:=candidatePages,
-                    isBackground:=isBackground).ConfigureAwait(False)
+                Dim hashDir = Path.GetDirectoryName(hashFilePath)
+                If Not String.IsNullOrWhiteSpace(hashDir) AndAlso Not Directory.Exists(hashDir) Then
+                    Directory.CreateDirectory(hashDir)
+                End If
+                File.WriteAllText(hashFilePath, currentHash, Encoding.UTF8)
             Catch ex As Exception
-                LogWikiError(kbRootPath, sourceFilePath, $"Supplemental page generation failed: {ex.Message}")
+                LogWikiError(kbRootPath, sourceFilePath, $"Hash cache write failed: {ex.Message}")
             End Try
 
             Return True
+        End Function
+
+        Private Shared Function ComputeSourceTextHash(text As String) As String
+            Using sha = System.Security.Cryptography.SHA256.Create()
+                Dim bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(If(text, "")))
+                Return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant()
+            End Using
+        End Function
+
+        Private Shared Function GetSourceHashCachePath(kbRootPath As String, sourceFilePath As String) As String
+            Dim slug As String = SanitizeFileName(Path.GetFileNameWithoutExtension(If(sourceFilePath, "")))
+            If String.IsNullOrWhiteSpace(slug) Then slug = "source"
+
+            ' Disambiguate same-name files in different folders by appending a
+            ' short hash of the full path. Keeps the cache filename stable
+            ' across runs while avoiding collisions.
+            Dim pathKey As String = ""
+            Try
+                Using sha = System.Security.Cryptography.SHA256.Create()
+                    Dim bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(If(sourceFilePath, "").ToLowerInvariant()))
+                    pathKey = BitConverter.ToString(bytes, 0, 6).Replace("-", "").ToLowerInvariant()
+                End Using
+            Catch
+                pathKey = "x"
+            End Try
+
+            Dim dir = Path.Combine(kbRootPath, ".redink", "ingest-cache")
+            Return Path.Combine(dir, $"{slug}.{pathKey}.sha256")
         End Function
 
         Private Shared Async Function GenerateAndApplySupplementalPagesAsync(kbRootPath As String,
