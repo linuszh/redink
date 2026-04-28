@@ -82,7 +82,7 @@
     <DefineConstants>$(DefineConstants),HAS_WINRT</DefineConstants>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Develop'">
-    <ApplicationVersion>1.4.21.700</ApplicationVersion>
+    <ApplicationVersion>1.4.23.700</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\develop\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/develop/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Develop%29</ProductName>
@@ -490,11 +490,16 @@
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorageDashboard.vb" />
     <Compile Include="ThisAddIn.Autopilot.vb" />
+    <Compile Include="ThisAddIn.ChatAgentScope.vb" />
     <Compile Include="ThisAddIn.Commands.InboxBoard.vb" />
     <Compile Include="ThisAddIn.Commands.MailMover.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
     <Compile Include="ThisAddIn.KnowledgeStoreWiring.vb" />
+    <Compile Include="ThisAddIn.M365SearchForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="ThisAddIn.Processing.KnowledgeRAG.vb" />
+    <Compile Include="ThisAddIn.Tooling.M365.vb" />
     <Compile Include="ThisAddIn.Tooling.vb" />
     <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />

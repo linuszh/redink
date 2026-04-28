@@ -2666,6 +2666,21 @@ Partial Public Class ThisAddIn
                 response = Await ExecuteInternalKnowledgeTool(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
+            ElseIf SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
+                ' Defense-in-depth: even if a stale m365_* registration leaks
+                ' into AutoPilot mode, never execute it there — those tools
+                ' require interactive sign-in on the user's own machine.
+                If _chatAgentActive AndAlso Not _apActive Then
+                    response = Await ExecuteInternalM365Tool(toolCall, context)
+                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                Else
+                    response.Success = False
+                    response.ErrorMessage = "M365 tools are only available in interactive Chat Agent mode on the user's computer; they cannot run inside AutoPilot."
+                    ToolingFileLogger.LogWarn(
+                        "M365 tool blocked outside Chat Agent.",
+                        details:=$"tool={toolCall.ToolName}; _apActive={_apActive}; _chatAgentActive={_chatAgentActive}")
+                End If
+
             Else
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
@@ -3803,6 +3818,13 @@ Partial Public Class ThisAddIn
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+
+        ' M365 tools: only when the Chat Agent runs interactively on the user's
+        ' computer. They require an MSAL sign-in popup and access the user's own
+        ' M365 tenant, which is incompatible with unattended AutoPilot runs.
+        If _chatAgentActive AndAlso Not _apActive Then
+            tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
+        End If
 
         Return tools
     End Function

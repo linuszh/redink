@@ -217,13 +217,13 @@
           "key": "HeaderA",
           "label": "Header Name",
           "type": "string",
-          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. [HeaderA]"
+          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. If you want to use two headers, separate their values with '¦'. [HeaderA]"
         },
         {
           "key": "HeaderB",
           "label": "Header Value",
           "type": "string",
-          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. [HeaderB]"
+          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. If you want to use two headers, separate their values with '¦'. [HeaderB]"
         },
         {
           "key": "Response",
@@ -1316,6 +1316,36 @@
           "type": "string",
           "default": "",
           "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
+        }
+      ]
+    },
+    {
+      "id": "m365",
+      "title": "Microsoft 365 Integration",
+      "description": "Settings for the optional Microsoft 365 integration that lets the LLM search and retrieve the user's own emails, OneDrive/SharePoint files, Teams chats, calendar events, OneNote pages and contacts via Microsoft Graph. Auth is interactive (MSAL) on the user's PC; the resulting token is cached cross-process under %APPDATA%\\RedInk. Leave Client ID empty to disable the integration entirely.",
+      "fields": [
+        {
+          "key": "M365ClientId",
+          "label": "M365 Application (Client) ID",
+          "type": "string",
+          "default": "",
+          "description": "The Azure AD application (client) ID of the Red Ink app registration in your tenant (or a multi-tenant registration). This is the GUID shown on the App Registration overview page in Microsoft Entra ID / Azure AD. Leave empty to disable the entire M365 integration (search, mail/file/event/chat/OneNote retrieval, M365 LLM tools). Example: 11111111-2222-3333-4444-555555555555. [M365ClientId]"
+        },
+        {
+          "key": "M365TenantId",
+          "label": "M365 Tenant ID",
+          "type": "string",
+          "default": "common",
+          "description": "Azure AD tenant the app is registered in. Use the tenant GUID for single-tenant apps, your verified domain (e.g. contoso.onmicrosoft.com), 'organizations' to allow any work/school account, or 'common' to allow both work/school and personal Microsoft accounts. Defaults to 'common' when empty. Example: contoso.onmicrosoft.com. [M365TenantId]",
+          "condition": "M365ClientId != \"\""
+        },
+        {
+          "key": "M365Scopes",
+          "label": "M365 Graph Scopes",
+          "type": "string",
+          "default": "openid profile offline_access User.Read Mail.Read Files.Read Files.Read.All Sites.Read.All Calendars.Read Chat.Read ChannelMessage.Read.All Notes.Read.All People.Read Contacts.Read",
+          "description": "Space-separated list of Microsoft Graph delegated permission scopes requested at sign-in. Must match the scopes consented to in the Azure AD app registration; users will see a consent prompt if any are new. Keep openid/profile/offline_access for sign-in and silent token refresh. The default covers full read-only access across mail, files (personal + shared + SharePoint), calendar, Teams chats and channel messages, OneNote, people and contacts — everything the M365 LLM tools can call. ADMIN CONSENT: Files.Read.All, Sites.Read.All, ChannelMessage.Read.All, Notes.Read.All, People.Read and Contacts.Read are admin-consent scopes; a tenant admin must grant consent once before regular users can sign in. Reduce the list to a stricter subset (e.g. ''openid profile offline_access User.Read Mail.Read Calendars.Read'') to limit the surface, at the cost of disabling the corresponding tools. Example: openid profile offline_access User.Read Mail.Read Files.Read.All Sites.Read.All Calendars.Read. [M365Scopes]",
+          "condition": "M365ClientId != \"\""
         }
       ]
     },

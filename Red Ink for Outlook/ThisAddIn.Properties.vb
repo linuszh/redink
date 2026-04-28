@@ -1022,6 +1022,15 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_AIMailSearch As String
+        Get
+            Return _context.SP_AIMailSearch
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch = value
+        End Set
+    End Property
+
     Public Shared Property SP_FreestyleText As String
         Get
             Return _context.SP_FreestyleText

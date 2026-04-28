@@ -185,6 +185,7 @@ Namespace SharedLibrary
             Property SP_MailReply As String
             Property SP_MailSumup As String
             Property SP_MailSumup2 As String
+            Property SP_AIMailSearch As String
             Property SP_FreestyleText As String
             Property SP_FreestyleNoText As String
             Property SP_Freestyle_Document As String
@@ -366,6 +367,11 @@ Namespace SharedLibrary
             Property SP_Assemble_Execute As String
             Property SP_Assemble_Summarize As String
 
+            ' Microsoft 365 / Graph integration (used by M365Service in CommonFeatures)
+            Property INI_M365ClientId As String
+            Property INI_M365TenantId As String
+            Property INI_M365Scopes As String
+
 
         End Interface
 
@@ -515,6 +521,7 @@ Namespace SharedLibrary
         Public Property SP_MailReply As String Implements ISharedContext.SP_MailReply
         Public Property SP_MailSumup As String Implements ISharedContext.SP_MailSumup
         Public Property SP_MailSumup2 As String Implements ISharedContext.SP_MailSumup2
+        Public Property SP_AIMailSearch As String Implements ISharedContext.SP_AIMailSearch
         Public Property SP_FreestyleText As String Implements ISharedContext.SP_FreestyleText
         Public Property SP_FreestyleNoText As String Implements ISharedContext.SP_FreestyleNoText
         Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
@@ -685,6 +692,10 @@ Namespace SharedLibrary
         Public Property SP_Assemble_Plan As String Implements ISharedContext.SP_Assemble_Plan
         Public Property SP_Assemble_Execute As String Implements ISharedContext.SP_Assemble_Execute
         Public Property SP_Assemble_Summarize As String Implements ISharedContext.SP_Assemble_Summarize
+
+        Public Property INI_M365ClientId As String Implements ISharedContext.INI_M365ClientId
+        Public Property INI_M365TenantId As String Implements ISharedContext.INI_M365TenantId
+        Public Property INI_M365Scopes As String Implements ISharedContext.INI_M365Scopes
 
     End Class
 End Namespace

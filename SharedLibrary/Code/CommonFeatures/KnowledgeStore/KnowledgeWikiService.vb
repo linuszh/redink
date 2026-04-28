@@ -949,18 +949,20 @@ Namespace SharedLibrary
             End If
 
             ' ── Re-ingest guard ──────────────────────────────────────────────
-            ' If this exact source has already been ingested (i.e. at least one
-            ' wiki page lists it under source_paths) AND the extracted text
-            ' hash hasn't changed since last time, skip the entire LLM ingest.
-            ' This is what stops background re-scans (mtime drift, AV touches,
-            ' resync) from minting fresh supplemental pages every run.
             Dim currentHash As String = ComputeSourceTextHash(sourceText)
-            Dim hashFilePath As String = GetSourceHashCachePath(kbRootPath, sourceFilePath)
+            Dim normalizedSourcePath = NormalizeStoreSourcePath(kbRootPath, sourceFilePath)
+            Dim hashFilePath As String = GetSourceHashCachePath(kbRootPath, normalizedSourcePath)
 
             Dim alreadyIngested As Boolean =
-                GetAllWikiPages(kbRootPath).
-                    Any(Function(p) p.SourcePaths IsNot Nothing AndAlso
-                                    p.SourcePaths.Any(Function(sp) String.Equals(sp, sourceFilePath, StringComparison.OrdinalIgnoreCase)))
+    GetAllWikiPages(kbRootPath).
+        Any(Function(p) p.SourcePaths IsNot Nothing AndAlso
+                        p.SourcePaths.Any(
+                            Function(sp)
+                                Return String.Equals(
+                                    NormalizeStoreSourcePath(kbRootPath, sp),
+                                    normalizedSourcePath,
+                                    StringComparison.OrdinalIgnoreCase)
+                            End Function))
 
             Dim contentUnchanged As Boolean = False
             Try
@@ -976,7 +978,7 @@ Namespace SharedLibrary
                 AppendToLog(kbRootPath, "ingest-skip", $"{Path.GetFileName(sourceFilePath)} | unchanged content")
                 Return True
             End If
-            ' ─────────────────────────────────────────────────────────────────
+
 
             Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
             Dim wikiIndex = LoadIndexText(kbRootPath)
@@ -1072,17 +1074,19 @@ Namespace SharedLibrary
             End Using
         End Function
 
+        ' Replace GetSourceHashCachePath with this:
+
         Private Shared Function GetSourceHashCachePath(kbRootPath As String, sourceFilePath As String) As String
-            Dim slug As String = SanitizeFileName(Path.GetFileNameWithoutExtension(If(sourceFilePath, "")))
+            Dim normalizedSourcePath = NormalizeStoreSourcePath(kbRootPath, sourceFilePath)
+            Dim pathForFileName = normalizedSourcePath.Replace("/"c, Path.DirectorySeparatorChar)
+
+            Dim slug As String = SanitizeFileName(Path.GetFileNameWithoutExtension(If(pathForFileName, "")))
             If String.IsNullOrWhiteSpace(slug) Then slug = "source"
 
-            ' Disambiguate same-name files in different folders by appending a
-            ' short hash of the full path. Keeps the cache filename stable
-            ' across runs while avoiding collisions.
             Dim pathKey As String = ""
             Try
                 Using sha = System.Security.Cryptography.SHA256.Create()
-                    Dim bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(If(sourceFilePath, "").ToLowerInvariant()))
+                    Dim bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(If(normalizedSourcePath, "").ToLowerInvariant()))
                     pathKey = BitConverter.ToString(bytes, 0, 6).Replace("-", "").ToLowerInvariant()
                 End Using
             Catch
@@ -1310,6 +1314,188 @@ Namespace SharedLibrary
             End If
 
             Return sb.ToString().Trim()
+        End Function
+
+        Public Shared Async Function ReformatMalformedPagesAsync(kbRootPath As String,
+                                                         context As ISharedContext,
+                                                         pagePaths As IEnumerable(Of String),
+                                                         Optional progressCallback As Action(Of String) = Nothing,
+                                                         Optional operationName As String = "Reformat Page") As Task(Of String)
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return "Invalid KB path."
+
+            InitializeWikiStructure(kbRootPath)
+
+            Dim targets = If(pagePaths, Enumerable.Empty(Of String)()).
+        Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+        Select(Function(p) Path.GetFullPath(p.Trim())).
+        Distinct(StringComparer.OrdinalIgnoreCase).
+        ToList()
+
+            If targets.Count = 0 Then
+                Return "No wiki pages selected."
+            End If
+
+            BeginEmbeddingBatch(kbRootPath)
+
+            Dim resultText As String = ""
+            Dim captured As ExceptionDispatchInfo = Nothing
+
+            Try
+                resultText = Await ReformatMalformedPagesCoreAsync(
+            kbRootPath:=kbRootPath,
+            context:=context,
+            pagePaths:=targets,
+            progressCallback:=progressCallback,
+            operationName:=operationName).ConfigureAwait(False)
+            Catch ex As Exception
+                captured = ExceptionDispatchInfo.Capture(ex)
+            End Try
+
+            Await EndEmbeddingBatchAsync(context).ConfigureAwait(False)
+
+            If captured IsNot Nothing Then captured.Throw()
+            Return resultText
+        End Function
+
+        Private Shared Async Function ReformatMalformedPagesCoreAsync(kbRootPath As String,
+                                                              context As ISharedContext,
+                                                              pagePaths As List(Of String),
+                                                              progressCallback As Action(Of String),
+                                                              operationName As String) As Task(Of String)
+            Dim schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
+            Dim updatedCount As Integer = 0
+            Dim unchangedCount As Integer = 0
+            Dim skippedCount As Integer = 0
+            Dim failed As New List(Of String)()
+
+            If pagePaths Is Nothing OrElse pagePaths.Count = 0 Then
+                Return "No wiki pages selected."
+            End If
+
+            For i As Integer = 0 To pagePaths.Count - 1
+                Dim pagePath = pagePaths(i)
+                Dim relForLog = GetRelativeWikiPath(kbRootPath, pagePath)
+
+                ReportMaintenanceProgress(
+            progressCallback,
+            $"{operationName}: processing page {i + 1} of {pagePaths.Count}: {relForLog}")
+
+                Try
+                    If Not File.Exists(pagePath) Then
+                        failed.Add($"{relForLog} — file not found.")
+                        Continue For
+                    End If
+
+                    Dim page = ReadWikiPageInfo(kbRootPath, pagePath, schema)
+
+                    If page.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then
+                        skippedCount += 1
+                        Continue For
+                    End If
+
+                    Dim candidates = FindCandidateWikiPages(
+                kbRootPath,
+                page.Title & " " & page.Summary & " " & RemoveFrontMatter(page.Content),
+                8).
+                Where(Function(p) Not p.FilePath.Equals(page.FilePath, StringComparison.OrdinalIgnoreCase)).
+                Where(Function(p) Not p.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase)).
+                ToList()
+
+                    Dim updatedBody = NormalizePageBody(
+                body:=RemoveFrontMatter(page.Content).Trim(),
+                currentPagePath:=page.FilePath,
+                sourcePaths:=page.SourcePaths,
+                relatedCandidates:=candidates,
+                schema:=schema)
+
+                    Dim dossierRefs = EnsureDossiersForPage(
+                kbRootPath:=kbRootPath,
+                pageFullPath:=page.FilePath,
+                pageTitle:=page.Title,
+                sourcePaths:=page.SourcePaths,
+                schema:=schema)
+
+                    If schema Is Nothing OrElse schema.AlwaysAddSourceLinks Then
+                        updatedBody = RebuildSourcesSectionDeterministically(
+                    body:=updatedBody,
+                    currentPagePath:=page.FilePath,
+                    kbRootPath:=kbRootPath,
+                    dossiers:=dossierRefs)
+                    End If
+
+                    Dim pageState = ComputePageComputedState(updatedBody, page.SourcePaths, schema)
+
+                    Dim recomposedContent = ComposePageDocument(
+                title:=page.Title,
+                summary:=page.Summary,
+                kind:=page.Kind,
+                body:=updatedBody,
+                sourceFilePath:="",
+                additionalSourcePaths:=page.SourcePaths,
+                status:=pageState.Status,
+                reviewNeeded:=pageState.ReviewNeeded,
+                contradictionCount:=pageState.ContradictionCount,
+                sourceCount:=pageState.SourceCount)
+
+                    If String.Equals(
+                NormalizeDocumentForReformatComparison(page.Content),
+                NormalizeDocumentForReformatComparison(recomposedContent),
+                StringComparison.Ordinal) Then
+
+                        unchangedCount += 1
+                        Continue For
+                    End If
+
+                    File.WriteAllText(page.FilePath, recomposedContent, Encoding.UTF8)
+                    Await QueueOrUpdateEmbeddingAsync(
+                kbRootPath:=kbRootPath,
+                filePath:=page.FilePath,
+                content:=recomposedContent,
+                context:=context).ConfigureAwait(False)
+
+                    updatedCount += 1
+                    InvalidateIngestPageCache(kbRootPath)
+                Catch ex As Exception
+                    failed.Add($"{relForLog} — {ex.Message}")
+                End Try
+            Next
+
+            CleanupUnusedSourceCopies(kbRootPath)
+            RebuildIndex(kbRootPath)
+            RefreshReviewArtifacts(kbRootPath)
+
+            AppendToLog(
+        kbRootPath,
+        "reformat",
+        $"PagesRequested={pagePaths.Count}; Updated={updatedCount}; Unchanged={unchangedCount}; Skipped={skippedCount}; Failed={failed.Count}")
+
+            Dim sb As New StringBuilder()
+            sb.AppendLine($"# {operationName}")
+            sb.AppendLine()
+            sb.AppendLine($"- Pages requested: {pagePaths.Count}")
+            sb.AppendLine($"- Reformatted: {updatedCount}")
+            sb.AppendLine($"- Already clean: {unchangedCount}")
+            sb.AppendLine($"- Skipped: {skippedCount}")
+            sb.AppendLine($"- Failed: {failed.Count}")
+
+            If failed.Count > 0 Then
+                sb.AppendLine()
+                sb.AppendLine("## Failures")
+                For Each item In failed
+                    sb.AppendLine($"- {item}")
+                Next
+            End If
+
+            ReportMaintenanceProgress(progressCallback, $"{operationName}: finished.")
+            Return sb.ToString().Trim()
+        End Function
+
+        Private Shared Function NormalizeDocumentForReformatComparison(document As String) As String
+            Dim normalized = If(document, "").Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            normalized = Regex.Replace(normalized, "(?im)^\s*updated_utc\s*:\s*.*\n", "")
+            normalized = Regex.Replace(normalized, "[ \t]+\n", vbLf)
+            normalized = Regex.Replace(normalized, "\n{3,}", vbLf & vbLf)
+            Return normalized.Trim()
         End Function
 
         Public Shared Async Function FileQueryResultAsync(kbRootPath As String,
@@ -1641,6 +1827,8 @@ Namespace SharedLibrary
         End Function
 
 
+
+
         Public Shared Async Function ProcessLargeTextInChunksAsync(context As ISharedContext,
                                                                    systemPrompt As String,
                                                                    fullText As String,
@@ -1917,10 +2105,12 @@ Namespace SharedLibrary
                 finalPath = Path.Combine(targetDir, safeName & ".md")
             End If
 
-            Dim mergedSourcePaths = MergeSourcePaths(
-                sourceFilePath,
-                additionalSourcePaths,
-                If(existingPageInfo Is Nothing, Nothing, existingPageInfo.SourcePaths))
+            Dim mergedSourcePaths = NormalizeStoreSourcePaths(
+                    kbRootPath,
+                    MergeSourcePaths(
+                        sourceFilePath,
+                        additionalSourcePaths,
+                        If(existingPageInfo Is Nothing, Nothing, existingPageInfo.SourcePaths)))
 
             If isUpdate Then
                 Dim existingContent = If(
@@ -2102,11 +2292,11 @@ Namespace SharedLibrary
                 Dim line = lines(i).Trim()
 
                 If line.StartsWith("TITLE:", StringComparison.OrdinalIgnoreCase) Then
-                    result.Title = line.Substring(6).Trim()
+                    result.Title = NormalizeMetadataScalar(line.Substring(6).Trim(), stripOuterQuotes:=True)
                 ElseIf line.StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase) Then
-                    result.Summary = line.Substring(8).Trim()
+                    result.Summary = NormalizeMetadataScalar(line.Substring(8).Trim(), stripOuterQuotes:=True)
                 ElseIf line.StartsWith("KIND:", StringComparison.OrdinalIgnoreCase) Then
-                    result.Kind = line.Substring(5).Trim()
+                    result.Kind = NormalizeMetadataScalar(line.Substring(5).Trim(), stripOuterQuotes:=True)
                 ElseIf contentStartIdx = -1 AndAlso Not String.IsNullOrWhiteSpace(line) Then
                     contentStartIdx = i
                 End If
@@ -2115,16 +2305,16 @@ Namespace SharedLibrary
             If contentStartIdx < 0 Then
                 contentStartIdx = 0
                 While contentStartIdx < lines.Length AndAlso
-                      (lines(contentStartIdx).Trim().StartsWith("TITLE:", StringComparison.OrdinalIgnoreCase) OrElse
-                       lines(contentStartIdx).Trim().StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase) OrElse
-                       lines(contentStartIdx).Trim().StartsWith("KIND:", StringComparison.OrdinalIgnoreCase) OrElse
-                       String.IsNullOrWhiteSpace(lines(contentStartIdx)))
+              (lines(contentStartIdx).Trim().StartsWith("TITLE:", StringComparison.OrdinalIgnoreCase) OrElse
+               lines(contentStartIdx).Trim().StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase) OrElse
+               lines(contentStartIdx).Trim().StartsWith("KIND:", StringComparison.OrdinalIgnoreCase) OrElse
+               String.IsNullOrWhiteSpace(lines(contentStartIdx)))
                     contentStartIdx += 1
                 End While
             End If
 
             If contentStartIdx < lines.Length Then
-                result.Body = String.Join(vbCrLf, lines.Skip(contentStartIdx)).Trim()
+                result.Body = StripDuplicatedMetadataPrelude(String.Join(vbCrLf, lines.Skip(contentStartIdx)).Trim())
             End If
 
             If String.IsNullOrWhiteSpace(result.Title) Then
@@ -2183,7 +2373,7 @@ Namespace SharedLibrary
                                                   sourcePaths As IEnumerable(Of String),
                                                   relatedCandidates As List(Of WikiPageInfo),
                                                   schema As KnowledgeStoreSchema) As String
-            Dim normalized = If(body, "").Trim()
+            Dim normalized = StripDuplicatedMetadataPrelude(If(body, "").Trim())
             Dim sections = GetEffectiveRequiredSections(schema)
 
             ' Headings that are managed by the deterministic Sources / Related Pages
@@ -3455,45 +3645,6 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-        Private Shared Function ComposePageDocument(title As String,
-                                                    summary As String,
-                                                    kind As String,
-                                                    body As String,
-                                                    sourceFilePath As String,
-                                                    Optional additionalSourcePaths As IEnumerable(Of String) = Nothing,
-                                                    Optional status As String = "stable",
-                                                    Optional reviewNeeded As Boolean = False,
-                                                    Optional contradictionCount As Integer = 0,
-                                                    Optional sourceCount As Integer = 0) As String
-            Dim sb As New StringBuilder()
-            Dim allSourcePaths = MergeSourcePaths(sourceFilePath, additionalSourcePaths)
-
-            sb.AppendLine("---")
-            sb.AppendLine($"title: ""{EscapeYaml(title)}""")
-            sb.AppendLine($"summary: ""{EscapeYaml(summary)}""")
-            sb.AppendLine($"kind: ""{EscapeYaml(kind)}""")
-            sb.AppendLine($"status: ""{EscapeYaml(NormalizePageStatus(status))}""")
-            sb.AppendLine($"review_needed: {If(reviewNeeded, "true", "false")}")
-            sb.AppendLine($"contradiction_count: {Math.Max(0, contradictionCount)}")
-            sb.AppendLine($"source_count: {Math.Max(allSourcePaths.Count, sourceCount)}")
-            sb.AppendLine($"updated_utc: ""{DateTime.UtcNow.ToString("o")}""")
-            sb.AppendLine("source_paths:")
-            For Each path In allSourcePaths
-                sb.AppendLine($"  - '{EscapeYamlSingleQuote(path)}'")
-            Next
-
-            sb.AppendLine("source_refs:")
-            For Each path In allSourcePaths
-                Dim slug = SanitizeFileName(System.IO.Path.GetFileNameWithoutExtension(path))
-                sb.AppendLine($"  - '{EscapeYamlSingleQuote(slug)}'")
-            Next
-
-            sb.AppendLine("---")
-            sb.AppendLine()
-            sb.AppendLine(If(body, "").Trim())
-
-            Return sb.ToString().Trim() & vbCrLf
-        End Function
 
         Private Shared Function EscapeYamlSingleQuote(value As String) As String
             ' In YAML single-quoted strings, the only escape is '' for a literal single quote.
@@ -3796,7 +3947,7 @@ Namespace SharedLibrary
             info.ContradictionCount = GetFrontMatterInteger(frontMatter, "contradiction_count", 0)
             info.SourceCount = GetFrontMatterInteger(frontMatter, "source_count", 0)
             info.UpdatedUtc = GetFrontMatterDateTime(frontMatter, "updated_utc")
-            info.SourcePaths = GetFrontMatterList(frontMatter, "source_paths")
+            info.SourcePaths = NormalizeStoreSourcePaths(kbRootPath, GetFrontMatterList(frontMatter, "source_paths"))
 
             If String.IsNullOrWhiteSpace(info.Title) Then
                 info.Title = Path.GetFileNameWithoutExtension(filePath)
@@ -3859,6 +4010,112 @@ Namespace SharedLibrary
             Return normalized.Substring(endPos + endMarker.Length).Replace(vbLf, vbCrLf)
         End Function
 
+        Private Shared Function DecodeYamlDoubleQuotedScalar(value As String) As String
+            If String.IsNullOrEmpty(value) Then Return ""
+
+            Dim sb As New StringBuilder(value.Length)
+            Dim idx As Integer = 0
+
+            While idx < value.Length
+                Dim ch = value.Chars(idx)
+
+                If ch <> "\"c Then
+                    sb.Append(ch)
+                    idx += 1
+                    Continue While
+                End If
+
+                If idx >= value.Length - 1 Then
+                    sb.Append(ch)
+                    Exit While
+                End If
+
+                Dim nextCh = value.Chars(idx + 1)
+
+                Select Case nextCh
+                    Case "\"c
+                        sb.Append("\"c)
+                    Case """"c
+                        sb.Append(""""c)
+                    Case "n"c
+                        sb.Append(vbLf)
+                    Case "r"c
+                        sb.Append(vbCr)
+                    Case "t"c
+                        sb.Append(vbTab)
+                    Case Else
+                        sb.Append(nextCh)
+                End Select
+
+                idx += 2
+            End While
+
+            Return sb.ToString()
+        End Function
+
+        Private Shared Function StripRepeatedOuterDoubleQuoteWrapping(value As String) As String
+            Dim normalized = If(value, "").Trim()
+
+            Do
+                Dim previous = normalized
+                Dim match = Regex.Match(
+            normalized,
+            "^\s*(?:\\+)?""(?<inner>.*?)(?:\\+)?""\s*$",
+            RegexOptions.Singleline)
+
+                If match.Success Then
+                    normalized = match.Groups("inner").Value.Trim()
+                End If
+
+                If String.Equals(previous, normalized, StringComparison.Ordinal) Then
+                    Exit Do
+                End If
+            Loop
+
+            Return normalized
+        End Function
+
+        Private Shared Function NormalizeMetadataScalar(value As String,
+                                                Optional stripOuterQuotes As Boolean = False) As String
+            Dim normalized = If(value, "")
+
+            For pass As Integer = 1 To 3
+                Dim previous = normalized
+
+                normalized = DecodeYamlDoubleQuotedScalar(normalized)
+                normalized = normalized.Replace(vbCr, " ").Replace(vbLf, " ")
+                normalized = Regex.Replace(normalized, "\s+", " ").Trim()
+
+                If stripOuterQuotes Then
+                    normalized = StripRepeatedOuterDoubleQuoteWrapping(normalized)
+                End If
+
+                If String.Equals(previous, normalized, StringComparison.Ordinal) Then
+                    Exit For
+                End If
+            Next
+
+            Return normalized.Trim()
+        End Function
+
+        Private Shared Function StripDuplicatedMetadataPrelude(body As String) As String
+            Dim normalized = If(body, "").Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).TrimStart()
+            If normalized.Length = 0 Then Return ""
+
+            Dim pattern =
+        "^(?:(?:TITLE|SUMMARY|KIND|STATUS|REVIEW_NEEDED|CONTRADICTION_COUNT|SOURCE_COUNT|UPDATED_UTC|SOURCE_PATHS|SOURCE_REFS)\s*:\s*.*\n|" &
+        "[ \t]*-\s+.*\n|" &
+        "[ \t]*\n)+" &
+        "---\s*(?:\n+)?"
+
+            Dim match = Regex.Match(normalized, pattern, RegexOptions.IgnoreCase)
+            If match.Success Then
+                normalized = normalized.Substring(match.Length).TrimStart()
+            End If
+
+            Return normalized.Replace(vbLf, vbCrLf).Trim()
+        End Function
+
         Private Shared Function GetFrontMatterScalar(frontMatter As String, key As String) As String
             If String.IsNullOrWhiteSpace(frontMatter) Then Return ""
 
@@ -3866,16 +4123,64 @@ Namespace SharedLibrary
                 Dim line = rawLine.Trim()
                 If line.StartsWith(key & ":", StringComparison.OrdinalIgnoreCase) Then
                     Dim value = line.Substring(key.Length + 1).Trim()
+
                     If value.StartsWith("""") AndAlso value.EndsWith("""") AndAlso value.Length >= 2 Then
-                        value = value.Substring(1, value.Length - 2)
+                        value = DecodeYamlDoubleQuotedScalar(value.Substring(1, value.Length - 2))
                     ElseIf value.StartsWith("'") AndAlso value.EndsWith("'") AndAlso value.Length >= 2 Then
                         value = value.Substring(1, value.Length - 2).Replace("''", "'")
                     End If
-                    Return value.Trim()
+
+                    Return NormalizeMetadataScalar(value, stripOuterQuotes:=True)
                 End If
             Next
 
             Return ""
+        End Function
+
+        Private Shared Function ComposePageDocument(title As String,
+                                            summary As String,
+                                            kind As String,
+                                            body As String,
+                                            sourceFilePath As String,
+                                            Optional additionalSourcePaths As IEnumerable(Of String) = Nothing,
+                                            Optional status As String = "stable",
+                                            Optional reviewNeeded As Boolean = False,
+                                            Optional contradictionCount As Integer = 0,
+                                            Optional sourceCount As Integer = 0) As String
+            Dim sb As New StringBuilder()
+            Dim allSourcePaths = MergeSourcePaths(sourceFilePath, additionalSourcePaths)
+
+            title = NormalizeMetadataScalar(title, stripOuterQuotes:=True)
+            summary = NormalizeMetadataScalar(summary, stripOuterQuotes:=True)
+            kind = NormalizeMetadataScalar(kind, stripOuterQuotes:=True)
+            status = NormalizePageStatus(NormalizeMetadataScalar(status, stripOuterQuotes:=True))
+            body = StripDuplicatedMetadataPrelude(If(body, "").Trim())
+
+            sb.AppendLine("---")
+            sb.AppendLine($"title: '{EscapeYamlSingleQuote(title)}'")
+            sb.AppendLine($"summary: '{EscapeYamlSingleQuote(summary)}'")
+            sb.AppendLine($"kind: '{EscapeYamlSingleQuote(kind)}'")
+            sb.AppendLine($"status: '{EscapeYamlSingleQuote(status)}'")
+            sb.AppendLine($"review_needed: {If(reviewNeeded, "true", "false")}")
+            sb.AppendLine($"contradiction_count: {Math.Max(0, contradictionCount)}")
+            sb.AppendLine($"source_count: {Math.Max(allSourcePaths.Count, sourceCount)}")
+            sb.AppendLine($"updated_utc: '{EscapeYamlSingleQuote(DateTime.UtcNow.ToString("o"))}'")
+            sb.AppendLine("source_paths:")
+            For Each path In allSourcePaths
+                sb.AppendLine($"  - '{EscapeYamlSingleQuote(path)}'")
+            Next
+
+            sb.AppendLine("source_refs:")
+            For Each path In allSourcePaths
+                Dim slug = SanitizeFileName(System.IO.Path.GetFileNameWithoutExtension(path))
+                sb.AppendLine($"  - '{EscapeYamlSingleQuote(slug)}'")
+            Next
+
+            sb.AppendLine("---")
+            sb.AppendLine()
+            sb.AppendLine(body)
+
+            Return sb.ToString().Trim() & vbCrLf
         End Function
 
         Private Shared Function GetFrontMatterList(frontMatter As String, key As String) As List(Of String)
@@ -5033,6 +5338,87 @@ Namespace SharedLibrary
             Catch
             End Try
         End Sub
+
+
+        Private Shared Function NormalizeStoreSourcePath(kbRootPath As String, sourcePath As String) As String
+            Dim cleaned = If(sourcePath, "").Trim().Trim(""""c, "'"c)
+            If String.IsNullOrWhiteSpace(cleaned) Then Return ""
+
+            Dim expanded = cleaned
+            Try
+                expanded = SharedMethods.ExpandEnvironmentVariables(cleaned)
+            Catch
+            End Try
+
+            Dim normalizedRoot As String = ""
+            Try
+                If Not String.IsNullOrWhiteSpace(kbRootPath) Then
+                    normalizedRoot = Path.GetFullPath(kbRootPath).
+                        TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                End If
+            Catch
+                normalizedRoot = If(kbRootPath, "").Trim().
+                    TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            End Try
+
+            If Path.IsPathRooted(expanded) Then
+                Try
+                    Dim fullPath = Path.GetFullPath(expanded)
+
+                    If normalizedRoot.Length > 0 Then
+                        Dim rootWithSeparator = normalizedRoot
+                        If Not rootWithSeparator.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) Then
+                            rootWithSeparator &= Path.DirectorySeparatorChar
+                        End If
+
+                        If fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) Then
+                            Return NormalizeWikiRelativePath(GetRelativePathCompat(normalizedRoot, fullPath))
+                        End If
+                    End If
+
+                    Return fullPath
+                Catch
+                    Return expanded
+                End Try
+            End If
+
+            Dim relativePath = NormalizeWikiRelativePath(
+                expanded.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+
+            If normalizedRoot.Length = 0 Then
+                Return relativePath
+            End If
+
+            Try
+                Dim combined = Path.GetFullPath(
+                    Path.Combine(normalizedRoot, relativePath.Replace("/"c, Path.DirectorySeparatorChar)))
+
+                Dim rootWithSeparator = normalizedRoot
+                If Not rootWithSeparator.EndsWith(Path.DirectorySeparatorChar.ToString(), StringComparison.Ordinal) Then
+                    rootWithSeparator &= Path.DirectorySeparatorChar
+                End If
+
+                If combined.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase) Then
+                    Return NormalizeWikiRelativePath(GetRelativePathCompat(normalizedRoot, combined))
+                End If
+            Catch
+            End Try
+
+            Return relativePath
+        End Function
+
+        Private Shared Function NormalizeStoreSourcePaths(kbRootPath As String,
+                                                          sourcePaths As IEnumerable(Of String)) As List(Of String)
+            If sourcePaths Is Nothing Then
+                Return New List(Of String)()
+            End If
+
+            Return sourcePaths.
+                Select(Function(p) NormalizeStoreSourcePath(kbRootPath, p)).
+                Where(Function(p) Not String.IsNullOrWhiteSpace(p)).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+        End Function
 
 
     End Class

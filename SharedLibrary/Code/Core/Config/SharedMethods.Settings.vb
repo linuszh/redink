@@ -1015,6 +1015,12 @@ Namespace SharedLibrary
                     Return context.INI_AutoPilotAutoStart.ToString()
                 Case "AutoPilotSchedulerLocalChat"
                     Return context.INI_AutoPilotSchedulerLocalChat.ToString()
+                Case "M365ClientID"
+                    Return context.INI_M365ClientId
+                Case "M365TenantID"
+                    Return context.INI_M365TenantId
+                Case "M365Scopes"
+                    Return context.INI_M365Scopes
                 Case "ISearch"
                     Return context.INI_ISearch.ToString()
                 Case "ISearch_Approve"
@@ -1363,6 +1369,12 @@ Namespace SharedLibrary
                     context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "AutoPilotSchedulerLocalChat"
                     context.INI_AutoPilotSchedulerLocalChat = Boolean.Parse(value)
+                Case "M365ClientID"
+                    context.INI_M365ClientId = value
+                Case "M365TenantID"
+                    context.INI_M365TenantId = value
+                Case "M365Scopes"
+                    context.INI_M365Scopes = value
                 Case "ISearch"
                     context.INI_ISearch = Boolean.Parse(value)
                 Case "ISearch_Approve"
@@ -1743,6 +1755,9 @@ Namespace SharedLibrary
                     {"OAuth2Scopes_2", context.INI_OAuth2Scopes_2},
                     {"OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2},
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
+                    {"M365ClientID", context.INI_M365ClientId},
+                    {"M365TenantID", context.INI_M365TenantId},
+                    {"M365Scopes", context.INI_M365Scopes},
                     {"ISearch", context.INI_ISearch.ToString()},
                     {"ISearch_Approve", context.INI_ISearch_Approve.ToString()},
                     {"ISearch_URL", context.INI_ISearch_URL},
@@ -1844,6 +1859,7 @@ Namespace SharedLibrary
                     {"SP_MailReply", context.SP_MailReply},
                     {"SP_MailSumup", context.SP_MailSumup},
                     {"SP_MailSumup2", context.SP_MailSumup2},
+                    {"SP_AIMailSearch", context.SP_AIMailSearch},
                     {"SP_FreestyleText", context.SP_FreestyleText},
                     {"SP_FreestyleNoText", context.SP_FreestyleNoText},
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
@@ -2115,6 +2131,7 @@ Namespace SharedLibrary
                 {"SP_MailReply", Default_SP_MailReply},
                 {"SP_MailSumup", Default_SP_MailSumup},
                 {"SP_MailSumup2", Default_SP_MailSumup2},
+                {"SP_AIMailSearch", Default_SP_AIMailSearch},
                 {"SP_FreestyleText", Default_SP_FreestyleText},
                 {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
                 {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
@@ -2204,6 +2221,7 @@ Namespace SharedLibrary
                 {"UpdateIni", DEFAULT_BOOL_UPDATEINI},
                 {"UpdateIniAllowRemote", DEFAULT_BOOL_UPDATEINI_ALLOWREMOTE},
                 {"UpdateIniSilentLog", DEFAULT_BOOL_UPDATEINISILENTLOG},
+                {"M365Scopes", DEFAULT_M365SCOPES},
                 {"ISearch_URL", DEFAULT_ISEARCH_URL},
                 {"ISearch_ResponseMask1", DEFAULT_ISEARCH_RESPONSE_MASK_1},
                 {"ISearch_ResponseMask2", DEFAULT_ISEARCH_RESPONSE_MASK_2},
@@ -2338,7 +2356,7 @@ Namespace SharedLibrary
                 ' Validate IniFilePath
                 If Not System.IO.File.Exists(IniFilePath) Then
                     ShowCustomMessageBox($"The configuration file '{IniFilePath}' was not found.")
-                    Return
+            Return
                 End If
 
                 ' Create a temporary file for the updated configuration
@@ -3170,6 +3188,9 @@ Namespace SharedLibrary
             variableValues.Add("ReplaceText2Override", context.INI_ReplaceText2Override)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
+            variableValues.Add("M365ClientID", context.INI_M365ClientId)
+            variableValues.Add("M365TenantID", context.INI_M365TenantId)
+            variableValues.Add("M365Scopes", context.INI_M365Scopes)
             variableValues.Add("ISearch", context.INI_ISearch)
             variableValues.Add("ISearch_Approve", context.INI_ISearch_Approve)
             variableValues.Add("ISearch_URL", context.INI_ISearch_URL)
@@ -3279,6 +3300,7 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailReply", context.SP_MailReply)
             variableValues.Add("SP_MailSumup", context.SP_MailSumup)
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
+            variableValues.Add("SP_AIMailSearch", context.SP_AIMailSearch)
             variableValues.Add("SP_FreestyleText", context.SP_FreestyleText)
             variableValues.Add("SP_FreestyleNoText", context.SP_FreestyleNoText)
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
@@ -3473,6 +3495,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailReply") Then context.SP_MailReply = CStr(updatedValues("SP_MailReply"))
                 If updatedValues.ContainsKey("SP_MailSumup") Then context.SP_MailSumup = CStr(updatedValues("SP_MailSumup"))
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
+                If updatedValues.ContainsKey("SP_AIMailSearch") Then context.SP_AIMailSearch = CStr(updatedValues("SP_AIMailSearch"))
                 If updatedValues.ContainsKey("SP_FreestyleText") Then context.SP_FreestyleText = CStr(updatedValues("SP_FreestyleText"))
                 If updatedValues.ContainsKey("SP_FreestyleNoText") Then context.SP_FreestyleNoText = CStr(updatedValues("SP_FreestyleNoText"))
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
@@ -3534,6 +3557,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_FindPrompts") Then context.SP_FindPrompts = CStr(updatedValues("SP_FindPrompts"))
                 If updatedValues.ContainsKey("SP_MergePrompt") Then context.SP_MergePrompt = CStr(updatedValues("SP_MergePrompt"))
                 If updatedValues.ContainsKey("SP_MergePrompt2") Then context.SP_MergePrompt2 = CStr(updatedValues("SP_MergePrompt2"))
+                If updatedValues.ContainsKey("M365ClientID") Then context.INI_M365ClientId = CStr(updatedValues("M365ClientID"))
+                If updatedValues.ContainsKey("M365TenantID") Then context.INI_M365TenantId = CStr(updatedValues("M365TenantID"))
+                If updatedValues.ContainsKey("M365Scopes") Then context.INI_M365Scopes = CStr(updatedValues("M365Scopes"))
                 If updatedValues.ContainsKey("ISearch") Then context.INI_ISearch = CBool(updatedValues("ISearch"))
                 If updatedValues.ContainsKey("ISearch_Approve") Then context.INI_ISearch_Approve = CBool(updatedValues("ISearch_Approve"))
                 If updatedValues.ContainsKey("ISearch_URL") Then context.INI_ISearch_URL = CStr(updatedValues("ISearch_URL"))

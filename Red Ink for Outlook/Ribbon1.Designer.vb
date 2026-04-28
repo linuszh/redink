@@ -487,6 +487,7 @@ Partial Class Ribbon2
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
+        Me.RI_M365 = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
@@ -537,6 +538,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
+        Me.Menu1.Items.Add(Me.RI_M365)
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
@@ -697,6 +699,14 @@ Partial Class Ribbon2
         Me.RI_Clipboard.ScreenTip = "Will convert to text what is contained in the clipboard (e.g., screenshot, video, " &
     "audio, image)"
         Me.RI_Clipboard.ShowImage = True
+        '
+        'RI_M365
+        '
+        Me.RI_M365.Label = "M365 Search"
+        Me.RI_M365.Name = "RI_M365"
+        Me.RI_M365.OfficeImageId = "NewSearchFolder"
+        Me.RI_M365.ScreenTip = "Searches your M365 content with the help of AI"
+        Me.RI_M365.ShowImage = True
         '
         'RI_MailMover
         '
@@ -872,6 +882,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Summarize As RibbonButton
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
+    Friend WithEvents RI_M365 As RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
     Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
@@ -905,3 +916,5 @@ Partial Class ThisRibbonCollection
         End Get
     End Property
 End Class
+
+

@@ -2047,6 +2047,11 @@ Partial Public Class ThisAddIn
             ElseIf IsInternalKnowledgeToolName(toolCall.ToolName) Then
                 response = Await ExecuteInternalKnowledgeTool(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
+            ElseIf SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
+                response = Await ExecuteInternalM365Tool(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
             Else
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context)
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
@@ -2916,6 +2921,8 @@ Partial Public Class ThisAddIn
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+
+        tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
 
         Return tools
     End Function

@@ -267,6 +267,8 @@ Partial Public Class ThisAddIn
 
             If Command = "MailMover" Then MailMover() : Return
 
+            If Command = "M365" Then M365SearchTest.Show(_context) : Return
+
             If Command = "InboxBoard" Then InboxBoard() : Return
 
             Dim Sumup As Boolean = (Command = "Sumup")
