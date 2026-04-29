@@ -782,6 +782,9 @@ Namespace SharedLibrary
         ''' <summary>
         ''' Returns every message in a mail conversation, ordered per <see cref="M365ThreadOptions.Ascending"/>.
         ''' </summary>
+        ''' <summary>
+        ''' Returns every message in a mail conversation, ordered per <see cref="M365ThreadOptions.Ascending"/>.
+        ''' </summary>
         Public Async Function GetMailThreadAsync(context As ISharedContext,
                                                  conversationId As String,
                                                  Optional options As M365ThreadOptions = Nothing,
@@ -796,6 +799,9 @@ Namespace SharedLibrary
             }
             If options.IncludeMailBody Then selectFields.Add("body")
 
+            ' IMPORTANT:
+            ' Do NOT send $orderby together with this filter. In some mailboxes Graph
+            ' returns "InefficientFilter". We fetch unsorted and sort client-side.
             Dim filter = New StringBuilder($"conversationId eq '{conversationId.Replace("'", "''")}'")
             If options.From.HasValue Then filter.Append($" and receivedDateTime ge {options.From.Value:yyyy-MM-ddTHH:mm:ssZ}")
             If options.To.HasValue Then filter.Append($" and receivedDateTime le {options.To.Value:yyyy-MM-ddTHH:mm:ssZ}")
@@ -803,16 +809,27 @@ Namespace SharedLibrary
             Dim url = $"{GraphV1}/me/messages?" &
                       $"$select={String.Join(",", selectFields)}" &
                       $"&$filter={Uri.EscapeDataString(filter.ToString())}" &
-                      $"&$orderby=receivedDateTime {If(options.Ascending, "asc", "desc")}" &
                       $"&$top={Math.Min(options.MaxMessages, 100)}"
 
             Dim raw = Await GraphPageAsync(token, url, options.MaxMessages, ct).ConfigureAwait(False)
+
             Dim out As New List(Of M365Message)()
             For Each j In raw
                 Dim flags = M365MessageFields.Recipients
                 If options.IncludeMailBody Then flags = flags Or M365MessageFields.Body
                 out.Add(ParseMessage(j, flags))
             Next
+
+            If options.Ascending Then
+                out = out.
+                    OrderBy(Function(m) If(m.ReceivedUtc, If(m.SentUtc, DateTime.MinValue))).
+                    ToList()
+            Else
+                out = out.
+                    OrderByDescending(Function(m) If(m.ReceivedUtc, If(m.SentUtc, DateTime.MinValue))).
+                    ToList()
+            End If
+
             Return out
         End Function
 

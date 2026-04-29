@@ -19,10 +19,13 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary
 
 Partial Public Class ThisAddIn
+
+    Private _lastCompletedToolResponses As New List(Of ToolResponse)()
 
     Private Async Function ExecuteInternalM365Tool(toolCall As ToolCall,
                                                    context As ToolExecutionContext) As Task(Of ToolResponse)
@@ -42,6 +45,30 @@ Partial Public Class ThisAddIn
         resp.Response = r.Response
         resp.ErrorMessage = r.ErrorMessage
         Return resp
+    End Function
+
+    Friend Function GetLastCompletedToolResponsesSnapshot() As List(Of ToolResponse)
+        Dim result As New List(Of ToolResponse)()
+        Try
+            Debug.WriteLine("[AISearch] GetLastCompletedToolResponsesSnapshot: source count=" &
+                            If(_lastCompletedToolResponses Is Nothing, -1, _lastCompletedToolResponses.Count).ToString())
+
+            If _lastCompletedToolResponses Is Nothing Then Return result
+
+            For Each r In _lastCompletedToolResponses
+                result.Add(New ToolResponse() With {
+                    .CallId = r.CallId,
+                    .ToolName = r.ToolName,
+                    .Response = r.Response,
+                    .Success = r.Success,
+                    .ErrorMessage = r.ErrorMessage,
+                    .Timestamp = r.Timestamp,
+                    .OriginalCallJson = r.OriginalCallJson
+                })
+            Next
+        Catch
+        End Try
+        Return result
     End Function
 
 End Class

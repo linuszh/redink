@@ -28,7 +28,15 @@ Namespace SharedLibrary
                                       sourceFilePath As String,
                                       schema As KnowledgeStoreSchema) As DossierRef
             If String.IsNullOrWhiteSpace(sourceFilePath) Then Return Nothing
-            If Not File.Exists(sourceFilePath) Then Return Nothing
+
+            ' Callers may hand us either an absolute path or a path that has
+            ' already been normalized to be relative to the store root. Resolve
+            ' to an absolute, on-disk path before doing anything that needs the
+            ' actual bytes (hash, copy, dossier title).
+            Dim resolvedSourcePath As String = ResolveSourcePath(kbRootPath, sourceFilePath)
+            If String.IsNullOrWhiteSpace(resolvedSourcePath) OrElse Not File.Exists(resolvedSourcePath) Then
+                Return Nothing
+            End If
 
             Dim filesFolder As String =
                     If(schema IsNot Nothing AndAlso schema.SourceAccess IsNot Nothing AndAlso
@@ -48,7 +56,7 @@ Namespace SharedLibrary
             If Not Directory.Exists(filesRoot) Then Directory.CreateDirectory(filesRoot)
             If Not Directory.Exists(sourcesRoot) Then Directory.CreateDirectory(sourcesRoot)
 
-            Dim ext As String = Path.GetExtension(sourceFilePath)
+            Dim ext As String = Path.GetExtension(resolvedSourcePath)
 
             Dim allowed As String() = Nothing
             If schema IsNot Nothing AndAlso schema.SourceAccess IsNot Nothing Then
@@ -62,7 +70,7 @@ Namespace SharedLibrary
             End If
 
             ' --- 1. Hash & blob copy ---
-            Dim hash = ComputeSha256(sourceFilePath)
+            Dim hash = ComputeSha256(resolvedSourcePath)
             Dim blobName As String
             Dim deduplicate As Boolean = True
             If schema IsNot Nothing AndAlso schema.SourceAccess IsNot Nothing Then
@@ -72,28 +80,28 @@ Namespace SharedLibrary
             If deduplicate Then
                 blobName = hash & ext.ToLowerInvariant()
             Else
-                blobName = SafeFileName(Path.GetFileNameWithoutExtension(sourceFilePath)) & "_" & hash.Substring(0, 8) & ext.ToLowerInvariant()
+                blobName = SafeFileName(Path.GetFileNameWithoutExtension(resolvedSourcePath)) & "_" & hash.Substring(0, 8) & ext.ToLowerInvariant()
             End If
             Dim blobPath = Path.Combine(filesRoot, blobName)
 
             If Not File.Exists(blobPath) Then
                 Try
-                    File.Copy(sourceFilePath, blobPath, overwrite:=False)
+                    File.Copy(resolvedSourcePath, blobPath, overwrite:=False)
                 Catch
                 End Try
             End If
 
             ' --- 2. Dossier page ---
-            Dim slug = SafeFileName(Path.GetFileNameWithoutExtension(sourceFilePath))
+            Dim slug = SafeFileName(Path.GetFileNameWithoutExtension(resolvedSourcePath))
             If String.IsNullOrWhiteSpace(slug) Then slug = hash.Substring(0, 12)
             Dim dossierPath = Path.Combine(sourcesRoot, slug & ".md")
 
             Dim ref As New DossierRef With {
                 .Slug = slug,
-                .Title = Path.GetFileName(sourceFilePath),
+                .Title = Path.GetFileName(resolvedSourcePath),
                 .DossierRelPath = (sourcesFolder & "/" & slug & ".md").Replace("\"c, "/"c),
                 .BlobRelPath = (filesFolder & "/" & blobName).Replace("\"c, "/"c),
-                .OriginalPath = sourceFilePath,
+                .OriginalPath = resolvedSourcePath,
                 .Hash = hash
             }
 
@@ -107,6 +115,58 @@ Namespace SharedLibrary
             End If
 
             Return ref
+        End Function
+
+        ''' <summary>
+        ''' Resolves an incoming source-path token to an absolute on-disk path.
+        ''' Accepts:
+        '''   - an already-absolute local or UNC path;
+        '''   - a path with environment variables;
+        '''   - a path that has been normalized to be relative to the store root.
+        ''' </summary>
+        Private Function ResolveSourcePath(kbRootPath As String, sourcePath As String) As String
+            Dim cleaned As String
+            Try
+                cleaned = SharedMethods.ExpandEnvironmentVariables(
+                    If(sourcePath, "").Trim().Trim(""""c, "'"c))
+            Catch
+                cleaned = If(sourcePath, "").Trim().Trim(""""c, "'"c)
+            End Try
+
+            If String.IsNullOrWhiteSpace(cleaned) Then Return ""
+
+            ' Already absolute (drive-letter or UNC)?
+            If Path.IsPathRooted(cleaned) Then
+                If File.Exists(cleaned) Then
+                    Try
+                        Return Path.GetFullPath(cleaned)
+                    Catch
+                        Return cleaned
+                    End Try
+                End If
+                Return cleaned
+            End If
+
+            ' Relative — resolve against the store root.
+            If String.IsNullOrWhiteSpace(kbRootPath) Then Return cleaned
+
+            Dim normalizedRoot As String
+            Try
+                normalizedRoot = Path.GetFullPath(kbRootPath).
+                    TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            Catch
+                normalizedRoot = kbRootPath.Trim().
+                    TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            End Try
+
+            Try
+                Dim combined = Path.GetFullPath(
+                    Path.Combine(normalizedRoot,
+                                 cleaned.Replace("/"c, Path.DirectorySeparatorChar)))
+                Return combined
+            Catch
+                Return cleaned
+            End Try
         End Function
 
         ''' <summary>

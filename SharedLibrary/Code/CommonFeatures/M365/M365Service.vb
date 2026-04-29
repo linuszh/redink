@@ -91,6 +91,8 @@ Namespace SharedLibrary
         ''' </summary>
         Public Async Function SignInAsync(context As ISharedContext,
                                           Optional ct As CancellationToken = Nothing) As Task(Of String)
+            EnsureModernTls()
+
             Dim app = Await EnsureAppAsync(context).ConfigureAwait(False)
             Dim scopes = ParseScopes(context)
 
@@ -108,7 +110,6 @@ Namespace SharedLibrary
 
             Dim result = Await app.AcquireTokenInteractive(scopes) _
                                   .WithPrompt(Prompt.SelectAccount) _
-                                  .WithUseEmbeddedWebView(True) _
                                   .ExecuteAsync(ct).ConfigureAwait(False)
             Return result.AccessToken
         End Function
@@ -176,6 +177,8 @@ Namespace SharedLibrary
         End Function
 
         Private Async Function EnsureAppAsync(context As ISharedContext) As Task(Of IPublicClientApplication)
+            EnsureModernTls()
+
             If context Is Nothing Then Throw New ArgumentNullException(NameOf(context))
 
             Dim clientId = If(context.INI_M365ClientId, "").Trim()
@@ -588,6 +591,46 @@ Namespace SharedLibrary
             Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
             Return ParseMessage(j, fields)
         End Function
+
+        ''' <summary>
+        ''' Resolves a message via /me/messages?$filter=internetMessageId eq '...'.
+        ''' Returns Nothing when no match is found.
+        ''' </summary>
+        Public Async Function GetMessageByInternetMessageIdAsync(context As ISharedContext,
+                                                                 internetMessageId As String,
+                                                                 Optional fields As M365MessageFields = M365MessageFields.Body Or M365MessageFields.Recipients,
+                                                                 Optional ct As CancellationToken = Nothing) As Task(Of M365Message)
+            If String.IsNullOrWhiteSpace(internetMessageId) Then Return Nothing
+
+            Dim core As String = internetMessageId.Trim().Trim("<"c, ">"c)
+            Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
+
+            Dim selectFields = New List(Of String) From {
+                "id", "subject", "from", "receivedDateTime", "sentDateTime", "importance",
+                "hasAttachments", "bodyPreview", "internetMessageId", "conversationId", "webLink"
+            }
+            If (fields And M365MessageFields.Body) <> 0 Then selectFields.Add("body")
+            If (fields And M365MessageFields.Recipients) <> 0 Then
+                selectFields.Add("toRecipients") : selectFields.Add("ccRecipients") : selectFields.Add("bccRecipients")
+            End If
+            If (fields And M365MessageFields.Categories) <> 0 Then selectFields.Add("categories")
+            If (fields And M365MessageFields.InternetHeaders) <> 0 Then selectFields.Add("internetMessageHeaders")
+
+            Dim filter As String = "internetMessageId eq '" & core.Replace("'", "''") & "'"
+            Dim url As String = $"{GraphV1}/me/messages?$top=1&$select={String.Join(",", selectFields)}&$filter={Uri.EscapeDataString(filter)}"
+
+            Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
+            If j Is Nothing Then Return Nothing
+
+            Dim arr = TryCast(j("value"), JArray)
+            If arr Is Nothing OrElse arr.Count = 0 Then Return Nothing
+
+            Dim first = TryCast(arr(0), JObject)
+            If first Is Nothing Then Return Nothing
+
+            Return ParseMessage(first, fields)
+        End Function
+
 
         ''' <summary>Retrieves multiple messages in a single Graph $batch request (up to 20 per batch).</summary>
         Public Async Function GetMessagesBatchAsync(context As ISharedContext,
@@ -1142,6 +1185,23 @@ Namespace SharedLibrary
             Next
             Return name
         End Function
+
+
+        Private Sub EnsureModernTls()
+            Try
+                ServicePointManager.SecurityProtocol =
+                    ServicePointManager.SecurityProtocol Or
+                    SecurityProtocolType.Tls12 Or
+                    CType(12288, SecurityProtocolType) ' Tls13 = 12288 on older .NET Framework
+            Catch
+                Try
+                    ServicePointManager.SecurityProtocol =
+                        ServicePointManager.SecurityProtocol Or
+                        SecurityProtocolType.Tls12
+                Catch
+                End Try
+            End Try
+        End Sub
 
     End Module
 

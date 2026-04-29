@@ -74,6 +74,11 @@ Namespace SharedLibrary
             Public Property UpdatedUtc As DateTime? = Nothing
             Public Property Content As String = ""
             Public Property SourcePaths As New List(Of String)()
+
+            ' Cached deterministic derivatives used by candidate search and pair scans.
+            Public Property BodyWithoutFrontMatter As String = ""
+            Public Property SearchTokens As HashSet(Of String) = Nothing
+            Public Property StructuralTokens As HashSet(Of String) = Nothing
         End Class
 
         Private Class WikiComputedState
@@ -617,6 +622,89 @@ Namespace SharedLibrary
             If Not String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then Return
             scope.SavedPages.Add(page)
         End Sub
+
+        Private Shared Sub UpsertIngestCachedPage(kbRootPath As String, page As WikiPageInfo)
+            Dim scope = _currentIngestScope.Value
+            If scope Is Nothing OrElse page Is Nothing Then Return
+            If Not String.Equals(scope.KbRootPath, kbRootPath, StringComparison.OrdinalIgnoreCase) Then Return
+            If scope.CachedPages Is Nothing Then Return
+
+            Dim existingIndex = scope.CachedPages.FindIndex(
+                Function(p)
+                    Return p.FilePath.Equals(page.FilePath, StringComparison.OrdinalIgnoreCase)
+                End Function)
+
+            If existingIndex >= 0 Then
+                scope.CachedPages(existingIndex) = page
+            Else
+                scope.CachedPages.Add(page)
+            End If
+        End Sub
+
+        Private Shared Function GetPageBodyWithoutFrontMatter(page As WikiPageInfo) As String
+            If page Is Nothing Then Return ""
+
+            If String.IsNullOrWhiteSpace(page.BodyWithoutFrontMatter) Then
+                page.BodyWithoutFrontMatter = RemoveFrontMatter(page.Content)
+            End If
+
+            Return page.BodyWithoutFrontMatter
+        End Function
+
+        Private Shared Function BuildSearchTokens(page As WikiPageInfo) As HashSet(Of String)
+            If page Is Nothing Then
+                Return New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim body = GetPageBodyWithoutFrontMatter(page)
+            Dim weightedText =
+                If(page.Title, "") & " " &
+                If(page.Title, "") & " " &
+                If(page.Summary, "") & " " &
+                If(page.Kind, "") & " " &
+                If(page.Status, "") & " " &
+                body
+
+            Return Tokenize(weightedText)
+        End Function
+
+        Private Shared Function BuildStructuralTokens(page As WikiPageInfo) As HashSet(Of String)
+            If page Is Nothing Then
+                Return New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            Dim body = GetPageBodyWithoutFrontMatter(page)
+            Dim structuralText =
+                If(page.Title, "") & " " &
+                If(page.Summary, "") & " " &
+                body
+
+            Return Tokenize(structuralText)
+        End Function
+
+        Private Shared Function GetOrBuildPageSearchTokens(page As WikiPageInfo) As HashSet(Of String)
+            If page Is Nothing Then
+                Return New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            If page.SearchTokens Is Nothing OrElse page.SearchTokens.Count = 0 Then
+                page.SearchTokens = BuildSearchTokens(page)
+            End If
+
+            Return page.SearchTokens
+        End Function
+
+        Private Shared Function GetOrBuildPageStructuralTokens(page As WikiPageInfo) As HashSet(Of String)
+            If page Is Nothing Then
+                Return New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            End If
+
+            If page.StructuralTokens Is Nothing OrElse page.StructuralTokens.Count = 0 Then
+                page.StructuralTokens = BuildStructuralTokens(page)
+            End If
+
+            Return page.StructuralTokens
+        End Function
 
 #End Region
 
@@ -2037,15 +2125,7 @@ Namespace SharedLibrary
 
             Dim scored = pages.Select(
                 Function(p)
-                    Dim weightedText =
-                        p.Title & " " &
-                        p.Title & " " &
-                        p.Summary & " " &
-                        p.Kind & " " &
-                        p.Status & " " &
-                        RemoveFrontMatter(p.Content)
-
-                    Dim score = ScoreTokens(seedTokens, Tokenize(weightedText))
+                    Dim score = ScoreTokens(seedTokens, GetOrBuildPageSearchTokens(p))
                     Return Tuple.Create(p, score)
                 End Function).
                 Where(Function(x) x.Item2 > 0).
@@ -2206,12 +2286,15 @@ Namespace SharedLibrary
                     .ReviewNeeded = pageState.ReviewNeeded,
                     .ContradictionCount = pageState.ContradictionCount,
                     .SourceCount = pageState.SourceCount,
+                    .UpdatedUtc = DateTime.UtcNow,
                     .Content = fullDocument,
-                    .SourcePaths = mergedSourcePaths
+                    .SourcePaths = mergedSourcePaths,
+                    .BodyWithoutFrontMatter = finalBody,
+                    .SearchTokens = Tokenize(finalTitle & " " & finalTitle & " " & finalSummary & " " & finalKind & " " & pageState.Status & " " & finalBody),
+                    .StructuralTokens = Tokenize(finalTitle & " " & finalSummary & " " & finalBody)
                 }
 
-                ' The wiki on disk has changed; force the next snapshot read to refresh.
-                InvalidateIngestPageCache(kbRootPath)
+                UpsertIngestCachedPage(kbRootPath, savedPageInfo)
 
                 Dim backfilledRelatedPages As Integer = 0
                 Dim deferredMaintenance As Boolean = IsIngestScopeActive(kbRootPath)
@@ -2850,17 +2933,16 @@ Namespace SharedLibrary
 
             Dim seenKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            ' Per-page ranked neighbor list. Score >= 3 mirrors the historical
-            ' threshold used by the legacy LINQ path.
             Dim byPage As New Dictionary(Of String, List(Of Tuple(Of WikiPageInfo, Double)))(StringComparer.OrdinalIgnoreCase)
 
             For Each pair As CandidatePagePair In EnumerateCandidatePairs(pages, schema)
                 Dim pageA As WikiPageInfo = pair.PageA
                 Dim pageB As WikiPageInfo = pair.PageB
 
-                Dim seedA = pageA.Title & " " & pageA.Summary & " " & RemoveFrontMatter(pageA.Content)
-                Dim seedB = pageB.Title & " " & pageB.Summary & " " & RemoveFrontMatter(pageB.Content)
-                Dim score = ScoreTokens(Tokenize(seedA), Tokenize(seedB))
+                Dim score = ScoreTokens(
+                    GetOrBuildPageStructuralTokens(pageA),
+                    GetOrBuildPageStructuralTokens(pageB))
+
                 If score < 3 Then Continue For
 
                 AddRankedCandidate(byPage, pageA, pageB, score)
@@ -2916,7 +2998,6 @@ Namespace SharedLibrary
                 Take(20).
                 ToList()
         End Function
-
 
 
         Private Shared Function GetPotentialSupersededPagePaths(pages As List(Of WikiPageInfo)) As HashSet(Of String)
@@ -3432,11 +3513,9 @@ Namespace SharedLibrary
             Dim pageTokens(pages.Count - 1) As HashSet(Of String)
 
             For i As Integer = 0 To pages.Count - 1
-                Dim toks = Tokenize(
-                    pages(i).Title & " " &
-                    pages(i).Summary & " " &
-                    RemoveFrontMatter(pages(i).Content))
+                Dim toks = GetOrBuildPageStructuralTokens(pages(i))
                 pageTokens(i) = toks
+
                 For Each t In toks
                     Dim list As List(Of Integer) = Nothing
                     If Not postings.TryGetValue(t, list) Then
@@ -3447,8 +3526,6 @@ Namespace SharedLibrary
                 Next
             Next
 
-            ' Skip extremely common tokens to avoid quadratic blowups in the
-            ' candidate count. The cap scales with the wiki size.
             Dim postingCap As Integer = Math.Max(50, pages.Count \ 4)
 
             Dim emitted As New HashSet(Of Long)()
@@ -3505,18 +3582,16 @@ Namespace SharedLibrary
             Dim claimsHeading = GetClaimsHeading(schema)
             Dim seenKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
-            ' Pre-compute candidate neighbors per page using the (optionally
-            ' inverted-index) pair generator. Behavior is identical to the
-            ' legacy code path when UseInvertedIndexPairScan is False.
             Dim neighborRanking As New Dictionary(Of String, List(Of Tuple(Of WikiPageInfo, Double)))(StringComparer.OrdinalIgnoreCase)
 
             For Each pair As CandidatePagePair In EnumerateCandidatePairs(pages, schema)
                 Dim pageA As WikiPageInfo = pair.PageA
                 Dim pageB As WikiPageInfo = pair.PageB
 
-                Dim seedA = pageA.Title & " " & pageA.Summary & " " & RemoveFrontMatter(pageA.Content)
-                Dim seedB = pageB.Title & " " & pageB.Summary & " " & RemoveFrontMatter(pageB.Content)
-                Dim score = ScoreTokens(Tokenize(seedA), Tokenize(seedB))
+                Dim score = ScoreTokens(
+                    GetOrBuildPageStructuralTokens(pageA),
+                    GetOrBuildPageStructuralTokens(pageB))
+
                 If score <= 0 Then Continue For
 
                 AddRankedCandidate(neighborRanking, pageA, pageB, score)
@@ -3924,21 +3999,18 @@ Namespace SharedLibrary
         Private Shared Function ReadWikiPageInfo(kbRootPath As String, filePath As String,
                                                  Optional schema As KnowledgeStoreSchema = Nothing) As WikiPageInfo
             Dim content = File.ReadAllText(filePath, Encoding.UTF8)
+            Dim bodyWithoutFrontMatter = RemoveFrontMatter(content)
+
             Dim info As New WikiPageInfo() With {
                 .FilePath = filePath,
                 .FileName = Path.GetFileName(filePath),
                 .RelativePath = GetRelativeWikiPath(kbRootPath, filePath),
-                .Content = content
+                .Content = content,
+                .BodyWithoutFrontMatter = bodyWithoutFrontMatter
             }
 
             Dim frontMatter = GetFrontMatter(content)
             Dim rawStatus = GetFrontMatterScalar(frontMatter, "status")
-
-            If info.Kind.Equals("SourceDossier", StringComparison.OrdinalIgnoreCase) Then
-                info.Status = "stable"
-                info.ReviewNeeded = False
-                info.ContradictionCount = 0
-            End If
 
             info.Title = GetFrontMatterScalar(frontMatter, "title")
             info.Summary = GetFrontMatterScalar(frontMatter, "summary")
@@ -3954,7 +4026,7 @@ Namespace SharedLibrary
             End If
 
             If String.IsNullOrWhiteSpace(info.Summary) Then
-                info.Summary = BuildFallbackSummary(RemoveFrontMatter(content))
+                info.Summary = BuildFallbackSummary(bodyWithoutFrontMatter)
             End If
 
             If String.IsNullOrWhiteSpace(info.Kind) Then
@@ -3962,7 +4034,7 @@ Namespace SharedLibrary
             End If
 
             If schema Is Nothing Then schema = KnowledgeStoreSchema.LoadOrCreate(kbRootPath)
-            Dim computed = ComputePageComputedState(RemoveFrontMatter(content), info.SourcePaths, schema)
+            Dim computed = ComputePageComputedState(bodyWithoutFrontMatter, info.SourcePaths, schema)
 
             If String.IsNullOrWhiteSpace(rawStatus) Then
                 info.Status = computed.Status
@@ -3981,6 +4053,9 @@ Namespace SharedLibrary
             If Not info.ReviewNeeded AndAlso computed.ReviewNeeded Then
                 info.ReviewNeeded = True
             End If
+
+            info.SearchTokens = BuildSearchTokens(info)
+            info.StructuralTokens = BuildStructuralTokens(info)
 
             Return info
         End Function
@@ -4990,7 +5065,7 @@ Namespace SharedLibrary
             Dim seedText =
                 savedPage.Title & " " &
                 savedPage.Summary & " " &
-                RemoveFrontMatter(savedPage.Content)
+                GetPageBodyWithoutFrontMatter(savedPage)
 
             Dim candidatePages = FindCandidateWikiPages(kbRootPath, seedText, 8).
                         Where(Function(p) Not p.FilePath.Equals(savedPage.FilePath, StringComparison.OrdinalIgnoreCase)).
@@ -5012,7 +5087,7 @@ Namespace SharedLibrary
 
                 Dim originalContent = latestCandidate.Content
                 Dim updatedBody = NormalizePageBody(
-                    body:=RemoveFrontMatter(originalContent).Trim(),
+                    body:=GetPageBodyWithoutFrontMatter(latestCandidate).Trim(),
                     currentPagePath:=latestCandidate.FilePath,
                     sourcePaths:=latestCandidate.SourcePaths,
                     relatedCandidates:=New List(Of WikiPageInfo) From {savedPage},
@@ -5054,6 +5129,26 @@ Namespace SharedLibrary
                         recomposedContent,
                         context).ConfigureAwait(False)
 
+                    latestCandidate.Content = recomposedContent
+                    latestCandidate.Status = pageState.Status
+                    latestCandidate.ReviewNeeded = pageState.ReviewNeeded
+                    latestCandidate.ContradictionCount = pageState.ContradictionCount
+                    latestCandidate.SourceCount = pageState.SourceCount
+                    latestCandidate.UpdatedUtc = DateTime.UtcNow
+                    latestCandidate.BodyWithoutFrontMatter = updatedBody
+                    latestCandidate.SearchTokens = Tokenize(
+                        latestCandidate.Title & " " &
+                        latestCandidate.Title & " " &
+                        latestCandidate.Summary & " " &
+                        latestCandidate.Kind & " " &
+                        latestCandidate.Status & " " &
+                        updatedBody)
+                    latestCandidate.StructuralTokens = Tokenize(
+                        latestCandidate.Title & " " &
+                        latestCandidate.Summary & " " &
+                        updatedBody)
+
+                    UpsertIngestCachedPage(kbRootPath, latestCandidate)
                     updatedCount += 1
                 End If
             Next

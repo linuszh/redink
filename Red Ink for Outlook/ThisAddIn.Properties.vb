@@ -2662,6 +2662,34 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_M365ClientID As String
+        Get
+            Return _context.INI_M365ClientId
+        End Get
+        Set(value As String)
+            _context.INI_M365ClientId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365TenantID As String
+        Get
+            Return _context.INI_M365TenantId
+        End Get
+        Set(value As String)
+            _context.INI_M365TenantId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365Scopes As String
+        Get
+            Return _context.INI_M365Scopes
+        End Get
+        Set(value As String)
+            _context.INI_M365Scopes = value
+        End Set
+    End Property
+
+
 
     ''' <summary>
     ''' Returns the supplied <paramref name="OverrideValue"/> when it is not null, empty,

@@ -702,10 +702,10 @@ Partial Class Ribbon2
         '
         'RI_M365
         '
-        Me.RI_M365.Label = "M365 Search"
+        Me.RI_M365.Label = "M365 Mail Search"
         Me.RI_M365.Name = "RI_M365"
         Me.RI_M365.OfficeImageId = "NewSearchFolder"
-        Me.RI_M365.ScreenTip = "Searches your M365 content with the help of AI"
+        Me.RI_M365.ScreenTip = "Searches your M365 content with and without the help of AI"
         Me.RI_M365.ShowImage = True
         '
         'RI_MailMover
@@ -734,7 +734,7 @@ Partial Class Ribbon2
         '
         'RI_KnowledgeStores
         '
-        Me.RI_KnowledgeStores.Label = "Knowledge Stores"
+        Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
         Me.RI_KnowledgeStores.Name = "RI_KnowledgeStores"
         Me.RI_KnowledgeStores.OfficeImageId = "DatabaseCopyDatabaseFile"
         Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
@@ -866,6 +866,13 @@ Partial Class Ribbon2
         Else
             Me.RI_KnowledgeStores.Enabled = True
         End If
+
+        If String.IsNullOrWhiteSpace(ThisAddIn.INI_M365TenantID) OrElse String.IsNullOrWhiteSpace(ThisAddIn.INI_M365ClientID) Then
+            Me.RI_KnowledgeStores.Enabled = False
+        Else
+            Me.RI_KnowledgeStores.Enabled = True
+        End If
+
 
         ApplyThemeAwareMenuIcon()
 

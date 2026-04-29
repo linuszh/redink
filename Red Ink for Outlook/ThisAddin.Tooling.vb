@@ -1577,6 +1577,29 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            Try
+                _lastCompletedToolResponses = New List(Of ToolResponse)()
+                If context IsNot Nothing AndAlso context.AllToolResponses IsNot Nothing Then
+                    Debug.WriteLine("[AISearch] Persisting completed tool responses: " & context.AllToolResponses.Count.ToString())
+
+                    For Each r In context.AllToolResponses
+                        _lastCompletedToolResponses.Add(New ToolResponse() With {
+                            .CallId = r.CallId,
+                            .ToolName = r.ToolName,
+                            .Response = r.Response,
+                            .Success = r.Success,
+                            .ErrorMessage = r.ErrorMessage,
+                            .Timestamp = r.Timestamp,
+                            .OriginalCallJson = r.OriginalCallJson
+                        })
+                    Next
+                Else
+                    Debug.WriteLine("[AISearch] Persisting completed tool responses: context or response list is Nothing")
+                End If
+            Catch ex As Exception
+                Debug.WriteLine("[AISearch] Persisting completed tool responses failed: " & ex.Message)
+            End Try
+
             ' Clear the context reference so ApDashboardLog stops routing
             _activeToolingContext = Nothing
         End Try
