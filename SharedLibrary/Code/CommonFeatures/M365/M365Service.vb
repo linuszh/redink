@@ -386,15 +386,30 @@ Namespace SharedLibrary
             Dim entityType = MapEntityType(src)
             Dim kql As String = ApplyKqlFilters(query, src, options)
 
+            Dim requestObject As New JObject From {
+                {"entityTypes", New JArray From {entityType}},
+                {"query", New JObject From {{"queryString", kql}}},
+                {"from", Math.Max(0, options.FromIndex)},
+                {"size", Math.Max(1, Math.Min(options.MaxPerSource, 500))}
+            }
+
+            If src = M365SearchSources.Mail Then
+                requestObject("fields") = New JArray From {
+                    "id",
+                    "subject",
+                    "from",
+                    "toRecipients",
+                    "ccRecipients",
+                    "receivedDateTime",
+                    "sentDateTime",
+                    "internetMessageId",
+                    "conversationId",
+                    "webLink"
+                }
+            End If
+
             Dim req As New JObject From {
-                {"requests", New JArray From {
-                    New JObject From {
-                        {"entityTypes", New JArray From {entityType}},
-                        {"query", New JObject From {{"queryString", kql}}},
-                        {"from", 0},
-                        {"size", Math.Max(1, Math.Min(options.MaxPerSource, 500))}
-                    }
-                }}
+                {"requests", New JArray From {requestObject}}
             }
 
             Dim resp = Await GraphPostAsync(token, GraphV1 & "/search/query", req, ct).ConfigureAwait(False)
@@ -415,6 +430,7 @@ Namespace SharedLibrary
                     Next
                 Next
             Next
+
             Return hits
         End Function
 
@@ -451,6 +467,9 @@ Namespace SharedLibrary
             Return sb.ToString()
         End Function
 
+
+
+
         Private Function ParseSearchHit(h As JObject, src As M365SearchSources,
                                         options As M365SearchOptions) As M365SearchHit
             If h Is Nothing Then Return Nothing
@@ -466,11 +485,24 @@ Namespace SharedLibrary
             Select Case src
                 Case M365SearchSources.Mail
                     hit.Id = SafeStr(resource, "id")
+                    If String.IsNullOrWhiteSpace(hit.Id) Then
+                        hit.Id = SafeStr(h, "hitId")
+                    End If
+
                     hit.Title = SafeStr(resource, "subject")
                     hit.WebUrl = SafeStr(resource, "webLink")
-                    hit.LastModifiedUtc = TryDate(resource, "receivedDateTime")
+
+                    Dim sentUtc = TryDate(resource, "sentDateTime")
+                    Dim receivedUtc = TryDate(resource, "receivedDateTime")
+                    hit.LastModifiedUtc = If(sentUtc, receivedUtc)
+
                     Dim fromObj = TryCast(resource("from"), JObject)?("emailAddress")
                     hit.Author = SafeStr(CType(fromObj, JObject), "name")
+                    If String.IsNullOrWhiteSpace(hit.Author) Then
+                        hit.Author = SafeStr(CType(fromObj, JObject), "address")
+                    End If
+
+                    hit.AdditionalText = BuildRecipientsDisplay(TryCast(resource("toRecipients"), JArray))
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint
                     hit.Id = SafeStr(resource, "id")
                     Dim parent = TryCast(resource("parentReference"), JObject)
@@ -511,6 +543,27 @@ Namespace SharedLibrary
             End Select
             Return hit
         End Function
+
+
+        Private Function BuildRecipientsDisplay(arr As JArray) As String
+            If arr Is Nothing OrElse arr.Count = 0 Then Return ""
+
+            Dim parts As New List(Of String)()
+
+            For Each r In arr
+                Dim ea = TryCast(CType(r, JObject)("emailAddress"), JObject)
+                If ea Is Nothing Then Continue For
+
+                Dim addr = SafeStr(ea, "address")
+                Dim disp = SafeStr(ea, "name")
+
+                If String.IsNullOrWhiteSpace(addr) AndAlso String.IsNullOrWhiteSpace(disp) Then Continue For
+                parts.Add(If(String.IsNullOrWhiteSpace(disp), addr, disp))
+            Next
+
+            Return String.Join("; ", parts.Where(Function(s) Not String.IsNullOrWhiteSpace(s)).Distinct())
+        End Function
+
 
         ' ── OneNote search (separate endpoint) ────────────────────────────────
         Private Async Function SearchOneNoteAsync(token As String, query As String,
@@ -602,7 +655,9 @@ Namespace SharedLibrary
                                                                  Optional ct As CancellationToken = Nothing) As Task(Of M365Message)
             If String.IsNullOrWhiteSpace(internetMessageId) Then Return Nothing
 
-            Dim core As String = internetMessageId.Trim().Trim("<"c, ">"c)
+            Dim raw As String = internetMessageId.Trim()
+            Dim core As String = raw.Trim("<"c, ">"c)
+
             Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
 
             Dim selectFields = New List(Of String) From {
@@ -616,19 +671,29 @@ Namespace SharedLibrary
             If (fields And M365MessageFields.Categories) <> 0 Then selectFields.Add("categories")
             If (fields And M365MessageFields.InternetHeaders) <> 0 Then selectFields.Add("internetMessageHeaders")
 
-            Dim filter As String = "internetMessageId eq '" & core.Replace("'", "''") & "'"
-            Dim url As String = $"{GraphV1}/me/messages?$top=1&$select={String.Join(",", selectFields)}&$filter={Uri.EscapeDataString(filter)}"
+            Dim candidates As New List(Of String) From {
+                raw,
+                core,
+                "<" & core & ">"
+            }
 
-            Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
-            If j Is Nothing Then Return Nothing
+            For Each candidate In candidates.Where(Function(s) Not String.IsNullOrWhiteSpace(s)).Distinct()
+                Dim filter As String = "internetMessageId eq '" & candidate.Replace("'", "''") & "'"
+                Dim url As String = $"{GraphV1}/me/messages?$top=1&$select={String.Join(",", selectFields)}&$filter={Uri.EscapeDataString(filter)}"
 
-            Dim arr = TryCast(j("value"), JArray)
-            If arr Is Nothing OrElse arr.Count = 0 Then Return Nothing
+                Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
+                If j Is Nothing Then Continue For
 
-            Dim first = TryCast(arr(0), JObject)
-            If first Is Nothing Then Return Nothing
+                Dim arr = TryCast(j("value"), JArray)
+                If arr Is Nothing OrElse arr.Count = 0 Then Continue For
 
-            Return ParseMessage(first, fields)
+                Dim first = TryCast(arr(0), JObject)
+                If first Is Nothing Then Continue For
+
+                Return ParseMessage(first, fields)
+            Next
+
+            Return Nothing
         End Function
 
 

@@ -3317,22 +3317,24 @@ Partial Public Class ThisAddIn
                 ' Determine whether we need a leading space before this run.
                 Dim needsLeadingSpace As Boolean = False
                 Dim isLineBreakRun As Boolean = (run.Text = vbCr OrElse run.Text = vbLf OrElse
-                                                  run.Text = vbCrLf OrElse
-                                                  run.Text.Trim(vbCr, vbLf, " "c).Length = 0)
-                If ri > 0 AndAlso Not isLineBreakRun Then
+                                  run.Text = vbCrLf OrElse
+                                  run.Text.Trim(vbCr, vbLf, " "c).Length = 0)
+                Dim isSpecialPlaceholderRunCurrent As Boolean = IsSpecialPlaceholderRun(run.Text)
+
+                If ri > 0 AndAlso Not isLineBreakRun AndAlso Not isSpecialPlaceholderRunCurrent Then
                     Dim prevRun As DiffRun = runs(ri - 1)
                     Dim prevIsLineBreak As Boolean = (prevRun.Text = vbCr OrElse prevRun.Text = vbLf OrElse
-                                                      prevRun.Text = vbCrLf OrElse
-                                                      prevRun.Text.Trim(vbCr, vbLf, " "c).Length = 0)
+                                      prevRun.Text = vbCrLf OrElse
+                                      prevRun.Text.Trim(vbCr, vbLf, " "c).Length = 0)
                     If Not prevIsLineBreak Then
                         Dim prevText As String = prevRun.Text
                         Dim curText As String = run.Text
                         If Not String.IsNullOrWhiteSpace(prevText) AndAlso
-                           Not String.IsNullOrWhiteSpace(curText) AndAlso
-                           Not prevText.EndsWith(vbCr) AndAlso Not prevText.EndsWith(vbLf) AndAlso
-                           Not prevText.EndsWith(" ") AndAlso
-                           Not curText.StartsWith(vbCr) AndAlso Not curText.StartsWith(vbLf) AndAlso
-                           Not curText.StartsWith(" ") Then
+                                       Not String.IsNullOrWhiteSpace(curText) AndAlso
+                                       Not prevText.EndsWith(vbCr) AndAlso Not prevText.EndsWith(vbLf) AndAlso
+                                       Not prevText.EndsWith(" ") AndAlso
+                                       Not curText.StartsWith(vbCr) AndAlso Not curText.StartsWith(vbLf) AndAlso
+                                       Not curText.StartsWith(" ") Then
                             needsLeadingSpace = True
                         End If
                     End If
@@ -3448,7 +3450,10 @@ Partial Public Class ThisAddIn
                             End If
 
                             Dim nextIsInsert As Boolean = (ri + 1 < runs.Count AndAlso runs(ri + 1).RunType = ChangeType.Inserted)
-                            If nextIsInsert Then
+                            Dim nextInsertedIsSpecialPlaceholder As Boolean =
+                                    (nextIsInsert AndAlso IsSpecialPlaceholderRun(runs(ri + 1).Text))
+
+                            If nextIsInsert AndAlso Not nextInsertedIsSpecialPlaceholder Then
                                 Dim peekEnd As Integer = searchRange.End
                                 If peekEnd < rangeEnd Then
                                     Dim peekRange As Range = doc.Range(peekEnd, System.Math.Min(peekEnd + 1, rangeEnd))
@@ -3475,8 +3480,10 @@ Partial Public Class ThisAddIn
                         Dim insText As String = run.Text.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
                         If String.IsNullOrEmpty(insText) Then Continue For
 
+                        Dim isSpecialPlaceholderInsert As Boolean = IsSpecialPlaceholderRun(run.Text)
+
                         Dim prevWasDelete As Boolean = (ri > 0 AndAlso runs(ri - 1).RunType = ChangeType.Deleted)
-                        If needsLeadingSpace AndAlso Not prevWasDelete Then
+                        If needsLeadingSpace AndAlso Not prevWasDelete AndAlso Not isSpecialPlaceholderInsert Then
                             insText = " " & insText
                         End If
 
@@ -3486,14 +3493,18 @@ Partial Public Class ThisAddIn
                         If nextIsUnchanged Then
                             Dim nxt As String = runs(ri + 1).Text
                             nextStartsWithLineBreak = (nxt.StartsWith(vbCrLf) OrElse
-                                                       nxt.StartsWith(vbCr) OrElse
-                                                       nxt.StartsWith(vbLf) OrElse
-                                                       nxt = vbCr OrElse nxt = vbLf OrElse nxt = vbCrLf OrElse
-                                                       nxt.Trim(vbCr, vbLf, " "c).Length = 0)
+                               nxt.StartsWith(vbCr) OrElse
+                               nxt.StartsWith(vbLf) OrElse
+                               nxt = vbCr OrElse nxt = vbLf OrElse nxt = vbCrLf OrElse
+                               nxt.Trim(vbCr, vbLf, " "c).Length = 0)
                         End If
-                        If nextIsUnchanged AndAlso Not nextStartsWithLineBreak AndAlso
-                           Not insText.EndsWith(" ") AndAlso
-                           Not insText.EndsWith(vbCr) AndAlso Not insText.EndsWith(vbLf) Then
+
+                        If nextIsUnchanged AndAlso
+                                   Not nextStartsWithLineBreak AndAlso
+                                   Not isSpecialPlaceholderInsert AndAlso
+                                   Not insText.EndsWith(" ") AndAlso
+                                   Not insText.EndsWith(vbCr) AndAlso
+                                   Not insText.EndsWith(vbLf) Then
                             insText = insText & " "
                         End If
 
@@ -3547,6 +3558,54 @@ Partial Public Class ThisAddIn
             wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
         End Try
     End Sub
+
+    Private Structure InlineCharFormatSnapshot
+        Public FontName As String
+        Public FontSize As Single?
+        Public Bold As Integer?
+        Public Italic As Integer?
+        Public Underline As Word.WdUnderline?
+        Public Color As Long?
+    End Structure
+
+    Private Shared Function CaptureInlineCharFormatSnapshot(sourceRange As Word.Range) As InlineCharFormatSnapshot
+        Dim result As New InlineCharFormatSnapshot
+
+        If sourceRange Is Nothing Then Return result
+
+        Try
+            With sourceRange.Font
+                If Not String.IsNullOrWhiteSpace(.Name) AndAlso .Name <> CStr(Word.WdConstants.wdUndefined) Then
+                    result.FontName = .Name
+                End If
+
+                If .Size <> CSng(Word.WdConstants.wdUndefined) AndAlso .Size > 0 Then
+                    result.FontSize = .Size
+                End If
+
+                If .Bold <> Word.WdConstants.wdUndefined Then
+                    result.Bold = .Bold
+                End If
+
+                If .Italic <> Word.WdConstants.wdUndefined Then
+                    result.Italic = .Italic
+                End If
+
+                If .Underline <> Word.WdConstants.wdUndefined Then
+                    result.Underline = CType(.Underline, Word.WdUnderline)
+                End If
+
+                If .Color <> Word.WdConstants.wdUndefined Then
+                    result.Color = .Color
+                End If
+            End With
+        Catch ex As System.Exception
+            Debug.WriteLine("CaptureInlineCharFormatSnapshot failed: " & ex.Message)
+        End Try
+
+        Return result
+    End Function
+
 
     ''' <summary>
     ''' Parses markup tags ([INS_START]/[DEL_START]) and applies them to Word with track changes, stripping merge fields from deleted runs.
@@ -3753,6 +3812,17 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    Private Shared Function IsSpecialPlaceholderRun(value As String) As Boolean
+        If String.IsNullOrWhiteSpace(value) Then Return False
+
+        Dim s As String = value.Trim()
+
+        Return System.Text.RegularExpressions.Regex.IsMatch(
+        s,
+        "^\{\{(?:WFLD|WFNT|WENT|PFOR):[\s\S]*\}\}$",
+        System.Text.RegularExpressions.RegexOptions.Singleline)
+    End Function
 
     ''' <summary>
     ''' Removes any "\* MERGEFORMAT" switch from inside {{…}} fields.

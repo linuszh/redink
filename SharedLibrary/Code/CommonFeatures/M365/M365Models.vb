@@ -100,6 +100,8 @@ Namespace SharedLibrary
     Public Class M365SearchOptions
         ''' <summary>Maximum hits returned per source (Graph caps at 500; default 25).</summary>
         Public Property MaxPerSource As Integer = 25
+        ''' <summary>Optional zero-based offset for paged search retrieval.</summary>
+        Public Property FromIndex As Integer = 0
         ''' <summary>Optional KQL date floor (uses Graph KQL <c>received&gt;=</c> for messages, <c>lastModifiedDateTime&gt;=</c> for files).</summary>
         Public Property [From] As Date?
         Public Property [To] As Date?

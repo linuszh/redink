@@ -38,10 +38,46 @@ Public Class M365SearchTestForm
 
     Private Const AISearch_MaxIterations As Integer = 30
     Private Const AISearch_MinCandidates As Integer = 10
+    Private Const AISearch_MaxCandidateHits As Integer = 300
+    Private Const AISearch_ReviewBatchSize As Integer = 12
+    Private Const AISearch_BodyCap_PerCandidate As Integer = 6000
+    Private Const AISearch_BodyCap_FinalSummary As Integer = 8000
 
     Private Const M365Search_SummaryBatchSize As Integer = 5
-    Private Const M365Search_SummaryBodyCap As Integer = 2000
+    Private Const M365Search_SummaryBodyCap As Integer = 2500
 
+    Private NotInheritable Class AiResolvedMail
+        Public Property GlobalRef As Integer
+        Public Property Hit As M365SearchHit
+        Public Property Message As M365Message
+    End Class
+
+    Private NotInheritable Class AiFinalSelection
+        Public Property Summary As String = ""
+        Public Property OrderedGlobalRefs As New List(Of Integer)()
+    End Class
+
+    Private NotInheritable Class AiSearchInvocation
+        Public Property Query As String = ""
+        Public Property Sources As M365SearchSources = M365SearchSources.Mail
+        Public Property MaxPerSource As Integer = 25
+        Public Property FromDate As Date?
+        Public Property ToDate As Date?
+        Public Property KqlExtra As String = ""
+        Public Property NextFromIndex As Integer = 0
+        Public Property Exhausted As Boolean
+
+        Public Function StableKey() As String
+            Return Query.Trim().ToLowerInvariant() & "|" &
+                   Sources.ToString() & "|" &
+                   MaxPerSource.ToString() & "|" &
+                   If(FromDate.HasValue, FromDate.Value.ToString("yyyy-MM-dd"), "") & "|" &
+                   If(ToDate.HasValue, ToDate.Value.ToString("yyyy-MM-dd"), "") & "|" &
+                   If(KqlExtra, "").Trim().ToLowerInvariant()
+        End Function
+    End Class
+
+    Private _aiRecordedSearches As New List(Of AiSearchInvocation)()
 
     Private ReadOnly _context As ISharedContext
     Private _hits As New List(Of M365SearchHit)()
@@ -50,6 +86,10 @@ Public Class M365SearchTestForm
     Private _aiHeartbeatStart As DateTime
     Private _aiHeartbeatPrefix As String = ""
     Private _hasPinnedSummary As Boolean
+    Private _aiLastUserPrompt As String = ""
+    Private _aiCandidateHits As New List(Of M365SearchHit)()
+    Private ReadOnly _aiMessageCacheLock As New Object()
+    Private ReadOnly _aiMessageCache As New Dictionary(Of String, M365Message)(StringComparer.OrdinalIgnoreCase)
 
     ' ── UI fields ───────────────────────────────────────────────────────
     Private WithEvents txtQuery As TextBox
@@ -57,6 +97,7 @@ Public Class M365SearchTestForm
     Private WithEvents btnOpen As Button
     Private WithEvents btnSignIn As Button
     Private WithEvents btnSignOut As Button
+    Private WithEvents btnGetMore As Button
     Private WithEvents numMax As NumericUpDown
     Private WithEvents lvResults As ListView
     Private WithEvents btnClose As Button
@@ -70,6 +111,7 @@ Public Class M365SearchTestForm
     Private WithEvents btnAISearch As Button
     Private txtSummary As WebBrowser
     Private lblSummary As Label
+    Private lblAiStats As Label
     Private pb As ProgressBar
 
     ' Standard Red Ink button padding/margin (matches ShowSelectionForm etc.).
@@ -81,6 +123,84 @@ Public Class M365SearchTestForm
         _context = context
         BuildUi()
     End Sub
+
+    Private ReadOnly _toolTip As New ToolTip() With {
+        .ShowAlways = True,
+        .AutoPopDelay = 20000,
+        .InitialDelay = 400,
+        .ReshowDelay = 150
+    }
+
+    Private Function GetAiHarvestMaxPerCall() As Integer
+        Return CInt(Math.Max(1D, Math.Min(CDec(AISearch_MaxCandidateHits), numMax.Value)))
+    End Function
+
+    Private Sub ConfigureToolTips()
+        _toolTip.SetToolTip(lblMax, "Search: maximum rows requested. AI Search / Get more: preferred maximum hits requested per m365_search call. Overall AI candidate pool is still capped at 100.")
+        _toolTip.SetToolTip(numMax, "Search: maximum rows requested. AI Search / Get more: preferred maximum hits requested per m365_search call. Overall AI candidate pool is still capped at 100.")
+        _toolTip.SetToolTip(btnSearch, "Run a direct Microsoft 365 mail search and show up to Max hits. Fast, metadata-first search.")
+        _toolTip.SetToolTip(btnAISearch, "Run multi-step AI mail search: broad candidate gathering first, then full-text review of the candidate mails. Slower, but more accurate for semantic requests.")
+        _toolTip.SetToolTip(btnGetMore, "Run another AI candidate-gathering pass for the current AI query. Already known candidates are passed back to the model, and duplicates are merged out host-side.")
+        _toolTip.SetToolTip(btnSignIn, "Sign in to Microsoft 365 so Red Ink can search and read your mailbox through Microsoft Graph.")
+        _toolTip.SetToolTip(btnSignOut, "Sign out of Microsoft 365 and clear the current Microsoft Graph session for this add-in.")
+    End Sub
+
+    Private Sub ClearAiMessageCache()
+        SyncLock _aiMessageCacheLock
+            _aiMessageCache.Clear()
+        End SyncLock
+    End Sub
+
+    Private Shared Function BuildMessageCacheKeys(messageId As String,
+                                                  internetMessageId As String) As List(Of String)
+        Dim keys As New List(Of String)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        Dim graphKey As String = NormalizeGraphIdForCompare(messageId)
+        If Not String.IsNullOrWhiteSpace(graphKey) Then
+            Dim key As String = "id:" & graphKey
+            If seen.Add(key) Then keys.Add(key)
+        End If
+
+        Dim imidKey As String = NormalizeInternetMessageId(internetMessageId)
+        If Not String.IsNullOrWhiteSpace(imidKey) Then
+            Dim key As String = "imid:" & imidKey
+            If seen.Add(key) Then keys.Add(key)
+        End If
+
+        Return keys
+    End Function
+
+    Private Sub CacheMessage(message As M365Message)
+        If message Is Nothing Then Return
+
+        Dim keys As List(Of String) = BuildMessageCacheKeys(message.Id, message.InternetMessageId)
+        If keys.Count = 0 Then Return
+
+        SyncLock _aiMessageCacheLock
+            For Each key In keys
+                _aiMessageCache(key) = message
+            Next
+        End SyncLock
+    End Sub
+
+    Private Function TryGetCachedMessage(hit As M365SearchHit) As M365Message
+        If hit Is Nothing Then Return Nothing
+
+        Dim keys As List(Of String) = BuildMessageCacheKeys(GetHitMessageId(hit), TryGetInternetMessageId(hit))
+        If keys.Count = 0 Then Return Nothing
+
+        SyncLock _aiMessageCacheLock
+            For Each key In keys
+                Dim cached As M365Message = Nothing
+                If _aiMessageCache.TryGetValue(key, cached) Then
+                    Return cached
+                End If
+            Next
+        End SyncLock
+
+        Return Nothing
+    End Function
 
     ' ════════════════════════════════════════════════════════════════════
     '  UI construction
@@ -149,6 +269,16 @@ Public Class M365SearchTestForm
             .Location = New Point(660, 9)}
         headerPanel.Controls.Add(btnAISearch)
 
+        btnGetMore = New Button() With {
+            .Text = "Get more",
+            .AutoSize = True,
+            .Padding = StdButtonPadding,
+            .Margin = StdButtonMargin,
+            .Anchor = AnchorStyles.Top Or AnchorStyles.Right,
+            .Location = New Point(750, 9),
+            .Enabled = False}
+        headerPanel.Controls.Add(btnGetMore)
+
         btnSignIn = New Button() With {
             .Text = "Sign in",
             .AutoSize = True,
@@ -172,6 +302,16 @@ Public Class M365SearchTestForm
             .Text = "(not signed in)", .AutoSize = True, .ForeColor = Color.DimGray,
             .Location = New Point(12, 60)}
         headerPanel.Controls.Add(lblUser)
+
+        lblAiStats = New Label() With {
+            .Text = "",
+            .AutoEllipsis = True,
+            .ForeColor = Color.DimGray,
+            .TextAlign = ContentAlignment.MiddleRight,
+            .Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
+            .Location = New Point(320, 60),
+            .Size = New Size(headerPanel.ClientSize.Width - 332, 20)}
+        headerPanel.Controls.Add(lblAiStats)
 
         ' ── Footer (progress, status, Open + Close) ──────────────────────
         footerPanel = New Panel() With {
@@ -278,6 +418,7 @@ Public Class M365SearchTestForm
         ' the controls have their preferred sizes.
         LayoutTopRowRight()
         LayoutFooterRight()
+        ConfigureToolTips()
     End Sub
 
     ''' <summary>
@@ -300,7 +441,7 @@ Public Class M365SearchTestForm
 
         Dim x As Integer = headerPanel.ClientSize.Width - rightMargin
 
-        For Each b As Button In New Button() {btnSignOut, btnSignIn, btnAISearch, btnSearch}
+        For Each b As Button In New Button() {btnSignOut, btnSignIn, btnGetMore, btnAISearch, btnSearch}
             Dim w As Integer = b.PreferredSize.Width
             x -= w
             b.SetBounds(x, topY, w, b.Height)
@@ -323,6 +464,12 @@ Public Class M365SearchTestForm
         Dim queryRight As Integer = x - groupGap
         Dim newWidth As Integer = Math.Max(120, queryRight - queryLeft)
         txtQuery.SetBounds(queryLeft, txtQuery.Top, newWidth, txtQuery.Height)
+
+        If lblAiStats IsNot Nothing Then
+            Dim statsLeft As Integer = Math.Max(320, txtQuery.Left)
+            Dim statsWidth As Integer = Math.Max(120, headerPanel.ClientSize.Width - statsLeft - 12)
+            lblAiStats.SetBounds(statsLeft, 60, statsWidth, lblAiStats.Height)
+        End If
 
     End Sub
 
@@ -353,12 +500,42 @@ Public Class M365SearchTestForm
         End If
     End Sub
 
-
     Protected Overrides Sub OnResize(e As EventArgs)
         MyBase.OnResize(e)
         LayoutTopRowRight()
         LayoutFooterRight()
         ResizeResultsColumns()
+    End Sub
+
+
+    Private Sub ResetAiStats()
+        UiPost(Sub()
+                   If lblAiStats IsNot Nothing Then
+                       lblAiStats.Text = ""
+                   End If
+               End Sub)
+    End Sub
+
+    Private Sub UpdateAiStats(candidateCount As Integer,
+                              Optional reviewedCount As Integer? = Nothing,
+                              Optional shownCount As Integer? = Nothing)
+        UiPost(Sub()
+                   If lblAiStats Is Nothing Then Return
+
+                   Dim parts As New List(Of String) From {
+                       $"Candidates: {Math.Max(0, candidateCount)}/{AISearch_MaxCandidateHits}"
+                   }
+
+                   If reviewedCount.HasValue Then
+                       parts.Add($"Reviewed: {Math.Max(0, reviewedCount.Value)}")
+                   End If
+
+                   If shownCount.HasValue Then
+                       parts.Add($"Shown: {Math.Max(0, shownCount.Value)}")
+                   End If
+
+                   lblAiStats.Text = String.Join("   •   ", parts)
+               End Sub)
     End Sub
 
     ' ════════════════════════════════════════════════════════════════════
@@ -531,21 +708,30 @@ Public Class M365SearchTestForm
 
         For i As Integer = 0 To hits.Count - 1
             ct.ThrowIfCancellationRequested()
-            Dim hit = hits(i)
-            Dim id As String = GetHitMessageId(hit)
 
-            ' If we only have an internetMessageId (typical for AI-search fallback hits),
-            ' resolve to a real Graph id so we can fetch recipients/web link.
+            Dim hit = hits(i)
+            If hit Is Nothing Then
+                skipped += 1
+                Debug.WriteLine($"[M365Search.Enrich] #{i + 1}: SKIPPED (hit is Nothing)")
+                Continue For
+            End If
+
+            Dim id As String = GetHitMessageId(hit)
+            Dim msg As M365Message = Nothing
+
             If String.IsNullOrWhiteSpace(id) Then
                 Dim imid As String = TryGetInternetMessageId(hit)
                 If Not String.IsNullOrWhiteSpace(imid) Then
                     Try
-                        Dim resolved As M365Message = Await M365Service.GetMessageByInternetMessageIdAsync(
-                            _context, imid, M365MessageFields.Headers, ct).ConfigureAwait(False)
-                        If resolved IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(resolved.Id) Then
-                            hit.Id = resolved.Id
-                            id = resolved.Id
-                            If String.IsNullOrWhiteSpace(hit.WebUrl) Then hit.WebUrl = resolved.WebLink
+                        msg = Await M365Service.GetMessageByInternetMessageIdAsync(
+                            _context,
+                            imid,
+                            M365MessageFields.Recipients,
+                            ct).ConfigureAwait(False)
+
+                        If msg IsNot Nothing Then
+                            ApplyPreviewMessageToHit(hit, msg)
+                            id = GetHitMessageId(hit)
                         End If
                     Catch ex As OperationCanceledException
                         Throw
@@ -555,46 +741,66 @@ Public Class M365SearchTestForm
                 End If
             End If
 
-            If hit Is Nothing OrElse String.IsNullOrWhiteSpace(id) Then
-                skipped += 1
-                Debug.WriteLine($"[M365Search.Enrich] #{i + 1}: SKIPPED (no id)")
+            If String.IsNullOrWhiteSpace(id) Then
+                If String.IsNullOrWhiteSpace(hit.AdditionalText) AndAlso
+                   Not hit.LastModifiedUtc.HasValue AndAlso
+                   String.IsNullOrWhiteSpace(hit.Author) AndAlso
+                   String.IsNullOrWhiteSpace(hit.Title) Then
+
+                    skipped += 1
+                    Debug.WriteLine($"[M365Search.Enrich] #{i + 1}: SKIPPED (no id and no usable metadata)")
+                Else
+                    ok += 1
+                    Debug.WriteLine($"[M365Search.Enrich] #{i + 1}: kept metadata-only hit")
+                End If
+
                 Continue For
             End If
 
-            UiPost(Sub() lblStatus.Text = $"Loading recipients {i + 1}/{total}…")
+            Dim needsFetch As Boolean =
+                msg Is Nothing OrElse
+                String.IsNullOrWhiteSpace(hit.AdditionalText) OrElse
+                String.IsNullOrWhiteSpace(hit.Author) OrElse
+                String.IsNullOrWhiteSpace(hit.Title) OrElse
+                String.IsNullOrWhiteSpace(hit.WebUrl) OrElse
+                Not hit.LastModifiedUtc.HasValue
 
-            Dim msg As M365Message = Nothing
-            Try
-                msg = Await M365Service.GetMessageAsync(
-                    _context, id, M365MessageFields.Recipients, ct).ConfigureAwait(False)
-            Catch ex As OperationCanceledException
-                Throw
-            Catch ex As Exception
-                failed += 1
-                If String.IsNullOrEmpty(firstError) Then firstError = ex.Message
-                Debug.WriteLine($"[M365Search.Enrich] #{i + 1} EX: {ex.GetType().Name}: {ex.Message}")
-            End Try
+            If needsFetch Then
+                UiPost(Sub() lblStatus.Text = $"Loading recipients {i + 1}/{total}…")
 
-            If msg Is Nothing Then Continue For
-            ok += 1
-
-            hit.AdditionalText = BuildRecipientList(msg.To_)
-            If String.IsNullOrWhiteSpace(hit.AdditionalText) AndAlso msg.RawJson IsNot Nothing Then
-                hit.AdditionalText = ExtractToFromJson(msg.RawJson, "enrich.raw")
+                Try
+                    msg = Await M365Service.GetMessageAsync(
+                        _context,
+                        id,
+                        M365MessageFields.Recipients,
+                        ct).ConfigureAwait(False)
+                Catch ex As OperationCanceledException
+                    Throw
+                Catch ex As Exception
+                    failed += 1
+                    If String.IsNullOrEmpty(firstError) Then firstError = ex.Message
+                    Debug.WriteLine($"[M365Search.Enrich] #{i + 1} EX: {ex.GetType().Name}: {ex.Message}")
+                End Try
             End If
 
-            If String.IsNullOrWhiteSpace(hit.Author) Then
-                hit.Author = If(String.IsNullOrWhiteSpace(msg.From), msg.FromAddress, msg.From)
-            End If
-            If String.IsNullOrWhiteSpace(hit.Title) Then hit.Title = msg.Subject
-            If String.IsNullOrWhiteSpace(hit.WebUrl) Then hit.WebUrl = msg.WebLink
-            If Not hit.LastModifiedUtc.HasValue Then
-                If msg.ReceivedUtc.HasValue Then
-                    hit.LastModifiedUtc = msg.ReceivedUtc.Value
-                ElseIf msg.SentUtc.HasValue Then
-                    hit.LastModifiedUtc = msg.SentUtc.Value
+            If msg IsNot Nothing Then
+                ApplyPreviewMessageToHit(hit, msg)
+                If String.IsNullOrWhiteSpace(hit.AdditionalText) AndAlso msg.RawJson IsNot Nothing Then
+                    hit.AdditionalText = ExtractToFromJson(msg.RawJson, "enrich.raw")
                 End If
             End If
+
+            If String.IsNullOrWhiteSpace(hit.AdditionalText) AndAlso
+               Not hit.LastModifiedUtc.HasValue AndAlso
+               String.IsNullOrWhiteSpace(hit.Author) AndAlso
+               String.IsNullOrWhiteSpace(hit.Title) Then
+
+                skipped += 1
+                Debug.WriteLine($"[M365Search.Enrich] #{i + 1}: SKIPPED (message unresolved and no usable metadata)")
+                Continue For
+            End If
+
+            ok += 1
         Next
 
         Debug.WriteLine($"[M365Search.Enrich] done: total={total} ok={ok} failed={failed} skipped={skipped} firstError='{firstError}'")
@@ -602,7 +808,6 @@ Public Class M365SearchTestForm
                                       If(skipped > 0, $" {skipped} had no id.", "") &
                                       If(failed > 0, $" {failed} failed. First error: {firstError}", ""))
     End Function
-
 
     Private Shared Function BuildRecipientList(recipients As IEnumerable(Of String)) As String
         If recipients Is Nothing Then Return ""
@@ -690,6 +895,8 @@ Public Class M365SearchTestForm
         btnOpen.Enabled = False
         _hasPinnedSummary = False
         SetSummaryMarkdown("")
+        ResetAiStats()
+        ClearAiMessageCache()
 
         Try
             Dim opts As New M365SearchOptions() With {
@@ -742,204 +949,119 @@ Public Class M365SearchTestForm
         Try
             userPrompt = SharedMethods.ShowCustomInputBox(
                 "Describe the e-mails you are looking for. The AI will search " &
-                "your Microsoft 365 mailbox, list the relevant messages and " &
-                "summarise them.",
+                "your Microsoft 365 mailbox, gather candidate messages, review their full text, and " &
+                "show the relevant ones.",
                 "AI Mail Search",
                 SimpleInput:=False)
         Catch
         End Try
         If String.IsNullOrWhiteSpace(userPrompt) OrElse userPrompt = "ESC" Then Return
 
+        Await RunAiSearchPipelineAsync(userPrompt, appendMore:=False).ConfigureAwait(False)
+    End Sub
+
+    Private Async Sub btnGetMore_Click(sender As Object, e As EventArgs) Handles btnGetMore.Click
+        If String.IsNullOrWhiteSpace(_aiLastUserPrompt) Then
+            SharedMethods.ShowCustomMessageBox("Run an AI search first.", "AI Mail Search")
+            Return
+        End If
+
+        If _aiRecordedSearches Is Nothing OrElse _aiRecordedSearches.Count = 0 Then
+            SharedMethods.ShowCustomMessageBox("No recorded phase-1 searches are available for paging. Run AI Search again.", "AI Mail Search")
+            Return
+        End If
+
         _cts?.Cancel()
         _cts = New CancellationTokenSource()
-        SetBusy(True, "AI is searching your mailbox…")
-        StartAiHeartbeat("AI is searching your mailbox")
-        lvResults.Items.Clear()
-        _hits.Clear()
-        btnOpen.Enabled = False
-        _hasPinnedSummary = False
-        SetSummaryMarkdown("")
 
-        Dim addIn = Globals.ThisAddIn
-        Dim chatScope As IDisposable = Nothing
-        Dim previousOtherPrompt As String = addIn.OtherPrompt
-
-        Dim altPath As String = _context.INI_AlternateModelPath
-        Dim haveAltPath As Boolean = Not String.IsNullOrWhiteSpace(altPath)
-
-        Dim backupConfig As ModelConfig = Nothing
-        Dim backupOriginalLoaded As Boolean = False
-        Dim toolModelApplied As Boolean = False
-
-        ' Snapshot/override iteration cap.
-        Dim previousMaxIters As Integer = addIn.INI_ToolingMaximumIterations
-        Dim itersOverridden As Boolean = False
+        SetBusy(True, "Getting more candidates…")
+        StartAiHeartbeat("Getting more candidates")
 
         Try
-            addIn.OtherPrompt = userPrompt
-            Globals.ThisAddIn.OtherPrompt = userPrompt
+            Dim oldCount As Integer = _aiCandidateHits.Count
+            Dim moreHits As List(Of M365SearchHit) =
+                Await GetMoreCandidatesFromRecordedQueriesAsync(_cts.Token).ConfigureAwait(False)
 
-            Dim m365Tools = SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context)
-            Dim searchTool = m365Tools.FirstOrDefault(
-                Function(t) String.Equals(t?.ToolName,
-                                          SharedLibrary.SharedLibrary.M365ToolService.SearchToolName,
-                                          StringComparison.OrdinalIgnoreCase))
-            If searchTool Is Nothing Then
-                searchTool = m365Tools.FirstOrDefault(
-                    Function(t) Not String.IsNullOrEmpty(t?.ToolName) AndAlso
-                                SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(t.ToolName))
-            End If
-            If searchTool Is Nothing Then
-                SharedMethods.ShowCustomMessageBox(
-                    "The Microsoft 365 search tool is not available. Please ensure INI_M365ClientId is configured.",
-                    "AI Mail Search")
+            _aiCandidateHits = MergeCandidateHits(_aiCandidateHits, moreHits, AISearch_MaxCandidateHits)
+
+            If _aiCandidateHits.Count = oldCount Then
+                UiPost(Sub()
+                           UpdateAiStats(_aiCandidateHits.Count)
+                           UpdateGetMoreEnabled()
+                           lblStatus.Text = "No additional candidates were found from the recorded phase-1 searches."
+                       End Sub)
                 Return
             End If
 
-            Dim selectedTools As New List(Of ModelConfig)
-            selectedTools.Add(searchTool)
-            Dim getMailTool = m365Tools.FirstOrDefault(
-                Function(t) String.Equals(t?.ToolName,
-                                          SharedLibrary.SharedLibrary.M365ToolService.GetMailToolName,
-                                          StringComparison.OrdinalIgnoreCase))
-            If getMailTool IsNot Nothing Then selectedTools.Add(getMailTool)
+            Await ReviewAndDisplayCandidatePoolAsync(_aiLastUserPrompt, _cts.Token).ConfigureAwait(False)
 
-            chatScope = addIn.EnterChatAgentScope()
+        Catch ex As OperationCanceledException
+            UiPost(Sub() lblStatus.Text = "Get more cancelled.")
+        Catch ex As Exception When IsCancellation(ex)
+            UiPost(Sub() lblStatus.Text = "Get more cancelled.")
+        Catch ex As Exception
+            Dim msg As String = BuildExceptionDetails(ex)
+            Debug.WriteLine("[M365] Get more failed:" & vbCrLf & msg)
+            ShowErrorWithClipboard(
+                "AI Mail Search",
+                "Getting more candidates failed.",
+                msg,
+                "Get more failed.")
+        Finally
+            UiPost(Sub() StopAiHeartbeat())
+            UiPost(Sub() SetBusy(False))
+        End Try
+    End Sub
 
-            If haveAltPath Then
-                backupConfig = SharedMethods.GetCurrentConfig(_context)
-                backupOriginalLoaded = SharedMethods.originalConfigLoaded
+    Private Async Function RunAiSearchPipelineAsync(userPrompt As String,
+                                                    appendMore As Boolean) As Task
+        If String.IsNullOrWhiteSpace(userPrompt) Then Return
 
-                toolModelApplied = SharedMethods.GetSpecialTaskModel(
-                    _context, altPath, "ToolDefaultModel")
-                If Not toolModelApplied Then
-                    toolModelApplied = SharedMethods.GetSpecialTaskModel(
-                        _context, altPath, "AgentDefaultModel")
-                End If
-                If Not toolModelApplied Then
-                    SharedMethods.ShowCustomMessageBox(
-                        "No ToolDefaultModel or AgentDefaultModel is configured in the alternate models INI.",
-                        "AI Mail Search")
-                    Return
-                End If
-            Else
-                SharedMethods.ShowCustomMessageBox(
-                    "INI_AlternateModelPath is not configured.",
-                    "AI Mail Search")
-                Return
-            End If
+        _cts?.Cancel()
+        _cts = New CancellationTokenSource()
 
-            ' Bump iteration cap for this run.
-            addIn.INI_ToolingMaximumIterations = AISearch_MaxIterations
-            itersOverridden = True
+        Dim aiMaxPerCall As Integer = GetAiHarvestMaxPerCall()
 
-            ' Pre-resolve {OtherPrompt} and inject explicit retry policy.
-            Dim retryPolicy As String =
-                vbCrLf & vbCrLf &
-                "RETRY POLICY (read carefully):" & vbCrLf &
-                $"- Try multiple m365_search calls (up to {AISearch_MaxIterations - 2}) with progressively " &
-                "broader, alternative or rephrased queries (synonyms, partial names, common misspellings, " &
-                "different KQL operators) until you have collected at least " &
-                $"{AISearch_MinCandidates} candidate mail hits to evaluate, OR you are confident the " &
-                "mailbox truly contains fewer matching mails." & vbCrLf &
-                "- After each call, if the hit count is below the target, choose a DIFFERENT query — do " &
-                "not repeat the same query, and do not give up after a single empty/short result." & vbCrLf &
-                "- Once you have enough candidates, pick the relevant ones and return them in <email_ids>." & vbCrLf &
-                "- If the user clearly asked for ONE specific mail, return only that single id; otherwise " &
-                $"return up to {AISearch_MinCandidates} of the most relevant ids."
+        If Not appendMore Then
+            lvResults.Items.Clear()
+            _hits.Clear()
+            _aiCandidateHits.Clear()
+            _aiRecordedSearches.Clear()
+            btnOpen.Enabled = False
+            _hasPinnedSummary = False
+            SetSummaryMarkdown("")
+            ResetAiStats()
+            ClearAiMessageCache()
+        End If
 
-            Dim resolvedSysPrompt As String = If(_context.SP_AIMailSearch, "")
-            resolvedSysPrompt = System.Text.RegularExpressions.Regex.Replace(
-                resolvedSysPrompt,
-                "\{OtherPrompt\}",
-                userPrompt.Replace("\", "\\").Replace("$", "$$"),
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
-            resolvedSysPrompt &= retryPolicy
+        SetBusy(True, "AI is searching your mailbox…")
+        StartAiHeartbeat("AI is searching your mailbox")
 
-            Dim finalText = Await addIn.ExecuteToolingLoop(
-                sysCommand:=resolvedSysPrompt,
-                userText:=userPrompt,
-                selectedTools:=selectedTools,
-                useSecondAPI:=True,
-                otherPrompt:=userPrompt,
-                hideSplash:=True,
-                cancellationToken:=_cts.Token).ConfigureAwait(False)
-
+        Try
+            Dim harvest = Await ExecuteAiCandidateHarvestAsync(userPrompt, appendMore, aiMaxPerCall, _cts.Token).ConfigureAwait(False)
             If Not IsFormUsable() Then Return
 
-            Debug.WriteLine("[M365Search] AI raw response:" & vbCrLf & If(finalText, "(null)"))
+            Debug.WriteLine("[M365Search] AI candidate raw response:" & vbCrLf & If(harvest.Item1, "(null)"))
 
-            Dim summary As String = ExtractTaggedBlock(finalText, "summary")
-            Dim ids = ExtractEmailIds(finalText)
-            Dim toolResponses As List(Of ThisAddIn.ToolResponse) = addIn.GetLastCompletedToolResponsesSnapshot()
-            Debug.WriteLine("[AISearch] toolResponses snapshot count=" & toolResponses.Count.ToString())
+            _aiRecordedSearches = MergeSearchInvocations(_aiRecordedSearches, CaptureAiSearchInvocations(harvest.Item2))
 
-            Dim resolved As New List(Of M365SearchHit)()
-            Dim failedIds As New List(Of String)()
+            Dim candidateRefs As List(Of Integer) = ExtractEmailRefs(harvest.Item1)
+            Dim toolHits As List(Of M365SearchHit) = BuildHitsFromSearchToolResponses(harvest.Item2)
 
-            Dim toolHits As List(Of M365SearchHit) = BuildHitsFromSearchToolResponses(toolResponses)
-            Dim matchedHits As List(Of M365SearchHit) = MatchAiReturnedIdsToToolHits(ids, toolHits)
-
-            If matchedHits.Count > 0 Then
-                Debug.WriteLine("[AISearch] Matched returned ids to tool hits: " & matchedHits.Count)
-                Await EnrichMailHitsAsync(matchedHits, _cts.Token).ConfigureAwait(False)
-                resolved = matchedHits
+            Dim harvestedHits As New List(Of M365SearchHit)()
+            If candidateRefs.Count > 0 Then
+                harvestedHits = MatchAiReturnedRefsToToolHits(candidateRefs, toolHits)
+                Debug.WriteLine("[AISearch] Matched candidate refs to tool hits: " & harvestedHits.Count.ToString())
             Else
-                ' If the LLM returned unusable ids, fall back to the raw m365_search hits.
-                If toolHits.Count > 0 Then
-                    Debug.WriteLine("[AISearch] Falling back to raw m365_search tool hits: " & toolHits.Count)
-                    Await EnrichMailHitsAsync(toolHits, _cts.Token).ConfigureAwait(False)
-                    resolved = toolHits
-                End If
-
-                If ids.Count > 0 AndAlso resolved.Count = 0 Then
-                    For Each id In ids
-                        failedIds.Add(id & "  (not matched to any m365_search tool hit)")
-                    Next
-                End If
+                harvestedHits = toolHits
+                Debug.WriteLine("[AISearch] No candidate refs returned; using raw search hits.")
             End If
 
-            UiPost(Sub()
-                       _hits = resolved
-                       PopulateResults(_hits)
+            _aiCandidateHits = MergeCandidateHits(_aiCandidateHits, harvestedHits, AISearch_MaxCandidateHits)
+            _aiLastUserPrompt = userPrompt
 
-                       _hasPinnedSummary = Not String.IsNullOrWhiteSpace(summary)
-                       If _hasPinnedSummary Then
-                           SetSummaryMarkdown(summary.Trim())
-                       Else
-                           UpdateSummaryPaneFromSelection()
-                       End If
-
-                       Dim status As String = $"AI search: {_hits.Count} mail(s) shown of {ids.Count} returned."
-                       If failedIds.Count > 0 Then
-                           status &= $" {failedIds.Count} id(s) could not be resolved."
-                           Debug.WriteLine("[AISearch] Unresolved ids:" & vbCrLf & String.Join(vbCrLf, failedIds))
-                       End If
-                       lblStatus.Text = status
-                   End Sub)
-
-            UiPost(Sub() StartRowSummaries())
-
-            If ids.Count > 0 AndAlso resolved.Count = 0 Then
-                Dim diag As String =
-                    "User prompt: " & userPrompt & vbCrLf & vbCrLf &
-                    "LLM-returned ids (none resolved):" & vbCrLf & String.Join(vbCrLf, ids) & vbCrLf & vbCrLf &
-                    "Errors:" & vbCrLf & String.Join(vbCrLf, failedIds) & vbCrLf & vbCrLf &
-                    "Raw LLM response:" & vbCrLf & If(finalText, "(null)")
-                ShowErrorWithClipboard(
-                    "AI Mail Search",
-                    "The AI returned mail ids but none could be opened. Diagnostics copied to clipboard.",
-                    diag,
-                    "AI search ids unresolved.")
-            ElseIf ids.Count = 0 Then
-                Dim diag As String = "User prompt: " & userPrompt & vbCrLf & vbCrLf &
-                                     "Raw LLM response:" & vbCrLf & If(finalText, "(null)")
-                ShowErrorWithClipboard(
-                    "AI Mail Search",
-                    "The AI did not return any e-mail ids. Diagnostics copied to clipboard.",
-                    diag,
-                    "AI search returned no e-mails.")
-            End If
+            UpdateAiStats(_aiCandidateHits.Count)
+            Await ReviewAndDisplayCandidatePoolAsync(userPrompt, _cts.Token).ConfigureAwait(False)
 
         Catch ex As OperationCanceledException
             UiPost(Sub() lblStatus.Text = "AI search cancelled.")
@@ -953,6 +1075,105 @@ Public Class M365SearchTestForm
                 "AI mail search failed.",
                 msg,
                 "AI search failed.")
+        Finally
+            UiPost(Sub() StopAiHeartbeat())
+            UiPost(Sub() SetBusy(False))
+        End Try
+    End Function
+
+    Private Async Function ExecuteAiCandidateHarvestAsync(userPrompt As String,
+                                                          appendMore As Boolean,
+                                                          aiMaxPerCall As Integer,
+                                                          ct As CancellationToken) As Task(Of Tuple(Of String, List(Of ThisAddIn.ToolResponse)))
+
+        Dim addIn = Globals.ThisAddIn
+        Dim chatScope As IDisposable = Nothing
+        Dim previousOtherPrompt As String = addIn.OtherPrompt
+
+        Dim altPath As String = _context.INI_AlternateModelPath
+        Dim haveAltPath As Boolean = Not String.IsNullOrWhiteSpace(altPath)
+
+        Dim backupConfig As ModelConfig = Nothing
+        Dim backupOriginalLoaded As Boolean = False
+        Dim toolModelApplied As Boolean = False
+
+        Dim previousMaxIters As Integer = addIn.INI_ToolingMaximumIterations
+        Dim itersOverridden As Boolean = False
+
+        Try
+            addIn.OtherPrompt = userPrompt
+            Globals.ThisAddIn.OtherPrompt = userPrompt
+
+            Dim m365Tools = SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context)
+            Dim searchTool = m365Tools.FirstOrDefault(
+                Function(t) String.Equals(t?.ToolName,
+                                          SharedLibrary.SharedLibrary.M365ToolService.SearchToolName,
+                                          StringComparison.OrdinalIgnoreCase))
+            If searchTool Is Nothing Then
+                Throw New InvalidOperationException("The Microsoft 365 search tool is not available.")
+            End If
+
+            Dim selectedTools As New List(Of ModelConfig) From {searchTool}
+
+            chatScope = addIn.EnterChatAgentScope()
+
+            If haveAltPath Then
+                backupConfig = SharedMethods.GetCurrentConfig(_context)
+                backupOriginalLoaded = SharedMethods.originalConfigLoaded
+
+                toolModelApplied = SharedMethods.GetSpecialTaskModel(_context, altPath, "ToolDefaultModel")
+                If Not toolModelApplied Then
+                    toolModelApplied = SharedMethods.GetSpecialTaskModel(_context, altPath, "AgentDefaultModel")
+                End If
+                If Not toolModelApplied Then
+                    Throw New InvalidOperationException("No ToolDefaultModel or AgentDefaultModel is configured in the alternate models INI.")
+                End If
+            Else
+                Throw New InvalidOperationException("INI_AlternateModelPath is not configured.")
+            End If
+
+            addIn.INI_ToolingMaximumIterations = AISearch_MaxIterations
+            itersOverridden = True
+
+            Dim effectiveMaxPerCall As Integer = Math.Max(1, Math.Min(aiMaxPerCall, AISearch_MaxCandidateHits))
+
+            Dim retryPolicy As String =
+                vbCrLf & vbCrLf &
+                "RETRY POLICY (candidate gathering):" & vbCrLf &
+                $"- Use m365_search only. Gather a broad pool of distinct candidate mail hits for later full-text review, up to {AISearch_MaxCandidateHits} total candidates." & vbCrLf &
+                $"- In EVERY m365_search call, set max_per_source to {effectiveMaxPerCall}." & vbCrLf &
+                "- Start broad with objective anchors only. Do NOT use semantic review words such as problem, issue, risk, complaint or their German variants as initial KQL terms." & vbCrLf &
+                "- If the request is about problems/issues with a person or matter, first gather mails involving that person or matter broadly, then let later phases decide relevance from full text." & vbCrLf &
+                "- Use meaningfully different queries across calls. Do not just repeat the same query." & vbCrLf &
+                "- Return candidate hit numbers in <candidate_refs>, not ids." & vbCrLf &
+                "- If there is an ALREADY KNOWN CANDIDATES block, search for additional candidates beyond those already known. If old mails reappear in search results, do not return them again unless no other candidate exists."
+
+            Dim knownCandidatesBlock As String = BuildKnownCandidatesBlock(_aiCandidateHits)
+
+            Dim resolvedSysPrompt As String = If(_context.SP_AIMailSearch1, "")
+            resolvedSysPrompt = System.Text.RegularExpressions.Regex.Replace(
+                resolvedSysPrompt,
+                "\{OtherPrompt\}",
+                userPrompt.Replace("\", "\\").Replace("$", "$$"),
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            resolvedSysPrompt &= retryPolicy
+
+            If appendMore AndAlso Not String.IsNullOrWhiteSpace(knownCandidatesBlock) Then
+                resolvedSysPrompt &= vbCrLf & vbCrLf & knownCandidatesBlock
+            End If
+
+            Dim finalText As String = Await addIn.ExecuteToolingLoop(
+                sysCommand:=resolvedSysPrompt,
+                userText:=userPrompt,
+                selectedTools:=selectedTools,
+                useSecondAPI:=True,
+                otherPrompt:=userPrompt,
+                hideSplash:=True,
+                cancellationToken:=ct).ConfigureAwait(False)
+
+            Dim toolResponses As List(Of ThisAddIn.ToolResponse) = addIn.GetLastCompletedToolResponsesSnapshot()
+            Return Tuple.Create(finalText, toolResponses)
+
         Finally
             Try
                 If itersOverridden Then addIn.INI_ToolingMaximumIterations = previousMaxIters
@@ -972,10 +1193,336 @@ Public Class M365SearchTestForm
             End Try
             Try : chatScope?.Dispose() : Catch : End Try
             Try : addIn.OtherPrompt = previousOtherPrompt : Catch : End Try
-            UiPost(Sub() StopAiHeartbeat())
-            UiPost(Sub() SetBusy(False))
         End Try
-    End Sub
+    End Function
+
+    Private Function BuildKnownCandidatesBlock(knownHits As IEnumerable(Of M365SearchHit)) As String
+        If knownHits Is Nothing Then Return ""
+
+        Dim list As List(Of M365SearchHit) = knownHits.Where(Function(h) h IsNot Nothing).Take(40).ToList()
+        If list.Count = 0 Then Return ""
+
+        Dim sb As New System.Text.StringBuilder()
+        sb.AppendLine("ALREADY KNOWN CANDIDATES:")
+        sb.AppendLine("Search for ADDITIONAL candidates beyond these already-known mails.")
+        sb.AppendLine("Do not return the same mail again if new candidates can be found.")
+        For Each hit In list
+            Dim dtText As String = ""
+            Dim dt = GetMailDate(hit)
+            If dt.HasValue Then dtText = dt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+            sb.AppendLine("- " &
+                          If(String.IsNullOrWhiteSpace(dtText), "(no date)", dtText) &
+                          " | From: " & If(hit.Author, "") &
+                          " | Subject: " & If(hit.Title, ""))
+        Next
+
+        Return sb.ToString().Trim()
+    End Function
+
+    Private Function MergeCandidateHits(existingHits As IEnumerable(Of M365SearchHit),
+                                       newHits As IEnumerable(Of M365SearchHit),
+                                       maxCount As Integer) As List(Of M365SearchHit)
+        Dim merged As New List(Of M365SearchHit)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        Dim appendHit =
+            Sub(hit As M365SearchHit)
+                If hit Is Nothing Then Exit Sub
+                Dim key As String = GetCandidateStableKey(hit)
+                If String.IsNullOrWhiteSpace(key) Then Exit Sub
+                If seen.Add(key) Then merged.Add(hit)
+            End Sub
+
+        If existingHits IsNot Nothing Then
+            For Each hit In existingHits
+                appendHit(hit)
+                If merged.Count >= maxCount Then Return merged
+            Next
+        End If
+
+        If newHits IsNot Nothing Then
+            For Each hit In newHits
+                appendHit(hit)
+                If merged.Count >= maxCount Then Return merged
+            Next
+        End If
+
+        Return merged
+    End Function
+
+    Private Function GetCandidateStableKey(hit As M365SearchHit) As String
+        If hit Is Nothing Then Return ""
+
+        Dim graphId As String = NormalizeGraphIdForCompare(GetHitMessageId(hit))
+        If Not String.IsNullOrWhiteSpace(graphId) Then Return "id:" & graphId
+
+        Dim imid As String = NormalizeInternetMessageId(TryGetInternetMessageId(hit))
+        If Not String.IsNullOrWhiteSpace(imid) Then Return "imid:" & imid
+
+        Dim webUrl As String = If(hit.WebUrl, "").Trim()
+        If Not String.IsNullOrWhiteSpace(webUrl) Then Return "url:" & webUrl
+
+        Return "fallback:" &
+               If(hit.Author, "") & "|" &
+               If(hit.Title, "") & "|" &
+               If(GetMailDate(hit).HasValue, GetMailDate(hit).Value.ToString("o"), "")
+    End Function
+
+    Private Async Function FetchResolvedCandidateMailsAsync(candidateHits As IList(Of M365SearchHit),
+                                                            ct As CancellationToken) As Task(Of List(Of AiResolvedMail))
+        Dim result As New List(Of AiResolvedMail)()
+        If candidateHits Is Nothing OrElse candidateHits.Count = 0 Then Return result
+
+        Dim missingIds As New List(Of String)()
+
+        For Each hit In candidateHits
+            If hit Is Nothing Then Continue For
+            If TryGetCachedMessage(hit) Is Nothing Then
+                Dim id As String = GetHitMessageId(hit)
+                If Not String.IsNullOrWhiteSpace(id) Then
+                    missingIds.Add(id)
+                End If
+            End If
+        Next
+
+        If missingIds.Count > 0 Then
+            Dim fetched As List(Of M365Message) =
+                Await M365Service.GetMessagesBatchAsync(
+                    _context,
+                    missingIds.Distinct(StringComparer.OrdinalIgnoreCase),
+                    M365MessageFields.Body Or M365MessageFields.Recipients,
+                    ct).ConfigureAwait(False)
+
+            For Each msg In fetched
+                CacheMessage(msg)
+            Next
+        End If
+
+        For i As Integer = 0 To candidateHits.Count - 1
+            ct.ThrowIfCancellationRequested()
+
+            Dim hit As M365SearchHit = candidateHits(i)
+            Dim msg As M365Message = Nothing
+
+            Dim currentIndex As Integer = i + 1
+            UiPost(Sub() lblStatus.Text = $"Downloading full text {currentIndex}/{candidateHits.Count}…")
+
+            If hit IsNot Nothing Then
+                msg = TryGetCachedMessage(hit)
+            End If
+
+            If msg Is Nothing AndAlso hit IsNot Nothing Then
+                Dim imid As String = NormalizeInternetMessageId(TryGetInternetMessageId(hit))
+                If Not String.IsNullOrWhiteSpace(imid) Then
+                    Try
+                        msg = Await M365Service.GetMessageByInternetMessageIdAsync(
+                            _context,
+                            imid,
+                            M365MessageFields.Body Or M365MessageFields.Recipients,
+                            ct).ConfigureAwait(False)
+
+                        CacheMessage(msg)
+                    Catch ex As Exception
+                        Debug.WriteLine("[AISearch] Fallback GetMessageByInternetMessageIdAsync failed: " & ex.Message)
+                    End Try
+                End If
+            End If
+
+            If msg IsNot Nothing Then
+                ApplyPreviewMessageToHit(hit, msg)
+            End If
+
+            result.Add(New AiResolvedMail() With {
+                .GlobalRef = i + 1,
+                .Hit = hit,
+                .Message = msg
+            })
+        Next
+
+        Return result
+    End Function
+
+    Private Async Function ReviewCandidatesInBatchesAsync(userPrompt As String,
+                                                          resolvedCandidates As IList(Of AiResolvedMail),
+                                                          ct As CancellationToken) As Task(Of List(Of Integer))
+        Dim result As New List(Of Integer)()
+        If resolvedCandidates Is Nothing OrElse resolvedCandidates.Count = 0 Then Return result
+
+        Dim addIn = Globals.ThisAddIn
+        Dim seen As New HashSet(Of Integer)()
+
+        For startIdx As Integer = 0 To resolvedCandidates.Count - 1 Step AISearch_ReviewBatchSize
+            ct.ThrowIfCancellationRequested()
+
+            Dim batch As List(Of AiResolvedMail) =
+                resolvedCandidates.Skip(startIdx).Take(AISearch_ReviewBatchSize).ToList()
+
+            Dim sb As New System.Text.StringBuilder()
+            sb.AppendLine("<user_request>" & userPrompt & "</user_request>")
+            For Each item In batch
+                sb.AppendLine(BuildAiAnalysisMailBlock(item, AISearch_BodyCap_PerCandidate))
+            Next
+
+            Dim currentEnd As Integer = Math.Min(startIdx + AISearch_ReviewBatchSize, resolvedCandidates.Count)
+            UiPost(Sub() lblStatus.Text = $"Reviewing full text batch {startIdx + 1}-{currentEnd} of {resolvedCandidates.Count}…")
+
+            Dim raw As String =
+                Await addIn.LLM(_context.SP_AIMailSearch2, sb.ToString(), "", "", 0, False, True).ConfigureAwait(False)
+
+            Dim parsedRefs As List(Of Integer) = ParseJsonIntArray(raw)
+
+            Dim reviewedSoFar As Integer = Math.Min(currentEnd, resolvedCandidates.Count)
+            UiPost(Sub() lblStatus.Text = $"Reviewed {reviewedSoFar}/{resolvedCandidates.Count} candidate mails…")
+
+            Dim batchAllowed As New HashSet(Of Integer)(batch.Select(Function(x) x.GlobalRef))
+
+            For Each r In parsedRefs
+                If batchAllowed.Contains(r) AndAlso seen.Add(r) Then
+                    result.Add(r)
+                End If
+            Next
+        Next
+
+        Return result
+    End Function
+
+    Private Async Function BuildFinalGridSelectionAsync(userPrompt As String,
+                                                        shortlistedCandidates As IList(Of AiResolvedMail),
+                                                        ct As CancellationToken) As Task(Of AiFinalSelection)
+
+        Dim finalSelection As New AiFinalSelection()
+
+        If shortlistedCandidates Is Nothing OrElse shortlistedCandidates.Count = 0 Then
+            finalSelection.Summary = "No matching e-mails were found."
+            Return finalSelection
+        End If
+
+        UiPost(Sub() lblStatus.Text = $"Building final summary from {shortlistedCandidates.Count} reviewed mail(s)…")
+
+        Dim addIn = Globals.ThisAddIn
+        Dim sb As New System.Text.StringBuilder()
+        sb.AppendLine("<user_request>" & userPrompt & "</user_request>")
+        For Each item In shortlistedCandidates
+            sb.AppendLine(BuildAiAnalysisMailBlock(item, AISearch_BodyCap_FinalSummary))
+        Next
+
+        Dim raw As String =
+            Await addIn.LLM(_context.SP_AIMailSearch3, sb.ToString(), "", "", 0, False, True).ConfigureAwait(False)
+
+        Dim summary As String = ExtractTaggedBlock(raw, "summary").Trim()
+        Dim orderedRefs As List(Of Integer) = ExtractEmailRefs(raw)
+        Dim allowed As New HashSet(Of Integer)(shortlistedCandidates.Select(Function(x) x.GlobalRef))
+        Dim seen As New HashSet(Of Integer)()
+
+        For Each r In orderedRefs
+            If allowed.Contains(r) AndAlso seen.Add(r) Then
+                finalSelection.OrderedGlobalRefs.Add(r)
+            End If
+        Next
+
+        If finalSelection.OrderedGlobalRefs.Count = 0 Then
+            For Each item In shortlistedCandidates
+                If seen.Add(item.GlobalRef) Then finalSelection.OrderedGlobalRefs.Add(item.GlobalRef)
+            Next
+        End If
+
+        finalSelection.Summary = If(String.IsNullOrWhiteSpace(summary),
+                                    "No matching e-mails were found.",
+                                    summary)
+
+        Return finalSelection
+    End Function
+
+    Private Function BuildAiAnalysisMailBlock(item As AiResolvedMail,
+                                              bodyCap As Integer) As String
+        Dim hit As M365SearchHit = item?.Hit
+        Dim msg As M365Message = item?.Message
+
+        Dim subjectText As String = If(If(msg?.Subject, ""), If(hit?.Title, ""))
+        Dim fromText As String = ""
+        If msg IsNot Nothing Then
+            fromText = If(String.IsNullOrWhiteSpace(msg.From), msg.FromAddress, msg.From)
+        End If
+        If String.IsNullOrWhiteSpace(fromText) Then fromText = If(If(hit?.Author, ""), "")
+
+        Dim toText As String = ""
+        If msg IsNot Nothing Then
+            toText = BuildRecipientList(msg.To_)
+        End If
+        If String.IsNullOrWhiteSpace(toText) Then
+            toText = If(If(hit?.AdditionalText, ""), "")
+        End If
+
+        Dim dtText As String = ""
+        Dim dt = If(msg?.SentUtc, If(msg?.ReceivedUtc, GetMailDate(hit)))
+        If dt.HasValue Then dtText = dt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+
+        Dim bodyText As String = ""
+        If msg IsNot Nothing Then
+            bodyText = GetPreviewBodyText(msg)
+        End If
+        If String.IsNullOrWhiteSpace(bodyText) Then
+            bodyText = If(If(hit?.Summary, ""), "")
+        End If
+        If bodyText.Length > bodyCap Then
+            bodyText = bodyText.Substring(0, bodyCap)
+        End If
+
+        Dim sb As New System.Text.StringBuilder()
+        sb.AppendLine($"<EMAIL ref=""{item.GlobalRef}"">")
+        sb.AppendLine("Date: " & dtText)
+        sb.AppendLine("From: " & fromText)
+        sb.AppendLine("To: " & toText)
+        sb.AppendLine("Subject: " & subjectText)
+        sb.AppendLine("Body:")
+        sb.AppendLine(bodyText)
+        sb.AppendLine("</EMAIL>")
+        Return sb.ToString()
+    End Function
+
+    Private Shared Function ParseJsonIntArray(rawJson As String) As List(Of Integer)
+        Dim result As New List(Of Integer)()
+        If String.IsNullOrWhiteSpace(rawJson) Then Return result
+
+        Dim text As String = rawJson.Trim()
+        If text.StartsWith("```", StringComparison.Ordinal) Then
+            Dim startArr As Integer = text.IndexOf("["c)
+            Dim endArr As Integer = text.LastIndexOf("]"c)
+            If startArr >= 0 AndAlso endArr > startArr Then
+                text = text.Substring(startArr, endArr - startArr + 1)
+            End If
+        End If
+
+        Dim arr As JArray = Nothing
+        Try
+            arr = JArray.Parse(text)
+        Catch
+            Return result
+        End Try
+
+        Dim seen As New HashSet(Of Integer)()
+        For Each tok As JToken In arr
+            Dim n As Integer = 0
+            If tok.Type = JTokenType.Integer Then
+                n = tok.Value(Of Integer)()
+            ElseIf tok.Type = JTokenType.Object Then
+                Dim obj As JObject = CType(tok, JObject)
+                If obj("ref") IsNot Nothing Then
+                    Integer.TryParse(obj("ref").ToString(), n)
+                ElseIf obj("id") IsNot Nothing Then
+                    Integer.TryParse(obj("id").ToString(), n)
+                End If
+            Else
+                Integer.TryParse(tok.ToString(), n)
+            End If
+
+            If n > 0 AndAlso seen.Add(n) Then
+                result.Add(n)
+            End If
+        Next
+
+        Return result
+    End Function
 
 
     Private Shared Function ExtractTaggedBlock(text As String, tag As String) As String
@@ -1013,6 +1560,38 @@ Public Class M365SearchTestForm
 
         Return list
     End Function
+
+    Private Shared Function ExtractEmailRefs(text As String) As List(Of Integer)
+        Dim block As String = ExtractTaggedBlock(text, "candidate_refs")
+        If String.IsNullOrWhiteSpace(block) Then
+            block = ExtractTaggedBlock(text, "email_refs")
+        End If
+        If String.IsNullOrWhiteSpace(block) Then
+            block = ExtractTaggedBlock(text, "selected_refs")
+        End If
+        If String.IsNullOrWhiteSpace(block) Then
+            block = ExtractTaggedBlock(text, "email_hit_numbers")
+        End If
+        If String.IsNullOrWhiteSpace(block) Then
+            block = ExtractTaggedBlock(text, "email_hits")
+        End If
+
+        Dim result As New List(Of Integer)()
+        If String.IsNullOrWhiteSpace(block) Then Return result
+
+        Dim seen As New HashSet(Of Integer)()
+        Dim matches = System.Text.RegularExpressions.Regex.Matches(block, "\d+")
+
+        For Each m As System.Text.RegularExpressions.Match In matches
+            Dim n As Integer
+            If Integer.TryParse(m.Value, n) AndAlso n > 0 AndAlso seen.Add(n) Then
+                result.Add(n)
+            End If
+        Next
+
+        Return result
+    End Function
+
 
     Private Shared Function NormalizeInternetMessageId(value As String) As String
         Dim s As String = If(value, "").Trim()
@@ -1095,7 +1674,6 @@ Public Class M365SearchTestForm
 
         Dim hitId As String = If(h.Id, "(no id)")
 
-        ' (a) Pre-set on the hit (e.g. by enrichment).
         If Not String.IsNullOrWhiteSpace(h.AdditionalText) Then
             Debug.WriteLine($"[M365Search.To] {hitId} -> AdditionalText='{h.AdditionalText}'")
             Return h.AdditionalText.Trim()
@@ -1103,17 +1681,27 @@ Public Class M365SearchTestForm
 
         Debug.WriteLine($"[M365Search.To] {hitId} -> AdditionalText is empty/whitespace")
 
-        ' (b) Try the wrapped/raw JSON in either shape.
         Dim resourceObj As JObject = TryCast(h.RawJson?("resource"), JObject)
         Debug.WriteLine($"[M365Search.To] {hitId} -> resource exists: {resourceObj IsNot Nothing}")
+
+        Dim flatResourceTo As String = If(resourceObj?("to")?.ToString(), "")
+        If Not String.IsNullOrWhiteSpace(flatResourceTo) Then
+            Debug.WriteLine($"[M365Search.To] {hitId} -> resource.to='{flatResourceTo}'")
+            Return flatResourceTo.Trim()
+        End If
 
         Dim fromResource As String = ExtractToFromJson(resourceObj, $"{hitId}/resource")
         If Not String.IsNullOrWhiteSpace(fromResource) Then Return fromResource
 
+        Dim flatTopTo As String = If(h.RawJson?("to")?.ToString(), "")
+        If Not String.IsNullOrWhiteSpace(flatTopTo) Then
+            Debug.WriteLine($"[M365Search.To] {hitId} -> top.to='{flatTopTo}'")
+            Return flatTopTo.Trim()
+        End If
+
         Dim fromTop As String = ExtractToFromJson(h.RawJson, $"{hitId}/top")
         If Not String.IsNullOrWhiteSpace(fromTop) Then Return fromTop
 
-        ' Last resort dump — print raw JSON top-level keys + first 400 chars.
         Try
             If h.RawJson IsNot Nothing Then
                 Dim keys = String.Join(",", h.RawJson.Properties().Select(Function(p) p.Name))
@@ -1400,6 +1988,12 @@ Public Class M365SearchTestForm
     Private Async Function GetPreviewMessageAsync(hit As M365SearchHit) As Task(Of M365Message)
         If hit Is Nothing Then Return Nothing
 
+        Dim cached As M365Message = TryGetCachedMessage(hit)
+        If cached IsNot Nothing Then
+            ApplyPreviewMessageToHit(hit, cached)
+            Return cached
+        End If
+
         Dim resolvedId As String = GetHitMessageId(hit)
         Dim imidRaw As String = TryGetInternetMessageId(hit)
         Dim imid As String = NormalizeInternetMessageId(imidRaw)
@@ -1491,6 +2085,7 @@ Public Class M365SearchTestForm
             "id='" & If(resolvedId, "") & "', internetMessageId='" & If(imid, "") & "'.")
         End If
 
+        CacheMessage(msg)
         ApplyPreviewMessageToHit(hit, msg)
         Return msg
     End Function
@@ -1653,21 +2248,23 @@ Public Class M365SearchTestForm
 
     Private Sub ApplyPreviewMessageToHit(hit As M365SearchHit, message As M365Message)
         If hit Is Nothing OrElse message Is Nothing Then Return
+
         Dim graphId As String = ToGraphUrlSafeId(If(message.Id, ""))
         If Not String.IsNullOrWhiteSpace(graphId) Then
             hit.Id = graphId
         End If
 
-        If String.IsNullOrWhiteSpace(hit.Title) Then
+        If Not String.IsNullOrWhiteSpace(message.Subject) Then
             hit.Title = message.Subject
         End If
 
-        If String.IsNullOrWhiteSpace(hit.Author) Then
-            hit.Author = If(String.IsNullOrWhiteSpace(message.From), message.FromAddress, message.From)
+        Dim fromDisplay As String = If(String.IsNullOrWhiteSpace(message.From), message.FromAddress, message.From)
+        If Not String.IsNullOrWhiteSpace(fromDisplay) Then
+            hit.Author = fromDisplay
         End If
 
-        If String.IsNullOrWhiteSpace(hit.WebUrl) Then
-            hit.WebUrl = If(message.WebLink, "").Trim()
+        If Not String.IsNullOrWhiteSpace(If(message.WebLink, "").Trim()) Then
+            hit.WebUrl = message.WebLink.Trim()
         End If
 
         Dim toLine As String = BuildRecipientList(message.To_)
@@ -1675,12 +2272,14 @@ Public Class M365SearchTestForm
             hit.AdditionalText = toLine
         End If
 
-        If Not hit.LastModifiedUtc.HasValue Then
-            If message.SentUtc.HasValue Then
-                hit.LastModifiedUtc = message.SentUtc.Value
-            ElseIf message.ReceivedUtc.HasValue Then
-                hit.LastModifiedUtc = message.ReceivedUtc.Value
-            End If
+        Dim preferredDate As DateTime? = Nothing
+        If message.SentUtc.HasValue Then
+            preferredDate = message.SentUtc.Value
+        ElseIf message.ReceivedUtc.HasValue Then
+            preferredDate = message.ReceivedUtc.Value
+        End If
+        If preferredDate.HasValue Then
+            hit.LastModifiedUtc = preferredDate.Value
         End If
 
         Try
@@ -2074,8 +2673,12 @@ Public Class M365SearchTestForm
 
     Private Sub SetBusy(busy As Boolean, Optional status As String = Nothing)
         btnSearch.Enabled = Not busy
+        btnAISearch.Enabled = Not busy
         btnSignIn.Enabled = Not busy
         btnSignOut.Enabled = Not busy
+        If busy Then
+            btnGetMore.Enabled = False
+        End If
         txtQuery.Enabled = Not busy
         numMax.Enabled = Not busy
         Cursor = If(busy, Cursors.AppStarting, Cursors.Default)
@@ -2176,10 +2779,15 @@ Public Class M365SearchTestForm
                 Dim hit = row.Item2
                 Dim body As String = ""
                 Try
-                    Dim mailId As String = GetHitMessageId(hit)
-                    If hit IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(mailId) Then
-                        body = Await M365Service.GetMessageBodyAsync(
-                            _context, mailId, asPlainText:=True, ct:=ct).ConfigureAwait(False)
+                    Dim cached As M365Message = TryGetCachedMessage(hit)
+                    If cached IsNot Nothing Then
+                        body = GetPreviewBodyText(cached)
+                    Else
+                        Dim mailId As String = GetHitMessageId(hit)
+                        If hit IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(mailId) Then
+                            body = Await M365Service.GetMessageBodyAsync(
+                                _context, mailId, asPlainText:=True, ct:=ct).ConfigureAwait(False)
+                        End If
                     End If
                     Debug.WriteLine($"[M365Search.Sum] body fetched id={If(hit?.Id, "?")} len={If(body, "").Length}")
                 Catch ex As OperationCanceledException
@@ -2472,10 +3080,19 @@ Public Class M365SearchTestForm
                 End If
 
                 Dim graphId As String = If(tok("id")?.ToString(),
-                                       If(tok("hitId")?.ToString(), "")).Trim()
+                                           If(tok("hitId")?.ToString(), "")).Trim()
+
                 Dim internetMessageId As String =
                     If(tok("internet_message_id")?.ToString(),
                        If(tok("internetMessageId")?.ToString(), "")).Trim()
+
+                If String.IsNullOrWhiteSpace(graphId) Then
+                    Dim webUrlCandidate As String = If(tok("web_url")?.ToString(),
+                                                       If(tok("webLink")?.ToString(), "")).Trim()
+                    If Not String.IsNullOrWhiteSpace(webUrlCandidate) Then
+                        graphId = ExtractMessageIdFromWebLink(webUrlCandidate)
+                    End If
+                End If
 
                 Dim dedupKey As String = If(Not String.IsNullOrWhiteSpace(graphId), graphId, internetMessageId)
                 If String.IsNullOrWhiteSpace(dedupKey) OrElse Not seen.Add(dedupKey) Then Continue For
@@ -2487,8 +3104,25 @@ Public Class M365SearchTestForm
                                           If(tok("from")?.ToString(), ""))
                 Dim webUrl As String = If(tok("web_url")?.ToString(),
                                           If(tok("webLink")?.ToString(), ""))
-                Dim dateStr As String = If(tok("date")?.ToString(),
-                                           If(tok("receivedDateTime")?.ToString(), ""))
+
+                Dim sentDateStr As String = If(tok("sentDateTime")?.ToString(), "")
+                Dim receivedDateStr As String = If(tok("receivedDateTime")?.ToString(),
+                                                   If(tok("date")?.ToString(), ""))
+
+                Dim toLine As String = ""
+                Dim toRecipients = TryCast(tok("toRecipients"), JArray)
+                If toRecipients IsNot Nothing Then
+                    Dim names As New List(Of String)()
+                    For Each rcp In toRecipients
+                        Dim ea = TryCast(rcp("emailAddress"), JObject)
+                        If ea Is Nothing Then Continue For
+                        Dim nm As String = If(ea("name")?.ToString(), "")
+                        Dim ad As String = If(ea("address")?.ToString(), "")
+                        Dim disp As String = If(Not String.IsNullOrWhiteSpace(nm), nm, ad)
+                        If Not String.IsNullOrWhiteSpace(disp) Then names.Add(disp.Trim())
+                    Next
+                    toLine = String.Join("; ", names.Distinct(StringComparer.OrdinalIgnoreCase))
+                End If
 
                 Dim h As New M365SearchHit() With {
                     .Source = M365SearchSources.Mail,
@@ -2496,8 +3130,9 @@ Public Class M365SearchTestForm
                     .Title = title,
                     .Summary = summary,
                     .Author = author,
+                    .AdditionalText = toLine,
                     .WebUrl = webUrl,
-                    .LastModifiedUtc = TryParseUtc(dateStr),
+                    .LastModifiedUtc = TryParseUtc(If(Not String.IsNullOrWhiteSpace(sentDateStr), sentDateStr, receivedDateStr)),
                     .RawJson = New JObject(
                         New JProperty("hitId", graphId),
                         New JProperty("resource",
@@ -2507,7 +3142,9 @@ Public Class M365SearchTestForm
                                 New JProperty("conversationId", If(tok("conversation_id")?.ToString(), "")),
                                 New JProperty("webLink", webUrl),
                                 New JProperty("subject", title),
-                                New JProperty("receivedDateTime", dateStr)
+                                New JProperty("sentDateTime", sentDateStr),
+                                New JProperty("receivedDateTime", receivedDateStr),
+                                New JProperty("toRecipients", If(toRecipients, New JArray()))
                             )))
                 }
 
@@ -2579,6 +3216,50 @@ Public Class M365SearchTestForm
         Debug.WriteLine("[AISearch] matched result count=" & result.Count)
         Return result
     End Function
+
+
+    Private Function MatchAiReturnedRefsToToolHits(
+        returnedRefs As IEnumerable(Of Integer),
+        toolHits As IEnumerable(Of M365SearchHit)) As List(Of M365SearchHit)
+
+        Dim result As New List(Of M365SearchHit)()
+        If returnedRefs Is Nothing OrElse toolHits Is Nothing Then Return result
+
+        Dim orderedHits As List(Of M365SearchHit) = toolHits.Where(Function(h) h IsNot Nothing).ToList()
+        Dim added As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        For Each n In returnedRefs
+            If n < 1 OrElse n > orderedHits.Count Then
+                Debug.WriteLine("[AISearch] Ignoring out-of-range email_ref n=" & n.ToString())
+                Continue For
+            End If
+
+            Dim hit As M365SearchHit = orderedHits(n - 1)
+            If hit Is Nothing Then Continue For
+
+            Dim graphId As String = GetHitMessageId(hit)
+            If String.IsNullOrWhiteSpace(graphId) Then
+                graphId = If(hit.Id, "").Trim()
+            End If
+
+            If String.IsNullOrWhiteSpace(graphId) Then
+                graphId = If(TryGetInternetMessageId(hit), "").Trim()
+            End If
+
+            Dim dedupKey As String = If(graphId, "").Trim()
+            If String.IsNullOrWhiteSpace(dedupKey) Then
+                dedupKey = "ref:" & n.ToString()
+            End If
+
+            If added.Add(dedupKey) Then
+                result.Add(hit)
+            End If
+        Next
+
+        Debug.WriteLine("[AISearch] matched refs result count=" & result.Count.ToString())
+        Return result
+    End Function
+
 
     Private Function FindMailInDefaultStoreByHeuristics(app As Outlook.Application,
                                                     subject As String,
@@ -2725,6 +3406,286 @@ Public Class M365SearchTestForm
         Return s.Replace("+"c, "-"c).Replace("/"c, "_"c)
     End Function
 
+
+    Private Shared Function ParseAiSourceName(name As String) As M365SearchSources
+        Select Case If(name, "").Trim().ToLowerInvariant()
+            Case "mail" : Return M365SearchSources.Mail
+            Case "onedrive" : Return M365SearchSources.OneDrive
+            Case "sharepoint" : Return M365SearchSources.SharePoint
+            Case "sharepoint_sites" : Return M365SearchSources.SharePointSites
+            Case "sharepoint_listitems" : Return M365SearchSources.SharePointListItems
+            Case "teams" : Return M365SearchSources.Teams
+            Case "calendar" : Return M365SearchSources.Calendar
+            Case "onenote" : Return M365SearchSources.OneNote
+            Case "people" : Return M365SearchSources.People
+            Case "all_files" : Return M365SearchSources.OneDrive Or M365SearchSources.SharePoint
+            Case "all_sharepoint" : Return M365SearchSources.SharePoint Or M365SearchSources.SharePointSites Or M365SearchSources.SharePointListItems
+            Case "all" : Return M365SearchSources.All
+            Case Else : Return M365SearchSources.None
+        End Select
+    End Function
+
+    Private Shared Function ParseAiSourcesToken(tok As JToken) As M365SearchSources
+        If tok Is Nothing Then Return M365SearchSources.None
+
+        Dim combined As M365SearchSources = M365SearchSources.None
+
+        If tok.Type = JTokenType.Array Then
+            For Each item In CType(tok, JArray)
+                combined = combined Or ParseAiSourceName(item.ToString())
+            Next
+        ElseIf tok.Type = JTokenType.String Then
+            combined = ParseAiSourceName(tok.ToString())
+        End If
+
+        Return combined
+    End Function
+
+    Private Shared Function ParseNullableDate(value As String) As Date?
+        If String.IsNullOrWhiteSpace(value) Then Return Nothing
+        Dim dt As DateTime
+        If DateTime.TryParse(value, dt) Then Return dt.Date
+        Return Nothing
+    End Function
+
+    Private Function ParseAiSearchInvocation(tr As ThisAddIn.ToolResponse) As AiSearchInvocation
+        If tr Is Nothing OrElse Not tr.Success Then Return Nothing
+        If Not String.Equals(tr.ToolName, SharedLibrary.SharedLibrary.M365ToolService.SearchToolName, StringComparison.OrdinalIgnoreCase) Then Return Nothing
+
+        Dim query As String = ""
+        Dim sources As M365SearchSources = M365SearchSources.None
+        Dim maxPerSource As Integer = 25
+        Dim fromIndex As Integer = 0
+        Dim fromDate As Date? = Nothing
+        Dim toDate As Date? = Nothing
+        Dim kqlExtra As String = ""
+
+        Try
+            If Not String.IsNullOrWhiteSpace(tr.OriginalCallJson) Then
+                Dim root As JToken = JToken.Parse(tr.OriginalCallJson)
+                Dim fc As JObject = TryCast(root("functionCall"), JObject)
+                If fc Is Nothing Then fc = TryCast(root, JObject)
+
+                Dim args As JObject = TryCast(fc?("args"), JObject)
+                If args IsNot Nothing Then
+                    query = If(args("query")?.ToString(), "").Trim()
+                    sources = ParseAiSourcesToken(args("sources"))
+                    maxPerSource = Math.Max(1, Math.Min(CInt(If(args("max_per_source"), 25)), 500))
+                    fromIndex = Math.Max(0, CInt(If(args("from_index"), 0)))
+                    fromDate = ParseNullableDate(If(args("from_date")?.ToString(), ""))
+                    toDate = ParseNullableDate(If(args("to_date")?.ToString(), ""))
+                    kqlExtra = If(args("kql_extra")?.ToString(), "")
+                End If
+            End If
+        Catch ex As Exception
+            Debug.WriteLine("[AISearch] Failed to parse OriginalCallJson for search invocation: " & ex.Message)
+        End Try
+
+        If String.IsNullOrWhiteSpace(query) Then
+            Try
+                Dim envelope As JObject = JObject.Parse(If(tr.Response, ""))
+                query = If(envelope("query")?.ToString(), "").Trim()
+                If sources = M365SearchSources.None Then
+                    sources = ParseAiSourceName(If(envelope("requested_sources")?.ToString(), ""))
+                End If
+                maxPerSource = Math.Max(1, Math.Min(CInt(If(envelope("requested_max_per_source"), maxPerSource)), 500))
+                fromIndex = Math.Max(0, CInt(If(envelope("requested_from_index"), fromIndex)))
+                If String.IsNullOrWhiteSpace(kqlExtra) Then
+                    kqlExtra = If(envelope("requested_kql_extra")?.ToString(), "")
+                End If
+            Catch ex As Exception
+                Debug.WriteLine("[AISearch] Failed to parse search response envelope: " & ex.Message)
+            End Try
+        End If
+
+        If String.IsNullOrWhiteSpace(query) Then Return Nothing
+        If sources = M365SearchSources.None Then sources = M365SearchSources.Mail
+
+        Return New AiSearchInvocation() With {
+            .Query = query,
+            .Sources = sources,
+            .MaxPerSource = maxPerSource,
+            .FromDate = fromDate,
+            .ToDate = toDate,
+            .KqlExtra = kqlExtra,
+            .NextFromIndex = fromIndex + maxPerSource,
+            .Exhausted = False
+        }
+    End Function
+
+    Private Function CaptureAiSearchInvocations(toolResponses As IEnumerable(Of ThisAddIn.ToolResponse)) As List(Of AiSearchInvocation)
+        Dim result As New List(Of AiSearchInvocation)()
+        If toolResponses Is Nothing Then Return result
+
+        For Each tr In toolResponses
+            Dim parsed As AiSearchInvocation = ParseAiSearchInvocation(tr)
+            If parsed IsNot Nothing Then result.Add(parsed)
+        Next
+
+        Return result
+    End Function
+
+    Private Function MergeSearchInvocations(existingItems As IEnumerable(Of AiSearchInvocation),
+                                            newItems As IEnumerable(Of AiSearchInvocation)) As List(Of AiSearchInvocation)
+        Dim merged As New Dictionary(Of String, AiSearchInvocation)(StringComparer.OrdinalIgnoreCase)
+
+        If existingItems IsNot Nothing Then
+            For Each item In existingItems
+                If item Is Nothing Then Continue For
+                Dim key As String = item.StableKey()
+                If Not merged.ContainsKey(key) Then
+                    merged.Add(key, item)
+                End If
+            Next
+        End If
+
+        If newItems IsNot Nothing Then
+            For Each item In newItems
+                If item Is Nothing Then Continue For
+                Dim key As String = item.StableKey()
+                If merged.ContainsKey(key) Then
+                    merged(key).NextFromIndex = Math.Max(merged(key).NextFromIndex, item.NextFromIndex)
+                Else
+                    merged.Add(key, item)
+                End If
+            Next
+        End If
+
+        Return merged.Values.ToList()
+    End Function
+
+    Private Sub UpdateGetMoreEnabled()
+        UiPost(Sub()
+                   If btnGetMore Is Nothing Then Return
+                   Dim haveRoom As Boolean = _aiCandidateHits.Count < AISearch_MaxCandidateHits
+                   Dim haveSearches As Boolean = _aiRecordedSearches.Any(Function(x) x IsNot Nothing AndAlso Not x.Exhausted)
+                   btnGetMore.Enabled = haveRoom AndAlso haveSearches
+               End Sub)
+    End Sub
+
+    Private Async Function GetMoreCandidatesFromRecordedQueriesAsync(ct As CancellationToken) As Task(Of List(Of M365SearchHit))
+        Dim additional As New List(Of M365SearchHit)()
+        If _aiRecordedSearches Is Nothing OrElse _aiRecordedSearches.Count = 0 Then Return additional
+
+        Dim remainingRoom As Integer = AISearch_MaxCandidateHits - _aiCandidateHits.Count
+        If remainingRoom <= 0 Then Return additional
+
+        Dim perPageTarget As Integer = Math.Max(1, Math.Min(GetAiHarvestMaxPerCall(), remainingRoom))
+
+        For Each inv In _aiRecordedSearches.Where(Function(x) x IsNot Nothing AndAlso Not x.Exhausted).ToList()
+            ct.ThrowIfCancellationRequested()
+
+            Dim pageSize As Integer = Math.Max(1, Math.Min(inv.MaxPerSource, perPageTarget))
+            Dim opts As New M365SearchOptions() With {
+                .MaxPerSource = pageSize,
+                .FromIndex = inv.NextFromIndex,
+                .From = inv.FromDate,
+                .To = inv.ToDate,
+                .KqlExtra = inv.KqlExtra,
+                .Parallel = True
+            }
+
+            UiPost(Sub() lblStatus.Text = $"Get more: searching next page at offset {inv.NextFromIndex} ({pageSize} requested)…")
+
+            Dim res As M365SearchResult = Await M365Service.SearchAsync(
+                _context,
+                inv.Query,
+                inv.Sources,
+                opts,
+                Nothing,
+                ct).ConfigureAwait(False)
+
+            If res Is Nothing OrElse res.Hits.Count = 0 Then
+                inv.Exhausted = True
+                Continue For
+            End If
+
+            additional.AddRange(res.Hits)
+            inv.NextFromIndex += pageSize
+
+            If res.Hits.Count < pageSize Then
+                inv.Exhausted = True
+            End If
+
+            If additional.Count >= perPageTarget Then Exit For
+        Next
+
+        Return additional
+    End Function
+
+    Private Async Function ReviewAndDisplayCandidatePoolAsync(userPrompt As String,
+                                                              ct As CancellationToken) As Task
+        If _aiCandidateHits.Count = 0 Then
+            UiPost(Sub()
+                       _hits.Clear()
+                       lvResults.Items.Clear()
+                       _hasPinnedSummary = True
+                       SetSummaryMarkdown("No matching e-mails were found.")
+                       UpdateAiStats(0, 0, 0)
+                       UpdateGetMoreEnabled()
+                       lblStatus.Text = "AI search found no candidate mails."
+                   End Sub)
+            Return
+        End If
+
+        UiPost(Sub() lblStatus.Text = $"Reviewing {_aiCandidateHits.Count} candidate mail(s) in full text…")
+
+        Dim resolvedCandidates As List(Of AiResolvedMail) =
+            Await FetchResolvedCandidateMailsAsync(_aiCandidateHits, ct).ConfigureAwait(False)
+
+        Dim shortlistRefs As List(Of Integer) =
+            Await ReviewCandidatesInBatchesAsync(userPrompt, resolvedCandidates, ct).ConfigureAwait(False)
+
+        Dim shortlistSet As New HashSet(Of Integer)(shortlistRefs)
+        Dim shortlistResolved As List(Of AiResolvedMail) =
+            resolvedCandidates.Where(Function(x) shortlistSet.Contains(x.GlobalRef)).ToList()
+
+        UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count)
+        UiPost(Sub() lblStatus.Text = $"Full-text review kept {shortlistResolved.Count} of {_aiCandidateHits.Count} candidate mails. Building final result…")
+
+        Dim finalSelection As AiFinalSelection =
+            Await BuildFinalGridSelectionAsync(userPrompt, shortlistResolved, ct).ConfigureAwait(False)
+
+        If finalSelection.OrderedGlobalRefs.Count = 0 Then
+            UiPost(Sub()
+                       _hits = New List(Of M365SearchHit)()
+                       lvResults.Items.Clear()
+                       _hasPinnedSummary = True
+                       SetSummaryMarkdown("No matching e-mails were found.")
+                       UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count, 0)
+                       UpdateGetMoreEnabled()
+                       lblStatus.Text = $"0 relevant mails shown from {_aiCandidateHits.Count} candidate(s)."
+                   End Sub)
+            Return
+        End If
+
+        Dim byGlobalRef As Dictionary(Of Integer, AiResolvedMail) =
+            shortlistResolved.ToDictionary(Function(x) x.GlobalRef)
+
+        Dim finalHits As New List(Of M365SearchHit)()
+        For Each globalRef In finalSelection.OrderedGlobalRefs
+            Dim resolved As AiResolvedMail = Nothing
+            If byGlobalRef.TryGetValue(globalRef, resolved) AndAlso resolved IsNot Nothing AndAlso resolved.Hit IsNot Nothing Then
+                finalHits.Add(resolved.Hit)
+            End If
+        Next
+
+        Await EnrichMailHitsAsync(finalHits, ct).ConfigureAwait(False)
+
+        UiPost(Sub()
+                   _hits = finalHits
+                   PopulateResults(_hits)
+                   _hasPinnedSummary = True
+                   SetSummaryMarkdown(If(String.IsNullOrWhiteSpace(finalSelection.Summary),
+                                         "No matching e-mails were found.",
+                                         finalSelection.Summary.Trim()))
+                   UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count, _hits.Count)
+                   UpdateGetMoreEnabled()
+                   lblStatus.Text = $"Showing {_hits.Count} relevant mail(s) from {_aiCandidateHits.Count} candidate(s)."
+               End Sub)
+
+        UiPost(Sub() StartRowSummaries())
+    End Function
 
 
 End Class

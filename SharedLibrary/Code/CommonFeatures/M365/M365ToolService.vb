@@ -185,6 +185,9 @@ Namespace SharedLibrary
                                 New JProperty("max_per_source",
                                     New JObject(New JProperty("type", "integer"),
                                                 New JProperty("description", "Default 25, server cap 500."))),
+                                New JProperty("from_index",
+                                    New JObject(New JProperty("type", "integer"),
+                                                New JProperty("description", "Optional zero-based offset for paging; default 0."))),
                                 New JProperty("from_date",
                                     New JObject(New JProperty("type", "string"),
                                                 New JProperty("description", "Optional ISO date (YYYY-MM-DD)."))),
@@ -205,7 +208,7 @@ Namespace SharedLibrary
                     "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
                     "USE THIS whenever the user refers to their own materials — do NOT use internet_search " &
                     "or web_content_retriever for the user's own content. Provide query (required). " &
-                    "Optionally narrow with sources, max_per_source, from_date, to_date, kql_extra. " &
+                    "Optionally narrow with sources, max_per_source, from_index, from_date, to_date, kql_extra. " &
                     "Each hit has 'n', 'id', 'source', 'title', 'summary', 'date', 'web_url' and source-specific " &
                     "ids ('conversation_id' for mail, 'drive_id' for files, 'chat_id'/'team_id'/'channel_id' for Teams). " &
                     "Pass those ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
@@ -216,6 +219,8 @@ Namespace SharedLibrary
                 .ToolErrorHandling = "skip"
             }
         End Function
+
+
 
         Private Function BuildGetMailTool(suffix As String) As ModelConfig
             Dim def As New JObject(
@@ -463,13 +468,14 @@ Namespace SharedLibrary
 
             Dim opts As New M365SearchOptions() With {
                 .MaxPerSource = Math.Max(1, Math.Min(GetArgInt(args, "max_per_source", 25), 500)),
+                .FromIndex = Math.Max(0, GetArgInt(args, "from_index", 0)),
                 .From = GetArgDate(args, "from_date"),
                 .To = GetArgDate(args, "to_date"),
                 .KqlExtra = GetArgString(args, "kql_extra"),
                 .Parallel = True
             }
 
-            log($"  Searching M365 (sources={sources}) for: {query}")
+            log($"  Searching M365 (sources={sources}, from_index={opts.FromIndex}, max_per_source={opts.MaxPerSource}) for: {query}")
 
             Dim result As M365SearchResult
             Try
@@ -490,6 +496,9 @@ Namespace SharedLibrary
             Dim envelope As New JObject(
                 New JProperty("query", query),
                 New JProperty("requested_sources", sources.ToString()),
+                New JProperty("requested_max_per_source", opts.MaxPerSource),
+                New JProperty("requested_from_index", opts.FromIndex),
+                New JProperty("requested_kql_extra", If(opts.KqlExtra, "")),
                 New JProperty("total", result.Hits.Count),
                 New JProperty("hits", hitsJson),
                 New JProperty("errors", errorsJson)
@@ -652,32 +661,88 @@ Namespace SharedLibrary
         '  HELPERS
         ' ════════════════════════════════════════════════════════════════════
 
+        Private Function GetJsonString(obj As JObject, name As String) As String
+            If obj Is Nothing Then Return ""
+            Dim tok = obj(name)
+            If tok Is Nothing OrElse tok.Type = JTokenType.Null Then Return ""
+            Return tok.ToString()
+        End Function
+
+        Private Function GetEmailDisplay(emailAddress As JObject) As String
+            If emailAddress Is Nothing Then Return ""
+
+            Dim name As String = GetJsonString(emailAddress, "name").Trim()
+            Dim address As String = GetJsonString(emailAddress, "address").Trim()
+
+            If Not String.IsNullOrWhiteSpace(name) Then Return name
+            Return address
+        End Function
+
+        Private Function GetRecipientsDisplay(resource As JObject, propertyName As String) As String
+            If resource Is Nothing OrElse String.IsNullOrWhiteSpace(propertyName) Then Return ""
+
+            Dim arr = TryCast(resource(propertyName), JArray)
+            If arr Is Nothing OrElse arr.Count = 0 Then Return ""
+
+            Dim items As New List(Of String)()
+
+            For Each tok As JToken In arr
+                Dim emailAddress = TryCast(tok("emailAddress"), JObject)
+                Dim display As String = GetEmailDisplay(emailAddress)
+                If Not String.IsNullOrWhiteSpace(display) Then
+                    items.Add(display.Trim())
+                End If
+            Next
+
+            If items.Count = 0 Then Return ""
+            Return String.Join("; ", items.Distinct(StringComparer.OrdinalIgnoreCase))
+        End Function
+
         Private Function HitToJson(h As M365SearchHit, n As Integer) As JObject
             Dim o As New JObject()
             o("n") = n
             o("source") = h.Source.ToString().ToLowerInvariant()
-            o("id") = If(h.Id, "")
+
+            Dim resource As JObject = Nothing
+            If h.RawJson IsNot Nothing Then resource = TryCast(h.RawJson("resource"), JObject)
+
+            Dim effectiveId As String = If(h.Id, "")
+            If String.IsNullOrWhiteSpace(effectiveId) AndAlso h.RawJson IsNot Nothing Then
+                effectiveId = If(h.RawJson("hitId")?.ToString(), "")
+            End If
+
+            o("id") = effectiveId
             o("title") = If(h.Title, "")
             If Not String.IsNullOrWhiteSpace(h.Summary) Then o("summary") = h.Summary
             If Not String.IsNullOrEmpty(h.Author) Then o("author") = h.Author
             If h.LastModifiedUtc.HasValue Then o("date") = h.LastModifiedUtc.Value.ToString("u")
             If Not String.IsNullOrWhiteSpace(h.WebUrl) Then o("web_url") = h.WebUrl
 
-            Dim resource As JObject = Nothing
-            If h.RawJson IsNot Nothing Then resource = TryCast(h.RawJson("resource"), JObject)
-
             Select Case h.Source
                 Case M365SearchSources.Mail
                     If resource IsNot Nothing Then
                         Dim conv = If(resource("conversationId")?.ToString(), "")
                         If Not String.IsNullOrEmpty(conv) Then o("conversation_id") = conv
+
                         Dim imid = If(resource("internetMessageId")?.ToString(), "")
                         If Not String.IsNullOrEmpty(imid) Then o("internet_message_id") = imid
+
+                        Dim sent = If(resource("sentDateTime")?.ToString(), "")
+                        If Not String.IsNullOrEmpty(sent) Then o("sentDateTime") = sent
+
+                        Dim received = If(resource("receivedDateTime")?.ToString(), "")
+                        If Not String.IsNullOrEmpty(received) Then o("receivedDateTime") = received
+
+                        Dim toRecipients = TryCast(resource("toRecipients"), JArray)
+                        If toRecipients IsNot Nothing Then o("toRecipients") = toRecipients.DeepClone()
                     End If
+
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint
                     If Not String.IsNullOrEmpty(h.ParentId) Then o("drive_id") = h.ParentId
+
                 Case M365SearchSources.SharePointListItems
                     If Not String.IsNullOrEmpty(h.ParentId) Then o("site_id") = h.ParentId
+
                 Case M365SearchSources.Teams
                     If Not String.IsNullOrEmpty(h.ParentId) Then o("chat_id_or_channel_id") = h.ParentId
                     If resource IsNot Nothing Then
@@ -688,10 +753,9 @@ Namespace SharedLibrary
                             If Not String.IsNullOrEmpty(teamId) Then o("team_id") = teamId
                             If Not String.IsNullOrEmpty(chanId) Then o("channel_id") = chanId
                         End If
-                        Dim cid = If(resource("chatId")?.ToString(), "")
-                        If Not String.IsNullOrEmpty(cid) Then o("chat_id") = cid
                     End If
             End Select
+
             Return o
         End Function
 

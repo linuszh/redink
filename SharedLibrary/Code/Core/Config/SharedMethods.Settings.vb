@@ -1859,7 +1859,9 @@ Namespace SharedLibrary
                     {"SP_MailReply", context.SP_MailReply},
                     {"SP_MailSumup", context.SP_MailSumup},
                     {"SP_MailSumup2", context.SP_MailSumup2},
-                    {"SP_AIMailSearch", context.SP_AIMailSearch},
+                    {"SP_AIMailSearch1", context.SP_AIMailSearch1},
+                    {"SP_AIMailSearch2", context.SP_AIMailSearch2},
+                    {"SP_AIMailSearch3", context.SP_AIMailSearch3},
                     {"SP_FreestyleText", context.SP_FreestyleText},
                     {"SP_FreestyleNoText", context.SP_FreestyleNoText},
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
@@ -2131,7 +2133,9 @@ Namespace SharedLibrary
                 {"SP_MailReply", Default_SP_MailReply},
                 {"SP_MailSumup", Default_SP_MailSumup},
                 {"SP_MailSumup2", Default_SP_MailSumup2},
-                {"SP_AIMailSearch", Default_SP_AIMailSearch},
+                {"SP_AIMailSearch1", Default_SP_AIMailSearch1},
+                {"SP_AIMailSearch2", Default_SP_AIMailsearch2},
+                {"SP_AIMailSearch3", Default_SP_AIMailsearch3},
                 {"SP_FreestyleText", Default_SP_FreestyleText},
                 {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
                 {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
@@ -3300,7 +3304,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailReply", context.SP_MailReply)
             variableValues.Add("SP_MailSumup", context.SP_MailSumup)
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
-            variableValues.Add("SP_AIMailSearch", context.SP_AIMailSearch)
+            variableValues.Add("SP_AIMailSearch1", context.SP_AIMailSearch1)
+            variableValues.Add("SP_AIMailSearch2", context.SP_AIMailSearch2)
+            variableValues.Add("SP_AIMailSearch3", context.SP_AIMailSearch3)
             variableValues.Add("SP_FreestyleText", context.SP_FreestyleText)
             variableValues.Add("SP_FreestyleNoText", context.SP_FreestyleNoText)
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
@@ -3495,7 +3501,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailReply") Then context.SP_MailReply = CStr(updatedValues("SP_MailReply"))
                 If updatedValues.ContainsKey("SP_MailSumup") Then context.SP_MailSumup = CStr(updatedValues("SP_MailSumup"))
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
-                If updatedValues.ContainsKey("SP_AIMailSearch") Then context.SP_AIMailSearch = CStr(updatedValues("SP_AIMailSearch"))
+                If updatedValues.ContainsKey("SP_AIMailSearch1") Then context.SP_AIMailSearch1 = CStr(updatedValues("SP_AIMailSearch1"))
+                If updatedValues.ContainsKey("SP_AIMailSearch2") Then context.SP_AIMailSearch2 = CStr(updatedValues("SP_AIMailSearch2"))
+                If updatedValues.ContainsKey("SP_AIMailSearch3") Then context.SP_AIMailSearch3 = CStr(updatedValues("SP_AIMailSearch3"))
                 If updatedValues.ContainsKey("SP_FreestyleText") Then context.SP_FreestyleText = CStr(updatedValues("SP_FreestyleText"))
                 If updatedValues.ContainsKey("SP_FreestyleNoText") Then context.SP_FreestyleNoText = CStr(updatedValues("SP_FreestyleNoText"))
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))

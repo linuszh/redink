@@ -185,7 +185,9 @@ Namespace SharedLibrary
             Property SP_MailReply As String
             Property SP_MailSumup As String
             Property SP_MailSumup2 As String
-            Property SP_AIMailSearch As String
+            Property SP_AIMailSearch1 As String
+            Property SP_AIMailSearch2 As String
+            Property SP_AIMailSearch3 As String
             Property SP_FreestyleText As String
             Property SP_FreestyleNoText As String
             Property SP_Freestyle_Document As String
@@ -521,7 +523,9 @@ Namespace SharedLibrary
         Public Property SP_MailReply As String Implements ISharedContext.SP_MailReply
         Public Property SP_MailSumup As String Implements ISharedContext.SP_MailSumup
         Public Property SP_MailSumup2 As String Implements ISharedContext.SP_MailSumup2
-        Public Property SP_AIMailSearch As String Implements ISharedContext.SP_AIMailSearch
+        Public Property SP_AIMailSearch1 As String Implements ISharedContext.SP_AIMailSearch1
+        Public Property SP_AIMailSearch2 As String Implements ISharedContext.SP_AIMailSearch2
+        Public Property SP_AIMailSearch3 As String Implements ISharedContext.SP_AIMailSearch3
         Public Property SP_FreestyleText As String Implements ISharedContext.SP_FreestyleText
         Public Property SP_FreestyleNoText As String Implements ISharedContext.SP_FreestyleNoText
         Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
