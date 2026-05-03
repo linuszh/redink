@@ -2994,6 +2994,54 @@ Partial Public Class ThisAddIn
 
 
     ''' <summary>
+    ''' Generates inline diff markup using shared diff logic, optionally showing the result in a preview window or inserting it into the target range.
+    ''' </summary>
+    ''' <param name="text1">Original text.</param>
+    ''' <param name="text2">Revised text.</param>
+    ''' <param name="targetRange">Destination range.</param>
+    ''' <param name="ShowInWindow">Display preview before inserting.</param>
+    ''' <param name="TextforWindow">Window caption.</param>
+    ''' <param name="paraformatinline">Inline paragraph formatting flag.</param>
+    ''' <param name="noformatting">Skip formatting.</param>
+    Private Sub CompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True, Optional trailingCR As Boolean = False)
+        Try
+
+            Debug.WriteLine("A Text1 = " & text1)
+            Debug.WriteLine("A Text2 = " & text2)
+
+            Dim sText As String =
+                BuildInlineDiffMarkup(
+                    text1,
+                    text2,
+                    trimTrailingLineBreaksOnRevised:=Not trailingCR)
+
+            Debug.WriteLine("Diff markup = " & sText)
+
+            ' Insert formatted text into the specified range
+            If Not ShowInWindow Then
+                Debug.WriteLine("Text with tags: " & vbCrLf & "'" & sText & "'" & vbCrLf & vbCrLf)
+
+                ' Trim trailing line breaks that may have been added during diff processing
+                sText = sText.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+
+                InsertMarkupText(sText, targetRange)
+            Else
+                sText = Regex.Replace(sText, "\{\{.*?\}\}", String.Empty)
+
+                Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & vbCrLf & vbCrLf & sText)
+
+                System.Threading.Tasks.Task.Run(
+                    Sub()
+                        ShowRTFCustomMessageBox(htmlContent, RestoreWindow:=True)
+                    End Sub)
+            End If
+
+        Catch ex As System.Exception
+            MessageBox.Show("Error in CompareAndInsertText: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Generates inline diff markup using DiffPlex, converting word-by-word changes into [INS_START]/[DEL_START] tags.
     ''' Optionally shows result in a preview window or inserts directly into target range.
     ''' </summary>
@@ -3004,7 +3052,7 @@ Partial Public Class ThisAddIn
     ''' <param name="TextforWindow">Window caption.</param>
     ''' <param name="paraformatinline">Inline paragraph formatting flag.</param>
     ''' <param name="noformatting">Skip formatting.</param>
-    Private Sub CompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True, Optional trailingCR As Boolean = False)
+    Private Sub oldCompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True, Optional trailingCR As Boolean = False)
         Try
 
             Dim diffBuilder As New InlineDiffBuilder(New Differ())

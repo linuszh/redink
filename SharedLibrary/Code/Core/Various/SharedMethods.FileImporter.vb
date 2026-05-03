@@ -53,12 +53,16 @@ Namespace SharedLibrary
             ''' <summary>True if the file was a PDF and heuristics suggested it may contain images but OCR was not performed.</summary>
             Public Property PdfMayBeIncomplete As Boolean = False
 
+            ''' <summary>True if the user canceled an interactive file-reading choice (for example worksheet selection).</summary>
+            Public Property UserCancelled As Boolean = False
+
             Public Sub New()
             End Sub
 
-            Public Sub New(content As String, pdfMayBeIncomplete As Boolean)
+            Public Sub New(content As String, pdfMayBeIncomplete As Boolean, Optional userCancelled As Boolean = False)
                 Me.Content = content
                 Me.PdfMayBeIncomplete = pdfMayBeIncomplete
+                Me.UserCancelled = userCancelled
             End Sub
         End Class
 

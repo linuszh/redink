@@ -155,9 +155,16 @@ Public Class DiscussInky
 
     ' Supported file extensions for knowledge loading
     Private Shared ReadOnly SupportedKnowledgeExtensions As String() = {
-        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
-        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
-        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+        ".txt", ".rtf", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm",
+        ".md", ".yaml", ".yml",
+        ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql",
+        ".doc", ".docx", ".xlsx", ".pptx",
+        ".pdf",
+        ".eml", ".msg",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+        ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm",
+        ".mp4", ".avi", ".mkv", ".mov", ".wmv"
     }
 
     ' Random words for response variety
@@ -881,7 +888,7 @@ Public Class DiscussInky
 
             If isFile Then
                 ' Single file - use existing logic
-                Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
+                Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False, askWorksheetSelection:=True)
                 _knowledgeContent = result.Content
                 _knowledgeFilePath = savedPath
 
@@ -921,28 +928,46 @@ Public Class DiscussInky
                 Dim resultBuilder As New StringBuilder()
                 Dim useDocumentTags = (filesToProcess.Count > 1)
                 Dim loadedCount = 0
-
                 For Each filePath In filesToProcess
                     Try
-                        Dim result = Await LoadSingleKnowledgeFileAsync(filePath, False, True)
+                        Dim askWorksheetSelection As Boolean =
+                        isFile AndAlso
+                        filesToProcess.Count = 1 AndAlso
+                        Path.GetExtension(filePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        Dim result = Await LoadSingleKnowledgeFileAsync(
+                        filePath,
+                        ctx.EnableOCR,
+                        silent:=Not askWorksheetSelection,
+                        askWorksheetSelection:=askWorksheetSelection)
+
                         Dim content = result.Content
 
-                        If String.IsNullOrWhiteSpace(content) Then Continue For
+                        ' Track PDFs that may have incomplete content
+                        If result.PdfMayBeIncomplete Then
+                            ctx.PdfsWithPossibleImages.Add(filePath)
+                        End If
+
+                        If String.IsNullOrWhiteSpace(content) Then
+                            ctx.FailedFiles.Add(filePath)
+                            Continue For
+                        End If
 
                         ctx.GlobalDocumentCounter += 1
-                        loadedCount += 1
+                        ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
 
                         If useDocumentTags Then
                             Dim docNum = ctx.GlobalDocumentCounter
                             Dim fileName = Path.GetFileName(filePath)
-                            resultBuilder.Append($"<document{docNum} name=""{fileName}"">")
-                            resultBuilder.Append(content)
-                            resultBuilder.Append($"</document{docNum}>")
+                            Dim openTag = $"<document{docNum} name=""{fileName}"">"
+                            Dim closeTag = $"</document{docNum}>"
+                            resultBuilder.Append(openTag).Append(content).Append(closeTag)
                         Else
                             resultBuilder.Append(content)
                         End If
-                    Catch
-                        ' Skip failed files silently during restore
+
+                    Catch ex As Exception
+                        ctx.FailedFiles.Add(filePath)
                     End Try
                 Next
 
@@ -1845,6 +1870,31 @@ Public Class DiscussInky
 
 #Region "Knowledge File Management"
 
+
+    Private Sub DeleteCurrentKnowledge()
+        _knowledgeContent = Nothing
+        _knowledgeFilePath = Nothing
+        _cachedKnowledgeContent = Nothing
+        _cachedKnowledgeFilePath = Nothing
+
+        Try
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+            If File.Exists(persistPath) Then
+                File.Delete(persistPath)
+            End If
+        Catch
+        End Try
+
+        Try
+            My.Settings.DiscussKnowledgePath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+
+        UpdateWindowTitle()
+        AppendSystemMessage("Knowledge deleted.")
+    End Sub
+
     ''' <summary>
     ''' Button handler that launches the knowledge file/directory picker.
     ''' </summary>
@@ -1880,30 +1930,7 @@ Public Class DiscussInky
                         "Yes, delete knowledge", "No, keep it")
 
                     If answer = 1 Then
-                        ' Delete knowledge
-                        _knowledgeContent = Nothing
-                        _knowledgeFilePath = Nothing
-                        _cachedKnowledgeContent = Nothing
-                        _cachedKnowledgeFilePath = Nothing
-
-                        ' Delete persisted knowledge file if it exists
-                        Try
-                            Dim persistPath = GetPersistedKnowledgeFilePath()
-                            If File.Exists(persistPath) Then
-                                File.Delete(persistPath)
-                            End If
-                        Catch
-                        End Try
-
-                        ' Clear the saved path in settings
-                        Try
-                            My.Settings.DiscussKnowledgePath = ""
-                            My.Settings.Save()
-                        Catch
-                        End Try
-
-                        UpdateWindowTitle()
-                        AppendSystemMessage("Knowledge deleted.")
+                        DeleteCurrentKnowledge()
                     End If
                 End If
                 Return
@@ -1998,7 +2025,33 @@ Public Class DiscussInky
 
             For Each filePath In filesToProcess
                 Try
-                    Dim result = Await LoadSingleKnowledgeFileAsync(filePath, ctx.EnableOCR, True)
+                    Dim askWorksheetSelection As Boolean =
+                        isFile AndAlso
+                        filesToProcess.Count = 1 AndAlso
+                        Path.GetExtension(filePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                    Dim result = Await LoadSingleKnowledgeFileAsync(
+                        filePath,
+                        ctx.EnableOCR,
+                        silent:=Not askWorksheetSelection,
+                        askWorksheetSelection:=askWorksheetSelection)
+
+                    If result.UserCancelled Then
+                        RemoveAssistantThinking()
+
+                        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                            Dim answer = ShowCustomYesNoBox(
+                                "No worksheet was selected. Do you want to delete the currently loaded knowledge?",
+                                "Yes, delete knowledge", "No, keep it")
+
+                            If answer = 1 Then
+                                DeleteCurrentKnowledge()
+                            End If
+                        End If
+
+                        Return
+                    End If
+
                     Dim content = result.Content
 
                     ' Track PDFs that may have incomplete content
@@ -2127,49 +2180,42 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Loads a single knowledge file, optionally with OCR for PDFs.
+    ''' Loads a single knowledge file via the shared file importer used by Freestyle.
+    ''' This aligns DiscussInky with sandboxed readers and shared file-type support.
     ''' </summary>
     ''' <param name="filePath">Path to the file to load.</param>
     ''' <param name="enableOCR">Whether to enable OCR for PDF files.</param>
     ''' <param name="silent">Whether to suppress error messages.</param>
-    ''' <returns>Tuple of (content, pdfMayBeIncomplete) where pdfMayBeIncomplete is True if PDF heuristics suggest images but OCR was not performed.</returns>
-    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+    ''' <param name="askWorksheetSelection">
+    ''' For Excel files, whether to prompt the user to select one worksheet or all worksheets.
+    ''' </param>
+    ''' <returns>
+    ''' Tuple of (content, pdfMayBeIncomplete) where pdfMayBeIncomplete is True if PDF
+    ''' heuristics suggest images/scans but OCR was not performed.
+    ''' </returns>
+    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String,
+                                                        enableOCR As Boolean,
+                                                        silent As Boolean,
+                                                        Optional askWorksheetSelection As Boolean = False) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean, UserCancelled As Boolean))
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
-            Return ("", False)
+            Return ("", False, False)
         End If
 
         Try
-            Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
+            Dim result = Await Globals.ThisAddIn.GetFileContentEx(
+                optionalFilePath:=filePath,
+                Silent:=silent,
+                DoOCR:=enableOCR,
+                AskUser:=False,
+                AskWorksheetSelection:=askWorksheetSelection)
 
-            Select Case ext
-                Case ".txt", ".md", ".log", ".ini", ".csv", ".json", ".xml", ".html", ".htm",
-                     ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
-
-                Case ".rtf"
-                    Return (ReadRtfAsText(filePath), False)
-
-                Case ".doc", ".docx"
-                    Return (ReadWordDocument(filePath), False)
-
-                Case ".pdf"
-                    ' Use the extended version that reports if OCR was skipped
-                    Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, enableOCR, False, _context)
-                    Return (pdfResult.Content, pdfResult.OcrWasSkippedDueToHeuristics)
-
-                Case ".pptx"
-                    Return (Globals.ThisAddIn.GetPresentationJson(filePath), False)
-
-                Case Else
-                    ' Try to read as text
-                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
-            End Select
+            Return (If(result.Content, ""), result.PdfMayBeIncomplete, result.UserCancelled)
 
         Catch ex As Exception
             If Not silent Then
                 AppendSystemMessage($"Error loading {Path.GetFileName(filePath)}: {ex.Message}")
             End If
-            Return ("", False)
+            Return ("", False, False)
         End Try
     End Function
 
