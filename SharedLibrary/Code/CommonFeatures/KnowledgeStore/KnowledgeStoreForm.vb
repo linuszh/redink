@@ -59,6 +59,7 @@ Namespace SharedLibrary
         Private ReadOnly _chkActive As New CheckBox() With {.Text = "Active", .AutoSize = True}
         Private ReadOnly _chkScanSub As New CheckBox() With {.Text = "Scan subdirectories", .AutoSize = True}
         Private ReadOnly _btnSave As New Button() With {.Text = "Save Changes", .Margin = New Padding(4)}
+        Private ReadOnly _btnReformatPage As New Button() With {.Text = "Reformat Page...", .Margin = New Padding(4)}
 
         ' ── Statistics ──
         Private ReadOnly _lblStats As New Label() With {
@@ -127,10 +128,12 @@ Namespace SharedLibrary
             ConfigureStandardButton(_btnHealthCheck)
             ConfigureStandardButton(_btnRepair)
             ConfigureStandardButton(_btnRepairPage)
+            ConfigureStandardButton(_btnReformatPage)
             ConfigureStandardButton(_btnRevectorize)
             ConfigureStandardButton(_btnLint)
             ConfigureStandardButton(_btnEditSchema)
             ConfigureStandardButton(_btnClose)
+
 
             ConfigureBrowseButton(_btnBrowsePath, _txtSourcePath)
 
@@ -255,9 +258,9 @@ Namespace SharedLibrary
                 .Padding = New Padding(0, 0, 0, 4)
             }
             opsPanel.Controls.AddRange(New Control() {
-                _btnIndex, _btnReindex, _btnHealthCheck, _btnRepair, _btnRepairPage,
-                _btnRevectorize, _btnLint, _btnEditSchema
-            })
+                        _btnIndex, _btnReindex, _btnHealthCheck, _btnRepair, _btnRepairPage, _btnReformatPage,
+                        _btnRevectorize, _btnLint, _btnEditSchema
+                    })
 
             ' Bottom close button
             Dim bottomPanel As New FlowLayoutPanel() With {
@@ -297,6 +300,7 @@ Namespace SharedLibrary
             AddHandler _btnHealthCheck.Click, AddressOf OnHealthCheck
             AddHandler _btnRepair.Click, AddressOf OnRepair
             AddHandler _btnRepairPage.Click, AddressOf OnRepairPage
+            AddHandler _btnReformatPage.Click, AddressOf OnReformatPage
             AddHandler _btnRevectorize.Click, AddressOf OnRevectorize
             AddHandler _btnLint.Click, AddressOf OnLint
             AddHandler _btnEditSchema.Click, AddressOf OnEditSchema
@@ -306,16 +310,25 @@ Namespace SharedLibrary
         End Sub
 
         Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
-            If _runningOperations > 0 Then
+            Dim cancellationPending As Boolean = False
+
+            Try
+                cancellationPending = ProgressBarModule.CancelOperation
+            Catch
+                cancellationPending = False
+            End Try
+
+            If _runningOperations > 0 AndAlso Not cancellationPending Then
                 Dim answer = ShowCustomYesNoBox(
-                    "A maintenance operation is still running. Closing now will let it finish in the background, " &
-                    "but progress will no longer be shown. Close anyway?",
-                    "Yes, close", "No, keep open")
+            "A maintenance operation is still running. Closing now will let it finish in the background, " &
+            "but progress will no longer be shown. Close anyway?",
+            "Yes, close", "No, keep open")
                 If answer <> 1 Then
                     e.Cancel = True
                     Return
                 End If
             End If
+
             MyBase.OnFormClosing(e)
         End Sub
 
@@ -735,9 +748,41 @@ Namespace SharedLibrary
                 Throw
             Finally
                 If trayIcon IsNot Nothing Then
+                    Dim iconToDispose = trayIcon
+                    trayIcon = Nothing
+
                     Try
-                        trayIcon.Visible = False
-                        trayIcon.Dispose()
+                        If Me.IsDisposed OrElse Me.Disposing OrElse Not Me.IsHandleCreated Then
+                            Try
+                                iconToDispose.Visible = False
+                                iconToDispose.Dispose()
+                            Catch
+                            End Try
+                        ElseIf Me.InvokeRequired Then
+                            Try
+                                Me.BeginInvoke(
+                        New Action(
+                            Sub()
+                                Try
+                                    iconToDispose.Visible = False
+                                    iconToDispose.Dispose()
+                                Catch
+                                End Try
+                            End Sub))
+                            Catch
+                                Try
+                                    iconToDispose.Visible = False
+                                    iconToDispose.Dispose()
+                                Catch
+                                End Try
+                            End Try
+                        Else
+                            Try
+                                iconToDispose.Visible = False
+                                iconToDispose.Dispose()
+                            Catch
+                            End Try
+                        End If
                     Catch
                     End Try
                 End If
@@ -745,32 +790,29 @@ Namespace SharedLibrary
         End Function
 
         Private Sub UpdateMaintenanceStatusSafe(storeName As String,
-                                                operationName As String,
-                                                statusText As String,
-                                                trayIcon As NotifyIcon)
+                                        operationName As String,
+                                        statusText As String,
+                                        trayIcon As NotifyIcon)
             If Me.IsDisposed OrElse Me.Disposing OrElse Not Me.IsHandleCreated Then
                 Return
             End If
 
             If Me.InvokeRequired Then
                 Try
-                    Me.BeginInvoke(
-                        New Action(Of String, String, String, NotifyIcon)(AddressOf UpdateMaintenanceStatusSafe),
-                        storeName,
-                        operationName,
-                        statusText,
-                        trayIcon)
+                    Me.Invoke(
+                New Action(Of String, String, String, NotifyIcon)(AddressOf UpdateMaintenanceStatusSafe),
+                storeName,
+                operationName,
+                statusText,
+                trayIcon)
                 Catch
                 End Try
                 Return
             End If
 
-            ' Avoid the duplicate "Lint Wiki: Lint Wiki: ..." (issue #3):
-            Dim prefix = operationName & ":"
-            ' Avoid duplicated "Lint Wiki: Lint Wiki: ..." style prefixing.
             Dim cleaned = statusText
             If cleaned IsNot Nothing AndAlso
-               cleaned.StartsWith(operationName, StringComparison.OrdinalIgnoreCase) Then
+       cleaned.StartsWith(operationName, StringComparison.OrdinalIgnoreCase) Then
                 Dim rest = cleaned.Substring(operationName.Length)
                 If rest.Length = 0 OrElse "(: —-".IndexOf(rest(0)) >= 0 OrElse Char.IsWhiteSpace(rest(0)) Then
                     cleaned = rest.TrimStart(":"c, " "c, ChrW(9))
@@ -778,6 +820,7 @@ Namespace SharedLibrary
             End If
 
             _lblStatus.Text = $"{operationName} — {storeName}: {cleaned}"
+            _lblStatus.Refresh()
 
             If trayIcon IsNot Nothing Then
                 Dim toolTipText = $"{operationName}: {cleaned}"
@@ -839,27 +882,40 @@ Namespace SharedLibrary
                 Return
             End If
 
+            Dim buttonsRestoredEarly As Boolean = False
+
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
-                    _context, storeName:=store.StoreId, forceReindex:=False)
+            _context, storeName:=store.StoreId, forceReindex:=False)
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomMessageBox(
-                    $"Indexing complete for '{store.Name}':{vbCrLf}" &
-                    $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
-                    $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
-                    If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
-                    $"{AN} Knowledge Store")
+            $"Indexing complete for '{store.Name}':{vbCrLf}" &
+            $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
+            $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
+            If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
+                UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during indexing: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
+                End If
             End Try
         End Sub
 
@@ -873,32 +929,45 @@ Namespace SharedLibrary
             End If
 
             Dim answer = ShowCustomYesNoBox(
-                $"This will force a full re-index of '{store.Name}', regenerating all metadata and Wiki summaries. " &
-                "This may take a while and use API credits. Continue?",
-                "Yes, re-index", "No, cancel")
+        $"This will force a full re-index of '{store.Name}', regenerating all metadata and Wiki summaries. " &
+        "This may take a while and use API credits. Continue?",
+        "Yes, re-index", "No, cancel")
             If answer <> 1 Then Return
+
+            Dim buttonsRestoredEarly As Boolean = False
 
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim result = Await KnowledgeStoreForegroundIndexer.RunAsync(
-                    _context, storeName:=store.StoreId, forceReindex:=True)
+            _context, storeName:=store.StoreId, forceReindex:=True)
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomMessageBox(
-                    $"Re-indexing complete for '{store.Name}':{vbCrLf}" &
-                    $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
-                    $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
-                    If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
-                    $"{AN} Knowledge Store")
+            $"Re-indexing complete for '{store.Name}':{vbCrLf}" &
+            $"Total: {result.TotalFiles}, Indexed: {result.IndexedFiles}, " &
+            $"Skipped: {result.SkippedFiles}, Failed: {result.FailedFiles}" &
+            If(result.WasCancelled, $"{vbCrLf}(Cancelled by user)", ""),
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
+                UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during re-indexing: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
+                End If
             End Try
         End Sub
 
@@ -911,37 +980,137 @@ Namespace SharedLibrary
                 Return
             End If
 
+            Dim buttonsRestoredEarly As Boolean = False
+
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim report = Await RunMaintenanceJobAsync(
-                    store:=store,
-                    operationName:="Health Check",
-                    work:=Function(progressCallback)
-                              Return KnowledgeWikiService.LintWikiAsync(
-                                  kbRootPath:=store.ResolvedSourcePath,
-                                  context:=_context,
-                                  autoApply:=False,
-                                  progressCallback:=progressCallback)
-                          End Function)
+            store:=store,
+            operationName:="Health Check",
+            work:=Function(progressCallback)
+                      Return KnowledgeWikiService.LintWikiAsync(
+                          kbRootPath:=store.ResolvedSourcePath,
+                          context:=_context,
+                          autoApply:=False,
+                          progressCallback:=progressCallback)
+                  End Function)
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomWindow(
-                    $"Health check report for '{store.Name}':",
-                    report,
-                    "You can copy this report to the clipboard.",
-                    $"{AN} Knowledge Store")
+            $"Health check report for '{store.Name}':",
+            report,
+            "You can copy this report to the clipboard.",
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during health check: {ex.Message}", AN)
             Finally
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
+                End If
+            End Try
+        End Sub
+
+        Private Async Sub OnReformatPage(sender As Object, e As EventArgs)
+            Dim store = GetSelectedStore()
+            If store Is Nothing Then Return
+
+            If String.IsNullOrWhiteSpace(store.ResolvedSourcePath) Then
+                ShowCustomMessageBox("The selected store does not have a valid source path.", AN)
+                Return
+            End If
+
+            If Not KnowledgeStoreCatalog.CanCurrentUserWrite(store, _context) Then
+                ShowCustomMessageBox($"You do not have write permission to '{store.Name}'.", AN)
+                Return
+            End If
+
+            Dim wikiRoot = Path.Combine(store.ResolvedSourcePath, ".redink", KnowledgeStoreCatalog.WikiFolder)
+            If Not Directory.Exists(wikiRoot) Then
+                ShowCustomMessageBox("This store has no wiki yet. Index it first.", AN)
+                Return
+            End If
+
+            Dim reservedNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        KnowledgeStoreCatalog.IndexFile, KnowledgeStoreCatalog.LogFile,
+        "health_report.md", "review_queue.md"
+    }
+
+            Dim allPages = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
+        Where(Function(f) Not reservedNames.Contains(Path.GetFileName(f))).
+        OrderBy(Function(f) f, StringComparer.OrdinalIgnoreCase).
+        ToList()
+
+            If allPages.Count = 0 Then
+                ShowCustomMessageBox("No wiki pages found in this store.", AN)
+                Return
+            End If
+
+            Dim selected = ShowWikiPageSelector(wikiRoot, allPages)
+            If selected Is Nothing OrElse selected.Count = 0 Then Return
+
+            Dim confirm = ShowCustomYesNoBox(
+        $"Reformat {selected.Count} wiki page(s) in '{store.Name}'?{vbCrLf}{vbCrLf}" &
+        "This deterministically normalizes front matter and removes malformed metadata blocks. " &
+        "No LLM call is made.",
+        "Yes, reformat", "Cancel")
+            If confirm <> 1 Then Return
+
+            Dim buttonsRestoredEarly As Boolean = False
+
+            SetOperationButtonsEnabled(False)
+            System.Threading.Interlocked.Increment(_runningOperations)
+
+            Try
+                Dim summary = Await RunMaintenanceJobAsync(
+            store:=store,
+            operationName:="Reformat Page",
+            work:=Function(progressCallback)
+                      Return KnowledgeWikiService.ReformatMalformedPagesAsync(
+                          kbRootPath:=store.ResolvedSourcePath,
+                          context:=_context,
+                          pagePaths:=selected,
+                          progressCallback:=progressCallback,
+                          operationName:="Reformat Page")
+                  End Function)
+
+                If Me.IsDisposed OrElse Me.Disposing Then Return
+
                 System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then
-                    SetOperationButtonsEnabled(True)
-                    UpdateStatus()
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
+                ShowCustomWindow(
+            $"Page reformat summary for '{store.Name}':",
+            summary,
+            "You can copy this summary to the clipboard.",
+            $"{AN} Knowledge Store")
+
+                LoadStatistics(store)
+                UpdateStatus()
+            Catch ex As Exception
+                If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during page reformat: {ex.Message}", AN)
+            Finally
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
                 End If
             End Try
         End Sub
@@ -967,14 +1136,14 @@ Namespace SharedLibrary
             End If
 
             Dim reservedNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                KnowledgeStoreCatalog.IndexFile, KnowledgeStoreCatalog.LogFile,
-                "health_report.md", "review_queue.md"
-            }
+        KnowledgeStoreCatalog.IndexFile, KnowledgeStoreCatalog.LogFile,
+        "health_report.md", "review_queue.md"
+    }
 
             Dim allPages = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
-                Where(Function(f) Not reservedNames.Contains(Path.GetFileName(f))).
-                OrderBy(Function(f) f, StringComparer.OrdinalIgnoreCase).
-                ToList()
+        Where(Function(f) Not reservedNames.Contains(Path.GetFileName(f))).
+        OrderBy(Function(f) f, StringComparer.OrdinalIgnoreCase).
+        ToList()
 
             If allPages.Count = 0 Then
                 ShowCustomMessageBox("No wiki pages found in this store.", AN)
@@ -985,37 +1154,46 @@ Namespace SharedLibrary
             If selected Is Nothing OrElse selected.Count = 0 Then Return
 
             Dim confirm = ShowCustomYesNoBox(
-                $"Repair {selected.Count} wiki page(s) in '{store.Name}'?{vbCrLf}{vbCrLf}" &
-                "For each page the corresponding source document (if known) will be re-ingested by the LLM, " &
-                "overwriting the page. Pages without a known source will simply be deleted.",
-                "Yes, repair", "Cancel")
+        $"Repair {selected.Count} wiki page(s) in '{store.Name}'?{vbCrLf}{vbCrLf}" &
+        "For each page the corresponding source document (if known) will be re-ingested by the LLM, " &
+        "overwriting the page. Pages without a known source will simply be deleted.",
+        "Yes, repair", "Cancel")
             If confirm <> 1 Then Return
+
+            Dim buttonsRestoredEarly As Boolean = False
 
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim summary = Await RunMaintenanceJobAsync(
-                    store:=store,
-                    operationName:="Repair Page",
-                    work:=Function(progressCallback) RepairWikiPagesAsync(store, selected, progressCallback))
+            store:=store,
+            operationName:="Repair Page",
+            work:=Function(progressCallback) RepairWikiPagesAsync(store, selected, progressCallback))
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomWindow(
-                    $"Page repair summary for '{store.Name}':",
-                    summary,
-                    "You can copy this summary to the clipboard.",
-                    $"{AN} Knowledge Store")
+            $"Page repair summary for '{store.Name}':",
+            summary,
+            "You can copy this summary to the clipboard.",
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during page repair: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then
-                    SetOperationButtonsEnabled(True)
-                    UpdateStatus()
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
                 End If
             End Try
         End Sub
@@ -1342,42 +1520,51 @@ Namespace SharedLibrary
             End If
 
             Dim answer = ShowCustomYesNoBox(
-                $"This will run automatic repairs on '{store.Name}', including LLM-assisted fixes. Continue?",
-                "Yes, repair", "No, cancel")
+        $"This will run automatic repairs on '{store.Name}', including LLM-assisted fixes. Continue?",
+        "Yes, repair", "No, cancel")
             If answer <> 1 Then Return
+
+            Dim buttonsRestoredEarly As Boolean = False
 
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim summary = Await RunMaintenanceJobAsync(
-                    store:=store,
-                    operationName:="Repair",
-                    work:=Function(progressCallback)
-                              Return KnowledgeWikiService.ApplyWikiHealthFixesAsync(
-                                  kbRootPath:=store.ResolvedSourcePath,
-                                  context:=_context,
-                                  includeLlmRepairs:=True,
-                                  progressCallback:=progressCallback,
-                                  operationName:="Repair")
-                          End Function)
+            store:=store,
+            operationName:="Repair",
+            work:=Function(progressCallback)
+                      Return KnowledgeWikiService.ApplyWikiHealthFixesAsync(
+                          kbRootPath:=store.ResolvedSourcePath,
+                          context:=_context,
+                          includeLlmRepairs:=True,
+                          progressCallback:=progressCallback,
+                          operationName:="Repair")
+                  End Function)
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomWindow(
-                    $"Repair summary for '{store.Name}':",
-                    summary,
-                    "You can copy this summary to the clipboard.",
-                    $"{AN} Knowledge Store")
+            $"Repair summary for '{store.Name}':",
+            summary,
+            "You can copy this summary to the clipboard.",
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during repair: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then
-                    SetOperationButtonsEnabled(True)
-                    UpdateStatus()
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
                 End If
             End Try
         End Sub
@@ -1398,12 +1585,13 @@ Namespace SharedLibrary
             End If
 
             Dim wikiPages = Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories).
-                Where(Function(f)
-                          Dim n = Path.GetFileName(f)
-                          Return Not n.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) AndAlso
-                                 Not n.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) AndAlso
-                                 Not n.Equals("health_report.md", StringComparison.OrdinalIgnoreCase)
-                      End Function).ToList()
+        Where(Function(f)
+                  Dim n = Path.GetFileName(f)
+                  Return Not n.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) AndAlso
+                         Not n.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) AndAlso
+                         Not n.Equals("health_report.md", StringComparison.OrdinalIgnoreCase)
+              End Function).
+        ToList()
 
             If wikiPages.Count = 0 Then
                 ShowCustomMessageBox("No wiki pages found to rebuild embeddings for.", AN)
@@ -1411,10 +1599,12 @@ Namespace SharedLibrary
             End If
 
             Dim answer = ShowCustomYesNoBox(
-                $"This will rebuild the embedding index for '{store.Name}' from {wikiPages.Count} existing wiki page(s) " &
-                "using the currently configured embedding model. Continue?",
-                "Yes, rebuild embeddings", "No, cancel")
+        $"This will rebuild the embedding index for '{store.Name}' from {wikiPages.Count} existing wiki page(s) " &
+        "using the currently configured embedding model. Continue?",
+        "Yes, rebuild embeddings", "No, cancel")
             If answer <> 1 Then Return
+
+            Dim buttonsRestoredEarly As Boolean = False
 
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
@@ -1424,34 +1614,46 @@ Namespace SharedLibrary
                 ProgressBarModule.GlobalProgressLabel = "Preparing embedding rebuild..."
                 ProgressBarModule.CancelOperation = False
                 ProgressBarModule.ShowProgressBarInSeparateThread(
-                    $"{AN} Knowledge Store — Embeddings",
-                    "Refreshing embeddings...")
+            $"{AN} Knowledge Store — Embeddings",
+            "Refreshing embeddings...")
 
                 Dim rebuiltPages = Await KnowledgeEmbeddingService.RebuildAllWikiEmbeddingsAsync(
-                    kbRootPath:=store.ResolvedSourcePath,
-                    context:=_context,
-                    progressPrefix:=store.Name,
-                    progressOffset:=0,
-                    progressTotal:=wikiPages.Count)
+            kbRootPath:=store.ResolvedSourcePath,
+            context:=_context,
+            progressPrefix:=store.Name,
+            progressOffset:=0,
+            progressTotal:=wikiPages.Count)
 
                 Dim wasCancelled = ProgressBarModule.CancelOperation
                 ProgressBarModule.CancelOperation = True
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomMessageBox(
-                    If(wasCancelled,
-                       $"Embedding rebuild cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
-                       $"Embedding rebuild complete. Refreshed {rebuiltPages} wiki page embedding set(s)."),
-                    $"{AN} Knowledge Store")
+            If(wasCancelled,
+               $"Embedding rebuild cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
+               $"Embedding rebuild complete. Refreshed {rebuiltPages} wiki page embedding set(s)."),
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
+                UpdateStatus()
             Catch ex As Exception
                 ProgressBarModule.CancelOperation = True
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during embedding rebuild: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then SetOperationButtonsEnabled(True)
+                If Not buttonsRestoredEarly Then
+                    ProgressBarModule.CancelOperation = True
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
+                End If
             End Try
         End Sub
 
@@ -1464,41 +1666,49 @@ Namespace SharedLibrary
                 Return
             End If
 
+            Dim buttonsRestoredEarly As Boolean = False
+
             SetOperationButtonsEnabled(False)
             System.Threading.Interlocked.Increment(_runningOperations)
             Try
                 Dim report = Await RunMaintenanceJobAsync(
-                    store:=store,
-                    operationName:="Lint Wiki",
-                    work:=Function(progressCallback)
-                              Return KnowledgeWikiService.LintWikiAsync(
-                                  kbRootPath:=store.ResolvedSourcePath,
-                                  context:=_context,
-                                  autoApply:=True,
-                                  progressCallback:=progressCallback)
-                          End Function)
+            store:=store,
+            operationName:="Lint Wiki",
+            work:=Function(progressCallback)
+                      Return KnowledgeWikiService.LintWikiAsync(
+                          kbRootPath:=store.ResolvedSourcePath,
+                          context:=_context,
+                          autoApply:=True,
+                          progressCallback:=progressCallback)
+                  End Function)
 
                 If Me.IsDisposed OrElse Me.Disposing Then Return
 
+                System.Threading.Interlocked.Decrement(_runningOperations)
+                SetOperationButtonsEnabled(True)
+                UpdateStatus()
+                buttonsRestoredEarly = True
+
                 ShowCustomWindow(
-                    $"Lint report for '{store.Name}':",
-                    report,
-                    "Auto-fixes have been applied. You can copy this report to the clipboard.",
-                    $"{AN} Knowledge Store")
+            $"Lint report for '{store.Name}':",
+            report,
+            "Auto-fixes have been applied. You can copy this report to the clipboard.",
+            $"{AN} Knowledge Store")
 
                 LoadStatistics(store)
                 UpdateStatus()
             Catch ex As Exception
                 If Not Me.IsDisposed Then ShowCustomMessageBox($"Error during wiki lint: {ex.Message}", AN)
             Finally
-                System.Threading.Interlocked.Decrement(_runningOperations)
-                If Not Me.IsDisposed Then
-                    SetOperationButtonsEnabled(True)
-                    UpdateStatus()
+                If Not buttonsRestoredEarly Then
+                    System.Threading.Interlocked.Decrement(_runningOperations)
+                    If Not Me.IsDisposed Then
+                        SetOperationButtonsEnabled(True)
+                        UpdateStatus()
+                    End If
                 End If
             End Try
         End Sub
-
 
 
 
@@ -1537,6 +1747,7 @@ Namespace SharedLibrary
             _btnHealthCheck.Enabled = enabled
             _btnRepair.Enabled = enabled
             _btnRepairPage.Enabled = enabled
+            _btnReformatPage.Enabled = enabled
             _btnRevectorize.Enabled = enabled
             _btnLint.Enabled = enabled
             _btnEditSchema.Enabled = enabled

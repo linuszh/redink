@@ -1251,23 +1251,43 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Shows a modal RichTextBox-based message dialog (RTF content) with optional auto-close.
+        ''' Returns 1 for the primary button, 2 for the secondary button, 3 for auto-close, and 0 for close/Esc.
         ''' </summary>
         ''' <param name="bodyText">RTF content assigned to <see cref="RichTextBox.Rtf"/>.</param>
         ''' <param name="header">Dialog title. Defaults to <c>AN</c> if empty/whitespace.</param>
         ''' <param name="autoCloseSeconds">If set, closes the dialog after this many seconds.</param>
         ''' <param name="Defaulttext">Suffix appended to the countdown label text.</param>
         ''' <param name="RestoreWindow">If True, saves and restores window position and size from settings.</param>
-        Public Shared Sub ShowRTFCustomMessageBox(ByVal bodyText As String, Optional header As String = AN, Optional autoCloseSeconds As Integer? = Nothing, Optional Defaulttext As String = " - execution continues meanwhile", Optional RestoreWindow As Boolean = False)
+        ''' <param name="okButtonText">Primary button text.</param>
+        ''' <param name="secondaryButtonText">Optional secondary button text.</param>
+        ''' <param name="okButtonAction">Optional callback invoked when the primary button is clicked.</param>
+        ''' <param name="secondaryButtonAction">Optional callback invoked when the secondary button is clicked.</param>
+        ''' <param name="CloseAfterOk">If True, closes after the primary button is clicked.</param>
+        ''' <param name="CloseAfterSecondary">If True, closes after the secondary button is clicked.</param>
+        Public Shared Function ShowRTFCustomMessageBox(
+            ByVal bodyText As String,
+            Optional header As String = AN,
+            Optional autoCloseSeconds As Integer? = Nothing,
+            Optional Defaulttext As String = " - execution continues meanwhile",
+            Optional RestoreWindow As Boolean = False,
+            Optional okButtonText As String = "OK",
+            Optional secondaryButtonText As String = Nothing,
+            Optional okButtonAction As System.Action = Nothing,
+            Optional secondaryButtonAction As System.Action = Nothing,
+            Optional CloseAfterOk As Boolean = True,
+            Optional CloseAfterSecondary As Boolean = True
+        ) As Integer
 
             Dim RTFMessageForm As New System.Windows.Forms.Form()
             Dim bodyLabel As New System.Windows.Forms.RichTextBox()
             Dim okButton As New System.Windows.Forms.Button()
+            Dim secondaryButton As System.Windows.Forms.Button = Nothing
             Dim countdownLabel As New System.Windows.Forms.Label()
-            Dim Truncated As Boolean = False
+            Dim result As Integer = 0
+            Dim userClicked As Boolean = False
 
             If String.IsNullOrWhiteSpace(header) Then header = AN
 
-            ' Form attributes.
             RTFMessageForm.Opacity = 0
             RTFMessageForm.Text = header
             RTFMessageForm.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
@@ -1277,107 +1297,135 @@ Namespace SharedLibrary
             RTFMessageForm.ShowInTaskbar = False
             RTFMessageForm.TopMost = True
             RTFMessageForm.KeyPreview = True
-
-            ' Autoscale for fonts & DPI.
             RTFMessageForm.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi
             RTFMessageForm.AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F)
-
             RTFMessageForm.MinimumSize = New System.Drawing.Size(650, 335)
 
-            ' Icon.
             Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
             RTFMessageForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
 
-            ' Standard font.
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
 
-            ' Body RTF box.
             bodyLabel.Font = standardFont
             bodyLabel.ReadOnly = True
             bodyLabel.BorderStyle = System.Windows.Forms.BorderStyle.None
             bodyLabel.BackColor = RTFMessageForm.BackColor
-            'bodyLabel.TabStop = False
-
-            ' allow focus so user can select/copy
             bodyLabel.TabStop = True
-
-            ' make selection visible and allow standard shortcuts
             bodyLabel.HideSelection = False
             bodyLabel.ShortcutsEnabled = True
-
             bodyLabel.Rtf = bodyText
             bodyLabel.Location = New System.Drawing.Point(20, 20)
             bodyLabel.Width = 600
             bodyLabel.Height = 200
-            ' Anchor to all sides so it resizes with the form.
             bodyLabel.Anchor = System.Windows.Forms.AnchorStyles.Top _
                      Or System.Windows.Forms.AnchorStyles.Left _
                      Or System.Windows.Forms.AnchorStyles.Right _
                      Or System.Windows.Forms.AnchorStyles.Bottom
             RTFMessageForm.Controls.Add(bodyLabel)
 
-
-            ' OK button & countdown label setup.
             okButton.Font = standardFont
-            okButton.Text = "OK"
+            okButton.Text = okButtonText
             okButton.AutoSize = True
+
+            If Not String.IsNullOrWhiteSpace(secondaryButtonText) Then
+                secondaryButton = New System.Windows.Forms.Button() With {
+                    .Font = standardFont,
+                    .Text = secondaryButtonText,
+                    .AutoSize = True
+                }
+            End If
 
             countdownLabel.Font = standardFont
             countdownLabel.AutoSize = True
 
-            ' Bottom panel to hold button + countdown, docked so it moves with resizing.
             Dim bottomPanel As New System.Windows.Forms.Panel()
             bottomPanel.Dock = System.Windows.Forms.DockStyle.Bottom
-            bottomPanel.Padding = New System.Windows.Forms.Padding(20)  ' 20px padding on all sides.
+            bottomPanel.Padding = New System.Windows.Forms.Padding(20)
             bottomPanel.Height = okButton.PreferredSize.Height + bottomPanel.Padding.Top + bottomPanel.Padding.Bottom
             RTFMessageForm.Controls.Add(bottomPanel)
 
-            ' Add controls into panel.
             bottomPanel.Controls.Add(okButton)
+
+            If secondaryButton IsNot Nothing Then
+                bottomPanel.Controls.Add(secondaryButton)
+            End If
+
             bottomPanel.Controls.Add(countdownLabel)
-            okButton.Location = New System.Drawing.Point(bottomPanel.Padding.Left, bottomPanel.Padding.Top)
-            countdownLabel.Location = New System.Drawing.Point(okButton.Right + 10, bottomPanel.Padding.Top)
 
-            ' Ensure bodyLabel resizes when form is resized.
-            AddHandler RTFMessageForm.Resize, Sub(sender As Object, e As EventArgs)
-                                                  Dim availableWidth As Integer = RTFMessageForm.ClientSize.Width - bodyLabel.Left - 20
-                                                  Dim availableHeight As Integer = RTFMessageForm.ClientSize.Height - bottomPanel.Height - bodyLabel.Top - 20
-                                                  bodyLabel.Size = New System.Drawing.Size(availableWidth, availableHeight)
-                                              End Sub
+            Dim nextLeft As Integer = bottomPanel.Padding.Left
+            okButton.Location = New System.Drawing.Point(nextLeft, bottomPanel.Padding.Top)
+            nextLeft = okButton.Right + 10
 
-            ' Handlers.
-            Dim userClicked As Boolean = False
-            AddHandler okButton.Click, Sub(sender As Object, e As EventArgs)
-                                           userClicked = True
-                                           RTFMessageForm.Close()
-                                           RTFMessageForm = Nothing
-                                       End Sub
-            AddHandler RTFMessageForm.KeyDown, Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
-                                                   If e.KeyCode = System.Windows.Forms.Keys.Escape Then
-                                                       userClicked = True
-                                                       RTFMessageForm.Close()
-                                                       RTFMessageForm = Nothing
-                                                       e.SuppressKeyPress = True
-                                                   End If
-                                               End Sub
-            AddHandler RTFMessageForm.Shown, Sub(sender As Object, e As EventArgs)
-                                                 ' Trigger initial resize layout.
-                                                 RTFMessageForm.PerformLayout()
-                                                 RTFMessageForm.Activate()
-                                             End Sub
+            If secondaryButton IsNot Nothing Then
+                secondaryButton.Location = New System.Drawing.Point(nextLeft, bottomPanel.Padding.Top)
+                nextLeft = secondaryButton.Right + 10
+            End If
 
-            ' Initial form sizing: ensure 20px padding around button and RTF label sizing.
+            countdownLabel.Location = New System.Drawing.Point(nextLeft, bottomPanel.Padding.Top + 4)
+
+            AddHandler RTFMessageForm.Resize,
+                Sub(sender As Object, e As EventArgs)
+                    Dim availableWidth As Integer = RTFMessageForm.ClientSize.Width - bodyLabel.Left - 20
+                    Dim availableHeight As Integer = RTFMessageForm.ClientSize.Height - bottomPanel.Height - bodyLabel.Top - 20
+                    bodyLabel.Size = New System.Drawing.Size(availableWidth, availableHeight)
+                End Sub
+
+            AddHandler okButton.Click,
+                Sub(sender As Object, e As EventArgs)
+                    result = 1
+                    userClicked = True
+                    Try
+                        If okButtonAction IsNot Nothing Then okButtonAction()
+                    Catch
+                    End Try
+                    If CloseAfterOk Then
+                        RTFMessageForm.Close()
+                    End If
+                End Sub
+
+            If secondaryButton IsNot Nothing Then
+                AddHandler secondaryButton.Click,
+                    Sub(sender As Object, e As EventArgs)
+                        result = 2
+                        userClicked = True
+                        Try
+                            If secondaryButtonAction IsNot Nothing Then secondaryButtonAction()
+                        Catch
+                        End Try
+                        If CloseAfterSecondary Then
+                            RTFMessageForm.Close()
+                        End If
+                    End Sub
+            End If
+
+            AddHandler RTFMessageForm.KeyDown,
+                Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                    If e.KeyCode = System.Windows.Forms.Keys.Escape Then
+                        result = 0
+                        userClicked = True
+                        RTFMessageForm.Close()
+                        e.SuppressKeyPress = True
+                    End If
+                End Sub
+
+            AddHandler RTFMessageForm.Shown,
+                Sub(sender As Object, e As EventArgs)
+                    RTFMessageForm.PerformLayout()
+                    RTFMessageForm.Activate()
+                    bodyLabel.Focus()
+                End Sub
+
             Dim formWidth As Integer = Math.Max(RTFMessageForm.MinimumSize.Width, bodyLabel.Width + 40)
-            Dim formHeight As Integer = Math.Max(RTFMessageForm.MinimumSize.Height,
-                                         bodyLabel.Bottom + 20 + bottomPanel.Height)
+            Dim formHeight As Integer = Math.Max(RTFMessageForm.MinimumSize.Height, bodyLabel.Bottom + 20 + bottomPanel.Height)
             RTFMessageForm.ClientSize = New System.Drawing.Size(formWidth, formHeight)
 
-            ' Restore window position and size if RestoreWindow is True.
             If RestoreWindow Then
                 Try
                     Dim savedBounds As Rectangle = My.Settings.RTFMessageBoxBounds
-                    If savedBounds <> Rectangle.Empty AndAlso savedBounds.Width >= RTFMessageForm.MinimumSize.Width AndAlso savedBounds.Height >= RTFMessageForm.MinimumSize.Height Then
-                        ' Verify the saved position is on a visible screen.
+                    If savedBounds <> Rectangle.Empty AndAlso
+                       savedBounds.Width >= RTFMessageForm.MinimumSize.Width AndAlso
+                       savedBounds.Height >= RTFMessageForm.MinimumSize.Height Then
+
                         Dim isOnScreen As Boolean = False
                         For Each scr As Screen In Screen.AllScreens
                             If scr.WorkingArea.IntersectsWith(savedBounds) Then
@@ -1385,87 +1433,90 @@ Namespace SharedLibrary
                                 Exit For
                             End If
                         Next
+
                         If isOnScreen Then
                             RTFMessageForm.StartPosition = FormStartPosition.Manual
                             RTFMessageForm.Bounds = savedBounds
                         End If
                     End If
                 Catch
-                    ' Ignore errors reading settings; use default position.
                 End Try
 
-                ' Save position and size on form closing.
-                AddHandler RTFMessageForm.FormClosing, Sub(sender As Object, e As FormClosingEventArgs)
-                                                           Try
-                                                               ' Only save if window is in normal state (not minimized/maximized).
-                                                               If RTFMessageForm.WindowState = FormWindowState.Normal Then
-                                                                   My.Settings.RTFMessageBoxBounds = RTFMessageForm.Bounds
-                                                                   My.Settings.Save()
-                                                               End If
-                                                           Catch
-                                                               ' Ignore errors saving settings.
-                                                           End Try
-                                                       End Sub
+                AddHandler RTFMessageForm.FormClosing,
+                    Sub(sender As Object, e As FormClosingEventArgs)
+                        Try
+                            If RTFMessageForm.WindowState = FormWindowState.Normal Then
+                                My.Settings.RTFMessageBoxBounds = RTFMessageForm.Bounds
+                                My.Settings.Save()
+                            End If
+                        Catch
+                        End Try
+                    End Sub
             End If
 
-            ' Auto-close timer.
             If autoCloseSeconds.HasValue AndAlso autoCloseSeconds > 0 Then
                 Dim remainingTime As Integer = autoCloseSeconds.Value
                 countdownLabel.Text = $"(closes in {remainingTime} seconds{Defaulttext})"
 
                 Dim timer As New System.Windows.Forms.Timer()
                 timer.Interval = 1000
-                AddHandler timer.Tick, Sub(sender As Object, e As EventArgs)
-                                           remainingTime -= 1
-                                           If remainingTime > 0 Then
-                                               countdownLabel.Text = $"(closes in {remainingTime} seconds{Defaulttext})"
-                                           Else
-                                               timer.Stop()
-                                               If Not userClicked Then
-                                                   RTFMessageForm.Close()
-                                               End If
-                                           End If
-                                       End Sub
-                timer.Start()
 
+                AddHandler timer.Tick,
+                    Sub(sender As Object, e As EventArgs)
+                        remainingTime -= 1
+                        If remainingTime > 0 Then
+                            countdownLabel.Text = $"(closes in {remainingTime} seconds{Defaulttext})"
+                        Else
+                            timer.Stop()
+                            If Not userClicked Then
+                                result = 3
+                                RTFMessageForm.Close()
+                            End If
+                        End If
+                    End Sub
+
+                timer.Start()
 
                 RTFMessageForm.BringToFront()
                 RTFMessageForm.Focus()
                 RTFMessageForm.Activate()
 
                 AddHandler RTFMessageForm.Shown,
-                                        Sub(sender, e)
-                                            RTFMessageForm.TopMost = False  ' Reset first.
-                                            RTFMessageForm.TopMost = True   ' Then set again.
-                                            RTFMessageForm.Activate()
-                                            RTFMessageForm.BringToFront()
-                                        End Sub
+                    Sub(sender, e)
+                        RTFMessageForm.TopMost = False
+                        RTFMessageForm.TopMost = True
+                        RTFMessageForm.Activate()
+                        RTFMessageForm.BringToFront()
+                    End Sub
 
                 RTFMessageForm.Opacity = 1
                 RTFMessageForm.Show()
                 RTFMessageForm.BringToFront()
                 RTFMessageForm.Activate()
                 System.Windows.Forms.Application.DoEvents()
+
+                Return result
             Else
-
-
                 RTFMessageForm.BringToFront()
                 RTFMessageForm.Focus()
                 RTFMessageForm.Activate()
 
                 AddHandler RTFMessageForm.Shown,
-                                        Sub(sender, e)
-                                            RTFMessageForm.TopMost = False  ' Reset first.
-                                            RTFMessageForm.TopMost = True   ' Then set again.
-                                            RTFMessageForm.Activate()
-                                            RTFMessageForm.BringToFront()
-                                        End Sub
+                    Sub(sender, e)
+                        RTFMessageForm.TopMost = False
+                        RTFMessageForm.TopMost = True
+                        RTFMessageForm.Activate()
+                        RTFMessageForm.BringToFront()
+                    End Sub
 
                 RTFMessageForm.Opacity = 1
                 RTFMessageForm.ShowDialog()
+
+                Return result
             End If
 
-        End Sub
+        End Function
+
 
         ''' <summary>
         ''' Shows an HTML message dialog using a WinForms WebBrowser control on an STA thread.
@@ -2337,23 +2388,25 @@ Namespace SharedLibrary
         ''' <param name="TransferToPane">If True, adds a button that returns the sentinel value "Pane".</param>
         ''' <param name="parentWindowHwnd">Optional explicit parent window handle for dialog ownership.</param>
         ''' <param name="PreserveLiterals">Passed through to Markdown-to-RTF conversion.</param>
+        ''' <param name="ReturnPlainText">If True, returns plain text even when RTF editing is enabled; otherwise returns RTF when edited.</param>
         ''' <returns>
         ''' On OK buttons: returns edited text (RTF or plain) or original text (RTF or original input) as implemented.
         ''' On Cancel: returns <see cref="String.Empty"/>.
         ''' On special buttons: returns the sentinel strings "Markdown" or "Pane" as implemented.
         ''' </returns>
         Public Shared Function ShowCustomWindow(
-            introLine As String,
-            ByVal bodyText As String,
-            finalRemark As String,
-            header As String,
-            Optional NoRTF As Boolean = False,
-            Optional Getfocus As Boolean = False,
-            Optional InsertMarkdown As Boolean = False,
-            Optional TransferToPane As Boolean = False,
-            Optional parentWindowHwnd As IntPtr = Nothing,
-            Optional PreserveLiterals As Boolean = False
-        ) As String
+    introLine As String,
+    ByVal bodyText As String,
+    finalRemark As String,
+    header As String,
+    Optional NoRTF As Boolean = False,
+    Optional Getfocus As Boolean = False,
+    Optional InsertMarkdown As Boolean = False,
+    Optional TransferToPane As Boolean = False,
+    Optional parentWindowHwnd As IntPtr = Nothing,
+    Optional PreserveLiterals As Boolean = False,
+    Optional ReturnPlainText As Boolean = False
+                ) As String
 
             ' Store original body text.
             Dim OriginalText As String = bodyText
@@ -2671,18 +2724,26 @@ Namespace SharedLibrary
             Dim returnValue As String = String.Empty
 
             AddHandler btnEdited.Click,
-        Sub()
-            returnValue = If(NoRTF, bodyTextBox.Text, bodyTextBox.Rtf)
-            styledForm.DialogResult = DialogResult.OK
-            styledForm.Close()
-        End Sub
+                    Sub()
+                        If ReturnPlainText Then
+                            returnValue = bodyTextBox.Text
+                        Else
+                            returnValue = If(NoRTF, bodyTextBox.Text, bodyTextBox.Rtf)
+                        End If
+                        styledForm.DialogResult = DialogResult.OK
+                        styledForm.Close()
+                    End Sub
 
             AddHandler btnOriginal.Click,
-        Sub()
-            returnValue = If(NoRTF, OriginalText, If(rtf, bodyText))
-            styledForm.DialogResult = DialogResult.OK
-            styledForm.Close()
-        End Sub
+                    Sub()
+                        If ReturnPlainText Then
+                            returnValue = OriginalText
+                        Else
+                            returnValue = If(NoRTF, OriginalText, If(rtf, bodyText))
+                        End If
+                        styledForm.DialogResult = DialogResult.OK
+                        styledForm.Close()
+                    End Sub
 
             If InsertMarkdown Then
                 AddHandler btnMark.Click,

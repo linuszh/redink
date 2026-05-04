@@ -218,17 +218,17 @@ Namespace SharedLibrary
 
             ' Create entry for the ephemeral catalog indexer
             Dim entry As New KnowledgeStoreManager.KnowledgeEntry() With {
-                .FilePath = expandedPath,
-                .Title = title,
-                .Summary = summary,
-                .Keywords = keywords,
-                .ContentSnapshot = If(content.Length > MaxContentChars,
-                                      content.Substring(0, MaxContentChars),
-                                      content),
-                .IndexedDate = DateTime.Now,
-                .Tags = Nothing,
-                .IsFromCentralIndex = False
-            }
+                    .FilePath = KnowledgeStoreManifest.NormalizeStoredPathForStore(kbRootPath, expandedPath),
+                    .Title = title,
+                    .Summary = summary,
+                    .Keywords = keywords,
+                    .ContentSnapshot = If(content.Length > MaxContentChars,
+                                          content.Substring(0, MaxContentChars),
+                                          content),
+                    .IndexedDate = DateTime.Now,
+                    .Tags = Nothing,
+                    .IsFromCentralIndex = False
+                }
 
             Return entry
         End Function

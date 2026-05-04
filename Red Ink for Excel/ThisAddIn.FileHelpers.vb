@@ -64,17 +64,24 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Retrieves textual content from a supported file, returning extended result with PDF completeness info.
+    ''' Supports optional worksheet selection for Excel workbooks.
     ''' </summary>
     ''' <param name="optionalFilePath">File path to load; environment variables are expanded when provided.</param>
     ''' <param name="Silent">Suppresses UI error/notification messages when set to True.</param>
     ''' <param name="DoOCR">Enables OCR while reading PDF files when True.</param>
     ''' <param name="AskUser">Indicates whether PDF processing may prompt the user.</param>
-    ''' <returns>A FileReadResult containing the file content and whether a PDF may be incomplete.</returns>
-    ''' 
+    ''' <param name="AskWorksheetSelection">
+    ''' For Excel workbooks, when <c>True</c> and <paramref name="Silent"/> is <c>False</c>,
+    ''' allows the user to choose one worksheet or all worksheets.
+    ''' </param>
+    ''' <returns>
+    ''' A <see cref="FileReadResult"/> containing the extracted content and whether a PDF may be incomplete.
+    ''' </returns>
     Public Async Function GetFileContentEx(Optional ByVal optionalFilePath As String = Nothing,
                                             Optional Silent As Boolean = False,
                                             Optional DoOCR As Boolean = False,
-                                            Optional AskUser As Boolean = True) As Task(Of FileReadResult)
+                                            Optional AskUser As Boolean = True,
+                                            Optional AskWorksheetSelection As Boolean = False) As Task(Of FileReadResult)
         Dim result As New FileReadResult()
         Dim filePath As String = ""
 
@@ -121,7 +128,12 @@ Partial Public Class ThisAddIn
                     Case ".docx"
                         FromFile = ReadDocxSandboxed(filePath)
                     Case ".xlsx"
-                        FromFile = ReadXlsxSandboxed(filePath)
+                        FromFile = ReadXlsxSandboxed(filePath, Silent, AskWorksheetSelection)
+                        If String.Equals(FromFile, XlsxSelectionCancelledMarker, StringComparison.Ordinal) Then
+                            result.UserCancelled = True
+                            result.Content = ""
+                            Return result
+                        End If
                     Case ".pptx"
                         FromFile = ReadPptxSandboxed(filePath)
                     Case ".pdf"
@@ -172,12 +184,14 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Retrieves textual content from a supported file (backward compatible wrapper).
+    ''' Supports optional worksheet selection for Excel workbooks.
     ''' </summary>
     Public Async Function GetFileContent(Optional ByVal optionalFilePath As String = Nothing,
-                                          Optional Silent As Boolean = False,
-                                          Optional DoOCR As Boolean = False,
-                                          Optional AskUser As Boolean = True) As Task(Of String)
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser)
+                                         Optional Silent As Boolean = False,
+                                         Optional DoOCR As Boolean = False,
+                                         Optional AskUser As Boolean = True,
+                                         Optional AskWorksheetSelection As Boolean = False) As Task(Of String)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection)
         Return result.Content
     End Function
 

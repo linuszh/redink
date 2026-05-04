@@ -282,13 +282,45 @@ Namespace SharedLibrary
         Private Const SB_XlsxRelNs As String = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
         ''' <summary>
+        ''' Represents a readable worksheet discovered in an .xlsx workbook.
+        ''' </summary>
+        Private Structure XlsxSheetEntry
+            Public Name As String
+            Public SheetXmlPath As String
+        End Structure
+
+        ''' <summary>
+        ''' Represents a worksheet declared in workbook.xml, whether or not its XML part
+        ''' could be resolved immediately.
+        ''' </summary>
+        Private Structure XlsxDeclaredSheetEntry
+            Public Name As String
+            Public SheetXmlPath As String
+        End Structure
+
+        Public Const XlsxSelectionCancelledMarker As String = "__RI_XLSX_SELECTION_CANCELLED__"
+
+        ''' <summary>
         ''' Extracts text from an .xlsx file without COM interop.
         ''' Output format matches <c>ExtractExcelText</c>: <c>{addr}\tFORMULA:={formula}\tVALUE: {value}</c> per cell,
         ''' with <c>=== Sheet: {name} ===</c> headers.
         ''' </summary>
         ''' <param name="xlsxPath">Absolute path to the .xlsx file.</param>
-        ''' <returns>Extracted text representation of workbook data, or an error string on failure.</returns>
-        Public Shared Function ReadXlsxSandboxed(xlsxPath As String) As String
+        ''' <param name="silent">
+        ''' When <c>True</c>, suppresses worksheet-selection UI and always loads all readable worksheets.
+        ''' </param>
+        ''' <param name="askWorksheetSelection">
+        ''' When <c>True</c> and <paramref name="silent"/> is <c>False</c>, prompts the user via
+        ''' <see cref="SelectValue(IEnumerable(Of SelectionItem), Integer, String, String)"/> to choose
+        ''' either all readable worksheets or one specific worksheet when the workbook contains multiple sheets.
+        ''' </param>
+        ''' <returns>
+        ''' Extracted text representation of the selected worksheet set, or an error string on failure.
+        ''' Returns an empty string when worksheet selection is canceled.
+        ''' </returns>
+        Public Shared Function ReadXlsxSandboxed(xlsxPath As String,
+                                                 Optional silent As Boolean = True,
+                                                 Optional askWorksheetSelection As Boolean = False) As String
             If String.IsNullOrWhiteSpace(xlsxPath) OrElse Not File.Exists(xlsxPath) Then
                 Return "Error: File not found."
             End If
@@ -351,7 +383,8 @@ Namespace SharedLibrary
                     End If
                 End If
 
-                Dim sb As New StringBuilder(4096)
+                Dim declaredSheets As New List(Of XlsxDeclaredSheetEntry)()
+                Dim availableSheets As New List(Of XlsxSheetEntry)()
                 Dim sheetIdx As Integer = 0
 
                 For Each sheetNode As XmlNode In sheetNodes
@@ -360,12 +393,73 @@ Namespace SharedLibrary
                     Dim rId = If(sheetNode.Attributes("r:id")?.Value, "")
 
                     Dim sheetXmlPath = ResolveSheetPath(tempDir, rId, ridMap, sheetIdx)
-                    If sheetXmlPath Is Nothing OrElse Not File.Exists(sheetXmlPath) Then Continue For
 
-                    sb.AppendLine("=== Sheet: " & sheetName & " ===")
+                    declaredSheets.Add(New XlsxDeclaredSheetEntry With {
+                        .Name = sheetName,
+                        .SheetXmlPath = sheetXmlPath
+                    })
+
+                    If Not String.IsNullOrWhiteSpace(sheetXmlPath) AndAlso File.Exists(sheetXmlPath) Then
+                        availableSheets.Add(New XlsxSheetEntry With {
+                            .Name = sheetName,
+                            .SheetXmlPath = sheetXmlPath
+                        })
+                    End If
+                Next
+
+                If availableSheets.Count = 0 Then
+                    Return "Error: No readable sheets found in workbook."
+                End If
+
+                Dim sheetsToRead As New List(Of XlsxSheetEntry)()
+                For Each s In availableSheets
+                    sheetsToRead.Add(s)
+                Next
+
+                If askWorksheetSelection AndAlso Not silent AndAlso declaredSheets.Count > 1 Then
+                    Dim items As New List(Of SelectionItem) From {
+                        New SelectionItem("All worksheets", -1)
+                    }
+
+                    For i As Integer = 0 To declaredSheets.Count - 1
+                        items.Add(New SelectionItem(
+                            declaredSheets(i).Name & " (worksheet " & (i + 1).ToString(Globalization.CultureInfo.InvariantCulture) & ")",
+                            i + 1))
+                    Next
+
+                    Dim selectedValue As Integer = SelectValue(
+                        items,
+                        -1,
+                        "This workbook contains multiple worksheets. Load all worksheets or only one worksheet?",
+                        AN & " - Select Worksheet")
+
+                    If selectedValue = 0 Then
+                        Return XlsxSelectionCancelledMarker
+                    End If
+
+                    If selectedValue > 0 AndAlso selectedValue <= declaredSheets.Count Then
+                        Dim selectedSheet = declaredSheets(selectedValue - 1)
+
+                        If String.IsNullOrWhiteSpace(selectedSheet.SheetXmlPath) OrElse
+                           Not File.Exists(selectedSheet.SheetXmlPath) Then
+                            Return "Error: The selected worksheet could not be read."
+                        End If
+
+                        sheetsToRead.Clear()
+                        sheetsToRead.Add(New XlsxSheetEntry With {
+                            .Name = selectedSheet.Name,
+                            .SheetXmlPath = selectedSheet.SheetXmlPath
+                        })
+                    End If
+                End If
+
+                Dim sb As New StringBuilder(4096)
+
+                For Each sheet In sheetsToRead
+                    sb.AppendLine("=== Sheet: " & sheet.Name & " ===")
 
                     Dim sheetDoc As New XmlDocument()
-                    sheetDoc.Load(sheetXmlPath)
+                    sheetDoc.Load(sheet.SheetXmlPath)
                     Dim sheetNs As New XmlNamespaceManager(sheetDoc.NameTable)
                     sheetNs.AddNamespace("x", SB_XlsxNs)
 

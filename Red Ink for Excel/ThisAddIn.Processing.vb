@@ -118,6 +118,14 @@ Partial Public Class ThisAddIn
 
         undoStates.Clear()
 
+        Dim shouldShowCellDiffPreview As Boolean = AskWhetherToShowCellDiffPreview(selectedRange, DoRange)
+        Dim totalPreviewCells As Integer = 0
+        Dim previewCellIndex As Integer = 0
+
+        If shouldShowCellDiffPreview AndAlso selectedRange IsNot Nothing Then
+            totalPreviewCells = System.Convert.ToInt32(selectedRange.Cells.Count)
+        End If
+
         If Not DoRange Then
 
             Dim splash As New SplashScreen("Processing cells... press 'Esc' to abort")
@@ -127,6 +135,8 @@ Partial Public Class ThisAddIn
             'Application.ScreenUpdating = False ' Prevent UI updates during processing
             Try
                 For Each cell As Excel.Range In selectedRange.Cells
+
+                    previewCellIndex += 1
 
                     System.Windows.Forms.Application.DoEvents()
 
@@ -142,7 +152,7 @@ Partial Public Class ThisAddIn
                                 SelectedText = CStr(cell.Formula)
 
                                 If DoShorten Then
-                                    Dim Textlength As Integer = getnumberofwords(SelectedText)
+                                    Dim Textlength As Integer = GetNumberOfWords(SelectedText)
                                     ShortenLength = Textlength * (100 - ShortenPercentValue) / 100
                                     SysCommand = InterpolateAtRuntime(SysCommand)
                                 End If
@@ -157,6 +167,29 @@ Partial Public Class ThisAddIn
                                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
                                 End If
                                 If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                                    If shouldShowCellDiffPreview AndAlso Not String.Equals(SelectedText, LLMResult, StringComparison.Ordinal) Then
+                                        splash.Hide()
+
+                                        Dim previewResult As Integer =
+                                            ShowCellDiffPreview(
+                                                cell,
+                                                SelectedText,
+                                                LLMResult,
+                                                "Formula",
+                                                previewCellIndex,
+                                                totalPreviewCells)
+
+                                        splash.Show()
+                                        splash.Refresh()
+
+                                        If previewResult = 2 Then
+                                            Continue For
+                                        ElseIf previewResult <> 1 Then
+                                            Exit For
+                                        End If
+                                    End If
+
                                     Dim state As New CellState With {
                                                                     .WorksheetName = cell.Worksheet.Name,
                                                                     .CellAddress = cell.Address,
@@ -215,6 +248,29 @@ Partial Public Class ThisAddIn
                                 LLMResult = Trim(LLMResult).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr)
 
                                 If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                                    If shouldShowCellDiffPreview AndAlso Not String.Equals(SelectedText, LLMResult, StringComparison.Ordinal) Then
+                                        splash.Hide()
+
+                                        Dim previewResult As Integer =
+                                            ShowCellDiffPreview(
+                                                cell,
+                                                SelectedText,
+                                                LLMResult,
+                                                "Value",
+                                                previewCellIndex,
+                                                totalPreviewCells)
+
+                                        splash.Show()
+                                        splash.Refresh()
+
+                                        If previewResult = 2 Then
+                                            Continue For
+                                        ElseIf previewResult <> 1 Then
+                                            Exit For
+                                        End If
+                                    End If
+
                                     Dim state As New CellState With {
                                                                     .WorksheetName = cell.Worksheet.Name,
                                                                     .CellAddress = cell.Address,
@@ -293,13 +349,20 @@ Partial Public Class ThisAddIn
                             SP_MergePrompt_Cached = ""
                             ShowPaneAsync("The LLM has provided the following result (you can edit it):", LLMResult, $"You can let {AN} insert the square brackets into your worksheet, where possible", AN, False, True, True)
                         Else
-                            Dim FinalText = ShowCustomWindow("The LLM has provided the following result (you can edit it):", LLMResult, $"Shall {AN} insert the square brackets into your worksheet, where possible?", AN, False, False, False, True, Nothing, True)
+                            Dim FinalText = ShowCustomWindow("The LLM has provided the following result (you can edit it):", LLMResult, $"Shall {AN} insert the square brackets into your worksheet, where possible?", AN, False, False, False, True, Nothing, True, ReturnPlainText:=True)
 
                             If FinalText = "Pane" Then
                                 SP_MergePrompt_Cached = ""
                                 ShowPaneAsync("The LLM has provided the following result (you can edit it):", LLMResult, $"You can let {AN} insert the square brackets into your worksheet, where possible", AN, False, True, True)
                             ElseIf Not String.IsNullOrWhiteSpace(FinalText) Then
-                                instructions = ParseLLMResponse(FinalText)
+                                Dim InstructionsFinaltext As String = FinalText
+                                If InstructionsFinaltext.TrimStart().StartsWith("{\rtf", StringComparison.OrdinalIgnoreCase) Then
+                                    Using rtb As New System.Windows.Forms.RichTextBox()
+                                        rtb.Rtf = InstructionsFinaltext
+                                        InstructionsFinaltext = rtb.Text
+                                    End Using
+                                End If
+                                instructions = ParseLLMResponse(InstructionsFinaltext)
                                 ApplyLLMInstructions(instructions, DoBubbles)
                                 PutInClipboard(FinalText)
                                 ShowCustomMessageBox("Implementation of the instructions completed (to the extent possible). They are also in the clipboard.")
@@ -1070,6 +1133,71 @@ Partial Public Class ThisAddIn
         End Try
 
         Return sb.ToString()
+    End Function
+
+    Private Function ShouldPreviewCellDiff(selectedRange As Excel.Range, doRange As Boolean) As Boolean
+        If doRange OrElse selectedRange Is Nothing Then Return False
+
+        Try
+            Dim selectedCellCount As Integer = System.Convert.ToInt32(selectedRange.Cells.Count)
+            Return selectedCellCount >= 1 AndAlso selectedCellCount <= 10
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ShowCellDiffPreview(
+        cell As Excel.Range,
+        originalText As String,
+        revisedText As String,
+        cellKind As String,
+        itemIndex As Integer,
+        itemCount As Integer
+    ) As Integer
+
+        Dim diffMarkup As String = BuildInlineDiffMarkup(originalText, revisedText)
+
+        If String.IsNullOrWhiteSpace(diffMarkup) Then
+            Return 1
+        End If
+
+        Dim previewBody As String =
+            $"Worksheet: {cell.Worksheet.Name}" & vbCrLf &
+            $"Cell: {cell.Address(False, False)}" & vbCrLf &
+            $"Item: {itemIndex} of {itemCount}" & vbCrLf &
+            $"Type: {cellKind}" & vbCrLf & vbCrLf &
+            diffMarkup
+
+        Dim rtfContent As String = ConvertMarkupToRTF(previewBody)
+
+        Return ShowRTFCustomMessageBox(
+            rtfContent,
+            header:=$"{AN} - Review Changes",
+            RestoreWindow:=True,
+            okButtonText:="Accept",
+            secondaryButtonText:="Skip cell")
+    End Function
+
+    Private Function AskWhetherToShowCellDiffPreview(selectedRange As Excel.Range, doRange As Boolean) As Boolean
+        If doRange OrElse selectedRange Is Nothing Then Return False
+
+        Dim selectedCellCount As Integer
+
+        Try
+            selectedCellCount = System.Convert.ToInt32(selectedRange.Cells.Count)
+        Catch
+            Return False
+        End Try
+
+        Dim answer As Integer =
+            ShowCustomYesNoBox(
+                $"You selected {selectedCellCount} cell(s). Do you want {AN} to show a deltabefore each changed cell is applied?" & vbCrLf & vbCrLf &
+                "If you choose Yes, a review window will appear for each changed cell, one after another.",
+                "Yes, show delta",
+                "No, apply directly",
+                $"{AN} - Cell Delta Preview")
+
+        Return answer = 1
     End Function
 
 

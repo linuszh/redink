@@ -1251,20 +1251,22 @@ Partial Public Class ThisAddIn
 
                 ' Insert comment on pre-resolved range
                 Try
-                    If doMarkdownBubbles Then
-                        Dim cmt As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(Range:=anchorRange, Text:="")
-                        Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                        cRng.Text = ""
-                        Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
-                        Try
-                            win.View.ShowRevisionsAndComments = True
-                            InsertMarkdownToComment(cRng, $"{AN5}: " & commentBody)
-                        Finally
-                            win.View.ShowRevisionsAndComments = prevShow
-                        End Try
-                    Else
-                        doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}: " & commentBody)
-                    End If
+                    Using BeginMarkupAuthorScope(doc.Application)
+                        If doMarkdownBubbles Then
+                            Dim cmt As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(Range:=anchorRange, Text:="")
+                            Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                            cRng.Text = ""
+                            Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                            Try
+                                win.View.ShowRevisionsAndComments = True
+                                InsertMarkdownToComment(cRng, $"{AN5}: " & commentBody)
+                            Finally
+                                win.View.ShowRevisionsAndComments = prevShow
+                            End Try
+                        Else
+                            doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}: " & commentBody)
+                        End If
+                    End Using
                 Catch
                     AddNoticeBubbleAt(doc, 0, commentBody, " Markup Review")
                 End Try

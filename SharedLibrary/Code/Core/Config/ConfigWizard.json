@@ -83,13 +83,14 @@
         {
           "label": "OpenAI",
           "defaults": {
+            "APIKeyEncrypted": "False",
             "APIKeyPrefix": "sk-proj-",
             "Endpoint": "https://api.openai.com/v1/responses",
             "HeaderA": "Authorization",
             "HeaderB": "Bearer {apikey}",
             "Response": "text (rkmode_first)",
-            "Model": "gpt-5.2",
-            "Timeout": "200000",
+            "Model": "gpt-5.4",
+            "Timeout": "300000",
             "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
             "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
           }
@@ -97,32 +98,53 @@
         {
           "label": "Microsoft Azure OpenAI Services",
           "defaults": {
-            "Endpoint": "https://[[Your Azure Endpoint]]/openai/deployments/[your deployment-id]/chat/completions?api-version=2024-06-01",
-            "HeaderA": "api-key",
-            "HeaderB": "{apikey}",
-            "Response": "content (rkmode_first)",
-            "Model": "gpt-5.2",
-            "Temperature": "1.0",
-            "Timeout": "200000",
-            "APICall": "{\"messages\": [{\"role\": \"system\",\"content\": \"{promptsystem}\"},{\"role\": \"user\", \"content\": \"{promptuser}\"}],\"temperature\": {temperature}}"
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
+            "Endpoint": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
+            "HeaderA": "Authorization",
+            "HeaderB": "Bearer {apikey}",
+            "Response": "text (rkmode_first)",
+            "Model": "gpt-5.4",
+            "Timeout": "300000",
+            "APICall": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
+            "APICall_Object": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
           }
         },
         {
           "label": "Google Gemini",
           "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
             "Endpoint": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
             "HeaderA": "X-Goog-Api-Key",
             "HeaderB": "{apikey}",
             "Response": "text",
             "Model": "gemini-2.5-pro",
             "Temperature": "0.2",
-            "Timeout": "200000",
+            "Timeout": "300000",
             "APICall": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+          }
+        },
+        {
+          "label": "Anthropic",
+          "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "[[Your Anthropic API Key Prefix]]",
+            "Endpoint": "https://api.anthropic.com/v1/messages",
+            "HeaderA": "x-api-key¦anthropic-version",
+            "HeaderB": "{apikey}¦2023-06-01",
+            "Response": "text (rkmode_first)",
+            "Model": "claude-sonnet-4-6",
+            "Temperature": "1.0",
+            "Timeout": "200000",
+            "APICall": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
+            "APICall_Object": ""
           }
         },
         {
           "label": "Google Vertex (OAuth2)",
           "defaults": {
+            "APIKeyEncrypted": "False",
             "APIKeyPrefix": "",
             "Endpoint": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
             "HeaderA": "Authorization",
@@ -130,7 +152,7 @@
             "Response": "text",
             "Model": "gemini-2.5-pro",
             "Temperature": "0.2",
-            "Timeout": "200000",
+            "Timeout": "300000",
             "OAuth2": "True",
             "OAuth2Scopes": "https://www.googleapis.com/auth/cloud-platform",
             "OAuth2Endpoint": "https://oauth2.googleapis.com/token",
@@ -149,6 +171,8 @@
         {
           "label": "MTF",
           "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
             "Endpoint": "https://api.ai.mtf.cloud/v1/chat/completions",
             "HeaderA": "Authorization",
             "HeaderB": "Bearer {apikey}",
@@ -156,12 +180,14 @@
             "Model": "openai-gpt-oss-20b",
             "Temperature": "0.2",
             "Timeout": "200000",
-            "APICall": "{\"model\":   \"{model}\",  \"messages\": [{\"role\": \"system\",\"content\": \"{promptsystem}\"},{\"role\": \"user\",\"content\": \"{promptuser}\"}],\"temperature\": {temperature}}"
+            "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
           }
         },
         {
           "label": "SafeSwissCloud",
           "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
             "Endpoint": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
             "HeaderA": "Authorization",
             "HeaderB": "Bearer {apikey}",
@@ -169,12 +195,61 @@
             "Model": "gpt-oss-120b",
             "Temperature": "0.2",
             "Timeout": "200000",
-            "APICall": "{\"model\":   \"{model}\",  \"messages\": [{\"role\": \"system\",\"content\": \"{promptsystem}\"},{\"role\": \"user\",\"content\": \"{promptuser}\"}],\"temperature\": {temperature}}"
+            "APICall": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+          }
+        },
+        {
+          "label": "llama.cpp (local)",
+          "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
+            "APIKey": "dummy",
+            "Endpoint": "http://localhost:8080/v1/chat/completions",
+            "Response": "content",
+            "APICall": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
+            "Timeout": "200000",
+            "Temperature": "0.2",
+            "Model": "AnyModel"
+          }
+        },
+        {
+          "label": "Ollama (local)",
+          "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
+            "APIKey": "dummy",
+            "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
+            "HeaderA": "Authorization",
+            "HeaderB": "Bearer {apikey}",
+            "Response": "content",
+            "APICall": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
+            "Timeout": "200000",
+            "Temperature": "0.2",
+            "Model": "[[Your Model]]"
+          }
+        },
+        {
+          "label": "OpenWebUI (local)",
+          "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": "",
+            "APIKey": "dummy",
+            "Endpoint": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
+            "HeaderA": "Authorization",
+            "HeaderB": "Bearer {apikey}",
+            "Response": "content",
+            "APICall": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
+            "Timeout": "200000",
+            "Temperature": "0.2",
+            "Model": "[[Your Model]]"
           }
         },
         {
           "label": "Custom / Other",
-          "defaults": {}
+          "defaults": {
+            "APIKeyEncrypted": "False",
+            "APIKeyPrefix": ""
+          }
         }
       ],
       "fields": [
@@ -204,7 +279,7 @@
           "label": "Model Name",
           "type": "string",
           "validation": "NotEmpty",
-          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.2 or gemini-2.5-pro. [Model]"
+          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model]"
         },
         {
           "key": "Endpoint",
@@ -217,13 +292,13 @@
           "key": "HeaderA",
           "label": "Header Name",
           "type": "string",
-          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. [HeaderA]"
+          "description": "Enter the HTTP header name used for authentication. Leave it empty only if the provider does not require a custom auth header. Example: Authorization. If you want to use two headers, separate their values with '¦'. [HeaderA]"
         },
         {
           "key": "HeaderB",
           "label": "Header Value",
           "type": "string",
-          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. [HeaderB]"
+          "description": "Enter the HTTP header value template. Use {apikey} where Red Ink should insert the value from APIKey. Example: Bearer {apikey}. If you want to use two headers, separate their values with '¦'. [HeaderB]"
         },
         {
           "key": "Response",
@@ -249,7 +324,7 @@
           "type": "string",
           "validation": "0.0-2.0",
           "default": "1.0",
-          "description": "Set the model temperature. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature]"
+          "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature]"
         },
         {
           "key": "Timeout",
@@ -326,6 +401,180 @@
       "title": "Secondary Model",
       "description": "Optional secondary model used for Freestyle (2nd) or model switching. Configure it only if you want a second permanent model profile.",
       "keySuffix": "_2",
+      "branchField": "_provider_2",
+      "branches": [
+        {
+          "label": "OpenAI",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "sk-proj-",
+            "Endpoint_2": "https://api.openai.com/v1/responses",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "text (rkmode_first)",
+            "Model_2": "gpt-5.4",
+            "Timeout_2": "300000",
+            "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}],\"reasoning\": {\"effort\": \"low\"}}",
+            "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+          }
+        },
+        {
+          "label": "Microsoft Azure OpenAI Services",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "Endpoint_2": "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "text (rkmode_first)",
+            "Model_2": "gpt-5.4",
+            "Timeout_2": "300000",
+            "APICall_2": "{\"model\": \"{model}\", \"input\": [{\"role\": \"developer\", \"content\": [{\"type\": \"input_text\",\"text\": \"{promptsystem}\"}]},{\"role\": \"user\",\"content\": [{\"type\": \"input_text\",\"text\": \"{promptuser}\"}{objectcall}]}]}",
+            "APICall_Object_2": "[application/pdf],{\"type\": \"input_file\",\"filename\": \"userfile.pdf\", \"file_data\": \"data:{mimetype};base64,{encodeddata}\"}¦[image/png,image/jpeg,image/webp, image/gif],{\"type\": \"input_image\",\"image_url\": \"data:{mimetype};base64,{encodeddata}\"}"
+          }
+        },
+        {
+          "label": "Google Gemini",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "Endpoint_2": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}",
+            "HeaderA_2": "X-Goog-Api-Key",
+            "HeaderB_2": "{apikey}",
+            "Response_2": "text",
+            "Model_2": "gemini-2.5-pro",
+            "Temperature_2": "0.2",
+            "Timeout_2": "300000",
+            "APICall_2": "{\"contents\": [{\"role\": \"user\",\"parts\": [{ \"text\": \"{promptsystem} {promptuser}\" }]}], \"generationConfig\": {\"temperature\": {temperature}}}"
+          }
+        },
+        {
+          "label": "Anthropic",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "[[Your Anthropic API Key Prefix]]",
+            "Endpoint_2": "https://api.anthropic.com/v1/messages",
+            "HeaderA_2": "x-api-key¦anthropic-version",
+            "HeaderB_2": "{apikey}¦2023-06-01",
+            "Response_2": "text (rkmode_first)",
+            "Model_2": "claude-sonnet-4-6",
+            "Temperature_2": "1.0",
+            "Timeout_2": "200000",
+            "APICall_2": "{\"model\": \"{model}\",\"max_tokens\": 64000, \"messages\": [{\"role\": \"user\", \"content\": \"{promptsystem} {promptuser}\"}]}",
+            "APICall_Object_2": ""
+          }
+        },
+        {
+          "label": "Google Vertex (OAuth2)",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "Endpoint_2": "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "text",
+            "Model_2": "gemini-2.5-pro",
+            "Temperature_2": "0.2",
+            "Timeout_2": "300000",
+            "OAuth2_2": "True",
+            "OAuth2Scopes_2": "https://www.googleapis.com/auth/cloud-platform",
+            "OAuth2Endpoint_2": "https://oauth2.googleapis.com/token",
+            "OAuth2ATExpiry_2": "3600",
+            "APICall_2": "{\"contents\": [{\"role\": \"user\", \"parts\":[{\"text\": \"{promptsystem} {promptuser}\"}{objectcall}]}], \"generationConfig\": {\"temperature\": {temperature},  \"thinking_config\": {\"thinking_budget\": 128}}}",
+            "APICall_Object_2": ", {\"inlineData\": {\"mimeType\": \"{mimetype}\",\"data\": \"{encodeddata}\"}}"
+          },
+          "showExtra": [
+            "OAuth2_2",
+            "OAuth2ClientMail_2",
+            "OAuth2Scopes_2",
+            "OAuth2Endpoint_2",
+            "OAuth2ATExpiry_2"
+          ]
+        },
+        {
+          "label": "MTF",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "Endpoint_2": "https://api.ai.mtf.cloud/v1/chat/completions",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "content",
+            "Model_2": "openai-gpt-oss-20b",
+            "Temperature_2": "0.2",
+            "Timeout_2": "200000",
+            "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+          }
+        },
+        {
+          "label": "SafeSwissCloud",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "Endpoint_2": "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "content",
+            "Model_2": "gpt-oss-120b",
+            "Temperature_2": "0.2",
+            "Timeout_2": "200000",
+            "APICall_2": "{\"model\":\"{model}\",\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"}],\"temperature\":{temperature}}"
+          }
+        },
+        {
+          "label": "llama.cpp (local)",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "APIKey_2": "dummy",
+            "Endpoint_2": "http://localhost:8080/v1/chat/completions",
+            "Response_2": "content",
+            "APICall_2": "{\"messages\":[{\"role\":\"system\",\"content\":\"{promptsystem}\"},{\"role\":\"user\",\"content\":\"{promptuser}\"} ], \"temperature\": {temperature}}",
+            "Timeout_2": "200000",
+            "Temperature_2": "0.2",
+            "Model_2": "AnyModel"
+          }
+        },
+        {
+          "label": "Ollama (local)",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "APIKey_2": "dummy",
+            "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "content",
+            "APICall_2": "{\"model\":\"{model}\",\"messages\":[   {\"role\":\"system\",\"content\":\"{promptsystem}\"},   {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}} ], \"stream\": false, \"think\": false, \"options\":{\"temperature\": {temperature}}}",
+            "Timeout_2": "200000",
+            "Temperature_2": "0.2",
+            "Model_2": "[[Your Model]]"
+          }
+        },
+        {
+          "label": "OpenWebUI (local)",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": "",
+            "APIKey_2": "dummy",
+            "Endpoint_2": "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions",
+            "HeaderA_2": "Authorization",
+            "HeaderB_2": "Bearer {apikey}",
+            "Response_2": "content",
+            "APICall_2": "{\"model\":\"{model}\",\"messages\": [{\"role\":\"system\",\"content\":\"{promptsystem}\"}, {\"role\":\"user\",\"content\":\"{promptuser}\"{objectcall}}],\"stream\":false,\"temperature\":{temperature}}",
+            "Timeout_2": "200000",
+            "Temperature_2": "0.2",
+            "Model_2": "[[Your Model]]"
+          }
+        },
+        {
+          "label": "Custom / Other",
+          "defaults": {
+            "APIKeyEncrypted_2": "False",
+            "APIKeyPrefix_2": ""
+          }
+        }
+      ],
       "fields": [
         {
           "key": "SecondAPI",
@@ -362,7 +611,7 @@
           "label": "Model Name (2nd)",
           "type": "string",
           "condition": "SecondAPI == True",
-          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.2 or gemini-2.5-pro. [Model_2]"
+          "description": "Enter the provider's exact model identifier. Use the name required by the endpoint and API call template. Example: gpt-5.4 or gemini-2.5-pro. [Model_2]"
         },
         {
           "key": "Endpoint_2",
@@ -413,7 +662,7 @@
           "type": "string",
           "validation": "0.0-2.0",
           "condition": "SecondAPI == True",
-          "description": "Set the model temperature. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature_2]"
+          "description": "Set the model temperature, if supported. Lower values are better for stable tasks such as translation or correction, while higher values allow more creativity. Example: 0.2 for translation or 0.8 for freer drafting. [Temperature_2]"
         },
         {
           "key": "Timeout_2",
@@ -1316,6 +1565,36 @@
           "type": "string",
           "default": "",
           "description": "Comma-separated Windows client names that are allowed to manage or write central configuration files (use ''Client Name'' button below to identify your Windows client name). Leave empty to allow all clients. Example: DSKTOP01,ADMDSKTP01. [CentralConfigClients]"
+        }
+      ]
+    },
+    {
+      "id": "m365",
+      "title": "Microsoft 365 Integration",
+      "description": "Settings for the optional Microsoft 365 integration that lets the LLM search and retrieve the user's own emails, OneDrive/SharePoint files, Teams chats, calendar events, OneNote pages and contacts via Microsoft Graph. Auth is interactive (MSAL) on the user's PC; the resulting token is cached cross-process under %APPDATA%\\RedInk. Leave Client ID empty to disable the integration entirely.",
+      "fields": [
+        {
+          "key": "M365ClientId",
+          "label": "M365 Application (Client) ID",
+          "type": "string",
+          "default": "",
+          "description": "The Azure AD application (client) ID of the Red Ink app registration in your tenant (or a multi-tenant registration). This is the GUID shown on the App Registration overview page in Microsoft Entra ID / Azure AD. Leave empty to disable the entire M365 integration (search, mail/file/event/chat/OneNote retrieval, M365 LLM tools). Example: 11111111-2222-3333-4444-555555555555. [M365ClientId]"
+        },
+        {
+          "key": "M365TenantId",
+          "label": "M365 Tenant ID",
+          "type": "string",
+          "default": "common",
+          "description": "Azure AD tenant the app is registered in. Use the tenant GUID for single-tenant apps, your verified domain (e.g. contoso.onmicrosoft.com), 'organizations' to allow any work/school account, or 'common' to allow both work/school and personal Microsoft accounts. Defaults to 'common' when empty. Example: contoso.onmicrosoft.com. [M365TenantId]",
+          "condition": "M365ClientId != \"\""
+        },
+        {
+          "key": "M365Scopes",
+          "label": "M365 Graph Scopes",
+          "type": "string",
+          "default": "openid profile offline_access User.Read Mail.Read Files.Read Files.Read.All Sites.Read.All Calendars.Read Chat.Read ChannelMessage.Read.All Notes.Read.All People.Read Contacts.Read",
+          "description": "Space-separated list of Microsoft Graph delegated permission scopes requested at sign-in. Must match the scopes consented to in the Azure AD app registration; users will see a consent prompt if any are new. Keep openid/profile/offline_access for sign-in and silent token refresh. The default covers full read-only access across mail, files (personal + shared + SharePoint), calendar, Teams chats and channel messages, OneNote, people and contacts — everything the M365 LLM tools can call. ADMIN CONSENT: Files.Read.All, Sites.Read.All, ChannelMessage.Read.All, Notes.Read.All, People.Read and Contacts.Read are admin-consent scopes; a tenant admin must grant consent once before regular users can sign in. Reduce the list to a stricter subset (e.g. ''openid profile offline_access User.Read Mail.Read Calendars.Read'') to limit the surface, at the cost of disabling the corresponding tools. Example: openid profile offline_access User.Read Mail.Read Files.Read.All Sites.Read.All Calendars.Read. [M365Scopes]",
+          "condition": "M365ClientId != \"\""
         }
       ]
     },

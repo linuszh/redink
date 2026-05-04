@@ -398,38 +398,40 @@ Partial Public Class ThisAddIn
         End If
 
         Try
-            If INI_MarkdownBubbles Then
-                ' Markdown-enabled bubble (same pattern as MarkupReview lines 1253-1263)
-                Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
-                Try
-                    cmt = doc.Comments.Add(Range:=anchorRange, Text:="")
-                Catch exAdd As System.Runtime.InteropServices.COMException
-                    cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-                Catch exAdd2 As System.Exception
-                    cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-                End Try
+            Using BeginMarkupAuthorScope(app)
+                If INI_MarkdownBubbles Then
+                    ' Markdown-enabled bubble (same pattern as MarkupReview lines 1253-1263)
+                    Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
+                    Try
+                        cmt = doc.Comments.Add(Range:=anchorRange, Text:="")
+                    Catch exAdd As System.Runtime.InteropServices.COMException
+                        cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
+                    Catch exAdd2 As System.Exception
+                        cmt = doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
+                    End Try
 
-                Try
-                    Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                    cRng.Text = ""
-                    If win IsNot Nothing Then
-                        Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
-                        Try
-                            win.View.ShowRevisionsAndComments = True
+                    Try
+                        Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                        cRng.Text = ""
+                        If win IsNot Nothing Then
+                            Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                            Try
+                                win.View.ShowRevisionsAndComments = True
+                                InsertMarkdownToComment(cRng, $"{AN5}{prefix}: {justificationText}")
+                            Finally
+                                win.View.ShowRevisionsAndComments = prevShow
+                            End Try
+                        Else
                             InsertMarkdownToComment(cRng, $"{AN5}{prefix}: {justificationText}")
-                        Finally
-                            win.View.ShowRevisionsAndComments = prevShow
-                        End Try
-                    Else
-                        InsertMarkdownToComment(cRng, $"{AN5}{prefix}: {justificationText}")
-                    End If
-                Catch exMk As System.Exception
-                    cmt.Range.Text = $"{AN5}{prefix}: {justificationText}"
-                End Try
-            Else
-                ' Plain text bubble (same pattern as MarkupReview line 1265)
-                doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
-            End If
+                        End If
+                    Catch exMk As System.Exception
+                        cmt.Range.Text = $"{AN5}{prefix}: {justificationText}"
+                    End Try
+                Else
+                    ' Plain text bubble (same pattern as MarkupReview line 1265)
+                    doc.Comments.Add(Range:=anchorRange, Text:=$"{AN5}{prefix}: {justificationText}")
+                End If
+            End Using
 
         Catch ex As System.Exception
             ' Last-resort fallback (same as MarkupReview line 1268)

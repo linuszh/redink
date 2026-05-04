@@ -97,6 +97,9 @@ Namespace SharedLibrary
         Private _branchCombo As ComboBox = Nothing
         Private _currentBranchField As String = ""
 
+        ''' <summary>Tracks the currently selected template per branch field until it is explicitly applied.</summary>
+        Private ReadOnly _pendingBranchSelections As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
         ''' <summary>Prevents change handlers from re-entrancy during group rendering.</summary>
         Private _isLoadingGroup As Boolean = False
 
@@ -141,6 +144,17 @@ Namespace SharedLibrary
         ''' <returns>Scaled pixel value for the current DPI.</returns>
         Private Function Dpi(basePixels As Integer) As Integer
             Return CInt(Math.Ceiling(basePixels * _dpiScale))
+        End Function
+
+        ''' <summary>
+        ''' Returns the standard height used for inline action buttons.
+        ''' </summary>
+        Private Function GetInlineButtonHeight() As Integer
+            Using btn As New Button()
+                btn.Text = "Apply Template"
+                btn.AutoSize = True
+                Return btn.PreferredSize.Height
+            End Using
         End Function
 
         ''' <summary>
@@ -654,6 +668,7 @@ Namespace SharedLibrary
             ' Replace the working set, original values, and target path
             _currentValues.Clear()
             _originalValues.Clear()
+            _pendingBranchSelections.Clear()
             For Each kvp In newValues
                 _currentValues(kvp.Key) = kvp.Value
                 _originalValues(kvp.Key) = kvp.Value
@@ -764,6 +779,7 @@ Namespace SharedLibrary
             Dim lineHeight As Integer = CInt(standardFont.Height * 1.8)
             Dim descFont As New Font("Segoe UI", 8.0F, FontStyle.Italic, GraphicsUnit.Point)
             Dim defaultIndicatorFont As New Font("Segoe UI", 7.5F, FontStyle.Italic, GraphicsUnit.Point)
+            Dim inlineButtonHeight As Integer = GetInlineButtonHeight()
 
             ' Pre-measure all visible labels to determine the dynamic FIELD_LABEL_WIDTH
             Dim dynamicLabelWidth As Integer = Dpi(120)
@@ -781,7 +797,7 @@ Namespace SharedLibrary
 
             Dim yPos As Integer = 0
 
-            ' Branch selector (if applicable)
+            ' Branch selector (if applicable)          
             If Not String.IsNullOrWhiteSpace(grp.BranchField) AndAlso grp.Branches.Count > 0 Then
                 _currentBranchField = grp.BranchField
 
@@ -793,27 +809,65 @@ Namespace SharedLibrary
                 }
                 _contentPanel.Controls.Add(lbl)
 
+                Dim btnApplyTemplate As New Button() With {
+                    .Text = "Apply Template",
+                    .AutoSize = False,
+                    .Font = standardFont
+                }
+
+                Dim applyTemplateButtonWidth As Integer =
+                    TextRenderer.MeasureText(btnApplyTemplate.Text, btnApplyTemplate.Font).Width + Dpi(18)
+
+                btnApplyTemplate.Size = New Size(applyTemplateButtonWidth, inlineButtonHeight)
+
+                Dim branchComboWidth As Integer = Math.Max(Dpi(160), fieldWidth - btnApplyTemplate.Width - Dpi(8))
+
                 _branchCombo = New ComboBox() With {
                     .DropDownStyle = ComboBoxStyle.DropDownList,
-                    .Width = fieldWidth,
+                    .Width = branchComboWidth,
                     .Location = New Point(dynamicLabelWidth, yPos)
                 }
                 For Each branch In grp.Branches
                     _branchCombo.Items.Add(branch.Label)
                 Next
 
-                Dim currentBranch As String = ""
-                If _currentValues.ContainsKey(grp.BranchField) Then currentBranch = _currentValues(grp.BranchField)
-                Dim idx = _branchCombo.Items.IndexOf(currentBranch)
+                Dim selectedBranchLabel As String = ""
+                If _pendingBranchSelections.ContainsKey(grp.BranchField) Then
+                    selectedBranchLabel = _pendingBranchSelections(grp.BranchField)
+                ElseIf _currentValues.ContainsKey(grp.BranchField) Then
+                    selectedBranchLabel = _currentValues(grp.BranchField)
+                End If
+
+                Dim idx = _branchCombo.Items.IndexOf(selectedBranchLabel)
                 _branchCombo.SelectedIndex = If(idx >= 0, idx, 0)
 
-                AddHandler _branchCombo.SelectedIndexChanged, Sub(s, ev)
-                                                                  If _isLoadingGroup Then Return
-                                                                  ApplyBranchDefaults(grp)
-                                                              End Sub
+                AddHandler _branchCombo.SelectedIndexChanged,
+                    Sub(s, ev)
+                        If _isLoadingGroup Then Return
+                        _pendingBranchSelections(_currentBranchField) =
+                            If(_branchCombo.SelectedItem IsNot Nothing, _branchCombo.SelectedItem.ToString(), "")
+                    End Sub
+
+                btnApplyTemplate.Location = New Point(_branchCombo.Right + Dpi(8), yPos - Dpi(1))
+                AddHandler btnApplyTemplate.Click,
+                    Sub(s, ev)
+                        ApplyBranchDefaults(grp)
+                    End Sub
+
+                Dim applyTemplateNote As New Label() With {
+                    .Text = "Select a template and click ""Apply Template"" to overwrite the values in this section and clear unused template-specific entries.",
+                    .AutoSize = True,
+                    .MaximumSize = New Size(fieldWidth, 0),
+                    .Font = descFont,
+                    .ForeColor = Color.FromArgb(100, 100, 100),
+                    .Location = New Point(dynamicLabelWidth, yPos + _branchCombo.Height + Dpi(4))
+                }
 
                 _contentPanel.Controls.Add(_branchCombo)
-                yPos += lineHeight + Dpi(10)
+                _contentPanel.Controls.Add(btnApplyTemplate)
+                _contentPanel.Controls.Add(applyTemplateNote)
+
+                yPos = applyTemplateNote.Bottom + Dpi(8)
             End If
 
             ' Fields
@@ -904,16 +958,18 @@ Namespace SharedLibrary
                     yPos += lineHeight * 2 + Dpi(3) + mlIndicator.PreferredHeight
 
                 ElseIf fieldType = "password" Then
+                    Dim showButtonWidth As Integer = Dpi(70)
+
                     Dim txt As New TextBox() With {
                         .Text = currentVal,
                         .UseSystemPasswordChar = True,
-                        .Size = New Size(fieldWidth - Dpi(80), Dpi(20)),
+                        .Size = New Size(fieldWidth - showButtonWidth - Dpi(10), Dpi(20)),
                         .Location = New Point(dynamicLabelWidth, yPos)
                     }
                     Dim btnShow As New Button() With {
                         .Text = "Show",
-                        .Size = New Size(Dpi(70), txt.Height),
-                        .Location = New Point(txt.Right + Dpi(5), yPos)
+                        .Size = New Size(showButtonWidth, inlineButtonHeight),
+                        .Location = New Point(txt.Right + Dpi(5), yPos - Math.Max(0, (inlineButtonHeight - txt.Height) \ 2))
                     }
                     AddHandler btnShow.Click, Sub(s, ev)
                                                   txt.UseSystemPasswordChar = Not txt.UseSystemPasswordChar
@@ -1006,20 +1062,65 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
+        ''' Returns the set of field keys controlled by provider templates in the current group.
+        ''' These keys are cleared before the selected template defaults are applied.
+        ''' </summary>
+        Private Function GetBranchManagedFieldKeys(grp As WizardGroup) As HashSet(Of String)
+            Dim managedKeys As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each branch In grp.Branches
+                For Each kvp In branch.Defaults
+                    managedKeys.Add(kvp.Key)
+                Next
+
+                For Each key In branch.ShowExtra
+                    If Not String.IsNullOrWhiteSpace(key) Then
+                        managedKeys.Add(key)
+                    End If
+                Next
+            Next
+
+            For Each field In grp.Fields
+                If Not String.IsNullOrWhiteSpace(field.Condition) AndAlso
+                   field.Condition.IndexOf(grp.BranchField, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    managedKeys.Add(field.Key)
+                End If
+            Next
+
+            managedKeys.Remove(grp.BranchField)
+
+            Return managedKeys
+        End Function
+
+        ''' <summary>
         ''' Applies the defaults associated with the selected branch in the current group.
+        ''' Existing template-controlled values are overwritten, and unused template values
+        ''' are cleared or removed.
         ''' </summary>
         ''' <param name="grp">The current wizard group containing branches.</param>
         Private Sub ApplyBranchDefaults(grp As WizardGroup)
             If _branchCombo Is Nothing OrElse _branchCombo.SelectedIndex < 0 Then Return
+
+            SaveCurrentGroupValues()
+
             Dim selectedBranch = grp.Branches(_branchCombo.SelectedIndex)
+            Dim managedKeys As HashSet(Of String) = GetBranchManagedFieldKeys(grp)
+
+            For Each key In managedKeys
+                If _originalValues.ContainsKey(key) Then
+                    _currentValues(key) = ""
+                Else
+                    _currentValues.Remove(key)
+                End If
+            Next
 
             _currentValues(_currentBranchField) = selectedBranch.Label
+            _pendingBranchSelections(_currentBranchField) = selectedBranch.Label
 
             For Each kvp In selectedBranch.Defaults
                 _currentValues(kvp.Key) = kvp.Value
             Next
 
-            SaveCurrentGroupValues()
             Dim defIndex As Integer = GetCurrentDefinitionGroupIndex()
             If defIndex >= 0 Then LoadGroup(defIndex)
         End Sub
@@ -1041,7 +1142,8 @@ Namespace SharedLibrary
             Next
 
             If _branchCombo IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(_currentBranchField) Then
-                _currentValues(_currentBranchField) = If(_branchCombo.SelectedItem IsNot Nothing, _branchCombo.SelectedItem.ToString(), "")
+                _pendingBranchSelections(_currentBranchField) =
+                    If(_branchCombo.SelectedItem IsNot Nothing, _branchCombo.SelectedItem.ToString(), "")
             End If
         End Sub
 

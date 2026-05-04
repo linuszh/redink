@@ -34,9 +34,123 @@ Imports System.Text.RegularExpressions
 Imports HtmlAgilityPack
 Imports Markdig
 Imports Microsoft.Office.Interop.Word
+Imports DiffPlex
+Imports DiffPlex.DiffBuilder
+Imports DiffPlex.DiffBuilder.Model
 
 Namespace SharedLibrary
     Partial Public Class SharedMethods
+
+
+        ''' <summary>
+        ''' Builds inline diff markup using [INS_START]/[INS_END] and [DEL_START]/[DEL_END] tags.
+        ''' </summary>
+        ''' <param name="originalText">Original text.</param>
+        ''' <param name="revisedText">Revised text.</param>
+        ''' <param name="trimTrailingLineBreaksOnRevised">If True, trims trailing CR/LF from the revised text before diffing.</param>
+        ''' <returns>Diff-marked text suitable for <see cref="ConvertMarkupToRTF"/>.</returns>
+        Public Shared Function BuildInlineDiffMarkup(
+            originalText As String,
+            revisedText As String,
+            Optional trimTrailingLineBreaksOnRevised As Boolean = True
+        ) As String
+
+            Dim diffBuilder As New InlineDiffBuilder(New Differ())
+            Dim sText As String = String.Empty
+
+            Dim text1 As String = If(originalText, String.Empty)
+            Dim text2 As String = If(revisedText, String.Empty)
+
+            If trimTrailingLineBreaksOnRevised Then
+                text2 = text2.TrimEnd(ControlChars.Cr, ControlChars.Lf).TrimEnd(ControlChars.Cr, ControlChars.Lf)
+            End If
+
+            text1 = text1.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
+            text2 = text2.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
+
+            text1 = text1.Replace("  ", " ").Trim()
+            text2 = text2.Replace("  ", " ").Trim()
+
+            Dim mergefields As New List(Of String)
+
+            text1 = Regex.Replace(
+                text1,
+                "\{\{.*?\}\}",
+                Function(m)
+                    mergefields.Add(m.Value)
+                    Return $"[[MF{mergefields.Count - 1}]]"
+                End Function)
+
+            text2 = Regex.Replace(
+                text2,
+                "\{\{.*?\}\}",
+                Function(m)
+                    mergefields.Add(m.Value)
+                    Return $"[[MF{mergefields.Count - 1}]]"
+                End Function)
+
+            Dim words1 As String =
+                String.Join(
+                    Environment.NewLine,
+                    text1.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries))
+
+            Dim words2 As String =
+                String.Join(
+                    Environment.NewLine,
+                    text2.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries))
+
+            Dim diffResult As DiffPaneModel = diffBuilder.BuildDiffModel(words1, words2)
+
+            Dim prevType As ChangeType = ChangeType.Unchanged
+
+            For i As Integer = 0 To diffResult.Lines.Count - 1
+                Dim line = diffResult.Lines(i)
+                Dim nextType As ChangeType =
+                    If(i < diffResult.Lines.Count - 1, diffResult.Lines(i + 1).Type, ChangeType.Unchanged)
+
+                If line.Type = ChangeType.Inserted AndAlso prevType <> ChangeType.Inserted Then
+                    sText &= "[INS_START]"
+                ElseIf line.Type = ChangeType.Deleted AndAlso prevType <> ChangeType.Deleted Then
+                    sText &= "[DEL_START]"
+                End If
+
+                sText &= If(line.Text, String.Empty).Trim() & " "
+
+                If line.Type = ChangeType.Inserted AndAlso nextType <> ChangeType.Inserted Then
+                    sText &= "[INS_END] "
+                ElseIf line.Type = ChangeType.Deleted AndAlso nextType <> ChangeType.Deleted Then
+                    sText &= "[DEL_END] "
+                End If
+
+                prevType = line.Type
+            Next
+
+            For idx As Integer = 0 To mergefields.Count - 1
+                sText = sText.Replace($"[[MF{idx}]]", mergefields(idx))
+            Next
+
+            sText = sText.Replace("{vbCr}", "{vbCrLf}")
+            sText = sText.Replace("{vbLf}", "{vbCrLf}")
+            sText = sText.Replace(" {vbCrLf} ", "{vbCrLf}")
+            sText = sText.Replace(" {vbCrLf}", "{vbCrLf}")
+            sText = sText.Replace("{vbCrLf} ", "{vbCrLf}")
+
+            sText = sText.Replace("[DEL_START]{vbCrLf}[DEL_END] ", "")
+            sText = sText.Replace("[DEL_START]{vbCrLf}{vbCrLf}[DEL_END] ", "")
+            sText = sText.Replace("{vbCrLf}[DEL_END] ", "{vbCrLf}[DEL_END]")
+
+            sText = sText.Replace("[INS_START]{vbCrLf}[INS_END] ", "{vbCrLf}")
+            sText = sText.Replace("[INS_START]{vbCrLf}{vbCrLf}[INS_END] ", "{vbCrLf}{vbCrLf}")
+            sText = sText.Replace("{vbCrLf}[INS_END] ", "{vbCrLf}[INS_END]")
+
+            sText = sText.Replace(vbCrLf, "").Replace(vbCr, "").Replace(vbLf, "")
+            sText = sText.Replace("{vbCrLf}", vbCrLf)
+
+            sText = sText.Replace("[DEL_END] [INS_START]", "[DEL_END][INS_START]")
+            sText = sText.Replace("[INS_START][INS_END] ", "")
+
+            Return sText.TrimEnd()
+        End Function
 
         ''' <summary>
         ''' Converts the provided Markdown text to HTML and inserts it into the given Word selection.

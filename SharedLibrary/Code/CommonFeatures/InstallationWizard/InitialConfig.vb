@@ -289,11 +289,17 @@ Namespace SharedLibrary
 
             ' Populate combo in preferred order (OpenAI, Azure, Google Gemini, Google Vertex), then alphabetical
             Dim defaultOrder As New List(Of String) From {
-            "OpenAI",
-            "Microsoft Azure OpenAI Services",
-            "Google Gemini",
-            "Google Vertex"
-        }
+                    "OpenAI",
+                    "Microsoft Azure OpenAI Services",
+                    "Google Gemini",
+                    "Anthropic",
+                    "Google Vertex",
+                    "MTF",
+                    "SafeSwissCloud",
+                    "llama.cpp (local)",
+                    "Ollama (local)",
+                    "OpenWebUI (local)"
+                }
             For Each providerName As String In defaultOrder
                 If providerConfigs.ContainsKey(providerName) Then cmbProvider.Items.Add(providerName)
             Next
@@ -314,7 +320,7 @@ Namespace SharedLibrary
             Me.Controls.Add(lblUseThisConfig)
 
             chkWord = New System.Windows.Forms.CheckBox() With {
-            .Text = "for Word",
+            .Text = "for all/Word",
             .AutoSize = True,
             .Checked = _context.RDV.StartsWith("Word")
         }
@@ -391,29 +397,27 @@ Namespace SharedLibrary
             providerConfigs.Clear()
             providerNotes.Clear()
 
-            ' Helper lambda to add provider with cloned variable list (prevents reference sharing)
             Dim SubAdd As Action(Of String, List(Of AppConfigurationVariable)) =
-                Sub(name As String, vars As List(Of AppConfigurationVariable))
-                    Dim clone As New List(Of AppConfigurationVariable)
-                    For Each v In vars
-                        clone.Add(New AppConfigurationVariable With {
-                            .DisplayName = v.DisplayName,
-                            .VarName = v.VarName,
-                            .VarType = v.VarType,
-                            .ValidationRule = v.ValidationRule,
-                            .DefaultValue = v.DefaultValue,
-                            .CurrentValue = v.DefaultValue
-                        })
-                    Next
-                    providerConfigs(name) = clone
-                End Sub
+        Sub(name As String, vars As List(Of AppConfigurationVariable))
+            Dim clone As New List(Of AppConfigurationVariable)
+            For Each v In vars
+                clone.Add(New AppConfigurationVariable With {
+                    .DisplayName = v.DisplayName,
+                    .VarName = v.VarName,
+                    .VarType = v.VarType,
+                    .ValidationRule = v.ValidationRule,
+                    .DefaultValue = v.DefaultValue,
+                    .CurrentValue = v.DefaultValue
+                })
+            Next
+            providerConfigs(name) = clone
+        End Sub
 
-            ' OPENAI provider (10 fields + payment note)
             SubAdd("OpenAI",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your OpenAI API Key]]"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.4"},
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.openai.com/v1/responses"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
@@ -423,27 +427,25 @@ Namespace SharedLibrary
                 })
             providerNotes("OpenAI") = "Note: When generating the API key with OpenAI, make sure you have added a valid payment method (e.g., credit card), even if you use ChatGPT for free or with an already paid subscription. You still need the payment method and a budget to pay for the actual consumption (costs are in our experience low)."
 
-            ' MICROSOFT AZURE OPENAI SERVICES provider (9 fields, no note)
             SubAdd("Microsoft Azure OpenAI Services",
                 New List(Of AppConfigurationVariable) From {
-                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
-                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "1.0"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
-                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://[[Your Azure Endpoint]]/openai/deployments/[your deployment-id]/chat/completions?api-version=2024-06-01"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "api-key"},
-                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "{apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""messages"": [{""role"": ""system"",""content"": ""{promptsystem}""},{""role"": ""user"", ""content"": ""{promptuser}""}],""temperature"": {temperature}}"},
-                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content (rkmode_first)"}
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Azure OpenAI Services API Key]]"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gpt-5.4"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://[[Your Azure OpenAI Services Deployment]].cognitiveservices.azure.com/openai/responses?api-version=2025-04-01-preview"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"", ""input"": [{""role"": ""developer"", ""content"": [{""type"": ""input_text"",""text"": ""{promptsystem}""}]},{""role"": ""user"",""content"": [{""type"": ""input_text"",""text"": ""{promptuser}""}{objectcall}]}]}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = "[application/pdf],{""type"": ""input_file"",""filename"": ""userfile.pdf"", ""file_data"": ""data:{mimetype};base64,{encodeddata}""}¦[image/png,image/jpeg,image/webp, image/gif],{""type"": ""input_image"",""image_url"": ""data:{mimetype};base64,{encodeddata}""}"},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"}
                 })
             providerNotes("Microsoft Azure OpenAI Services") = "These may not be the latest possible settings available in your environment. Check your documentation to update this."
 
-            ' GOOGLE GEMINI provider (9 fields, no note)
             SubAdd("Google Gemini",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google API Key]]"},
                     New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
                     New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-2.5-pro"},
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={apikey}"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "X-Goog-Api-Key"},
@@ -453,12 +455,26 @@ Namespace SharedLibrary
                 })
             providerNotes("Google Gemini") = ""
 
-            ' GOOGLE VERTEX provider (14 fields: 10 common + APICall_Object + 4 OAuth2, includes service account note)
+            SubAdd("Anthropic",
+                New List(Of AppConfigurationVariable) From {
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Anthropic API Key]]"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "claude-sonnet-4-6"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.anthropic.com/v1/messages"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "x-api-key¦anthropic-version"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "{apikey}¦2023-06-01"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"": ""{model}"",""max_tokens"": 64000, ""messages"": [{""role"": ""user"", ""content"": ""{promptsystem} {promptuser}""}]}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall_Object:", .VarName = "INI_APICall_Object", .VarType = "String", .ValidationRule = "", .DefaultValue = ""},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "text (rkmode_first)"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "1.0"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"}
+                })
+            providerNotes("Anthropic") = ""
+
             SubAdd("Google Vertex",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "Private Key (barebones, not PEM):", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Google private_key]]"},
                     New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "2.0", .DefaultValue = "0.2"},
-                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "300000"},
                     New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "gemini-2.5-pro"},
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://europe-west4-aiplatform.googleapis.com/v1/projects/[[Your Google project_id]]/locations/europe-west4/publishers/google/models/{model}:generateContent"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
@@ -472,7 +488,7 @@ Namespace SharedLibrary
                     New AppConfigurationVariable With {.DisplayName = "OAuth2 Access Token Expiry (seconds):", .VarName = "INI_OAuth2ATExpiry", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "3600"}
                 })
             providerNotes("Google Vertex") = "Note: Requires OAuth2 service account to be configured via the GCP console. Private Key must be the raw key (not PEM)."
-            ' MTF provider (9 fields, no note)
+
             SubAdd("MTF",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
@@ -482,12 +498,11 @@ Namespace SharedLibrary
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://api.ai.mtf.cloud/v1/chat/completions"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":   ""{model}"",  ""messages"": [{""role"": ""system"",""content"": ""{promptsystem}""},{""role"": ""user"",""content"": ""{promptuser}""}],""temperature"": {temperature}}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}],""temperature"":{temperature}}"},
                     New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
                 })
             providerNotes("MTF") = ""
 
-            ' SAFESWISSCLOUD provider (9 fields, no note)
             SubAdd("SafeSwissCloud",
                 New List(Of AppConfigurationVariable) From {
                     New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = ""},
@@ -497,14 +512,52 @@ Namespace SharedLibrary
                     New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "https://llm01.safeswisscloud.ch/engines/{model}/chat/completions"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
                     New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
-                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":   ""{model}"",  ""messages"": [{""role"": ""system"",""content"": ""{promptsystem}""},{""role"": ""user"",""content"": ""{promptuser}""}],""temperature"": {temperature}}"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}],""temperature"":{temperature}}"},
                     New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"}
                 })
             providerNotes("SafeSwissCloud") = ""
 
-            ' Attempt to override with remote configuration if available and different
-            TryOverrideDefaultsFromRemote()
+            SubAdd("llama.cpp (local)",
+                New List(Of AppConfigurationVariable) From {
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://localhost:8080/v1/chat/completions"},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""messages"":[{""role"":""system"",""content"":""{promptsystem}""},{""role"":""user"",""content"":""{promptuser}""}], ""temperature"": {temperature}}"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "AnyModel"}
+                })
+            providerNotes("llama.cpp (local)") = ""
 
+            SubAdd("Ollama (local)",
+                New List(Of AppConfigurationVariable) From {
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"":[   {""role"":""system"",""content"":""{promptsystem}""},   {""role"":""user"",""content"":""{promptuser}""{objectcall}} ], ""stream"": false, ""think"": false, ""options"":{""temperature"": {temperature}}}"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Model]]"}
+                })
+            providerNotes("Ollama (local)") = ""
+
+            SubAdd("OpenWebUI (local)",
+                New List(Of AppConfigurationVariable) From {
+                    New AppConfigurationVariable With {.DisplayName = "API Key:", .VarName = "INI_APIKey", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "dummy"},
+                    New AppConfigurationVariable With {.DisplayName = "Endpoint:", .VarName = "INI_Endpoint", .VarType = "String", .ValidationRule = "Hyperlink", .DefaultValue = "http://[[Your Domain Or IP Address]:[[Your Port]]/api/chat/completions"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderA:", .VarName = "INI_HeaderA", .VarType = "String", .ValidationRule = "", .DefaultValue = "Authorization"},
+                    New AppConfigurationVariable With {.DisplayName = "HeaderB:", .VarName = "INI_HeaderB", .VarType = "String", .ValidationRule = "", .DefaultValue = "Bearer {apikey}"},
+                    New AppConfigurationVariable With {.DisplayName = "Response tag:", .VarName = "INI_Response", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "content"},
+                    New AppConfigurationVariable With {.DisplayName = "APICall:", .VarName = "INI_APICall", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "{""model"":""{model}"",""messages"": [{""role"":""system"",""content"":""{promptsystem}""}, {""role"":""user"",""content"":""{promptuser}""{objectcall}}],""stream"":false,""temperature"":{temperature}}"},
+                    New AppConfigurationVariable With {.DisplayName = "Timeout (ms):", .VarName = "INI_Timeout", .VarType = "Integer", .ValidationRule = ">0", .DefaultValue = "200000"},
+                    New AppConfigurationVariable With {.DisplayName = "Temperature:", .VarName = "INI_Temperature", .VarType = "String", .ValidationRule = "0.0-2.0", .DefaultValue = "0.2"},
+                    New AppConfigurationVariable With {.DisplayName = "Model:", .VarName = "INI_Model", .VarType = "String", .ValidationRule = "NotEmpty", .DefaultValue = "[[Your Model]]"}
+                })
+            providerNotes("OpenWebUI (local)") = ""
+
+            TryOverrideDefaultsFromRemote()
         End Sub
 
         ''' <summary>
@@ -1073,10 +1126,31 @@ Namespace SharedLibrary
                     Return
                 End If
 
-                ' Map VarName -> CurrentValue to _context properties
+                _context.INI_APIKey = ""
+                _context.INI_APIEncrypted = False
+                _context.INI_APIKeyPrefix = ""
+                _context.INI_Temperature = ""
+                _context.INI_Timeout = 0
+                _context.INI_Model = ""
+                _context.INI_Endpoint = ""
+                _context.INI_HeaderA = ""
+                _context.INI_HeaderB = ""
+                _context.INI_APICall = ""
+                _context.INI_APICall_Object = ""
+                _context.INI_Response = ""
+                _context.INI_OAuth2 = False
+                _context.INI_OAuth2ClientMail = ""
+                _context.INI_OAuth2Scopes = ""
+                _context.INI_OAuth2Endpoint = ""
+                _context.INI_OAuth2ATExpiry = 0
+
                 For Each cv In finalList
                     Select Case cv.VarName
                         Case "INI_APIKey" : _context.INI_APIKey = cv.CurrentValue
+                        Case "INI_APIEncrypted"
+                            Dim isEncrypted As Boolean
+                            _context.INI_APIEncrypted = Boolean.TryParse(cv.CurrentValue, isEncrypted) AndAlso isEncrypted
+                        Case "INI_APIKeyPrefix" : _context.INI_APIKeyPrefix = cv.CurrentValue
                         Case "INI_Temperature" : _context.INI_Temperature = cv.CurrentValue
                         Case "INI_Timeout" : _context.INI_Timeout = CInt(cv.CurrentValue)
                         Case "INI_Model" : _context.INI_Model = cv.CurrentValue
@@ -1321,22 +1395,24 @@ Namespace SharedLibrary
 
                     ' Loop through the dictionary and write each configuration value
                     Dim MinimumConfigValues As New Dictionary(Of String, String) From {
-                        {"APIKey", _context.INI_APIKey},
-                        {"Endpoint", _context.INI_Endpoint},
-                        {"HeaderA", _context.INI_HeaderA},
-                        {"HeaderB", _context.INI_HeaderB},
-                        {"Response", _context.INI_Response},
-                        {"APICall", _context.INI_APICall},
-                        {"APICall_Object", _context.INI_APICall_Object},
-                        {"Timeout", _context.INI_Timeout.ToString()},
-                        {"Temperature", normalizedTemp},
-                        {"Model", _context.INI_Model},
-                        {"OAuth2", _context.INI_OAuth2.ToString()},
-                        {"OAuth2ClientMail", _context.INI_OAuth2ClientMail},
-                        {"OAuth2Scopes", _context.INI_OAuth2Scopes},
-                        {"OAuth2Endpoint", _context.INI_OAuth2Endpoint},
-                        {"OAuth2ATExpiry", _context.INI_OAuth2ATExpiry.ToString()}
-                    }
+                            {"APIKey", _context.INI_APIKey},
+                            {"APIKeyEncrypted", _context.INI_APIEncrypted.ToString()},
+                            {"APIKeyPrefix", _context.INI_APIKeyPrefix},
+                            {"Endpoint", _context.INI_Endpoint},
+                            {"HeaderA", _context.INI_HeaderA},
+                            {"HeaderB", _context.INI_HeaderB},
+                            {"Response", _context.INI_Response},
+                            {"APICall", _context.INI_APICall},
+                            {"APICall_Object", _context.INI_APICall_Object},
+                            {"Timeout", _context.INI_Timeout.ToString()},
+                            {"Temperature", normalizedTemp},
+                            {"Model", _context.INI_Model},
+                            {"OAuth2", _context.INI_OAuth2.ToString()},
+                            {"OAuth2ClientMail", _context.INI_OAuth2ClientMail},
+                            {"OAuth2Scopes", _context.INI_OAuth2Scopes},
+                            {"OAuth2Endpoint", _context.INI_OAuth2Endpoint},
+                            {"OAuth2ATExpiry", _context.INI_OAuth2ATExpiry.ToString()}
+                        }
 
                     For Each kvp In MinimumConfigValues
                         writer.WriteLine($"{kvp.Key} = {kvp.Value}")

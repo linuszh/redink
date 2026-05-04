@@ -1106,20 +1106,22 @@ Partial Public Class ThisAddIn
         Try
             If doc Is Nothing OrElse String.IsNullOrWhiteSpace(noticeText) Then Return
 
-            ' Zero-length anchor at endPos
-            Dim anchor As Word.Range = doc.Range(endPos, endPos)
+            Using BeginMarkupAuthorScope(doc.Application)
+                ' Zero-length anchor at endPos
+                Dim anchor As Word.Range = doc.Range(endPos, endPos)
 
-            ' Create an empty comment so we can insert formatted content
-            Dim cmt As Word.Comment = doc.Comments.Add(anchor, "")
-            Dim cr As Word.Range = cmt.Range
+                ' Create an empty comment so we can insert formatted content
+                Dim cmt As Word.Comment = doc.Comments.Add(anchor, "")
+                Dim cr As Word.Range = cmt.Range
 
-            ' Clear and insert a formatted prefix (e.g., "RI: ")
-            cr.Text = ""
+                ' Clear and insert a formatted prefix (e.g., "RI: ")
+                cr.Text = ""
 
-            Dim ins As Word.Range = cr.Duplicate
-            ins.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                Dim ins As Word.Range = cr.Duplicate
+                ins.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
 
-            InsertMarkdownToComment(ins, $"{AN5}{Prefix}: " & noticeText)
+                InsertMarkdownToComment(ins, $"{AN5}{Prefix}: " & noticeText)
+            End Using
         Catch
             ' Swallow – adding the notice must not break the main flow
         End Try
@@ -1145,8 +1147,9 @@ Partial Public Class ThisAddIn
                 Dim mainStory As Word.Range = doc.StoryRanges(Word.WdStoryType.wdMainTextStory)
                 Dim anchor As Word.Range = mainStory.Duplicate
                 anchor.Collapse(Word.WdCollapseDirection.wdCollapseEnd) ' zero-length in MAIN story
-
-                doc.Comments.Add(anchor, $"{AN5}{Prefix}: " & noticeText)
+                Using BeginMarkupAuthorScope(doc.Application)
+                    doc.Comments.Add(anchor, $"{AN5}{Prefix}: " & noticeText)
+                End Using
             Finally
                 ' Restore previous seek view
                 win.View.SeekView = prevSeek

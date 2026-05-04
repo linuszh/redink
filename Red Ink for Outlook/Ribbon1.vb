@@ -375,6 +375,11 @@ Public Class Ribbon2
         Globals.ThisAddIn.MainMenu("ApplyMyStyle")
     End Sub
 
+    Private Sub RI_M365_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_M365.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "M365_Outlook invoked")
+        Globals.ThisAddIn.MainMenu("M365")
+    End Sub
+
     Private Sub RI_MailMover_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_MailMover.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "MailMover_Outlook invoked")
         Globals.ThisAddIn.MainMenu("MailMover")

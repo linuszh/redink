@@ -851,13 +851,18 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Ensures tooling selections are loaded and the tooling-enabled flag is consistent with model support.
     ''' </summary>
+    ''' <summary>
+    ''' Ensures tooling selections are loaded and the tooling-enabled flag is consistent with model support.
+    ''' </summary>
     Private Function SyncToolingState(ByVal st As InkyState, ByRef supportsTooling As Boolean) As Boolean
         _selectedToolsForChat = Nothing
         If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
             Try
-                Dim availableTools = GetAvailableTools()
+                Dim availableTools = GetAvailableTools(includeInteractiveM365Tools:=True)
                 Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
+                _selectedToolsForChat = availableTools.
+                    Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
+                    ToList()
             Catch
                 _selectedToolsForChat = Nothing
             End Try
@@ -1059,49 +1064,49 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Ensures tools are selected, prompting user if necessary.
     ''' </summary>
-    Private Function EnsureToolsSelected(st As InkyState) As Boolean
-        ' If tools already selected, verify they still exist
+    Private Function EnsureToolsSelected(st As InkyState,
+                                     Optional includeInteractiveM365Tools As Boolean = False) As Boolean
         If _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
             Return True
         End If
 
-        ' Load from persisted selection if available
         If st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0 Then
             Try
-                Dim availableTools = GetAvailableTools()
+                Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
                 Dim selectedNameSet = New HashSet(Of String)(st.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
-                _selectedToolsForChat = availableTools.Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).ToList()
+                _selectedToolsForChat = availableTools.
+                Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
+                ToList()
+
                 If _selectedToolsForChat.Count > 0 Then Return True
             Catch
             End Try
         End If
 
-        ' No tools selected - need to prompt
         Return False
     End Function
 
     ''' <summary>
     ''' Gets the list of available tools for browser display.
     ''' </summary>
-    Private Function GetToolListForBrowser() As List(Of Object)
+    Private Function GetToolListForBrowser(Optional includeInteractiveM365Tools As Boolean = False) As List(Of Object)
         Dim result As New List(Of Object)()
         Try
-            Dim availableTools = GetAvailableTools()
+            Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
             For Each t In availableTools
                 If t Is Nothing OrElse String.IsNullOrWhiteSpace(t.ToolName) Then Continue For
                 Dim isSelected = _selectedToolsForChat IsNot Nothing AndAlso
-                                 _selectedToolsForChat.Any(Function(s) String.Equals(s.ToolName, t.ToolName, StringComparison.OrdinalIgnoreCase))
+                             _selectedToolsForChat.Any(Function(s) String.Equals(s.ToolName, t.ToolName, StringComparison.OrdinalIgnoreCase))
                 result.Add(New With {
-                    .name = t.ToolName,
-                    .description = If(t.ModelDescription, t.ToolInstructionsPrompt),
-                    .selected = isSelected
-                })
+                .name = t.ToolName,
+                .description = If(t.ModelDescription, t.ToolInstructionsPrompt),
+                .selected = isSelected
+            })
             Next
         Catch
         End Try
         Return result
     End Function
-
 
     ' Builds the entire HTML UI (single file; no external assets)
     ''' <summary>
@@ -1402,11 +1407,11 @@ Partial Public Class ThisAddIn
         ' Tooling UI visibility + coupling logic
         html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__agentEnabled=false;agentChk.checked=false;updateAgentFilesDisplay([]);}applyCoupling();}")
         html.AppendLine("function applyCoupling(){if(__agentEnabled){toolingChk.checked=true;toolingChk.disabled=true;}else{toolingChk.disabled=false;}}")
-        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools');if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}applyCoupling();});")
+        html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}applyCoupling();});")
         html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools');if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
 
         ' Agent mode checkbox — coupled with sources
-        html.AppendLine("agentChk.addEventListener('change',async()=>{if(agentChk.checked){const r=await api('inky_setagent',{Enabled:true});if(!r.ok){agentChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools');if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;if(__toolingEnabled){const r2=await api('inky_setagent',{Enabled:true});if(r2.ok){__agentEnabled=!!r2.enabled;agentChk.checked=__agentEnabled;updateAgentFilesDisplay(r2.files||[]);}}}applyCoupling();return;}alert(r.error||'Failed to toggle agent mode');applyCoupling();return;}__agentEnabled=!!r.enabled;if(__agentEnabled){__toolingEnabled=true;toolingChk.checked=true;const tr=await api('inky_settooling',{Enabled:true});if(tr.ok){__toolingEnabled=!!tr.enabled;}}updateAgentFilesDisplay(r.files||[]);applyCoupling();}else{const r=await api('inky_setagent',{Enabled:false});if(!r.ok){agentChk.checked=true;alert(r.error||'Failed to toggle agent mode');applyCoupling();return;}__agentEnabled=!!r.enabled;updateAgentFilesDisplay(r.files||[]);applyCoupling();}});")
+        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
 
         ' Tooling log button (toggle)
         html.AppendLine("toolLogBtn.addEventListener('click',async()=>{__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);const r=await api('inky_settoolinglog',{Enabled:__toolLogEnabled});if(!r.ok){__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);}});")
@@ -1483,7 +1488,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             ' When enabling agent mode, ensure sources are selected first
-                            If enabled AndAlso Not EnsureToolsSelected(st) Then
+                            If enabled AndAlso Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
                                 Return JsonOk(New With {.ok = False, .openSources = True, .error = "No sources selected"})
                             End If
 
@@ -1603,13 +1608,12 @@ Partial Public Class ThisAddIn
                                 st.AgentModeEnabled = True
                                 _chatAgentModeEnabled = True
 
-                                ' Ensure sources are actually selected (prompt user if needed)
-                                If Not EnsureToolsSelected(st) Then
-                                    ' No persisted tools — prompt user to select
+                                ' Ensure sources are actually selected (prompt user if needed)                                
+                                If Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
                                     Dim selectedTools As List(Of ModelConfig) = Nothing
                                     Try
                                         Await SwitchToUi(Sub()
-                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName)
+                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName, includeInteractiveM365Tools:=True)
                                                          End Sub).ConfigureAwait(False)
                                     Catch
                                     End Try
@@ -1739,17 +1743,28 @@ Partial Public Class ThisAddIn
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SelectTools invoked")
 
-                        ' Tool selection dialog
                         Try
                             Dim st = LoadInkyState()
                             If Not CurrentModelSupportsTooling(st) Then
                                 Return JsonErr($"The selected model does not support {ToolFriendlyName.ToLower()}.")
                             End If
 
-                            ' Show tool selection on UI thread
+                            ' Local Chat is interactive; only AutoPilot should block M365 tools.
+                            Dim includeInteractiveM365Tools As Boolean = True
+
+                            If j("IncludeInteractiveM365Tools") IsNot Nothing Then
+                                Try
+                                    includeInteractiveM365Tools = includeInteractiveM365Tools OrElse CBool(j("IncludeInteractiveM365Tools"))
+                                Catch
+                                End Try
+                            End If
+
                             Dim selectedTools As List(Of ModelConfig) = Nothing
                             Await SwitchToUi(Sub()
-                                                 selectedTools = SelectToolsForSession(True, ToolFriendlyName)
+                                                 selectedTools = SelectToolsForSession(
+                                                     True,
+                                                     ToolFriendlyName,
+                                                     includeInteractiveM365Tools:=includeInteractiveM365Tools)
                                              End Sub).ConfigureAwait(False)
 
                             If selectedTools Is Nothing Then
@@ -1758,6 +1773,7 @@ Partial Public Class ThisAddIn
 
                             _selectedToolsForChat = selectedTools
                             st.SelectedToolNames = selectedTools.Select(Function(t) t.ToolName).ToList()
+
                             If selectedTools.Count > 0 Then
                                 st.ToolingEnabled = True
                                 _chatToolingEnabled = True
@@ -1766,11 +1782,11 @@ Partial Public Class ThisAddIn
                             SaveInkyState(st)
 
                             Return JsonOk(New With {
-                                    .ok = True,
-                                    .tools = GetToolListForBrowser(),
-                                    .count = selectedTools.Count,
-                                    .toolingEnabled = st.ToolingEnabled
-                                })
+                                .ok = True,
+                                .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
+                                .count = selectedTools.Count,
+                                .toolingEnabled = st.ToolingEnabled
+                            })
                         Catch ex As Exception
                             Return JsonErr("Tool selection failed: " & ex.Message)
                         End Try
@@ -1779,7 +1795,6 @@ Partial Public Class ThisAddIn
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_SetTooling invoked")
 
-                        ' Enable/disable tooling
                         Try
                             Dim enabled As Boolean = CBool(j("Enabled"))
                             Dim st = LoadInkyState()
@@ -1788,8 +1803,9 @@ Partial Public Class ThisAddIn
                                 Return JsonErr($"The selected model does not support {ToolFriendlyName.ToLower()}.")
                             End If
 
-                            If enabled AndAlso Not EnsureToolsSelected(st) Then
-                                ' No tools selected — tell the browser to open the Sources window
+                            Dim includeInteractiveM365Tools As Boolean = True
+
+                            If enabled AndAlso Not EnsureToolsSelected(st, includeInteractiveM365Tools:=includeInteractiveM365Tools) Then
                                 Return JsonOk(New With {.ok = False, .openSources = True, .error = "No sources selected"})
                             End If
 
@@ -1805,11 +1821,12 @@ Partial Public Class ThisAddIn
                     Case "inky_gettoolingstate"
                         Try
                             Dim st = LoadInkyState()
+
                             Return JsonOk(New With {
                                 .ok = True,
                                 .enabled = st.ToolingEnabled,
                                 .supportsTooling = CurrentModelSupportsTooling(st),
-                                .tools = GetToolListForBrowser(),
+                                .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                                 .selectedCount = If(_selectedToolsForChat, New List(Of ModelConfig)()).Count
                             })
                         Catch ex As Exception
@@ -1853,7 +1870,7 @@ Partial Public Class ThisAddIn
                             .toolingEnabled = toolingEnabled,
                             .supportsTooling = supportsTooling,
                             .toolingLogEnabled = INI_ToolingLogWindow,
-                            .tools = GetToolListForBrowser(),
+                            .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                             .agentEnabled = _chatAgentModeEnabled,
                             .agentFiles = GetAgentFileListForBrowser(),
                             .agentModelActive = st.AgentModelActive,
@@ -2078,12 +2095,12 @@ Partial Public Class ThisAddIn
 
                                             ' Ensure sources are selected (same logic as Form1.vb)
                                             If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                                                If Not EnsureToolsSelected(st) Then
+                                                If Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
                                                     ' No persisted tools — prompt user to select
                                                     Dim selectedTools As List(Of ModelConfig) = Nothing
                                                     Try
                                                         Await SwitchToUi(Sub()
-                                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName)
+                                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName, includeInteractiveM365Tools:=True)
                                                                          End Sub).ConfigureAwait(False)
                                                     Catch
                                                     End Try
@@ -2305,7 +2322,7 @@ Partial Public Class ThisAddIn
                                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                                         If stForTooling.SelectedToolNames IsNot Nothing AndAlso stForTooling.SelectedToolNames.Count > 0 Then
                                             Try
-                                                Dim availTools = GetAvailableTools()
+                                                Dim availTools = GetAvailableTools(includeInteractiveM365Tools:=True)
                                                 Dim nameSet = New HashSet(Of String)(stForTooling.SelectedToolNames, StringComparer.OrdinalIgnoreCase)
                                                 _selectedToolsForChat = availTools.Where(Function(tl) Not String.IsNullOrWhiteSpace(tl.ToolName) AndAlso nameSet.Contains(tl.ToolName)).ToList()
                                             Catch

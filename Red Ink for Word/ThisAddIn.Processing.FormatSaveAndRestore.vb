@@ -24,6 +24,7 @@ Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
+Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Microsoft.Office.Interop.Word
 Imports SharedLibrary.SharedLibrary
 
@@ -2057,34 +2058,44 @@ ContinueLoop:
     ''' <param name="doc">Owning document.</param>
     ''' <param name="placeholderPrefix">Token prefix (e.g., WFNT:).</param>
     ''' <param name="addNoteAction">Callback that handles reinsertion.</param>
-    Private Sub ProcessInTextPlaceholders(ByRef workingrange As Word.Range, doc As Word.Document, placeholderPrefix As String, addNoteAction As Action(Of Word.Document, Word.Range, String))
-        Dim PreserveRange As Range = workingrange
+    Private Sub ProcessInTextPlaceholders(
+    ByRef workingrange As Word.Range,
+    doc As Word.Document,
+    placeholderPrefix As String,
+    addNoteAction As Action(Of Word.Document, Word.Range, String, InlineCharFormatSnapshot))
+
         With workingrange.Find
+            .ClearFormatting()
+            .Replacement.ClearFormatting()
             .Text = "\{\{" & placeholderPrefix & "*\}\}"
             .MatchWildcards = True
+            .Format = False
+            .Forward = True
+            .Wrap = Word.WdFindWrap.wdFindStop
+
             Do While .Execute()
                 Dim startPos As Integer = workingrange.Start
-                Dim endPos As Integer = workingrange.End
 
-                ' Extract note or field text by trimming prefix and suffix
+                Dim placeholderRange As Word.Range = workingrange.Duplicate
+                Dim placeholderFormat As InlineCharFormatSnapshot =
+                CaptureInlineCharFormatSnapshot(placeholderRange)
+
                 Dim placeholderText As String = workingrange.Text
-                Dim noteText As String = placeholderText.Substring(placeholderPrefix.Length + 2, placeholderText.Length - (placeholderPrefix.Length + 4))
+                Dim noteText As String =
+                placeholderText.Substring(
+                    placeholderPrefix.Length + 2,
+                    placeholderText.Length - (placeholderPrefix.Length + 4))
 
-                ' Remove placeholder
                 workingrange.Text = ""
 
-                ' Add footnote, endnote, or field
                 Dim insertionRange As Word.Range = doc.Range(startPos, startPos)
-                addNoteAction.Invoke(doc, insertionRange, noteText)
+                addNoteAction.Invoke(doc, insertionRange, noteText, placeholderFormat)
 
-                ' Adjust range position for the next match
-                ' workingrange.Start = endPos + 1
                 workingrange.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                 If placeholderPrefix = "PFOR:" Then
                     workingrange.MoveStart(Unit:=Word.WdUnits.wdParagraph, Count:=1)
                     If workingrange.Start < doc.Content.End Then
                         Dim nextChar As String = doc.Range(workingrange.Start, workingrange.Start + 1).Text
-                        ' In Word the paragraph mark is typically Chr(13) (which is vbCr)
                         If nextChar = vbCr Then
                             workingrange.MoveStart(Unit:=Word.WdUnits.wdCharacter, Count:=1)
                         End If
@@ -2102,23 +2113,36 @@ ContinueLoop:
     ''' <summary>
     ''' Adds a footnote at the specified location.
     ''' </summary>
-    Private Sub AddFootnote(doc As Word.Document, insertionRange As Word.Range, noteText As String)
+    Private Sub AddFootnote(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    noteText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         doc.Footnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
     ''' <summary>
     ''' Adds an endnote at the specified location.
     ''' </summary>
-    Private Sub AddEndnote(doc As Word.Document, insertionRange As Word.Range, noteText As String)
+    Private Sub AddEndnote(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    noteText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         doc.Endnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
     ''' <summary>
     ''' Inserts a Word field and restores its code plus optional display text.
     ''' </summary>
-    Private Sub AddField(doc As Word.Document, insertionRange As Word.Range, fieldText As String)
-        ' fieldText may be either just the code
-        ' or "code|||base64(displayText)" for hyperlink fields
+    Private Sub AddField(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    fieldText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         Dim fieldCode As String = fieldText
         Dim displayText As String = Nothing
 
@@ -2128,50 +2152,65 @@ ContinueLoop:
             Try
                 displayText = System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(parts(1)))
             Catch
-                ' Fallback if it wasn't base64-encoded (keeps behavior robust)
                 displayText = parts(1)
             End Try
         End If
 
-        ' Insert the field and apply the code
-        Dim fieldRange As Word.Range = insertionRange.Duplicate
-        Dim field As Word.Field = doc.Fields.Add(fieldRange)
-        field.Code.Text = fieldCode
-        field.Update()
+        Try
+            Dim fieldRange As Word.Range = insertionRange.Duplicate
+            Dim field As Word.Field = doc.Fields.Add(fieldRange)
+            field.Code.Text = fieldCode
+            field.Update()
 
-        ' If we captured a display text (e.g., from a hyperlink), restore it and lock the field
-        If Not String.IsNullOrEmpty(displayText) Then
-            field.Result.Text = displayText
-            ' Keep the display text stable; remove this if you want updates to overwrite it later
-            field.Locked = True
-        End If
+            If Not String.IsNullOrEmpty(displayText) Then
+                field.Result.Text = displayText
+
+                Dim visibleRange As Word.Range = field.Result.Duplicate
+                Dim visibleEnd As Integer = Math.Min(visibleRange.Start + displayText.Length, visibleRange.End)
+                visibleRange.SetRange(visibleRange.Start, visibleEnd)
+
+                With visibleRange.Font
+                    If Not String.IsNullOrWhiteSpace(sourceFormat.FontName) Then .Name = sourceFormat.FontName
+                    If sourceFormat.FontSize.HasValue AndAlso sourceFormat.FontSize.Value > 0 Then .Size = sourceFormat.FontSize.Value
+                    If sourceFormat.Bold.HasValue Then .Bold = sourceFormat.Bold.Value
+                    If sourceFormat.Italic.HasValue Then .Italic = sourceFormat.Italic.Value
+                    If sourceFormat.Underline.HasValue Then .Underline = sourceFormat.Underline.Value
+                    If sourceFormat.Color.HasValue Then .Color = sourceFormat.Color.Value
+                End With
+
+                field.Locked = True
+            End If
+
+        Catch ex As System.Exception
+            Debug.WriteLine("AddField failed: " & ex.ToString())
+        End Try
     End Sub
+
 
     ''' <summary>
     ''' Applies a captured paragraph format (style, font, list, spacing) to the paragraph
     ''' containing the specified insertion range.
     ''' </summary>
-    Private Sub AddFormat(doc As Word.Document, insertionRange As Word.Range, formatIndexText As String)
+    Private Sub AddFormat(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    formatIndexText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         Try
-            ' Parse the format index from the input text
             Dim formatIndex As Integer = Integer.Parse(formatIndexText.Trim())
 
-            ' Ensure the format index is within bounds
             If formatIndex >= 0 AndAlso formatIndex < paragraphFormat.Length Then
-                ' Retrieve the specific paragraph format
                 Dim format = paragraphFormat(formatIndex)
 
-                ' Expand the range to the entire paragraph
                 Dim targetRange As Word.Range = insertionRange.Paragraphs(1).Range
                 If targetRange.End > targetRange.Start Then
-                    targetRange.End = targetRange.End - 1  ' Exclude the paragraph mark
+                    targetRange.End = targetRange.End - 1
                 End If
 
                 With targetRange
-                    ' Apply the stored style
                     If format.Style IsNot Nothing Then .Style = format.Style
 
-                    ' Apply the stored font formatting
                     With .Font
                         If format.FontName IsNot Nothing Then .Name = format.FontName
                         If format.FontSize > 0 Then .Size = format.FontSize
@@ -2181,36 +2220,26 @@ ContinueLoop:
                         .Color = format.FontColor
                     End With
 
-                    ' Apply list formatting if applicable
                     If format.HasListFormat AndAlso format.ListTemplate IsNot Nothing Then
                         Try
                             .ListFormat.ApplyListTemplateWithLevel(
                             ListTemplate:=format.ListTemplate,
                             ContinuePreviousList:=If(format.ListNumber > 0, True, False),
                             ApplyTo:=Word.WdListApplyTo.wdListApplyToWholeList,
-                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior
-                        )
+                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior)
                             .ListFormat.ListLevelNumber = format.ListLevel
                         Catch ex As System.Exception
-                            'MsgBox("Error applying list format: " & ex.Message, MsgBoxStyle.Exclamation)
                         End Try
                     End If
 
-                    ' Apply paragraph alignment
                     .ParagraphFormat.Alignment = format.Alignment
-
-                    ' Apply line spacing
                     .ParagraphFormat.LineSpacing = format.LineSpacing
-
-                    ' Apply spacing before and after
                     .ParagraphFormat.SpaceBefore = format.SpaceBefore
                     .ParagraphFormat.SpaceAfter = format.SpaceAfter
                 End With
-            Else
-                ' MsgBox("Invalid format index: " & formatIndex, MsgBoxStyle.Exclamation)
             End If
         Catch ex As System.Exception
-            ' MsgBox("Error applying format: " & ex.Message, MsgBoxStyle.Critical)
         End Try
     End Sub
+
 End Class
