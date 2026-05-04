@@ -1,0 +1,85 @@
+﻿Option Explicit On
+Option Strict On
+
+Imports System.ComponentModel
+Imports System.Drawing
+Imports System.Windows.Forms
+
+Namespace SharedLibrary
+
+    Partial Public Class M365SearchProgressForm
+
+        Private components As IContainer = Nothing
+        Friend WithEvents pb As ProgressBar
+        Friend WithEvents lblHits As Label
+        Friend WithEvents lstLog As ListBox
+        Friend WithEvents btnCancel As Button
+
+        Private Sub InitializeComponent()
+            Me.pb = New ProgressBar()
+            Me.lblHits = New Label()
+            Me.lstLog = New ListBox()
+            Me.btnCancel = New Button()
+            Me.SuspendLayout()
+            '
+            ' pb
+            '
+            Me.pb.Location = New Point(12, 12)
+            Me.pb.Size = New Size(560, 22)
+            Me.pb.Style = ProgressBarStyle.Marquee
+            Me.pb.Anchor = CType(AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right, AnchorStyles)
+            '
+            ' lblHits
+            '
+            Me.lblHits.AutoSize = True
+            Me.lblHits.Location = New Point(12, 40)
+            Me.lblHits.Text = "Hits so far: 0"
+            '
+            ' lstLog
+            '
+            Me.lstLog.Anchor = CType(AnchorStyles.Top Or AnchorStyles.Bottom Or AnchorStyles.Left Or AnchorStyles.Right, AnchorStyles)
+            Me.lstLog.IntegralHeight = False
+            Me.lstLog.Location = New Point(12, 64)
+            Me.lstLog.Size = New Size(560, 220)
+            '
+            ' btnCancel  — standard Red Ink button padding/sizing.
+            '
+            Me.btnCancel.Anchor = CType(AnchorStyles.Bottom Or AnchorStyles.Right, AnchorStyles)
+            Me.btnCancel.AutoSize = True
+            Me.btnCancel.Padding = New Padding(8, 4, 5, 4)
+            Me.btnCancel.Margin = New Padding(0)
+            Me.btnCancel.Location = New Point(497, 294)
+            Me.btnCancel.Text = "Cancel"
+            '
+            ' M365SearchProgressForm
+            '
+            Me.AutoScaleMode = AutoScaleMode.Dpi
+            Me.AutoScaleDimensions = New SizeF(96.0F, 96.0F)
+            Me.Font = New Font("Segoe UI", 9.0F, FontStyle.Regular, GraphicsUnit.Point)
+            Me.ClientSize = New Size(584, 330)
+            Me.Controls.Add(Me.btnCancel)
+            Me.Controls.Add(Me.lstLog)
+            Me.Controls.Add(Me.lblHits)
+            Me.Controls.Add(Me.pb)
+            Me.MinimumSize = New Size(420, 250)
+            Me.MaximizeBox = False
+            Me.MinimizeBox = False
+            Me.ShowInTaskbar = False
+            Me.StartPosition = FormStartPosition.CenterParent
+            Me.Text = "Microsoft 365 search"
+
+            ' Red Ink logo as window icon.
+            Try
+                Dim bmp As New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+                Me.Icon = Icon.FromHandle(bmp.GetHicon())
+            Catch
+                ' Fallback: leave default icon if logo unavailable.
+            End Try
+
+            Me.ResumeLayout(False)
+            Me.PerformLayout()
+        End Sub
+
+    End Class
+
+End Namespace

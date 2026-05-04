@@ -673,7 +673,7 @@ Partial Public Class ThisAddIn
                 CompareTextboxes:=True,
                 CompareFields:=True,
                 CompareComments:=True,
-                RevisedAuthor:=wordApp.UserName,
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                 IgnoreAllComparisonWarnings:=True
             )
 

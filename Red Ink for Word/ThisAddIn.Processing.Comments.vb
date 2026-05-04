@@ -191,38 +191,39 @@ Partial Public Class ThisAddIn
 
                                     If matchedRange IsNot Nothing AndAlso
                                    matchedRange.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
-
-                                        If INI_MarkdownBubbles Then
-                                            Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
-                                            Try
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:="")
-                                            Catch exAdd As System.Runtime.InteropServices.COMException
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
-                                            Catch exAdd2 As System.Exception
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
-                                            End Try
-
-                                            Try
-                                                If commentText.StartsWith("* ") Then
-                                                    commentText = $"{AN5}{Prefix}:" & vbCrLf & commentText
-                                                Else
-                                                    commentText = $"{AN5}{Prefix}: " & commentText
-                                                End If
-                                                Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                                                ' Ensure balloons visible during formatted insertion into the comment story
-                                                Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                                        Using BeginMarkupAuthorScope(app)
+                                            If INI_MarkdownBubbles Then
+                                                Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
                                                 Try
-                                                    win.View.ShowRevisionsAndComments = True
-                                                    InsertMarkdownToComment(cRng, commentText) ' will not fight a hidden pane
-                                                Finally
-                                                    win.View.ShowRevisionsAndComments = prevShow
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:="")
+                                                Catch exAdd As System.Runtime.InteropServices.COMException
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
+                                                Catch exAdd2 As System.Exception
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
                                                 End Try
-                                            Catch exMk As System.Exception
-                                                cmt.Range.Text = $"{AN5}{Prefix}: " & commentText
-                                            End Try
-                                        Else
-                                            Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(matchedRange, $"{AN5}{Prefix}: " & commentText)
-                                        End If
+
+                                                Try
+                                                    If commentText.StartsWith("* ") Then
+                                                        commentText = $"{AN5}{Prefix}:" & vbCrLf & commentText
+                                                    Else
+                                                        commentText = $"{AN5}{Prefix}: " & commentText
+                                                    End If
+                                                    Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                                                    ' Ensure balloons visible during formatted insertion into the comment story
+                                                    Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                                                    Try
+                                                        win.View.ShowRevisionsAndComments = True
+                                                        InsertMarkdownToComment(cRng, commentText) ' will not fight a hidden pane
+                                                    Finally
+                                                        win.View.ShowRevisionsAndComments = prevShow
+                                                    End Try
+                                                Catch exMk As System.Exception
+                                                    cmt.Range.Text = $"{AN5}{Prefix}: " & commentText
+                                                End Try
+                                            Else
+                                                Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(matchedRange, $"{AN5}{Prefix}: " & commentText)
+                                            End If
+                                        End Using
 
                                         BubbleCount += 1
                                     Else
@@ -316,14 +317,20 @@ Partial Public Class ThisAddIn
 
                 If INI_MarkdownBubbles Then
                     Try
-                        Dim cmt As Microsoft.Office.Interop.Word.Comment = docRef.Comments.Add(Range:=tailRange, Text:="")
-                        Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                        InsertMarkdownToComment(cRng, $"{AN5}{Prefix}:" & ErrorList)
+                        Using BeginMarkupAuthorScope(docRef.Application)
+                            Dim cmt As Microsoft.Office.Interop.Word.Comment = docRef.Comments.Add(Range:=tailRange, Text:="")
+                            Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                            InsertMarkdownToComment(cRng, $"{AN5}{Prefix}:" & ErrorList)
+                        End Using
                     Catch exMkSum As System.Exception
-                        docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                        Using BeginMarkupAuthorScope(docRef.Application)
+                            docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                        End Using
                     End Try
                 Else
-                    docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                    Using BeginMarkupAuthorScope(docRef.Application)
+                        docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                    End Using
                 End If
             End If
         Else
@@ -1144,29 +1151,31 @@ Partial Public Class ThisAddIn
 
         ' 3) Try to create a threaded reply if available, else fall back to appending inside the original comment range.
         Try
-            ' Preferred path: threaded reply (Word 2013+)
-            Dim newReply As Microsoft.Office.Interop.Word.Comment = Nothing
-            Try
-                ' Use the same anchor scope for the reply; text will be set via Range below.
-                newReply = target.Replies.Add(target.Scope, System.String.Empty)
-            Catch
-                ' Some versions may require a reference range; try Reference
+            Using BeginMarkupAuthorScope(app)
+                ' Preferred path: threaded reply (Word 2013+)
+                Dim newReply As Microsoft.Office.Interop.Word.Comment = Nothing
                 Try
-                    newReply = target.Replies.Add(target.Reference, System.String.Empty)
+                    ' Use the same anchor scope for the reply; text will be set via Range below.
+                    newReply = target.Replies.Add(target.Scope, System.String.Empty)
                 Catch
-                    newReply = Nothing
+                    ' Some versions may require a reference range; try Reference
+                    Try
+                        newReply = target.Replies.Add(target.Reference, System.String.Empty)
+                    Catch
+                        newReply = Nothing
+                    End Try
                 End Try
-            End Try
 
-            If newReply IsNot Nothing Then
-                If formatted Then
-                    ' Use provided formatter
-                    InsertMarkdownToComment(newReply.Range, replyText)
-                Else
-                    newReply.Range.Text = replyText
+                If newReply IsNot Nothing Then
+                    If formatted Then
+                        ' Use provided formatter
+                        InsertMarkdownToComment(newReply.Range, replyText)
+                    Else
+                        newReply.Range.Text = replyText
+                    End If
+                    Return True
                 End If
-                Return True
-            End If
+            End Using
         Catch ex As System.Exception
             ' fall through to non-threaded fallback
         End Try

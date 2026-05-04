@@ -72,7 +72,8 @@ Partial Public Class ThisAddIn
         Dim cellPattern As String
 
         ' Ensure we remove any newlines that might affect parsing
-        Response = Response.Replace(vbCrLf, " ").Replace(vbLf, " ")
+        ' Response = Response.Replace(vbCrLf, " ").Replace(vbLf, " ")
+        Response = Response.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
 
         ' Pattern for finding Cell
         cellPattern = "[Cell:"

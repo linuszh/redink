@@ -487,6 +487,7 @@ Partial Class Ribbon2
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
+        Me.RI_M365 = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
@@ -537,6 +538,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
+        Me.Menu1.Items.Add(Me.RI_M365)
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
@@ -698,6 +700,14 @@ Partial Class Ribbon2
     "audio, image)"
         Me.RI_Clipboard.ShowImage = True
         '
+        'RI_M365
+        '
+        Me.RI_M365.Label = "M365 Mail Search"
+        Me.RI_M365.Name = "RI_M365"
+        Me.RI_M365.OfficeImageId = "NewSearchFolder"
+        Me.RI_M365.ScreenTip = "Searches your M365 content with and without the help of AI"
+        Me.RI_M365.ShowImage = True
+        '
         'RI_MailMover
         '
         Me.RI_MailMover.Label = "Mail Mover"
@@ -724,7 +734,7 @@ Partial Class Ribbon2
         '
         'RI_KnowledgeStores
         '
-        Me.RI_KnowledgeStores.Label = "Knowledge Stores"
+        Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
         Me.RI_KnowledgeStores.Name = "RI_KnowledgeStores"
         Me.RI_KnowledgeStores.OfficeImageId = "DatabaseCopyDatabaseFile"
         Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
@@ -857,6 +867,13 @@ Partial Class Ribbon2
             Me.RI_KnowledgeStores.Enabled = True
         End If
 
+        If String.IsNullOrWhiteSpace(ThisAddIn.INI_M365TenantID) OrElse String.IsNullOrWhiteSpace(ThisAddIn.INI_M365ClientID) Then
+            Me.RI_KnowledgeStores.Enabled = False
+        Else
+            Me.RI_KnowledgeStores.Enabled = True
+        End If
+
+
         ApplyThemeAwareMenuIcon()
 
     End Function
@@ -872,6 +889,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Summarize As RibbonButton
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
+    Friend WithEvents RI_M365 As RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
     Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
@@ -905,3 +923,5 @@ Partial Class ThisRibbonCollection
         End Get
     End Property
 End Class
+
+

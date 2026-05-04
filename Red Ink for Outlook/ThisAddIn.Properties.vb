@@ -1022,6 +1022,33 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_AIMailSearch1 As String
+        Get
+            Return _context.SP_AIMailSearch1
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch1 = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AIMailSearch2 As String
+        Get
+            Return _context.SP_AIMailSearch2
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch2 = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AIMailSearch3 As String
+        Get
+            Return _context.SP_AIMailSearch3
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch3 = value
+        End Set
+    End Property
+
     Public Shared Property SP_FreestyleText As String
         Get
             Return _context.SP_FreestyleText
@@ -2652,6 +2679,34 @@ Partial Public Class ThisAddIn
             _context.INI_FormulaInstruction = value
         End Set
     End Property
+
+    Public Shared Property INI_M365ClientID As String
+        Get
+            Return _context.INI_M365ClientId
+        End Get
+        Set(value As String)
+            _context.INI_M365ClientId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365TenantID As String
+        Get
+            Return _context.INI_M365TenantId
+        End Get
+        Set(value As String)
+            _context.INI_M365TenantId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365Scopes As String
+        Get
+            Return _context.INI_M365Scopes
+        End Get
+        Set(value As String)
+            _context.INI_M365Scopes = value
+        End Set
+    End Property
+
 
 
     ''' <summary>

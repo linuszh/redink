@@ -160,6 +160,65 @@ Namespace SharedLibrary
             Return dotProduct / (Math.Sqrt(normA) * Math.Sqrt(normB))
         End Function
 
+        Private Shared Function GetEmbeddingStatePath(kbRootPath As String) As String
+            Return Path.Combine(kbRootPath, ".redink", ".embedding-state.json")
+        End Function
+
+        Private Shared Function ComputeContentHash(text As String) As String
+            Using sha = System.Security.Cryptography.SHA256.Create()
+                Dim bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(If(text, "")))
+                Return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant()
+            End Using
+        End Function
+
+        Private Shared Function LoadContentHashState(path As String) As Dictionary(Of String, String)
+            Dim result As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
+
+            If Not File.Exists(path) Then
+                Return result
+            End If
+
+            Try
+                Dim json = File.ReadAllText(path)
+                Dim raw = JsonConvert.DeserializeObject(Of Dictionary(Of String, String))(json)
+
+                If raw Is Nothing Then
+                    Return result
+                End If
+
+                For Each kvp In raw
+                    If String.IsNullOrWhiteSpace(kvp.Key) Then
+                        Continue For
+                    End If
+
+                    result(kvp.Key) = If(kvp.Value, "")
+                Next
+            Catch
+            End Try
+
+            Return result
+        End Function
+
+        Private Shared Sub SaveContentHashState(path As String, state As Dictionary(Of String, String))
+            Try
+                Dim dir = System.IO.Path.GetDirectoryName(path)
+                If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
+                    Directory.CreateDirectory(dir)
+                End If
+
+                Dim json = JsonConvert.SerializeObject(state, Formatting.None)
+                Dim tmpPath = path & ".tmp"
+
+                File.WriteAllText(tmpPath, json)
+                If File.Exists(path) Then
+                    File.Delete(path)
+                End If
+                File.Move(tmpPath, path)
+            Catch ex As Exception
+                System.Diagnostics.Debug.WriteLine($"Failed to save embedding state: {ex.Message}")
+            End Try
+        End Sub
+
         ' =====================================================================
         ' KB INDEXING & STORAGE
         ' =====================================================================
@@ -221,14 +280,24 @@ Namespace SharedLibrary
                 Return
             End If
 
+            Dim embeddingText = RemoveFrontMatter(text)
+            Dim contentHash = ComputeContentHash(embeddingText)
+
             Await EmbeddingUpdateLock.WaitAsync().ConfigureAwait(False)
             Try
                 Dim indexPath As String = Path.Combine(kbRootPath, ".redink", ".embeddings.json")
-                Dim records As List(Of EmbeddingRecord) = LoadIndex(indexPath)
+                Dim statePath As String = GetEmbeddingStatePath(kbRootPath)
+                Dim contentHashes = LoadContentHashState(statePath)
 
+                Dim previousHash As String = ""
+                If contentHashes.TryGetValue(filePath, previousHash) AndAlso
+                   String.Equals(previousHash, contentHash, StringComparison.OrdinalIgnoreCase) Then
+                    Return
+                End If
+
+                Dim records As List(Of EmbeddingRecord) = LoadIndex(indexPath)
                 records.RemoveAll(Function(r) String.Equals(r.FilePath, filePath, StringComparison.OrdinalIgnoreCase))
 
-                Dim embeddingText = RemoveFrontMatter(text)
                 Dim chunks = ChunkText(embeddingText)
 
                 For Each chunk In chunks
@@ -243,6 +312,9 @@ Namespace SharedLibrary
                 Next
 
                 SaveIndex(indexPath, records)
+
+                contentHashes(filePath) = contentHash
+                SaveContentHashState(statePath, contentHashes)
             Finally
                 EmbeddingUpdateLock.Release()
             End Try
@@ -278,6 +350,8 @@ Namespace SharedLibrary
 
             ' Start from a clean embedding index so no stale vectors survive model changes.
             SaveIndex(indexPath, New List(Of EmbeddingRecord)())
+
+            SaveContentHashState(GetEmbeddingStatePath(kbRootPath), New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase))
 
             Dim rebuiltCount As Integer = 0
 
@@ -346,6 +420,8 @@ Namespace SharedLibrary
 
             ' Start from a clean embedding index so no stale vectors survive model changes.
             SaveIndex(indexPath, New List(Of EmbeddingRecord)())
+
+            SaveContentHashState(GetEmbeddingStatePath(kbRootPath), New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase))
 
             Dim rebuiltCount As Integer = 0
 
