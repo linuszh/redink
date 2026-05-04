@@ -1222,7 +1222,7 @@ Public Class DiscussInky
 #Region "Tooling Support"
 
     ''' <summary>
-    ''' Updates enabled state of tooling controls based on current model's tooling support.
+    ''' Updates enabled state of tooling controls based on current model support and "(t)" availability.
     ''' </summary>
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
@@ -1233,21 +1233,21 @@ Public Class DiscussInky
             currentConfig = SharedMethods.GetCurrentConfig(_context)
         End If
 
-        Dim supportsTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsToolTrigger As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
 
-        _chkEnableTooling.Enabled = supportsTooling
-        _btnTools.Enabled = supportsTooling
+        Dim toolingUiAvailable As Boolean = supportsCurrentModelTooling OrElse supportsToolTrigger
 
-        ' Log checkbox is only enabled when the current model actually supports tooling
-        ' (not merely because a ToolDefaultModel exists — (t) uses it transiently)
-        _chkShowToolingLog.Enabled = supportsTooling
+        _chkEnableTooling.Enabled = toolingUiAvailable
+        _btnTools.Enabled = toolingUiAvailable
+        _chkShowToolingLog.Enabled = toolingUiAvailable
 
-        If Not supportsTooling Then
+        If Not toolingUiAvailable Then
             _chkEnableTooling.Checked = False
             _selectedToolsForChat = Nothing
         End If
 
-        ' Only set checkbox from INI on first initialization; preserve user's mid-session toggle afterward
         If Not _toolingControlsInitialized Then
             _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
             _toolingControlsInitialized = True
@@ -1302,8 +1302,8 @@ Public Class DiscussInky
         If Not _chkEnableTooling.Checked Then
             _selectedToolsForChat = Nothing
         End If
-        ' Log checkbox enabled state tracks the enable-tooling checkbox
-        _chkShowToolingLog.Enabled = _chkEnableTooling.Checked AndAlso _chkEnableTooling.Enabled
+
+        UpdateToolingControlsState()
     End Sub
 
     ''' <summary>
@@ -1334,74 +1334,6 @@ Public Class DiscussInky
         Return _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
     End Function
 
-    ''' <summary>
-    ''' Checks whether a "ToolDefaultModel" entry exists in the alternate models INI
-    ''' without applying it to the shared context. Used for UI hints and pre-validation.
-    ''' </summary>
-    ''' <returns>True if a model with ToolDefaultModel=True is defined; otherwise False.</returns>
-    Private Function IsToolDefaultModelAvailable() As Boolean
-        Try
-            Dim iniPath As String = _context.INI_AlternateModelPath
-            If String.IsNullOrWhiteSpace(iniPath) Then Return False
-
-            iniPath = SharedMethods.ExpandEnvironmentVariables(iniPath)
-            If Not System.IO.File.Exists(iniPath) Then Return False
-
-            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                "true", "yes", "wahr", "ja", "on", "1"
-            }
-
-            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-
-            For Each rawLine In System.IO.File.ReadAllLines(iniPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
-                    Continue For
-                End If
-
-                ' Section header
-                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                    If currentDict.ContainsKey("ToolDefaultModel") Then
-                        Dim raw As String = currentDict("ToolDefaultModel")
-                        If raw IsNot Nothing Then
-                            Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                            Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                            raw = raw.Trim()
-                            If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                                raw = raw.Substring(1, raw.Length - 2).Trim()
-                            End If
-                            If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                        End If
-                    End If
-                    currentDict.Clear()
-                    Continue For
-                End If
-
-                Dim tokens = line.Split(New Char() {"="c}, 2)
-                If tokens.Length = 2 Then
-                    currentDict(tokens(0).Trim()) = tokens(1).Trim()
-                End If
-            Next
-
-            ' Check final section
-            If currentDict.ContainsKey("ToolDefaultModel") Then
-                Dim raw As String = currentDict("ToolDefaultModel")
-                If raw IsNot Nothing Then
-                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                    raw = raw.Trim()
-                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                        raw = raw.Substring(1, raw.Length - 2).Trim()
-                    End If
-                    If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                End If
-            End If
-
-            Return False
-        Catch
-            Return False
-        End Try
-    End Function
 
 #End Region
 
@@ -2230,15 +2162,14 @@ Public Class DiscussInky
         Dim userText = _txtInput.Text.Trim()
         If userText.Length = 0 Then Return
 
-        ' Detect and strip ToolTrigger "(t)" from user prompt
-        Dim toolTriggerDetected As Boolean = False
+        ' Detect and strip explicit ToolTrigger "(t)" from user prompt
+        Dim explicitToolTriggerDetected As Boolean = False
         If userText.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-            toolTriggerDetected = True
+            explicitToolTriggerDetected = True
             userText = userText.Replace(ToolTrigger, "").Trim()
 
-            ' If the prompt is now empty after stripping, restore for user to fix
             If String.IsNullOrWhiteSpace(userText) Then
-                _txtInput.Text = userText
+                _txtInput.Text = ToolTrigger
                 Return
             End If
         End If
@@ -2247,7 +2178,7 @@ Public Class DiscussInky
         _history.Add(("user", userText))
         _txtInput.Clear()
         ShowAssistantThinking()
-        Dim __ = SendAsync(userText, toolTriggerDetected)
+        Dim __ = SendAsync(userText, explicitToolTriggerDetected)
     End Sub
 
     ''' <summary>
@@ -2452,7 +2383,10 @@ Public Class DiscussInky
         End If
 
         ' ToolTrigger hint
-        If IsToolDefaultModelAvailable() Then
+        Dim toolTriggerAvailable As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+        If toolTriggerAvailable Then
             sb.Append($" | Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request.")
         End If
 
@@ -2525,11 +2459,34 @@ Public Class DiscussInky
     ''' <summary>
     ''' Builds the full prompt (persona, mission, knowledge, history, document) and sends it to the LLM.
     ''' Supports one-shot ToolTrigger "(t)" for a single request using the ToolDefaultModel.
+    ''' Also supports implicit "(t)" behavior when Enable Tooling is checked, the current model
+    ''' does not support tooling, and a tooling-capable ToolDefaultModel exists.
     ''' </summary>
     ''' <param name="userText">User's message text.</param>
     ''' <param name="toolTriggerDetected">True if the user included "(t)" in their prompt.</param>
     Private Async Function SendAsync(userText As String, Optional toolTriggerDetected As Boolean = False) As Task
         Try
+            Dim explicitToolTriggerDetected As Boolean = toolTriggerDetected
+            Dim restoreUserText As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
+
+            Dim currentConfig As ModelConfig = Nothing
+            If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                currentConfig = _alternateModelConfig
+            Else
+                currentConfig = SharedMethods.GetCurrentConfig(_context)
+            End If
+
+            Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+            Dim supportsToolTrigger As Boolean =
+                SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+            Dim autoToolTriggerFromCheckbox As Boolean =
+                _chkEnableTooling.Checked AndAlso
+                Not supportsCurrentModelTooling AndAlso
+                supportsToolTrigger
+
+            toolTriggerDetected = explicitToolTriggerDetected OrElse autoToolTriggerFromCheckbox
+
             ' Build system prompt from persona or default
             Dim dateContext = GetDateContext()
             Dim randomWord = GetRandomModifier()
@@ -2558,7 +2515,6 @@ Public Class DiscussInky
                     systemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
                 End If
             End If
-
 
             ' (kb) / (kb:...) trigger: Supplement with knowledge store results
             Dim kbContext As String = Nothing
@@ -2677,69 +2633,41 @@ Public Class DiscussInky
 
             ' ──────────────────────────────────────────────────────────────
             ' ToolTrigger "(t)" - One-Shot Tooling Model
+            ' Also used implicitly when Enable Tooling is checked and only ToolDefaultModel supports tooling
             ' ──────────────────────────────────────────────────────────────
             Dim toolTriggerConfig As ModelConfig = Nothing
 
             If toolTriggerDetected Then
-                If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
+                If Not SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    _context.INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    toolTriggerConfig) Then
+
                     RemoveAssistantThinking()
-                    AppendSystemMessage($"The {ToolTrigger} trigger requires an alternate model configuration file, but none is configured.")
-                    Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                    AppendSystemMessage($"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                    Ui(Sub() _txtInput.Text = restoreUserText)
                     Return
                 End If
 
-                Dim preToolConfig As ModelConfig = SharedMethods.GetCurrentConfig(_context)
-                Dim found As Boolean = SharedMethods.GetSpecialTaskModel(
-                    _context, _context.INI_AlternateModelPath, "ToolDefaultModel")
-
-                If found Then
-                    ' Capture the just-applied ToolDefaultModel config
-                    toolTriggerConfig = SharedMethods.GetCurrentConfig(_context)
-
-                    ' Immediately restore original config so global context stays pristine
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
-                    ' Verify that the ToolDefaultModel actually supports tooling
-                    If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
-                        RemoveAssistantThinking()
-                        AppendSystemMessage($"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
-                        Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
-                        Return
-                    End If
-                Else
-                    ' Restore original config
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
+                If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
                     RemoveAssistantThinking()
-                    AppendSystemMessage($"The {ToolTrigger} trigger was used, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
-                    Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                    AppendSystemMessage($"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                    Ui(Sub() _txtInput.Text = restoreUserText)
                     Return
                 End If
 
                 ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
-                forceDialog:=True)
+                    _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True)
 
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         RemoveAssistantThinking()
                         AppendSystemMessage($"The {ToolTrigger} trigger requires {Globals.ThisAddIn.ToolFriendlyName.ToLower} to be selected. Please select at least one tool and try again.")
-                        Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                        Ui(Sub() _txtInput.Text = restoreUserText)
                         Return
                     End If
                 End If
-
-                ' (t) does not require pre-selected tools — Sources always works.
-                ' Use whatever tools are already selected; if none, pass an empty list.
-                'If _selectedToolsForChat Is Nothing Then
-                '_selectedToolsForChat = New List(Of ModelConfig)()
-                'End If
 
                 ' Execute via tooling loop with one-shot ToolDefaultModel config
                 Dim hideLog As Boolean = Not _chkShowToolingLog.Checked
@@ -2781,9 +2709,10 @@ Public Class DiscussInky
                 Return
             End If
 
-
             ' ──────────────────────────────────────────────────────────────
             ' Standard LLM call (existing behavior)
+            ' If the current model supports tooling and Enable Tooling is checked,
+            ' CallLlmWithSelectedModelAsync already handles that path.
             ' ──────────────────────────────────────────────────────────────
             Dim sw = Stopwatch.StartNew()
             Dim stdAnswer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())

@@ -1547,6 +1547,8 @@ Partial Public Class ThisAddIn
             context.Log($"Successful: {successCount}", If(failedCount = 0, "success", "step"))
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
 
+            currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
+
             ToolingFileLogger.EndSession(True, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
             Return currentResponse
 
@@ -2690,17 +2692,16 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
             ElseIf SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
-                ' Defense-in-depth: even if a stale m365_* registration leaks
-                ' into AutoPilot mode, never execute it there — those tools
-                ' require interactive sign-in on the user's own machine.
-                If _chatAgentActive AndAlso Not _apActive Then
+                ' M365 tools are allowed in interactive/local scenarios, but never in AutoPilot.
+                ' They may trigger an interactive MSAL sign-in on the user's machine.
+                If Not _apActive Then
                     response = Await ExecuteInternalM365Tool(toolCall, context)
                     ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
                 Else
                     response.Success = False
-                    response.ErrorMessage = "M365 tools are only available in interactive Chat Agent mode on the user's computer; they cannot run inside AutoPilot."
+                    response.ErrorMessage = "M365 tools cannot run inside AutoPilot because they may require interactive user sign-in."
                     ToolingFileLogger.LogWarn(
-                        "M365 tool blocked outside Chat Agent.",
+                        "M365 tool blocked in AutoPilot.",
                         details:=$"tool={toolCall.ToolName}; _apActive={_apActive}; _chatAgentActive={_chatAgentActive}")
                 End If
 
@@ -3826,7 +3827,7 @@ Partial Public Class ThisAddIn
     ''' (only when a knowledge store path is configured and at least one store is indexed).
     ''' </summary>
     ''' <returns>List of available tools.</returns>
-    Public Function GetAvailableTools() As List(Of ModelConfig)
+    Public Function GetAvailableTools(Optional includeInteractiveM365Tools As Boolean = False) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
         If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
@@ -3842,10 +3843,9 @@ Partial Public Class ThisAddIn
 
         tools.AddRange(GetInternalKnowledgeTools())
 
-        ' M365 tools: only when the Chat Agent runs interactively on the user's
-        ' computer. They require an MSAL sign-in popup and access the user's own
-        ' M365 tenant, which is incompatible with unattended AutoPilot runs.
-        If _chatAgentActive AndAlso Not _apActive Then
+        ' M365 tools are interactive-only. Show them for Local Chat Agent source
+        ' selection and execution, but never for AutoPilot.
+        If (includeInteractiveM365Tools OrElse _chatAgentActive) AndAlso Not _apActive Then
             tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
         End If
 
@@ -3872,8 +3872,10 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="forceDialog">If True, always shows the selection dialog.</param>
     ''' <returns>Selected tool configurations, or Nothing when the dialog is canceled or no tools are available.</returns>
-    Public Function SelectToolsForSession(Optional forceDialog As Boolean = False, Optional FriendlyName As String = ToolFriendlyName) As List(Of ModelConfig)
-        Dim availableTools = GetAvailableTools()
+    Public Function SelectToolsForSession(Optional forceDialog As Boolean = False,
+                                      Optional FriendlyName As String = ToolFriendlyName,
+                                      Optional includeInteractiveM365Tools As Boolean = False) As List(Of ModelConfig)
+        Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
 
         If availableTools.Count = 0 Then
             ShowCustomMessageBox($"No {FriendlyName.ToLower} are available. Configure 'Tooling' in the Special Services configuration file.")
@@ -3886,8 +3888,8 @@ Partial Public Class ThisAddIn
             Dim selectedNameSet As New HashSet(Of String)(SelectedToolNames, StringComparer.OrdinalIgnoreCase)
 
             Dim selected = availableTools.
-            Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
-            ToList()
+        Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
+        ToList()
 
             If selected.Count > 0 Then
                 Return selected
@@ -3896,8 +3898,235 @@ Partial Public Class ThisAddIn
 
         Dim hasPersistedSelection As Boolean = (SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0)
 
-        ' Only preselect all on first use (no persisted selection yet).
         Return ShowToolSelectionDialog(availableTools, preselectAll:=Not hasPersistedSelection, FriendlyName)
+    End Function
+
+    Private Class ToolSourceLink
+        Public Property Url As String
+        Public Property Title As String
+        Public Property Source As String
+    End Class
+
+    Private Function AppendM365SourcesFooter(finalAnswer As String,
+                                             toolResponses As List(Of ToolResponse)) As String
+        Dim answer As String = If(finalAnswer, "").Trim()
+        Dim links As List(Of ToolSourceLink) = ExtractM365SourceLinks(toolResponses, answer)
+
+        If links.Count = 0 Then
+            Return answer
+        End If
+
+        Dim sb As New StringBuilder()
+
+        If answer.Length > 0 Then
+            sb.AppendLine(answer)
+            sb.AppendLine()
+        End If
+
+        sb.AppendLine("### Sources")
+
+        For Each link In links
+            Dim label As String = BuildSourceLinkLabel(link)
+            sb.AppendLine($"- [{EscapeMarkdownLinkText(label)}]({link.Url})")
+        Next
+
+        Return sb.ToString().Trim()
+    End Function
+
+    Private Function ExtractM365SourceLinks(toolResponses As List(Of ToolResponse),
+                                            existingAnswer As String) As List(Of ToolSourceLink)
+        Dim results As New List(Of ToolSourceLink)()
+        Dim seenUrls As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        Dim answerText As String = If(existingAnswer, "")
+
+        If toolResponses Is Nothing OrElse toolResponses.Count = 0 Then
+            Return results
+        End If
+
+        For Each response As ToolResponse In toolResponses
+            If response Is Nothing OrElse Not response.Success OrElse String.IsNullOrWhiteSpace(response.Response) Then
+                Continue For
+            End If
+
+            If String.Equals(response.ToolName, "m365_search", StringComparison.OrdinalIgnoreCase) Then
+                ExtractM365SearchLinks(response.Response, answerText, seenUrls, results)
+            ElseIf IsM365RetrievalToolName(response.ToolName) Then
+                ExtractM365WrappedContentLink(response.ToolName, response.Response, answerText, seenUrls, results)
+            End If
+
+            If results.Count >= 12 Then
+                Exit For
+            End If
+        Next
+
+        Return results
+    End Function
+
+    Private Sub ExtractM365SearchLinks(responseText As String,
+                                       existingAnswer As String,
+                                       seenUrls As HashSet(Of String),
+                                       results As List(Of ToolSourceLink))
+        Dim root As JObject = Nothing
+
+        Try
+            root = JObject.Parse(responseText)
+        Catch
+            Exit Sub
+        End Try
+
+        Dim hits As JArray = TryCast(root("hits"), JArray)
+        If hits Is Nothing OrElse hits.Count = 0 Then
+            Exit Sub
+        End If
+
+        For Each hitToken As JToken In hits
+            Dim hit As JObject = TryCast(hitToken, JObject)
+            If hit Is Nothing Then Continue For
+
+            Dim url As String = If(hit("web_url")?.ToString(), "").Trim()
+            Dim title As String = If(hit("title")?.ToString(), "").Trim()
+            Dim source As String = If(hit("source")?.ToString(), "").Trim()
+
+            TryAddSourceLink(url, title, source, existingAnswer, seenUrls, results)
+
+            If results.Count >= 12 Then
+                Exit For
+            End If
+        Next
+    End Sub
+
+    Private Sub ExtractM365WrappedContentLink(toolName As String,
+                                              responseText As String,
+                                              existingAnswer As String,
+                                              seenUrls As HashSet(Of String),
+                                              results As List(Of ToolSourceLink))
+        Dim urlMatch As Match = Regex.Match(
+            responseText,
+            "<WEB_URL>\s*(.*?)\s*</WEB_URL>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+
+        If Not urlMatch.Success Then
+            Exit Sub
+        End If
+
+        Dim titleMatch As Match = Regex.Match(
+            responseText,
+            "^<(?<kind>[A-Z_]+)\s+id=""[^""]*""\s+title=""(?<title>[^""]*)""[^>]*>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+
+        Dim title As String = ""
+        If titleMatch.Success Then
+            title = titleMatch.Groups("title").Value.Trim()
+        End If
+
+        Dim url As String = urlMatch.Groups(1).Value.Trim()
+        Dim source As String = GetM365SourceFromToolName(toolName)
+
+        TryAddSourceLink(url, title, source, existingAnswer, seenUrls, results)
+    End Sub
+
+    Private Sub TryAddSourceLink(url As String,
+                                 title As String,
+                                 source As String,
+                                 existingAnswer As String,
+                                 seenUrls As HashSet(Of String),
+                                 results As List(Of ToolSourceLink))
+        Dim cleanUrl As String = If(url, "").Trim()
+        If String.IsNullOrWhiteSpace(cleanUrl) Then
+            Exit Sub
+        End If
+
+        If Not String.IsNullOrWhiteSpace(existingAnswer) AndAlso
+           existingAnswer.IndexOf(cleanUrl, StringComparison.OrdinalIgnoreCase) >= 0 Then
+            Exit Sub
+        End If
+
+        If Not seenUrls.Add(cleanUrl) Then
+            Exit Sub
+        End If
+
+        results.Add(New ToolSourceLink With {
+            .Url = cleanUrl,
+            .Title = If(title, "").Trim(),
+            .Source = If(source, "").Trim()
+        })
+    End Sub
+
+    Private Function IsM365RetrievalToolName(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        Select Case toolName.Trim().ToLowerInvariant()
+            Case "m365_get_mail",
+                 "m365_get_mail_thread",
+                 "m365_get_file",
+                 "m365_get_event",
+                 "m365_get_chat_thread",
+                 "m365_get_onenote_page"
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Function GetM365SourceFromToolName(toolName As String) As String
+        If String.IsNullOrWhiteSpace(toolName) Then
+            Return ""
+        End If
+
+        Select Case toolName.Trim().ToLowerInvariant()
+            Case "m365_get_mail", "m365_get_mail_thread"
+                Return "mail"
+            Case "m365_get_file"
+                Return "file"
+            Case "m365_get_event"
+                Return "calendar"
+            Case "m365_get_chat_thread"
+                Return "teams"
+            Case "m365_get_onenote_page"
+                Return "onenote"
+            Case Else
+                Return "m365"
+        End Select
+    End Function
+
+    Private Function BuildSourceLinkLabel(link As ToolSourceLink) As String
+        If link Is Nothing Then Return "Open source"
+
+        Dim title As String = If(link.Title, "").Trim()
+        Dim source As String = If(link.Source, "").Trim().ToLowerInvariant()
+
+        If String.IsNullOrWhiteSpace(title) Then
+            title = "Open item"
+        End If
+
+        Select Case source
+            Case "mail"
+                Return title & " (e-mail)"
+            Case "onedrive"
+                Return title & " (OneDrive)"
+            Case "sharepoint"
+                Return title & " (SharePoint)"
+            Case "file"
+                Return title & " (file)"
+            Case "teams"
+                Return title & " (Teams)"
+            Case "calendar"
+                Return title & " (calendar)"
+            Case "onenote"
+                Return title & " (OneNote)"
+            Case Else
+                Return title
+        End Select
+    End Function
+
+    Private Function EscapeMarkdownLinkText(value As String) As String
+        Dim s As String = If(value, "")
+        s = s.Replace("\", "\\")
+        s = s.Replace("[", "\[")
+        s = s.Replace("]", "\]")
+        Return s
     End Function
 
 #End Region

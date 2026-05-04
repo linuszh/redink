@@ -628,10 +628,13 @@ Partial Public Class ThisAddIn
                 "}},""description"":""Conditional formatting rules""}," &
                 """charts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]}," &
-                """data_range"":{""type"":""string""},""title"":{""type"":""string""}," &
-                """position"":{""type"":""string""},""width"":{""type"":""number""},""height"":{""type"":""number""}," &
-                """sheet_name"":{""type"":""string""}" &
-                "}},""description"":""Charts to create""}," &
+                """data_range"":{""type"":""string"",""description"":""Worksheet range used as the chart source data""}," &
+                """title"":{""type"":""string"",""description"":""Optional chart title""}," &
+                """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
+                """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
+                """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}" &
+                "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
                 """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""range"":{""type"":""string""}" &
                 "}},""description"":""Named ranges""}," &
@@ -3087,6 +3090,7 @@ Partial Public Class ThisAddIn
             Dim chartObject As Microsoft.Office.Interop.Excel.ChartObject = Nothing
             Dim chart As Microsoft.Office.Interop.Excel.Chart = Nothing
             Dim dataRangeObj As Microsoft.Office.Interop.Excel.Range = Nothing
+
             Try
                 Dim chartType = If(chartObj.Value(Of String)("type"), "column").ToLowerInvariant()
                 Dim dataRange = chartObj.Value(Of String)("data_range")
@@ -3107,13 +3111,9 @@ Partial Public Class ThisAddIn
                     targetWs = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
                 End If
 
-                ' Parse width/height
-                Dim chartWidth As Double = 480
-                Dim chartHeight As Double = 300
-                Dim wToken = chartObj("width")
-                If wToken IsNot Nothing Then Double.TryParse(wToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartWidth)
-                Dim hToken = chartObj("height")
-                If hToken IsNot Nothing Then Double.TryParse(hToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartHeight)
+                ' Parse width/height with normalization
+                Dim chartWidth As Double = NormalizeChartDimension(chartObj("width"), 480, 320)
+                Dim chartHeight As Double = NormalizeChartDimension(chartObj("height"), 300, 220)
 
                 ' Get position from cell
                 posCell = targetWs.Range(position)
@@ -3136,11 +3136,23 @@ Partial Public Class ThisAddIn
                 ' Add chart as embedded ChartObject
                 chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
                 chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
+
+                Try
+                    chartObject.Placement = Microsoft.Office.Interop.Excel.XlPlacement.xlFreeFloating
+                Catch
+                End Try
+
                 chart = chartObject.Chart
 
                 dataRangeObj = targetWs.Range(dataRange)
                 chart.SetSourceData(dataRangeObj)
                 chart.ChartType = xlChartType
+
+                Try
+                    chartObject.Width = chartWidth
+                    chartObject.Height = chartHeight
+                Catch
+                End Try
 
                 If Not String.IsNullOrWhiteSpace(chartTitle) Then
                     chart.HasTitle = True
@@ -3171,6 +3183,42 @@ Partial Public Class ThisAddIn
             End Try
         Next
     End Sub
+
+    ''' <summary>
+    ''' Normalizes chart dimensions for Excel.
+    ''' Excel expects points. Very small values are usually intended as inches.
+    ''' </summary>
+    Private Shared Function NormalizeChartDimension(
+            token As JToken,
+            defaultPoints As Double,
+            minPoints As Double) As Double
+
+        Dim value As Double = defaultPoints
+
+        If token IsNot Nothing Then
+            Dim parsed As Double
+            If Double.TryParse(token.ToString(),
+                               Globalization.NumberStyles.Any,
+                               Globalization.CultureInfo.InvariantCulture,
+                               parsed) Then
+                value = parsed
+            End If
+        End If
+
+        If value <= 0 Then value = defaultPoints
+
+        ' Heuristic:
+        ' Values like 4, 5, 6 are usually meant as inches, not points.
+        If value <= 24 Then
+            value *= 72.0
+        End If
+
+        If value < minPoints Then
+            value = minPoints
+        End If
+
+        Return value
+    End Function
 
     ''' <summary>
     ''' Applies print/page setup to a worksheet.

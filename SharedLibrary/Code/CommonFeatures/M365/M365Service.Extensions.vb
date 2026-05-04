@@ -61,6 +61,8 @@ Namespace SharedLibrary
         Unknown
     End Enum
 
+
+
     ''' <summary>One node in the (potentially nested) attachment tree of a message.</summary>
     Public Class M365ExpandedAttachment
         Public Property Kind As M365ExpandedAttachmentKind
@@ -127,6 +129,7 @@ Namespace SharedLibrary
         Public Property Source As M365SearchSources
         Public Property Id As String
         Public Property Title As String
+        Public Property WebUrl As String
         ''' <summary>Concatenated AI-friendly plain text (header block + body + attachments).</summary>
         Public Property Text As String
         Public Property Truncated As Boolean
@@ -497,6 +500,7 @@ Namespace SharedLibrary
                 Return r
             End If
             r.Title = msg.Subject
+            r.WebUrl = If(msg.WebLink, "")
 
             Dim sb As New StringBuilder()
             sb.AppendLine("From: " & FormatAddr(msg.From, msg.FromAddress))
@@ -510,7 +514,6 @@ Namespace SharedLibrary
             If String.Equals(msg.BodyContentType, "html", StringComparison.OrdinalIgnoreCase) Then body = StripHtml(body)
             sb.AppendLine(body.Trim())
 
-            ' Attachments
             If options.IncludeAttachments AndAlso msg.HasAttachments Then
                 Dim work = EnsureWorkingFolder(options, "ri_m365_msg_")
                 r.WorkingFolder = work
@@ -617,6 +620,7 @@ Namespace SharedLibrary
                 Return r
             End If
             r.Title = meta.Name
+            r.WebUrl = If(meta.WebUrl, "")
             If meta.IsFolder Then
                 r.Text = "[Folder] " & meta.Name
                 Return r
@@ -661,6 +665,7 @@ Namespace SharedLibrary
                 Return r
             End If
             r.Title = ev.Subject
+            r.WebUrl = If(ev.WebLink, "")
             Dim sb As New StringBuilder()
             sb.AppendLine($"Subject: {ev.Subject}")
             sb.AppendLine($"Organizer: {ev.Organizer}")

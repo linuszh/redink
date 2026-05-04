@@ -1435,8 +1435,16 @@ Namespace SharedLibrary
             pagePaths:=targets,
             progressCallback:=progressCallback,
             operationName:=operationName).ConfigureAwait(False)
+
+                ReportMaintenanceProgress(
+            progressCallback,
+            $"{operationName}: finalizing deferred embedding updates.")
             Catch ex As Exception
                 captured = ExceptionDispatchInfo.Capture(ex)
+
+                ReportMaintenanceProgress(
+            progressCallback,
+            $"{operationName}: finalizing after error.")
             End Try
 
             Await EndEmbeddingBatchAsync(context).ConfigureAwait(False)
@@ -1574,7 +1582,6 @@ Namespace SharedLibrary
                 Next
             End If
 
-            ReportMaintenanceProgress(progressCallback, $"{operationName}: finished.")
             Return sb.ToString().Trim()
         End Function
 
@@ -4727,20 +4734,13 @@ Namespace SharedLibrary
         End Function
 
         Public Shared Async Function ApplyWikiHealthFixesAsync(kbRootPath As String,
-                                                               context As ISharedContext,
-                                                               Optional includeLlmRepairs As Boolean = True,
-                                                               Optional progressCallback As Action(Of String) = Nothing,
-                                                               Optional operationName As String = "Repair") As Task(Of String)
+                                                       context As ISharedContext,
+                                                       Optional includeLlmRepairs As Boolean = True,
+                                                       Optional progressCallback As Action(Of String) = Nothing,
+                                                       Optional operationName As String = "Repair") As Task(Of String)
             If String.IsNullOrWhiteSpace(kbRootPath) Then Return ""
             InitializeWikiStructure(kbRootPath)
 
-            ' Same scope pattern as IngestSourceAsync: collapse the per-saved-page
-            ' RebuildIndex / RefreshReviewArtifacts / BackfillRelatedLinks work
-            ' (driven by ParseAndSaveAgentResponseAsync inside the repair loops)
-            ' into a single end-of-run flush. The explicit RebuildIndex /
-            ' RefreshReviewArtifacts calls already present inside
-            ' ApplyWikiHealthFixesCoreAsync remain — they are idempotent and the
-            ' final pair simply overlaps harmlessly with EndIngestScopeAsync.
             BeginEmbeddingBatch(kbRootPath)
             BeginIngestScope(kbRootPath)
 
@@ -4749,19 +4749,29 @@ Namespace SharedLibrary
 
             Try
                 resultText = Await ApplyWikiHealthFixesCoreAsync(
-                    kbRootPath:=kbRootPath,
-                    context:=context,
-                    includeLlmRepairs:=includeLlmRepairs,
-                    progressCallback:=progressCallback,
-                    operationName:=operationName).ConfigureAwait(False)
+            kbRootPath:=kbRootPath,
+            context:=context,
+            includeLlmRepairs:=includeLlmRepairs,
+            progressCallback:=progressCallback,
+            operationName:=operationName).ConfigureAwait(False)
+
+                ReportMaintenanceProgress(
+            progressCallback,
+            $"{operationName}: finalizing deferred page updates.")
             Catch ex As Exception
                 captured = ExceptionDispatchInfo.Capture(ex)
+
+                ReportMaintenanceProgress(
+            progressCallback,
+            $"{operationName}: finalizing after error.")
             End Try
 
-            ' End ingest scope BEFORE the embedding batch (same ordering as
-            ' IngestSourceAsync): the scope's deferred backfill rewrites must
-            ' still queue their embedding updates into the active batch.
             Await EndIngestScopeAsync(context).ConfigureAwait(False)
+
+            ReportMaintenanceProgress(
+        progressCallback,
+        $"{operationName}: finalizing deferred embedding updates.")
+
             Await EndEmbeddingBatchAsync(context).ConfigureAwait(False)
 
             If captured IsNot Nothing Then captured.Throw()
@@ -4937,11 +4947,10 @@ Namespace SharedLibrary
             sb.AppendLine($"- Risky writes skipped: {skippedRiskyWrites}")
 
             AppendToLog(
-                kbRootPath,
-                "repair",
-                $"Updated={result.UpdatedPages}; Sources={result.AddedSourcesSections}; Related={result.AddedRelatedSections}; Links={result.RepairedLinks}; BrokenLinksRemoved={result.RemovedBrokenLinks}; LlmPages={result.LlmRepairedPages}; Skipped={skippedRiskyWrites}")
+                    kbRootPath,
+                    "repair",
+                    $"Updated={result.UpdatedPages}; Sources={result.AddedSourcesSections}; Related={result.AddedRelatedSections}; Links={result.RepairedLinks}; BrokenLinksRemoved={result.RemovedBrokenLinks}; LlmPages={result.LlmRepairedPages}; Skipped={skippedRiskyWrites}")
 
-            ReportMaintenanceProgress(progressCallback, $"{operationName}: finished.")
             Return sb.ToString().Trim()
         End Function
 

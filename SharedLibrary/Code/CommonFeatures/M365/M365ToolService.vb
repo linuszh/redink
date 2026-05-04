@@ -762,6 +762,9 @@ Namespace SharedLibrary
         Private Function WrapContent(kind As String, id As String, r As M365TextResult) As String
             Dim sb As New StringBuilder()
             sb.AppendLine($"<{kind} id=""{id}"" title=""{EscapeAttr(If(r?.Title, ""))}"">")
+            If r IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(r.WebUrl) Then
+                sb.AppendLine($"<WEB_URL>{r.WebUrl}</WEB_URL>")
+            End If
             If r IsNot Nothing AndAlso Not String.IsNullOrEmpty(r.Text) Then sb.AppendLine(r.Text)
             If r IsNot Nothing AndAlso r.Truncated Then
                 sb.AppendLine("[content was truncated to fit the requested max_chars budget]")

@@ -202,11 +202,32 @@ Public Class M365SearchTestForm
         Return Nothing
     End Function
 
+    Private Function TryGetHitFromListItem(item As ListViewItem) As M365SearchHit
+        If item Is Nothing Then Return Nothing
+
+        Dim directHit As M365SearchHit = TryCast(item.Tag, M365SearchHit)
+        If directHit IsNot Nothing Then
+            Return directHit
+        End If
+
+        If item.Tag Is Nothing Then Return Nothing
+
+        Try
+            Dim hitIdx As Integer = CInt(item.Tag)
+            If hitIdx >= 0 AndAlso hitIdx < _hits.Count Then
+                Return _hits(hitIdx)
+            End If
+        Catch
+        End Try
+
+        Return Nothing
+    End Function
+
     ' ════════════════════════════════════════════════════════════════════
     '  UI construction
     ' ════════════════════════════════════════════════════════════════════
     Private Sub BuildUi()
-        Me.Text = "Search Mails"
+        Me.Text = Globals.ThisAddIn.AN & "- Search M365 Mails"
         Me.StartPosition = FormStartPosition.CenterScreen
         Me.MinimumSize = New Size(1100, 540)
         Me.ClientSize = New Size(1400, 700)
@@ -946,16 +967,38 @@ Public Class M365SearchTestForm
 
     Private Async Sub btnAISearch_Click(sender As Object, e As EventArgs) Handles btnAISearch.Click
         Dim userPrompt As String = ""
+        Dim lastPrompt As String = ""
+        Dim lastPromptInstruct As String = ""
+
+        Try
+            lastPrompt = If(My.Settings.LastSearchPrompt, "")
+        Catch
+            lastPrompt = ""
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(lastPrompt) Then
+            lastPromptInstruct = " Press Ctrl+P to reinsert your last prompt."
+        End If
+
         Try
             userPrompt = SharedMethods.ShowCustomInputBox(
-                "Describe the e-mails you are looking for. The AI will search " &
-                "your Microsoft 365 mailbox, gather candidate messages, review their full text, and " &
-                "show the relevant ones.",
-                "AI Mail Search",
-                SimpleInput:=False)
+            "Describe the e-mails you are looking for. The AI will search " &
+            "your Microsoft 365 mailbox, gather candidate messages, review their full text, and " &
+            "show the relevant ones." & lastPromptInstruct,
+            "AI Mail Search",
+            SimpleInput:=False,
+            CtrlP:=lastPrompt)
         Catch
         End Try
         If String.IsNullOrWhiteSpace(userPrompt) OrElse userPrompt = "ESC" Then Return
+
+        userPrompt = userPrompt.Trim()
+
+        Try
+            My.Settings.LastSearchPrompt = userPrompt
+            My.Settings.Save()
+        Catch
+        End Try
 
         Await RunAiSearchPipelineAsync(userPrompt, appendMore:=False).ConfigureAwait(False)
     End Sub
@@ -1645,13 +1688,14 @@ Public Class M365SearchTestForm
                     datePart = dtLocal.ToString("yyyy-MM-dd")
                     timePart = dtLocal.ToString("HH:mm")
                 End If
+
                 Dim it As New ListViewItem(datePart)
                 it.SubItems.Add(timePart)
                 it.SubItems.Add(If(h.Author, ""))
                 it.SubItems.Add(GetMailTo(h))
                 it.SubItems.Add(If(h.Title, "(no subject)"))
-                it.SubItems.Add("")  ' AI Summary placeholder
-                it.Tag = i
+                it.SubItems.Add("")
+                it.Tag = h
                 lvResults.Items.Add(it)
             Next
         Finally
@@ -1801,20 +1845,15 @@ Public Class M365SearchTestForm
     Private Async Sub OpenSelectedHit()
         If lvResults.SelectedItems.Count = 0 Then Return
 
-        Dim idx = CInt(lvResults.SelectedItems(0).Tag)
-        If idx < 0 OrElse idx >= _hits.Count Then Return
-
-        Dim hit = _hits(idx)
+        Dim selectedItem As ListViewItem = lvResults.SelectedItems(0)
+        Dim hit As M365SearchHit = TryGetHitFromListItem(selectedItem)
         If hit Is Nothing Then Return
 
         Dim previewMessage As M365Message = Nothing
-        Dim previewText As String = ""
-        Dim choice As Integer = 0
 
         SetBusy(True, "Loading e-mail text…")
         Try
             previewMessage = Await GetPreviewMessageAsync(hit).ConfigureAwait(False)
-            previewText = BuildPreviewDialogText(hit, previewMessage)
         Catch ex As Exception When IsCancellation(ex)
             UiPost(Sub() lblStatus.Text = "Open cancelled.")
             Return
@@ -1823,10 +1862,10 @@ Public Class M365SearchTestForm
             Debug.WriteLine("[M365Search] Preview download failed:")
             Debug.WriteLine(msg)
             ShowErrorWithClipboard(
-            "Microsoft 365",
-            "The selected e-mail could not be downloaded for preview.",
-            msg,
-            "Preview failed.")
+                "Microsoft 365",
+                "The selected e-mail could not be downloaded for preview.",
+                msg,
+                "Preview failed.")
             Return
         Finally
             UiInvoke(Sub() SetBusy(False))
@@ -1850,10 +1889,10 @@ Public Class M365SearchTestForm
             Debug.WriteLine("[M365Search] Open failed:")
             Debug.WriteLine(msg)
             ShowErrorWithClipboard(
-            "Microsoft 365",
-            "The selected message could not be opened.",
-            msg,
-            "Open failed.")
+                "Microsoft 365",
+                "The selected message could not be opened.",
+                msg,
+                "Open failed.")
         Finally
             UiInvoke(Sub() SetBusy(False))
         End Try
@@ -2167,7 +2206,7 @@ Public Class M365SearchTestForm
 
 
     Private Function TryBuildPreviewMessageFromAiToolResponses(hit As M365SearchHit,
-                                                           preferredMessageId As String) As M365Message
+                                                               preferredMessageId As String) As M365Message
         Dim responses As List(Of ThisAddIn.ToolResponse) = Nothing
         Try
             responses = Globals.ThisAddIn.GetLastCompletedToolResponsesSnapshot()
@@ -2178,49 +2217,45 @@ Public Class M365SearchTestForm
         If responses Is Nothing OrElse responses.Count = 0 Then Return Nothing
 
         Dim preferredIdNorm As String = NormalizeGraphIdForCompare(preferredMessageId)
-        Dim subjectText As String = If(hit?.Title, "").Trim()
         Dim hitWebUrl As String = If(hit?.WebUrl, "").Trim()
         Dim hitImid As String = NormalizeInternetMessageId(TryGetInternetMessageId(hit))
-        Dim subjectMatch As M365Message = Nothing
 
         For Each r In responses
             If r Is Nothing OrElse Not r.Success Then Continue For
             If Not String.Equals(r.ToolName,
-                             SharedLibrary.SharedLibrary.M365ToolService.GetMailToolName,
-                             StringComparison.OrdinalIgnoreCase) Then
+                                 SharedLibrary.SharedLibrary.M365ToolService.GetMailToolName,
+                                 StringComparison.OrdinalIgnoreCase) Then
                 Continue For
             End If
 
             Dim candidate As M365Message = ParsePreviewMessageFromGetMailResponse(r.Response)
             If candidate Is Nothing Then Continue For
 
-            If Not String.IsNullOrWhiteSpace(hitWebUrl) AndAlso String.IsNullOrWhiteSpace(candidate.WebLink) Then
-                candidate.WebLink = hitWebUrl
-            End If
-            If Not String.IsNullOrWhiteSpace(hitImid) AndAlso String.IsNullOrWhiteSpace(candidate.InternetMessageId) Then
-                candidate.InternetMessageId = hitImid
-            End If
-
             Dim candidateIdNorm As String = NormalizeGraphIdForCompare(candidate.Id)
             If Not String.IsNullOrWhiteSpace(preferredIdNorm) AndAlso
-           String.Equals(candidateIdNorm, preferredIdNorm, StringComparison.OrdinalIgnoreCase) Then
+               String.Equals(candidateIdNorm, preferredIdNorm, StringComparison.OrdinalIgnoreCase) Then
                 Return candidate
             End If
 
-            If subjectMatch Is Nothing AndAlso
-           Not String.IsNullOrWhiteSpace(subjectText) AndAlso
-           String.Equals(If(candidate.Subject, "").Trim(),
-                         subjectText,
-                         StringComparison.OrdinalIgnoreCase) Then
-                subjectMatch = candidate
+            If Not String.IsNullOrWhiteSpace(hitImid) AndAlso
+               Not String.IsNullOrWhiteSpace(candidate.InternetMessageId) AndAlso
+               String.Equals(NormalizeInternetMessageId(candidate.InternetMessageId),
+                             hitImid,
+                             StringComparison.OrdinalIgnoreCase) Then
+                Return candidate
+            End If
+
+            If Not String.IsNullOrWhiteSpace(hitWebUrl) AndAlso
+               Not String.IsNullOrWhiteSpace(candidate.WebLink) AndAlso
+               String.Equals(candidate.WebLink.Trim(),
+                             hitWebUrl,
+                             StringComparison.OrdinalIgnoreCase) Then
+                Return candidate
             End If
         Next
 
-        If subjectMatch IsNot Nothing Then
-            Debug.WriteLine("[M365Search] Preview fallback matched AI get_mail response by subject.")
-        End If
-
-        Return subjectMatch
+        Debug.WriteLine("[M365Search] AI tool preview fallback found no exact identifier match.")
+        Return Nothing
     End Function
 
     Private Function ParsePreviewMessageFromGetMailResponse(responseText As String) As M365Message
@@ -2686,6 +2721,7 @@ Public Class M365SearchTestForm
         If Not busy Then
             pb.Style = ProgressBarStyle.Continuous
             pb.Value = 0
+            UpdateGetMoreEnabled()
         End If
     End Sub
 
@@ -2735,18 +2771,16 @@ Public Class M365SearchTestForm
         _summaryCts = New CancellationTokenSource()
         Dim ct = _summaryCts.Token
 
-        ' Snapshot the rows to summarize (index → hit, listview item).
+        ' Snapshot the rows to summarize (row index -> hit).
         Dim snapshot As New List(Of Tuple(Of Integer, M365SearchHit))()
         For i As Integer = 0 To lvResults.Items.Count - 1
             Dim it = lvResults.Items(i)
-            If it Is Nothing OrElse it.Tag Is Nothing Then Continue For
-            Dim hitIdx As Integer = CInt(it.Tag)
-            If hitIdx < 0 OrElse hitIdx >= _hits.Count Then Continue For
-            snapshot.Add(Tuple.Create(i, _hits(hitIdx)))
+            Dim hit As M365SearchHit = TryGetHitFromListItem(it)
+            If hit Is Nothing Then Continue For
+            snapshot.Add(Tuple.Create(i, hit))
         Next
         If snapshot.Count = 0 Then Return
 
-        ' Fire and forget — we just push results back to the listview.
         Task.Run(Async Function()
                      Try
                          Await GenerateRowSummariesAsync(snapshot, ct).ConfigureAwait(False)
