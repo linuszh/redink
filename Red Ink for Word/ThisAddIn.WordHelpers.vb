@@ -305,7 +305,7 @@ Partial Public Class ThisAddIn
                 CompareFields:=True,
                 CompareComments:=True,
                 CompareMoves:=True,
-                RevisedAuthor:=Environment.UserName,
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                 IgnoreAllComparisonWarnings:=False
             )
             If compareDoc Is Nothing Then
@@ -685,7 +685,7 @@ Partial Public Class ThisAddIn
                     CompareFields:=False,
                     CompareComments:=False,
                     CompareMoves:=True,
-                    RevisedAuthor:=Environment.UserName,
+                    RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                     IgnoreAllComparisonWarnings:=True
                 )
 
@@ -4575,6 +4575,108 @@ Partial Public Class ThisAddIn
             End Using
         End Using
     End Sub
+
+    Private NotInheritable Class MarkupAuthorScope
+        Implements IDisposable
+
+        Private ReadOnly _app As Word.Application
+        Private ReadOnly _originalUserName As String
+        Private ReadOnly _originalUserInitials As String
+        Private _shouldRestore As Boolean
+
+        Public Sub New(app As Word.Application)
+            _app = app
+            If _app Is Nothing Then Exit Sub
+
+            Try
+                _originalUserName = If(_app.UserName, String.Empty)
+            Catch
+                _originalUserName = String.Empty
+            End Try
+
+            Try
+                _originalUserInitials = If(_app.UserInitials, String.Empty)
+            Catch
+                _originalUserInitials = String.Empty
+            End Try
+
+            Dim markupAuthor As String = GetMarkupAuthorOrCurrent(_app)
+            If String.IsNullOrWhiteSpace(markupAuthor) Then Exit Sub
+            If String.Equals(markupAuthor, _originalUserName, StringComparison.Ordinal) Then Exit Sub
+
+            Try
+                _app.UserName = markupAuthor
+                _app.UserInitials = BuildMarkupAuthorInitials(markupAuthor, _originalUserInitials)
+                _shouldRestore = True
+            Catch
+                _shouldRestore = False
+            End Try
+        End Sub
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If Not _shouldRestore OrElse _app Is Nothing Then Return
+
+            Try
+                _app.UserName = _originalUserName
+            Catch
+            End Try
+
+            Try
+                _app.UserInitials = _originalUserInitials
+            Catch
+            End Try
+        End Sub
+    End Class
+
+    Friend Shared Function GetMarkupAuthorOrCurrent(app As Word.Application) As String
+        Dim markupAuthor As String = String.Empty
+
+        Try
+            markupAuthor = If(Globals.ThisAddIn.INI_MarkupAuthor, String.Empty).Trim()
+        Catch
+            markupAuthor = String.Empty
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(markupAuthor) Then
+            Return markupAuthor
+        End If
+
+        If app Is Nothing Then Return String.Empty
+
+        Try
+            Return If(app.UserName, String.Empty)
+        Catch
+            Return String.Empty
+        End Try
+    End Function
+
+    Private Shared Function BuildMarkupAuthorInitials(markupAuthor As String, fallbackInitials As String) As String
+        If String.IsNullOrWhiteSpace(markupAuthor) Then Return fallbackInitials
+
+        Dim parts As String() =
+            markupAuthor.Trim().Split(New Char() {" "c, ControlChars.Tab}, StringSplitOptions.RemoveEmptyEntries)
+
+        If parts.Length = 0 Then Return fallbackInitials
+
+        Dim initials As String = String.Empty
+
+        For Each part As String In parts
+            If part.Length > 0 Then
+                initials &= Char.ToUpperInvariant(part(0))
+                If initials.Length >= 3 Then Exit For
+            End If
+        Next
+
+        If initials.Length = 1 AndAlso parts(0).Length > 1 Then
+            initials &= Char.ToUpperInvariant(parts(0)(1))
+        End If
+
+        Return If(initials.Length > 0, initials, fallbackInitials)
+    End Function
+
+    Friend Shared Function BeginMarkupAuthorScope(app As Word.Application) As IDisposable
+        Return New MarkupAuthorScope(app)
+    End Function
 
 
 

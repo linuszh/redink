@@ -88,6 +88,8 @@ Public Class M365SearchTestForm
     Private _hasPinnedSummary As Boolean
     Private _aiLastUserPrompt As String = ""
     Private _aiCandidateHits As New List(Of M365SearchHit)()
+    Private _aiSearchAvailable As Boolean
+    Private _aiSearchUnavailableReason As String = ""
     Private ReadOnly _aiMessageCacheLock As New Object()
     Private ReadOnly _aiMessageCache As New Dictionary(Of String, M365Message)(StringComparer.OrdinalIgnoreCase)
 
@@ -440,6 +442,7 @@ Public Class M365SearchTestForm
         LayoutTopRowRight()
         LayoutFooterRight()
         ConfigureToolTips()
+        RefreshAiSearchAvailability()
     End Sub
 
     ''' <summary>
@@ -966,6 +969,14 @@ Public Class M365SearchTestForm
 
 
     Private Async Sub btnAISearch_Click(sender As Object, e As EventArgs) Handles btnAISearch.Click
+
+        RefreshAiSearchAvailability()
+
+        If Not _aiSearchAvailable Then
+            SharedMethods.ShowCustomMessageBox(_aiSearchUnavailableReason, "AI Mail Search")
+            Return
+        End If
+
         Dim userPrompt As String = ""
         Dim lastPrompt As String = ""
         Dim lastPromptInstruct As String = ""
@@ -1139,6 +1150,7 @@ Public Class M365SearchTestForm
         Dim backupConfig As ModelConfig = Nothing
         Dim backupOriginalLoaded As Boolean = False
         Dim toolModelApplied As Boolean = False
+        Dim aiSearchModel As ModelConfig = Nothing
 
         Dim previousMaxIters As Integer = addIn.INI_ToolingMaximumIterations
         Dim itersOverridden As Boolean = False
@@ -1149,9 +1161,9 @@ Public Class M365SearchTestForm
 
             Dim m365Tools = SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context)
             Dim searchTool = m365Tools.FirstOrDefault(
-                Function(t) String.Equals(t?.ToolName,
-                                          SharedLibrary.SharedLibrary.M365ToolService.SearchToolName,
-                                          StringComparison.OrdinalIgnoreCase))
+        Function(t) String.Equals(t?.ToolName,
+                                  SharedLibrary.SharedLibrary.M365ToolService.SearchToolName,
+                                  StringComparison.OrdinalIgnoreCase))
             If searchTool Is Nothing Then
                 Throw New InvalidOperationException("The Microsoft 365 search tool is not available.")
             End If
@@ -1160,20 +1172,17 @@ Public Class M365SearchTestForm
 
             chatScope = addIn.EnterChatAgentScope()
 
-            If haveAltPath Then
-                backupConfig = SharedMethods.GetCurrentConfig(_context)
-                backupOriginalLoaded = SharedMethods.originalConfigLoaded
-
-                toolModelApplied = SharedMethods.GetSpecialTaskModel(_context, altPath, "ToolDefaultModel")
-                If Not toolModelApplied Then
-                    toolModelApplied = SharedMethods.GetSpecialTaskModel(_context, altPath, "AgentDefaultModel")
-                End If
-                If Not toolModelApplied Then
-                    Throw New InvalidOperationException("No ToolDefaultModel or AgentDefaultModel is configured in the alternate models INI.")
-                End If
-            Else
-                Throw New InvalidOperationException("INI_AlternateModelPath is not configured.")
+            If Not TryGetAiSearchDefaultModel(aiSearchModel) Then
+                Throw New InvalidOperationException(_aiSearchUnavailableReason)
             End If
+
+            backupConfig = SharedMethods.GetCurrentConfig(_context)
+            backupOriginalLoaded = SharedMethods.originalConfigLoaded
+
+            SharedMethods.originalConfig = backupConfig
+            SharedMethods.originalConfigLoaded = True
+            SharedMethods.ApplyModelConfig(_context, aiSearchModel)
+            toolModelApplied = True
 
             addIn.INI_ToolingMaximumIterations = AISearch_MaxIterations
             itersOverridden = True
@@ -2708,7 +2717,7 @@ Public Class M365SearchTestForm
 
     Private Sub SetBusy(busy As Boolean, Optional status As String = Nothing)
         btnSearch.Enabled = Not busy
-        btnAISearch.Enabled = Not busy
+        btnAISearch.Enabled = Not busy AndAlso _aiSearchAvailable
         btnSignIn.Enabled = Not busy
         btnSignOut.Enabled = Not busy
         If busy Then
@@ -3721,6 +3730,70 @@ Public Class M365SearchTestForm
         UiPost(Sub() StartRowSummaries())
     End Function
 
+
+    Private Function TryGetAiSearchDefaultModel(ByRef modelConfig As ModelConfig) As Boolean
+        modelConfig = Nothing
+        _aiSearchUnavailableReason = ""
+
+        Dim altPath As String = If(_context?.INI_AlternateModelPath, "")
+        If String.IsNullOrWhiteSpace(altPath) Then
+            _aiSearchUnavailableReason = "AI Search is unavailable because INI_AlternateModelPath is not configured."
+            Return False
+        End If
+
+        Dim candidate As ModelConfig = Nothing
+        Dim unsupportedDefaults As New List(Of String)()
+
+        If SharedMethods.TryGetSpecialTaskModelConfig(_context, altPath, "ToolDefaultModel", candidate) Then
+            If SharedMethods.ModelSupportsTooling(candidate) Then
+                modelConfig = candidate
+                Return True
+            End If
+
+            unsupportedDefaults.Add("ToolDefaultModel")
+        End If
+
+        candidate = Nothing
+
+        If SharedMethods.TryGetSpecialTaskModelConfig(_context, altPath, "AgentDefaultModel", candidate) Then
+            If SharedMethods.ModelSupportsTooling(candidate) Then
+                modelConfig = candidate
+                Return True
+            End If
+
+            unsupportedDefaults.Add("AgentDefaultModel")
+        End If
+
+        If unsupportedDefaults.Count > 0 Then
+            _aiSearchUnavailableReason =
+                "AI Search is unavailable because the configured " &
+                String.Join(" or ", unsupportedDefaults) &
+                " does not support tool calling."
+        Else
+            _aiSearchUnavailableReason =
+                "AI Search is unavailable because no tooling-capable ToolDefaultModel or AgentDefaultModel is configured in the alternate models INI."
+        End If
+
+        Return False
+    End Function
+
+    Private Sub RefreshAiSearchAvailability()
+        Dim aiModel As ModelConfig = Nothing
+        _aiSearchAvailable = TryGetAiSearchDefaultModel(aiModel)
+
+        If btnAISearch IsNot Nothing Then
+            btnAISearch.Enabled = _aiSearchAvailable
+            _toolTip.SetToolTip(
+                btnAISearch,
+                If(_aiSearchAvailable,
+                   "Run multi-step AI mail search: broad candidate gathering first, then full-text review of the candidate mails. Slower, but more accurate for semantic requests.",
+                   _aiSearchUnavailableReason))
+        End If
+
+        If Not _aiSearchAvailable AndAlso btnGetMore IsNot Nothing Then
+            btnGetMore.Enabled = False
+        End If
+    End Sub
 
 End Class
 

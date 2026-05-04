@@ -271,6 +271,7 @@ Namespace SharedLibrary
                 context.INI_ReplaceText2Override = My.Settings.ReplaceText2Override
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
+                context.INI_MarkupAuthor = My.Settings.MarkupAuthor
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")

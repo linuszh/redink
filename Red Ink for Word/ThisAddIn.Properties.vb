@@ -671,6 +671,16 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property INI_MarkupAuthor As String
+        Get
+            Return _context.INI_MarkupAuthor
+        End Get
+        Set(value As String)
+            _context.INI_MarkupAuthor = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_DoMarkupOutlook As Boolean
         Get
             Return _context.INI_DoMarkupOutlook

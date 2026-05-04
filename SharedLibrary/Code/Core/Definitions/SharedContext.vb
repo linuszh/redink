@@ -272,6 +272,7 @@ Namespace SharedLibrary
             Property INI_MarkupMethodWord As Integer
             Property INI_MarkupMethodWordOverride As String
             Property INI_MarkupMethodOutlookOverride As String
+            Property INI_MarkupAuthor As String
             Property INI_ShortcutsWordExcel As String
             Property INI_PromptLib As Boolean
             Property INI_PromptLibPath As String
@@ -608,8 +609,8 @@ Namespace SharedLibrary
         Public Property INI_MarkupMethodHelper As Integer Implements ISharedContext.INI_MarkupMethodHelper
         Public Property INI_MarkupMethodWord As Integer Implements ISharedContext.INI_MarkupMethodWord
         Public Property INI_MarkupMethodWordOverride As String Implements ISharedContext.INI_MarkupMethodWordOverride
-
         Public Property INI_MarkupMethodOutlookOverride As String Implements ISharedContext.INI_MarkupMethodOutlookOverride
+        Public Property INI_MarkupAuthor As String Implements ISharedContext.INI_MarkupAuthor
         Public Property INI_ShortcutsWordExcel As String Implements ISharedContext.INI_ShortcutsWordExcel
         Public Property INI_PromptLib As Boolean Implements ISharedContext.INI_PromptLib
         Public Property INI_PromptLibPath As String Implements ISharedContext.INI_PromptLibPath

@@ -615,6 +615,7 @@ Namespace SharedLibrary
                                                     {"ReplaceText2Override", "ReplaceText2Override"},
                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                                                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                                                    {"MarkupAuthor", "MarkupAuthor"},
                                                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                                                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
                                                     {"FormulaInstruction", "FormulaInstruction"}
@@ -953,6 +954,8 @@ Namespace SharedLibrary
                     Return context.INI_MarkupDiffCap.ToString()
                 Case "MarkupRegexCap"
                     Return context.INI_MarkupRegexCap.ToString()
+                Case "MarkupAuthor"
+                    Return context.INI_MarkupAuthor
                 Case "ChatCap"
                     Return context.INI_ChatCap.ToString()
                 Case "PreCorrection"
@@ -1307,6 +1310,8 @@ Namespace SharedLibrary
                     context.INI_MarkupDiffCap = Integer.Parse(value)
                 Case "MarkupRegexCap"
                     context.INI_MarkupRegexCap = Integer.Parse(value)
+                Case "MarkupAuthor"
+                    context.INI_MarkupAuthor = value
                 Case "ChatCap"
                     context.INI_ChatCap = Integer.Parse(value)
                 Case "PreCorrection"
@@ -1782,6 +1787,7 @@ Namespace SharedLibrary
                     {"MarkupMethodWord", context.INI_MarkupMethodWord.ToString()},
                     {"MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride},
                     {"MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride},
+                    {"MarkupAuthor", context.INI_MarkupAuthor},
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
@@ -1960,6 +1966,7 @@ Namespace SharedLibrary
                     {"ReplaceText2Override", "ReplaceText2Override"},
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
                     {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                    {"MarkupAuthor", "MarkupAuthor"},
                     {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
                     {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
                     {"FormulaInstruction", "FormulaInstruction"}
@@ -3219,6 +3226,7 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodWord", context.INI_MarkupMethodWord)
             variableValues.Add("MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride)
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
+            variableValues.Add("MarkupAuthor", context.INI_MarkupAuthor)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)
@@ -3591,6 +3599,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MarkupMethodWord") Then context.INI_MarkupMethodWord = CInt(updatedValues("MarkupMethodWord"))
                 If updatedValues.ContainsKey("MarkupMethodWordOverride") Then context.INI_MarkupMethodWordOverride = CStr(updatedValues("MarkupMethodWordOverride"))
                 If updatedValues.ContainsKey("MarkupMethodOutlookOverride") Then context.INI_MarkupMethodOutlookOverride = CStr(updatedValues("MarkupMethodOutlookOverride"))
+                If updatedValues.ContainsKey("MarkupAuthor") Then context.INI_MarkupAuthor = CStr(updatedValues("MarkupAuthor"))
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))

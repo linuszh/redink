@@ -2943,17 +2943,18 @@ Public Class frmAIChat
                    doc.Content.Duplicate)
 
             ' Find and replace all MarkerChar instances
-            With rng.Find
-                .ClearFormatting()
-                .Text = MarkerChar
-                .Replacement.ClearFormatting()
-                .Replacement.Text = ""
-                .Forward = True
-                .Wrap = Word.WdFindWrap.wdFindStop
-                Do While .Execute(Replace:=Word.WdReplace.wdReplaceOne)
-                    ' Keep looping until none left
-                Loop
-            End With
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                With rng.Find
+                    .ClearFormatting()
+                    .Text = MarkerChar
+                    .Replacement.ClearFormatting()
+                    .Replacement.Text = ""
+                    .Forward = True
+                    .Wrap = Word.WdFindWrap.wdFindStop
+                    Do While .Execute(Replace:=Word.WdReplace.wdReplaceOne)
+                    Loop
+                End With
+            End Using
         Catch ex As Exception
             MsgBox("Error in ReplaceSpecialCharacter: " & ex.Message, MsgBoxStyle.Critical)
         Finally
@@ -3212,38 +3213,40 @@ Public Class frmAIChat
         Dim added As Integer = 0
 
         Try
-            ' Iterate all matches using robust chunk finder
-            Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) = True
-                If sel Is Nothing Then Exit Do
+            Using ThisAddIn.BeginMarkupAuthorScope(app)
+                ' Iterate all matches using robust chunk finder
+                Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) = True
+                    If sel Is Nothing Then Exit Do
 
-                Try
-                    ' Anchor comment to found range
-                    Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
-                    Dim newComment As Microsoft.Office.Interop.Word.Comment = Nothing
+                    Try
+                        ' Anchor comment to found range
+                        Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
+                        Dim newComment As Microsoft.Office.Interop.Word.Comment = Nothing
 
-                    ' Create empty comment then fill body (avoids special char issues)
-                    newComment = doc.Comments.Add(anchor, String.Empty)
+                        ' Create empty comment then fill body (avoids special char issues)
+                        newComment = doc.Comments.Add(anchor, String.Empty)
 
-                    ' Apply Markdown formatting if enabled
-                    If chkConvertMarkdown.Checked Then
-                        ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
-                    Else
-                        newComment.Range.Text = AN6 & ": " & commentText
-                    End If
+                        ' Apply Markdown formatting if enabled
+                        If chkConvertMarkdown.Checked Then
+                            ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
+                        Else
+                            newComment.Range.Text = AN6 & ": " & commentText
+                        End If
 
-                    added += 1
-                Catch
-                    ' Ignore errors and continue with next occurrence
-                End Try
+                        added += 1
+                    Catch
+                        ' Ignore errors and continue with next occurrence
+                    End Try
 
-                ' Advance selection beyond current match
-                sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                    ' Advance selection beyond current match
+                    sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
 
-                ' Safety: stop if reached end of working region
-                If sel.Start >= limitEnd Then Exit Do
+                    ' Safety: stop if reached end of working region
+                    If sel.Start >= limitEnd Then Exit Do
 
-                sel.SetRange(sel.Start, limitEnd)
-            Loop
+                    sel.SetRange(sel.Start, limitEnd)
+                Loop
+            End Using
         Catch ex As System.Exception
             Debug.WriteLine($"AddComments failed: {ex.Message}")
         Finally
@@ -3633,40 +3636,42 @@ Public Class frmAIChat
             Debug.WriteLine("ExecuteReplaceCommand: PASS 2 - replacing in reverse order...")
             Dim replaceCount As Integer = 0
 
-            For i As Integer = matchPositions.Count - 1 To 0 Step -1
-                Dim mStart As Integer = matchPositions(i).Start
-                Dim mEnd As Integer = matchPositions(i).End
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                For i As Integer = matchPositions.Count - 1 To 0 Step -1
+                    Dim mStart As Integer = matchPositions(i).Start
+                    Dim mEnd As Integer = matchPositions(i).End
 
-                Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
+                    Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
 
-                Try
-                    ' Select the matched text using stored positions
-                    Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
-                    doc.Application.Selection.SetRange(mStart, mEnd)
-                    Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+                    Try
+                        ' Select the matched text using stored positions
+                        Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
+                        doc.Application.Selection.SetRange(mStart, mEnd)
+                        Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                    ' Atomic replacement
-                    Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
-                    doc.Application.Selection.Text = newText
-                    Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+                        ' Atomic replacement
+                        Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
+                        doc.Application.Selection.Text = newText
+                        Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                    ' Apply Markdown conversion if enabled and text was inserted
-                    If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                        Try
-                            Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
-                            Globals.ThisAddIn.ConvertMarkdownToWord()
-                            Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
-                        Catch ex As Exception
-                            Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
-                        End Try
-                    End If
+                        ' Apply Markdown conversion if enabled and text was inserted
+                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                            Try
+                                Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
+                                Globals.ThisAddIn.ConvertMarkdownToWord()
+                                Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
+                            Catch ex As Exception
+                                Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                            End Try
+                        End If
 
-                    replaceCount += 1
-                Catch ex As Exception
-                    Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
-                    Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
-                End Try
-            Next
+                        replaceCount += 1
+                    Catch ex As Exception
+                        Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
+                        Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
+                    End Try
+                Next
+            End Using
 
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {matchPositions.Count}")
 
@@ -3791,135 +3796,137 @@ Public Class frmAIChat
             If searchText.StartsWith(" ") OrElse searchText.EndsWith(" ") Then searchAttempts.Add(searchText.Trim())
             searchAttempts = searchAttempts.Distinct().ToList()
 
-            ' Try each search variant until match found
-            For Each currentSearchText In searchAttempts
-                If found Then Exit For
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                ' Try each search variant until match found
+                For Each currentSearchText In searchAttempts
+                    If found Then Exit For
 
-                Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
-                doc.Application.Selection.SetRange(workrange.Start, workrange.End)
+                    Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
+                    doc.Application.Selection.SetRange(workrange.Start, workrange.End)
 
-                Dim maxIterations As Integer = 1000
-                Dim iterationCount As Integer = 0
-                Dim lastProcessedPosition As Integer = -1
+                    Dim maxIterations As Integer = 1000
+                    Dim iterationCount As Integer = 0
+                    Dim lastProcessedPosition As Integer = -1
 
-                Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True) = True
+                    Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True) = True
 
-                    If doc.Application.Selection Is Nothing Then Exit Do
+                        If doc.Application.Selection Is Nothing Then Exit Do
 
-                    System.Windows.Forms.Application.DoEvents()
-                    If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
-                        CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
-                        Exit Do
-                    End If
-
-                    ' Safety: prevent infinite loops
-                    iterationCount += 1
-                    If iterationCount > maxIterations Then
-                        Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
-                        Exit Do
-                    End If
-
-                    ' Detect stuck state (same position)
-                    If doc.Application.Selection.Start = lastProcessedPosition Then
-                        Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
-                        doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                        doc.Application.Selection.Move(Word.WdUnits.wdCharacter, 1)
-                        Continue Do
-                    End If
-                    lastProcessedPosition = doc.Application.Selection.Start
-
-                    Dim foundRange As Word.Range = doc.Application.Selection.Range.Duplicate
-
-                    ' Skip TOC ranges to prevent corruption
-                    Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
-                    If tocEnd > 0 Then
-                        Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
-                        Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
-                        Dim continuePos As Integer = Math.Min(tocEnd, searchLimit)
-                        If continuePos >= searchLimit Then
+                        System.Windows.Forms.Application.DoEvents()
+                        If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
+                            CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                             Exit Do
-                        Else
-                            doc.Application.Selection.SetRange(continuePos, searchLimit)
+                        End If
+
+                        ' Safety: prevent infinite loops
+                        iterationCount += 1
+                        If iterationCount > maxIterations Then
+                            Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
+                            Exit Do
+                        End If
+
+                        ' Detect stuck state (same position)
+                        If doc.Application.Selection.Start = lastProcessedPosition Then
+                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
+                            doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                            doc.Application.Selection.Move(Word.WdUnits.wdCharacter, 1)
                             Continue Do
                         End If
-                    End If
+                        lastProcessedPosition = doc.Application.Selection.Start
 
-                    found = True
-                    Debug.WriteLine($"Found match at position {foundRange.Start}")
+                        Dim foundRange As Word.Range = doc.Application.Selection.Range.Duplicate
 
-                    Dim foundStart As Integer = foundRange.Start
-                    Dim foundEnd As Integer = foundRange.End
-                    Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
-
-                    ' Handle document end boundary (End includes final paragraph mark)
-                    Dim docContentEnd As Integer = doc.Content.End
-                    If insertPosition >= docContentEnd Then
-                        If Not InsertBefore Then
-                            insertPosition = docContentEnd - 1
-                        End If
-                    End If
-                    insertPosition = Math.Max(doc.Content.Start, Math.Min(insertPosition, docContentEnd - 1))
-
-                    Try
-                        ' Primary method: create Range and insert
-                        Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
-                        insertRange.Text = newText
-
-                        ' Apply Markdown if enabled
-                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                            Try
-                                Dim conversionStart As Integer = insertPosition
-                                Dim conversionEnd As Integer = Math.Min(insertPosition + Len(newText), doc.Content.End)
-                                doc.Range(conversionStart, conversionEnd).Select()
-                                Globals.ThisAddIn.ConvertMarkdownToWord()
-                            Catch
-                                ' Best effort
-                            End Try
-                        End If
-                    Catch rangeEx As Exception
-                        ' Fallback: use Selection to insert
-                        Debug.WriteLine($"Range creation failed at {insertPosition}, trying alternative")
-                        Try
-                            doc.Application.Selection.SetRange(insertPosition, insertPosition)
-                            doc.Application.Selection.Text = newText
-                            If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                                Globals.ThisAddIn.ConvertMarkdownToWord()
+                        ' Skip TOC ranges to prevent corruption
+                        Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
+                        If tocEnd > 0 Then
+                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
+                            Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
+                            Dim continuePos As Integer = Math.Min(tocEnd, searchLimit)
+                            If continuePos >= searchLimit Then
+                                Exit Do
+                            Else
+                                doc.Application.Selection.SetRange(continuePos, searchLimit)
+                                Continue Do
                             End If
-                        Catch altEx As Exception
-                            Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
-                            Continue Do
+                        End If
+
+                        found = True
+                        Debug.WriteLine($"Found match at position {foundRange.Start}")
+
+                        Dim foundStart As Integer = foundRange.Start
+                        Dim foundEnd As Integer = foundRange.End
+                        Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
+
+                        ' Handle document end boundary (End includes final paragraph mark)
+                        Dim docContentEnd As Integer = doc.Content.End
+                        If insertPosition >= docContentEnd Then
+                            If Not InsertBefore Then
+                                insertPosition = docContentEnd - 1
+                            End If
+                        End If
+                        insertPosition = Math.Max(doc.Content.Start, Math.Min(insertPosition, docContentEnd - 1))
+
+                        Try
+                            ' Primary method: create Range and insert
+                            Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
+                            insertRange.Text = newText
+
+                            ' Apply Markdown if enabled
+                            If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                                Try
+                                    Dim conversionStart As Integer = insertPosition
+                                    Dim conversionEnd As Integer = Math.Min(insertPosition + Len(newText), doc.Content.End)
+                                    doc.Range(conversionStart, conversionEnd).Select()
+                                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                                Catch
+                                    ' Best effort
+                                End Try
+                            End If
+                        Catch rangeEx As Exception
+                            ' Fallback: use Selection to insert
+                            Debug.WriteLine($"Range creation failed at {insertPosition}, trying alternative")
+                            Try
+                                doc.Application.Selection.SetRange(insertPosition, insertPosition)
+                                doc.Application.Selection.Text = newText
+                                If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                                End If
+                            Catch altEx As Exception
+                                Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
+                                Continue Do
+                            End Try
                         End Try
-                    End Try
 
-                    ' Calculate next search position
-                    Dim continuePosition As Integer
-                    If InsertBefore Then
-                        continuePosition = insertPosition + Len(newText) + (foundEnd - foundStart)
-                    Else
-                        continuePosition = insertPosition + Len(newText)
-                    End If
+                        ' Calculate next search position
+                        Dim continuePosition As Integer
+                        If InsertBefore Then
+                            continuePosition = insertPosition + Len(newText) + (foundEnd - foundStart)
+                        Else
+                            continuePosition = insertPosition + Len(newText)
+                        End If
 
-                    ' Ensure forward progress
-                    If continuePosition <= lastProcessedPosition Then
-                        continuePosition = lastProcessedPosition + 1
-                    End If
+                        ' Ensure forward progress
+                        If continuePosition <= lastProcessedPosition Then
+                            continuePosition = lastProcessedPosition + 1
+                        End If
 
-                    ' Adjust selection end if text inserted
-                    If OnlySelection Then
-                        selectionEnd = selectionEnd + Len(newText)
-                    End If
+                        ' Adjust selection end if text inserted
+                        If OnlySelection Then
+                            selectionEnd = selectionEnd + Len(newText)
+                        End If
 
-                    ' Check if reached end of search range
-                    If OnlySelection Then
-                        If continuePosition >= selectionEnd Then Exit Do
-                        Dim safeEnd As Integer = Math.Min(selectionEnd, doc.Content.End)
-                        doc.Application.Selection.SetRange(continuePosition, safeEnd)
-                    Else
-                        If continuePosition >= doc.Content.End Then Exit Do
-                        doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
-                    End If
-                Loop
-            Next
+                        ' Check if reached end of search range
+                        If OnlySelection Then
+                            If continuePosition >= selectionEnd Then Exit Do
+                            Dim safeEnd As Integer = Math.Min(selectionEnd, doc.Content.End)
+                            doc.Application.Selection.SetRange(continuePosition, safeEnd)
+                        Else
+                            If continuePosition >= doc.Content.End Then Exit Do
+                            doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
+                        End If
+                    Loop
+                Next
+            End Using
 
             If Not found Then
                 CommandsList = $"Note: The search term was not found." & Environment.NewLine & CommandsList
@@ -3977,14 +3984,16 @@ Public Class frmAIChat
             newText = newText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
 
             doc.TrackRevisions = True
-            Dim selection = doc.Application.Selection
-            selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
-            selection.Text = newText
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                Dim selection = doc.Application.Selection
+                selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
+                selection.Text = newText
 
-            ' Apply Markdown formatting if enabled
-            If chkConvertMarkdown.Checked Then
-                Globals.ThisAddIn.ConvertMarkdownToWord()
-            End If
+                ' Apply Markdown formatting if enabled
+                If chkConvertMarkdown.Checked Then
+                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                End If
+            End Using
 
             Return True
         Catch ex As Exception
