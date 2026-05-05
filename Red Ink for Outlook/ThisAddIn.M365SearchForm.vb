@@ -396,12 +396,14 @@ Public Class M365SearchTestForm
             .GridLines = True,
             .HideSelection = False,
             .MultiSelect = False}
-        lvResults.Columns.Add("Date", 110)
+        lvResults.Columns.Add("Ref", 55)
+        lvResults.Columns.Add("Att", 40)
+        lvResults.Columns.Add("Date", 120)
         lvResults.Columns.Add("Time", 75)
         lvResults.Columns.Add("From", 200)
         lvResults.Columns.Add("To", 220)
         lvResults.Columns.Add("Subject", 360)
-        lvResults.Columns.Add("AI Summary", 380)
+        lvResults.Columns.Add("AI Summary", 440)
         splitMain.Panel1.Controls.Add(lvResults)
 
         ' Order: textbox first (Fill), label second (Top), so the label
@@ -497,30 +499,90 @@ Public Class M365SearchTestForm
 
     End Sub
 
+    Private Shared Sub SetAiDisplayRef(hit As M365SearchHit, aiRef As Integer)
+        If hit Is Nothing Then Return
+
+        Try
+            If hit.RawJson Is Nothing Then
+                hit.RawJson = New JObject()
+            End If
+
+            If aiRef > 0 Then
+                hit.RawJson("aiRef") = aiRef
+            Else
+                Dim prop As JProperty = hit.RawJson.Property("aiRef")
+                If prop IsNot Nothing Then prop.Remove()
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Shared Function GetAiDisplayRef(hit As M365SearchHit) As String
+        If hit Is Nothing OrElse hit.RawJson Is Nothing Then Return ""
+
+        Try
+            Dim tok As JToken = hit.RawJson("aiRef")
+            If tok Is Nothing Then Return ""
+
+            Dim n As Integer = 0
+            If Integer.TryParse(tok.ToString(), n) AndAlso n > 0 Then
+                Return n.ToString()
+            End If
+        Catch
+        End Try
+
+        Return ""
+    End Function
+
+    Private Shared Function MeasureSingleLineLabelHeight(label As Label) As Integer
+        If label Is Nothing Then Return 22
+
+        Dim measured As Size = TextRenderer.MeasureText(
+        "Ag",
+        label.Font,
+        New Size(Integer.MaxValue, Integer.MaxValue),
+        TextFormatFlags.SingleLine Or TextFormatFlags.NoPadding)
+
+        Return Math.Max(22, measured.Height + 6)
+    End Function
+
     ''' <summary>Right-aligns Open + Close in the footer using PreferredSize.</summary>
     Private Sub LayoutFooterRight()
-        If footerPanel Is Nothing OrElse btnOpen Is Nothing OrElse btnClose Is Nothing Then Return
+        If footerPanel Is Nothing OrElse btnOpen Is Nothing OrElse btnClose Is Nothing OrElse
+       pb Is Nothing OrElse lblStatus Is Nothing Then Return
 
+        Const leftMargin As Integer = 12
         Const rightMargin As Integer = 12
+        Const topMargin As Integer = 10
+        Const rowGap As Integer = 8
         Const buttonGap As Integer = 6
-        Dim topY As Integer = 8
+        Const bottomMargin As Integer = 10
+
+        Dim buttonHeight As Integer = Math.Max(btnOpen.PreferredSize.Height, btnClose.PreferredSize.Height)
+        Dim progressHeight As Integer = Math.Max(pb.Height, 18)
+        Dim statusHeight As Integer = MeasureSingleLineLabelHeight(lblStatus)
 
         Dim x As Integer = footerPanel.ClientSize.Width - rightMargin
 
-        Dim wClose = btnClose.PreferredSize.Width
+        Dim wClose As Integer = btnClose.PreferredSize.Width
         x -= wClose
-        btnClose.SetBounds(x, topY, wClose, btnClose.Height)
+        btnClose.SetBounds(x, 8, wClose, buttonHeight)
         x -= buttonGap
 
-        Dim wOpen = btnOpen.PreferredSize.Width
+        Dim wOpen As Integer = btnOpen.PreferredSize.Width
         x -= wOpen
-        btnOpen.SetBounds(x, topY, wOpen, btnOpen.Height)
+        btnOpen.SetBounds(x, 8, wOpen, buttonHeight)
 
-        ' Resize progress + status to leave room for the button cluster.
-        Dim leftAreaWidth As Integer = x - 12 - 8
-        If leftAreaWidth > 80 Then
-            pb.Size = New Size(leftAreaWidth, pb.Height)
-            lblStatus.Size = New Size(leftAreaWidth, lblStatus.Height)
+        Dim leftAreaWidth As Integer = Math.Max(80, x - leftMargin - 8)
+        pb.SetBounds(leftMargin, topMargin, leftAreaWidth, progressHeight)
+        lblStatus.SetBounds(leftMargin, pb.Bottom + rowGap, leftAreaWidth, statusHeight)
+
+        Dim neededHeight As Integer = Math.Max(
+        lblStatus.Bottom + bottomMargin,
+        Math.Max(btnOpen.Bottom, btnClose.Bottom) + bottomMargin)
+
+        If footerPanel.Height <> neededHeight Then
+            footerPanel.Height = neededHeight
         End If
     End Sub
 
@@ -540,18 +602,23 @@ Public Class M365SearchTestForm
                End Sub)
     End Sub
 
-    Private Sub UpdateAiStats(candidateCount As Integer,
-                              Optional reviewedCount As Integer? = Nothing,
-                              Optional shownCount As Integer? = Nothing)
+    Private Sub UpdateAiStats(retrievedCount As Integer,
+                          Optional reviewedCount As Integer? = Nothing,
+                          Optional keptCount As Integer? = Nothing,
+                          Optional shownCount As Integer? = Nothing)
         UiPost(Sub()
                    If lblAiStats Is Nothing Then Return
 
                    Dim parts As New List(Of String) From {
-                       $"Candidates: {Math.Max(0, candidateCount)}/{AISearch_MaxCandidateHits}"
-                   }
+                   $"Retrieved: {Math.Max(0, retrievedCount)}/{AISearch_MaxCandidateHits}"
+               }
 
                    If reviewedCount.HasValue Then
                        parts.Add($"Reviewed: {Math.Max(0, reviewedCount.Value)}")
+                   End If
+
+                   If keptCount.HasValue Then
+                       parts.Add($"Kept: {Math.Max(0, keptCount.Value)}")
                    End If
 
                    If shownCount.HasValue Then
@@ -1248,6 +1315,30 @@ Public Class M365SearchTestForm
         End Try
     End Function
 
+    Private Shared Function GetAttachmentIndicator(hit As M365SearchHit) As String
+        If hit Is Nothing Then Return ""
+
+        Try
+            Dim resource As JObject = TryCast(hit.RawJson?("resource"), JObject)
+            If resource Is Nothing Then Return ""
+
+            Dim tok As JToken = resource("hasAttachments")
+            If tok Is Nothing OrElse tok.Type = JTokenType.Null Then Return ""
+
+            If tok.Type = JTokenType.Boolean AndAlso tok.Value(Of Boolean)() Then
+                Return "📎"
+            End If
+
+            Dim parsed As Boolean = False
+            If Boolean.TryParse(tok.ToString(), parsed) AndAlso parsed Then
+                Return "📎"
+            End If
+        Catch
+        End Try
+
+        Return ""
+    End Function
+
     Private Function BuildKnownCandidatesBlock(knownHits As IEnumerable(Of M365SearchHit)) As String
         If knownHits Is Nothing Then Return ""
 
@@ -1685,20 +1776,26 @@ Public Class M365SearchTestForm
     Private Sub PopulateResults(hits As List(Of M365SearchHit))
         lvResults.BeginUpdate()
         Try
+            lvResults.Items.Clear()
+
             Dim ordered = hits.OrderByDescending(Function(h) GetMailDate(h)).ToList()
             _hits = ordered
+
             For i = 0 To ordered.Count - 1
                 Dim h = ordered(i)
                 Dim dtUtc As DateTime? = GetMailDate(h)
                 Dim datePart As String = ""
                 Dim timePart As String = ""
+
                 If dtUtc.HasValue Then
                     Dim dtLocal = dtUtc.Value.ToLocalTime()
                     datePart = dtLocal.ToString("yyyy-MM-dd")
                     timePart = dtLocal.ToString("HH:mm")
                 End If
 
-                Dim it As New ListViewItem(datePart)
+                Dim it As New ListViewItem(GetAiDisplayRef(h))
+                it.SubItems.Add(GetAttachmentIndicator(h))
+                it.SubItems.Add(datePart)
                 it.SubItems.Add(timePart)
                 it.SubItems.Add(If(h.Author, ""))
                 it.SubItems.Add(GetMailTo(h))
@@ -3167,6 +3264,16 @@ Public Class M365SearchTestForm
                     toLine = String.Join("; ", names.Distinct(StringComparer.OrdinalIgnoreCase))
                 End If
 
+                Dim hasAttachments As Boolean = False
+                Dim hasAttachmentsTok As JToken = tok("has_attachments")
+                If hasAttachmentsTok IsNot Nothing AndAlso hasAttachmentsTok.Type <> JTokenType.Null Then
+                    If hasAttachmentsTok.Type = JTokenType.Boolean Then
+                        hasAttachments = hasAttachmentsTok.Value(Of Boolean)()
+                    Else
+                        Boolean.TryParse(hasAttachmentsTok.ToString(), hasAttachments)
+                    End If
+                End If
+
                 Dim h As New M365SearchHit() With {
                     .Source = M365SearchSources.Mail,
                     .Id = graphId,
@@ -3187,6 +3294,7 @@ Public Class M365SearchTestForm
                                 New JProperty("subject", title),
                                 New JProperty("sentDateTime", sentDateStr),
                                 New JProperty("receivedDateTime", receivedDateStr),
+                                New JProperty("hasAttachments", hasAttachments),
                                 New JProperty("toRecipients", If(toRecipients, New JArray()))
                             )))
                 }
@@ -3657,14 +3765,14 @@ Public Class M365SearchTestForm
     End Function
 
     Private Async Function ReviewAndDisplayCandidatePoolAsync(userPrompt As String,
-                                                              ct As CancellationToken) As Task
+                                                          ct As CancellationToken) As Task
         If _aiCandidateHits.Count = 0 Then
             UiPost(Sub()
                        _hits.Clear()
                        lvResults.Items.Clear()
                        _hasPinnedSummary = True
                        SetSummaryMarkdown("No matching e-mails were found.")
-                       UpdateAiStats(0, 0, 0)
+                       UpdateAiStats(0, 0, 0, 0)
                        UpdateGetMoreEnabled()
                        lblStatus.Text = "AI search found no candidate mails."
                    End Sub)
@@ -3674,41 +3782,63 @@ Public Class M365SearchTestForm
         UiPost(Sub() lblStatus.Text = $"Reviewing {_aiCandidateHits.Count} candidate mail(s) in full text…")
 
         Dim resolvedCandidates As List(Of AiResolvedMail) =
-            Await FetchResolvedCandidateMailsAsync(_aiCandidateHits, ct).ConfigureAwait(False)
+        Await FetchResolvedCandidateMailsAsync(_aiCandidateHits, ct).ConfigureAwait(False)
+
+        Dim reviewedCount As Integer = resolvedCandidates.Count
 
         Dim shortlistRefs As List(Of Integer) =
-            Await ReviewCandidatesInBatchesAsync(userPrompt, resolvedCandidates, ct).ConfigureAwait(False)
+        Await ReviewCandidatesInBatchesAsync(userPrompt, resolvedCandidates, ct).ConfigureAwait(False)
 
         Dim shortlistSet As New HashSet(Of Integer)(shortlistRefs)
         Dim shortlistResolved As List(Of AiResolvedMail) =
-            resolvedCandidates.Where(Function(x) shortlistSet.Contains(x.GlobalRef)).ToList()
+        resolvedCandidates.Where(Function(x) shortlistSet.Contains(x.GlobalRef)).ToList()
 
-        UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count)
-        UiPost(Sub() lblStatus.Text = $"Full-text review kept {shortlistResolved.Count} of {_aiCandidateHits.Count} candidate mails. Building final result…")
+        Dim keptCount As Integer = shortlistResolved.Count
+
+        UpdateAiStats(_aiCandidateHits.Count, reviewedCount, keptCount)
+        UiPost(Sub() lblStatus.Text = $"Full-text review kept {keptCount} of {reviewedCount} reviewed candidate mails. Building final result…")
 
         Dim finalSelection As AiFinalSelection =
-            Await BuildFinalGridSelectionAsync(userPrompt, shortlistResolved, ct).ConfigureAwait(False)
+        Await BuildFinalGridSelectionAsync(userPrompt, shortlistResolved, ct).ConfigureAwait(False)
 
-        If finalSelection.OrderedGlobalRefs.Count = 0 Then
+        If shortlistResolved.Count = 0 Then
             UiPost(Sub()
                        _hits = New List(Of M365SearchHit)()
                        lvResults.Items.Clear()
                        _hasPinnedSummary = True
                        SetSummaryMarkdown("No matching e-mails were found.")
-                       UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count, 0)
+                       UpdateAiStats(_aiCandidateHits.Count, reviewedCount, keptCount, 0)
                        UpdateGetMoreEnabled()
-                       lblStatus.Text = $"0 relevant mails shown from {_aiCandidateHits.Count} candidate(s)."
+                       lblStatus.Text = $"0 relevant mails shown from {keptCount} kept / {_aiCandidateHits.Count} retrieved."
                    End Sub)
             Return
         End If
 
         Dim byGlobalRef As Dictionary(Of Integer, AiResolvedMail) =
-            shortlistResolved.ToDictionary(Function(x) x.GlobalRef)
+        shortlistResolved.ToDictionary(Function(x) x.GlobalRef)
 
         Dim finalHits As New List(Of M365SearchHit)()
+        Dim addedRefs As New HashSet(Of Integer)()
+
+        ' First: honor the AI-provided order.
         For Each globalRef In finalSelection.OrderedGlobalRefs
             Dim resolved As AiResolvedMail = Nothing
-            If byGlobalRef.TryGetValue(globalRef, resolved) AndAlso resolved IsNot Nothing AndAlso resolved.Hit IsNot Nothing Then
+            If byGlobalRef.TryGetValue(globalRef, resolved) AndAlso
+           resolved IsNot Nothing AndAlso
+           resolved.Hit IsNot Nothing AndAlso
+           addedRefs.Add(globalRef) Then
+
+                SetAiDisplayRef(resolved.Hit, globalRef)
+                finalHits.Add(resolved.Hit)
+            End If
+        Next
+
+        ' Then: append every remaining kept mail so nothing mentioned in the
+        ' summary context can disappear from the grid.
+        For Each resolved In shortlistResolved
+            If resolved Is Nothing OrElse resolved.Hit Is Nothing Then Continue For
+            If addedRefs.Add(resolved.GlobalRef) Then
+                SetAiDisplayRef(resolved.Hit, resolved.GlobalRef)
                 finalHits.Add(resolved.Hit)
             End If
         Next
@@ -3720,11 +3850,11 @@ Public Class M365SearchTestForm
                    PopulateResults(_hits)
                    _hasPinnedSummary = True
                    SetSummaryMarkdown(If(String.IsNullOrWhiteSpace(finalSelection.Summary),
-                                         "No matching e-mails were found.",
-                                         finalSelection.Summary.Trim()))
-                   UpdateAiStats(_aiCandidateHits.Count, shortlistResolved.Count, _hits.Count)
+                                     "No matching e-mails were found.",
+                                     finalSelection.Summary.Trim()))
+                   UpdateAiStats(_aiCandidateHits.Count, reviewedCount, keptCount, _hits.Count)
                    UpdateGetMoreEnabled()
-                   lblStatus.Text = $"Showing {_hits.Count} relevant mail(s) from {_aiCandidateHits.Count} candidate(s)."
+                   lblStatus.Text = $"Showing {_hits.Count} relevant mail(s) from {keptCount} kept / {_aiCandidateHits.Count} retrieved."
                End Sub)
 
         UiPost(Sub() StartRowSummaries())

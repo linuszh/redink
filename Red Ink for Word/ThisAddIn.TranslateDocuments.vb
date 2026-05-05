@@ -143,6 +143,127 @@ Partial Public Class ThisAddIn
         Public Property IsEmpty As Boolean
     End Class
 
+
+    ''' <summary>
+    ''' Creates a temporary working copy of the currently active Word document for the document-processing pipeline.
+    ''' If the document has unsaved changes, the user can save first, use the last saved version, or cancel.
+    ''' </summary>
+    Friend Function TryCreateActiveDocumentProcessingCopy(ByRef tempCopyPath As String) As Boolean
+        Dim wordApp As Word.Application = Nothing
+        Dim activeDoc As Word.Document = Nothing
+        Dim tempFolder As String = Nothing
+
+        Try
+            wordApp = Globals.ThisAddIn.Application
+            If wordApp Is Nothing OrElse wordApp.Documents Is Nothing OrElse wordApp.Documents.Count = 0 Then
+                ShowCustomMessageBox("No Word document is currently open.")
+                Return False
+            End If
+
+            activeDoc = wordApp.ActiveDocument
+            If activeDoc Is Nothing Then
+                ShowCustomMessageBox("No active Word document was found.")
+                Return False
+            End If
+
+            If String.IsNullOrWhiteSpace(activeDoc.Path) OrElse String.IsNullOrWhiteSpace(activeDoc.FullName) Then
+                ShowCustomMessageBox("The active document has never been saved. Please save it first, then try again.")
+                Return False
+            End If
+
+            Dim sourcePath As String = activeDoc.FullName
+            Dim ext As String = Path.GetExtension(sourcePath).ToLowerInvariant()
+            If ext <> ".doc" AndAlso ext <> ".docx" Then
+                ShowCustomMessageBox($"The active document type '{ext}' is not supported for this workflow.")
+                Return False
+            End If
+
+            If Not activeDoc.Saved Then
+                Dim saveChoice As Integer = ShowCustomYesNoBox(
+                    "The active Word document has unsaved changes." & vbCrLf & vbCrLf &
+                    "How would you like to continue?",
+                    "Save current version and continue",
+                    "Use last saved version",
+                    AN & " Active Document",
+                    extraButtonText:="Cancel",
+                    extraButtonAction:=Sub()
+                                       End Sub,
+                    CloseAfterExtra:=True)
+
+                If saveChoice = 0 Then
+                    tempCopyPath = Nothing
+                    Return False
+                End If
+
+                If saveChoice = 1 Then
+                    activeDoc.Save()
+                End If
+            End If
+
+            If Not File.Exists(sourcePath) Then
+                Throw New FileNotFoundException("The saved document could not be found on disk.", sourcePath)
+            End If
+
+            tempFolder = Path.Combine(Path.GetTempPath(), $"{AN2}_active_doc_{Guid.NewGuid():N}")
+            Directory.CreateDirectory(tempFolder)
+            tempCopyPath = Path.Combine(tempFolder, Path.GetFileName(sourcePath))
+
+            File.Copy(sourcePath, tempCopyPath, overwrite:=True)
+
+            If Not File.Exists(tempCopyPath) Then
+                Throw New IOException("The temporary working copy could not be created.")
+            End If
+
+            Return True
+
+        Catch ex As Exception
+            tempCopyPath = Nothing
+
+            If Not String.IsNullOrWhiteSpace(tempFolder) AndAlso Directory.Exists(tempFolder) Then
+                Try : Directory.Delete(tempFolder, recursive:=True) : Catch : End Try
+            End If
+
+            ShowCustomMessageBox($"Could not prepare the active document: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Returns a non-conflicting file path in the specified directory.
+    ''' If the requested filename already exists, appends " (n)" before the extension.
+    ''' </summary>
+    Private Shared Function GetNonConflictingFilePath(directoryPath As String, fileName As String) As String
+        Dim candidatePath As String = Path.Combine(directoryPath, fileName)
+        If Not File.Exists(candidatePath) Then Return candidatePath
+
+        Dim baseName As String = Path.GetFileNameWithoutExtension(fileName)
+        Dim ext As String = Path.GetExtension(fileName)
+        Dim counter As Integer = 1
+
+        Do
+            candidatePath = Path.Combine(directoryPath, $"{baseName} ({counter}){ext}")
+            If Not File.Exists(candidatePath) Then Return candidatePath
+            counter += 1
+        Loop
+    End Function
+
+    ''' <summary>
+    ''' Moves a file to the current user's Desktop using a non-conflicting filename if needed.
+    ''' </summary>
+    Private Shared Function MoveFileToDesktop(sourcePath As String) As String
+        If String.IsNullOrWhiteSpace(sourcePath) Then Return Nothing
+        If Not File.Exists(sourcePath) Then
+            Throw New FileNotFoundException("The source file to move was not found.", sourcePath)
+        End If
+
+        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim destinationPath As String = GetNonConflictingFilePath(desktopPath, Path.GetFileName(sourcePath))
+
+        File.Move(sourcePath, destinationPath)
+        Return destinationPath
+    End Function
+
+
     ''' <summary>
     ''' Entry point for translation: prompts for file/directory and target language, then translates documents.
     ''' </summary>
@@ -230,8 +351,18 @@ Partial Public Class ThisAddIn
     ''' Supports both Word (.doc/.docx) and PowerPoint (.pptx) files with automatic dispatch.
     ''' </summary>
     ''' <param name="mode">The processing mode (Translate or Correct).</param>
+    ''' <summary>
+    ''' Main processing method that handles both translation and correction modes.
+    ''' Supports both Word (.doc/.docx) and PowerPoint (.pptx) files with automatic dispatch.
+    ''' </summary>
+    ''' <param name="mode">The processing mode (Translate or Correct).</param>
     Private Async Function ProcessWordDocuments(mode As DocumentProcessMode) As System.Threading.Tasks.Task
         Dim selectedPath As String = ""
+        Dim usedActiveDocument As Boolean = False
+        Dim activeDocumentTempFolder As String = Nothing
+        Dim keepActiveDocumentTempFolder As Boolean = False
+        Dim desktopResultPaths As New List(Of String)()
+
         Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", If(_isFreestyle, "adapt", "correct"))
         Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", If(_isFreestyle, "adapted", "corrected"))
         Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", If(_isFreestyle, "Adapting", "Correcting"))
@@ -239,18 +370,24 @@ Partial Public Class ThisAddIn
 
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
+
         If INI_AllowLegacyDocFiles Then
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
             Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
         Else
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
             Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.docx;*.pptx|Word Document (*.docx)|*.docx|PowerPoint (*.pptx)|*.pptx"
         End If
 
         Try
-            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory, allowUseActiveDocument:=True)
                 If frm.ShowDialog() = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
+                    usedActiveDocument = frm.UsedActiveDocument
+
+                    If usedActiveDocument AndAlso Not String.IsNullOrWhiteSpace(selectedPath) Then
+                        activeDocumentTempFolder = Path.GetDirectoryName(selectedPath)
+                    End If
                 End If
             End Using
         Finally
@@ -384,8 +521,8 @@ Partial Public Class ThisAddIn
             Dim exProc As String = Path.GetFileName(groups(exampleKey).ProcessedFiles(0))
 
             Dim suffixDesc As String = If(mode = DocumentProcessMode.Translate,
-    $"'{targetLanguage}' translation (suffix '_{targetLanguageToken}')",
-    $"modified version (suffix '{effectiveCorrectedSuffix}')")
+                $"'{targetLanguage}' translation (suffix '_{targetLanguageToken}')",
+                $"modified version (suffix '{effectiveCorrectedSuffix}')")
 
             Dim msg As New StringBuilder()
             msg.AppendLine($"Found {pairedGroups.Count} document(s) that already have an existing {suffixDesc}.")
@@ -449,8 +586,8 @@ Partial Public Class ThisAddIn
             Dim exProc As String = Path.GetFileName(groups(exampleKey).ProcessedFiles(0))
 
             Dim suffixDesc As String = If(mode = DocumentProcessMode.Translate,
-    $"'{targetLanguage}' (suffix '_{targetLanguageToken}')",
-    $"modified (suffix '{effectiveCorrectedSuffix}')")
+                $"'{targetLanguage}' (suffix '_{targetLanguageToken}')",
+                $"modified (suffix '{effectiveCorrectedSuffix}')")
 
             Dim msg2 As New StringBuilder()
             msg2.AppendLine($"Found {processedOnlyGroups.Count} {modeNoun.ToLower()}-only file(s) for {suffixDesc}, without a matching base file.")
@@ -535,11 +672,15 @@ Partial Public Class ThisAddIn
                     Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(filePath)
                     Dim outputExt As String = If(isPptx, ".pptx", ".docx")
                     Dim outputPath As String
+                    Dim compareOutputPath As String = Nothing
 
                     If mode = DocumentProcessMode.Translate Then
                         outputPath = Path.Combine(dir, $"{nameWithoutExt}_{targetLanguageToken}{outputExt}")
                     Else
                         outputPath = Path.Combine(dir, $"{nameWithoutExt}{effectiveCorrectedSuffix}{outputExt}")
+                        If Not isPptx Then
+                            compareOutputPath = GetCompareFilePath(outputPath)
+                        End If
                     End If
 
                     Dim success As Boolean
@@ -559,11 +700,32 @@ Partial Public Class ThisAddIn
                             Dim compareSuccess As Boolean = CreateWordCompareDocument(filePath, outputPath)
                             If Not compareSuccess Then
                                 failedFiles.Add($"{fileName}: Corrected but compare document creation failed")
-                                successCount += 1 ' Still count as success since correction worked
-                            Else
-                                successCount += 1
                             End If
-                        Else
+                        End If
+
+                        Dim desktopMoveSucceeded As Boolean = True
+
+                        If usedActiveDocument Then
+                            Try
+                                Dim movedOutputPath As String = MoveFileToDesktop(outputPath)
+                                If Not String.IsNullOrWhiteSpace(movedOutputPath) Then
+                                    desktopResultPaths.Add(movedOutputPath)
+                                End If
+
+                                If Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
+                                    Dim movedComparePath As String = MoveFileToDesktop(compareOutputPath)
+                                    If Not String.IsNullOrWhiteSpace(movedComparePath) Then
+                                        desktopResultPaths.Add(movedComparePath)
+                                    End If
+                                End If
+                            Catch ex As Exception
+                                desktopMoveSucceeded = False
+                                keepActiveDocumentTempFolder = True
+                                failedFiles.Add($"{fileName}: Processed but moving result(s) to the Desktop failed - {ex.Message}")
+                            End Try
+                        End If
+
+                        If desktopMoveSucceeded Then
                             successCount += 1
                         End If
                     Else
@@ -577,6 +739,16 @@ Partial Public Class ThisAddIn
             ProgressBarModule.CancelOperation = True
             _useFormattingMarkers = False
         End Try
+
+        If usedActiveDocument AndAlso
+           Not keepActiveDocumentTempFolder AndAlso
+           Not String.IsNullOrWhiteSpace(activeDocumentTempFolder) AndAlso
+           Directory.Exists(activeDocumentTempFolder) Then
+            Try
+                Directory.Delete(activeDocumentTempFolder, recursive:=True)
+            Catch
+            End Try
+        End If
 
         ' Summary
         Dim summary As New StringBuilder()
@@ -594,6 +766,23 @@ Partial Public Class ThisAddIn
             If hasWordFiles Then
                 summary.AppendLine($"Compare documents created with tracked changes")
             End If
+        End If
+
+        If usedActiveDocument AndAlso desktopResultPaths.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine("Result files saved to Desktop:")
+            For Each resultPath In desktopResultPaths.Take(10)
+                summary.AppendLine($"  • {Path.GetFileName(resultPath)}")
+            Next
+            If desktopResultPaths.Count > 10 Then
+                summary.AppendLine($"  ... and {desktopResultPaths.Count - 10} more")
+            End If
+        End If
+
+        If usedActiveDocument AndAlso keepActiveDocumentTempFolder AndAlso Not String.IsNullOrWhiteSpace(activeDocumentTempFolder) Then
+            summary.AppendLine()
+            summary.AppendLine("Temporary files were kept because moving the result failed:")
+            summary.AppendLine($"  {activeDocumentTempFolder}")
         End If
 
         If failedFiles.Count > 0 Then

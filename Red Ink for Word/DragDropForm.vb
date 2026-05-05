@@ -36,9 +36,9 @@
 'End If
 'End If
 
-Imports System.Windows.Forms
 Imports System.Drawing
 Imports System.IO
+Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
 
 ''' <summary>
@@ -57,9 +57,13 @@ Public Class DragDropForm
 
     Private _selectedFilePath As String = String.Empty
     Private _selectionMode As DragDropMode = DragDropMode.FileOnly
+    Private _allowUseActiveDocument As Boolean = False
+    Private _usedActiveDocument As Boolean = False
+    Private _btnUseActiveDocument As Button = Nothing
 
     ' Layout constants
     Private Const LabelToButtonSpacing As Integer = 20
+    Private Const ButtonToButtonSpacing As Integer = 12
     Private Const ButtonToFormBottomSpacing As Integer = 28
 
     ''' <summary>
@@ -90,11 +94,20 @@ Public Class DragDropForm
     End Property
 
     ''' <summary>
+    ''' Gets whether the active-document shortcut was used.
+    ''' </summary>
+    Public ReadOnly Property UsedActiveDocument As Boolean
+        Get
+            Return _usedActiveDocument
+        End Get
+    End Property
+
+    ''' <summary>
     ''' Initializes the form with drag-and-drop enabled and optional custom label text.
     ''' Defaults to file-only mode.
     ''' </summary>
     Public Sub New()
-        Me.New(DragDropMode.FileOnly)
+        Me.New(DragDropMode.FileOnly, False)
     End Sub
 
     ''' <summary>
@@ -102,8 +115,19 @@ Public Class DragDropForm
     ''' </summary>
     ''' <param name="mode">Specifies whether to accept files only, directories only, or both.</param>
     Public Sub New(mode As DragDropMode)
+        Me.New(mode, False)
+    End Sub
+
+    ''' <summary>
+    ''' Initializes the form with drag-and-drop enabled, optional custom label text,
+    ''' specified selection mode, and optional active-document shortcut button.
+    ''' </summary>
+    ''' <param name="mode">Specifies whether to accept files only, directories only, or both.</param>
+    ''' <param name="allowUseActiveDocument">If True, shows a button that uses the currently active Word document.</param>
+    Public Sub New(mode As DragDropMode, Optional allowUseActiveDocument As Boolean = False)
         InitializeComponent()
         _selectionMode = mode
+        _allowUseActiveDocument = allowUseActiveDocument
 
         ' Ensure drag and drop is enabled
         Me.AllowDrop = True
@@ -125,22 +149,49 @@ Public Class DragDropForm
             Me.Label2.Text = GetDefaultSupportedFormatsText()
         End If
 
+        If _allowUseActiveDocument Then
+            CreateUseActiveDocumentButton()
+        End If
+
         ' Resize the form so the label, button, and bottom margin all fit
         AdjustFormLayout()
     End Sub
 
     ''' <summary>
-    ''' Repositions the browse button below Label2 and resizes the form height to fit all content.
+    ''' Repositions the buttons below Label2 and resizes the form height to fit all content.
+    ''' Ensures the optional active-document button is wide enough for its full text.
     ''' </summary>
     Private Sub AdjustFormLayout()
         ' Let the label compute its auto-sized height
         Me.Label2.PerformLayout()
 
-        ' Position the button below the label
+        Dim targetButtonWidth As Integer = Me.btnBrowse.Width
+
+        If _btnUseActiveDocument IsNot Nothing Then
+            Dim measuredTextSize As Size = TextRenderer.MeasureText(_btnUseActiveDocument.Text, _btnUseActiveDocument.Font)
+            targetButtonWidth = Math.Max(targetButtonWidth, measuredTextSize.Width + 24)
+        End If
+
+        Me.btnBrowse.Width = targetButtonWidth
+
+        If _btnUseActiveDocument IsNot Nothing Then
+            _btnUseActiveDocument.Width = targetButtonWidth
+        End If
+
+        Dim requiredClientWidth As Integer = Me.btnBrowse.Left + targetButtonWidth + Me.btnBrowse.Left
+        If requiredClientWidth > Me.ClientSize.Width Then
+            Me.ClientSize = New Size(requiredClientWidth, Me.ClientSize.Height)
+        End If
+
+        ' Position the browse button below the label
         Me.btnBrowse.Top = Me.Label2.Bottom + LabelToButtonSpacing
 
-        ' Resize the form to fit the button plus bottom margin
-        Me.ClientSize = New Size(Me.ClientSize.Width, Me.btnBrowse.Bottom + ButtonToFormBottomSpacing)
+        If _btnUseActiveDocument IsNot Nothing Then
+            _btnUseActiveDocument.Top = Me.btnBrowse.Bottom + ButtonToButtonSpacing
+            Me.ClientSize = New Size(Me.ClientSize.Width, _btnUseActiveDocument.Bottom + ButtonToFormBottomSpacing)
+        Else
+            Me.ClientSize = New Size(Me.ClientSize.Width, Me.btnBrowse.Bottom + ButtonToFormBottomSpacing)
+        End If
     End Sub
 
     ''' <summary>
@@ -185,6 +236,24 @@ Public Class DragDropForm
                 Return "Supported are " & allButLast & " and " & parts.Last() & "."
         End Select
     End Function
+
+    ''' <summary>
+    ''' Creates the optional button for using the currently active Word document.
+    ''' </summary>
+    Private Sub CreateUseActiveDocumentButton()
+        _btnUseActiveDocument = New Button() With {
+            .Text = "Use currently active document",
+            .Width = Me.btnBrowse.Width,
+            .Height = Me.btnBrowse.Height,
+            .Left = Me.btnBrowse.Left,
+            .Anchor = Me.btnBrowse.Anchor,
+            .AutoSize = False
+        }
+
+        AddHandler _btnUseActiveDocument.Click, AddressOf btnUseActiveDocument_Click
+        Me.Controls.Add(_btnUseActiveDocument)
+        _btnUseActiveDocument.BringToFront()
+    End Sub
 
     ''' <summary>
     ''' Sets the form icon from application resources on load.
@@ -275,6 +344,38 @@ Public Class DragDropForm
                     BrowseForFolder()
                 End If
         End Select
+    End Sub
+
+    ''' <summary>
+    ''' Creates a temporary working copy from the currently active Word document
+    ''' and returns it as the selected file path.
+    ''' </summary>
+    Private Sub btnUseActiveDocument_Click(sender As Object, e As EventArgs)
+        Try
+            Dim tempCopyPath As String = Nothing
+
+            If Globals.ThisAddIn Is Nothing Then
+                SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The active Word document could not be accessed.")
+                Return
+            End If
+
+            If Not Globals.ThisAddIn.TryCreateActiveDocumentProcessingCopy(tempCopyPath) Then
+                Return
+            End If
+
+            If String.IsNullOrWhiteSpace(tempCopyPath) OrElse Not File.Exists(tempCopyPath) Then
+                SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("The temporary working copy could not be created.")
+                Return
+            End If
+
+            _selectedFilePath = tempCopyPath
+            _usedActiveDocument = True
+            Me.DialogResult = DialogResult.OK
+            Me.Close()
+
+        Catch ex As Exception
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox($"Error preparing the active document: {ex.Message}")
+        End Try
     End Sub
 
     ''' <summary>
