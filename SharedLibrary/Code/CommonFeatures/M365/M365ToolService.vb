@@ -172,8 +172,8 @@ Namespace SharedLibrary
                                 New JProperty("query",
                                     New JObject(New JProperty("type", "string"),
                                                 New JProperty("description",
-                                                    "KQL-compatible search expression. Plain words plus operators " &
-                                                    "like from:""peter"" subject:""acme"" received>=2025-01-01."))),
+                                                    "KQL-compatible search expression. Never pass an empty string. " &
+                                                    "If the user did not provide search terms and only wants browsing or date filtering, use '*'."))),
                                 New JProperty("sources",
                                     New JObject(New JProperty("type", "array"),
                                                 New JProperty("items", New JObject(New JProperty("type", "string"))),
@@ -190,10 +190,10 @@ Namespace SharedLibrary
                                                 New JProperty("description", "Optional zero-based offset for paging; default 0."))),
                                 New JProperty("from_date",
                                     New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD)."))),
+                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
                                 New JProperty("to_date",
                                     New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD)."))),
+                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
                                 New JProperty("kql_extra",
                                     New JObject(New JProperty("type", "string"),
                                                 New JProperty("description", "Optional extra KQL appended verbatim."))))),
@@ -207,7 +207,10 @@ Namespace SharedLibrary
                 .ToolInstructionsPrompt =
                     "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
                     "USE THIS whenever the user refers to their own materials — do NOT use internet_search " &
-                    "or web_content_retriever for the user's own content. Provide query (required). " &
+                    "or web_content_retriever for the user's own content. " &
+                    "Provide query (required) and NEVER send it as an empty string. " &
+                    "If the user only wants date-bounded browsing or a broad listing, use query='*'. " &
+                    "from_date is inclusive. to_date is inclusive for the user, but the implementation applies it as the next-day exclusive bound internally. " &
                     "Optionally narrow with sources, max_per_source, from_index, from_date, to_date, kql_extra. " &
                     "Each hit has 'n', 'id', 'source', 'title', 'summary', 'date', 'web_url' and source-specific " &
                     "ids ('conversation_id' for mail, 'drive_id' for files, 'chat_id'/'team_id'/'channel_id' for Teams). " &
@@ -219,7 +222,6 @@ Namespace SharedLibrary
                 .ToolErrorHandling = "skip"
             }
         End Function
-
 
 
         Private Function BuildGetMailTool(suffix As String) As ModelConfig
@@ -315,7 +317,8 @@ Namespace SharedLibrary
                 New JProperty("description",
                     "Downloads a OneDrive or SharePoint file (DriveItem) and returns its plain-text content. " &
                     "Supported: .docx, .xlsx, .pptx, .pdf, .eml, .rtf, .txt/.csv/.md/.json/.xml/.html. " &
-                    "Pass 'drive_item_id' from m365_search (and 'drive_id' for files in shared drives)."),
+                    "Pass 'drive_item_id' from m365_search. Also pass 'drive_id' when present. " &
+                    "For SharePoint hits, also pass 'web_url' from m365_search so retrieval can fall back via Graph /shares."),
                 New JProperty("parameters",
                     New JObject(
                         New JProperty("type", "object"),
@@ -327,6 +330,9 @@ Namespace SharedLibrary
                                 New JProperty("drive_id",
                                     New JObject(New JProperty("type", "string"),
                                                 New JProperty("description", "Optional drive id for shared drives."))),
+                                New JProperty("web_url",
+                                    New JObject(New JProperty("type", "string"),
+                                                New JProperty("description", "Optional web URL from m365_search. Recommended for SharePoint files."))),
                                 New JProperty("ocr_pdf",
                                     New JObject(New JProperty("type", "boolean"),
                                                 New JProperty("description", "Default false."))),
@@ -342,7 +348,8 @@ Namespace SharedLibrary
                 .ToolDefinition = def.ToString(Formatting.None),
                 .ToolInstructionsPrompt =
                     "m365_get_file: Returns plain text for a OneDrive/SharePoint file. " &
-                    "Provide drive_item_id (required). Optional: drive_id, ocr_pdf, max_chars.",
+                    "Provide drive_item_id (required). Also provide drive_id when present. " &
+                    "For SharePoint search hits, also provide web_url from m365_search. Optional: ocr_pdf, max_chars.",
                 .ModelDescription = "M365: Read OneDrive/SharePoint file" & suffix,
                 .Tool = True,
                 .ToolPriority = 993,
@@ -459,9 +466,7 @@ Namespace SharedLibrary
                                               ct As CancellationToken) As Task(Of M365ToolExecutionResult)
             Dim r As New M365ToolExecutionResult()
             Dim query = GetArgString(args, "query").Trim()
-            If String.IsNullOrWhiteSpace(query) Then
-                r.Success = False : r.ErrorMessage = "Missing required parameter: query" : Return r
-            End If
+            If String.IsNullOrWhiteSpace(query) Then query = "*"
 
             Dim sources = ParseSources(GetArg(args, "sources"))
             If sources = M365SearchSources.None Then sources = M365SearchSources.All
@@ -488,6 +493,7 @@ Namespace SharedLibrary
             For i As Integer = 0 To result.Hits.Count - 1
                 hitsJson.Add(HitToJson(result.Hits(i), i + 1))
             Next
+
             Dim errorsJson As New JObject()
             For Each kv In result.ErrorsBySource
                 errorsJson(kv.Key.ToString()) = kv.Value
@@ -503,6 +509,7 @@ Namespace SharedLibrary
                 New JProperty("hits", hitsJson),
                 New JProperty("errors", errorsJson)
             )
+
             r.Response = envelope.ToString(Formatting.None)
             r.Success = True
             Return r
@@ -568,16 +575,25 @@ Namespace SharedLibrary
             If String.IsNullOrEmpty(itemId) Then
                 r.Success = False : r.ErrorMessage = "Missing required parameter: drive_item_id" : Return r
             End If
+
             Dim driveId = GetArgString(args, "drive_id").Trim()
+            Dim webUrl = GetArgString(args, "web_url").Trim()
 
             Dim opts As New M365TextOptions() With {
                 .OcrPdf = GetArgBool(args, "ocr_pdf", False),
                 .AskUserForOcr = False,
                 .MaxChars = ClampMaxChars(GetArgInt(args, "max_chars", DefaultMaxChars))
             }
+
             log($"  Reading M365 file: {itemId}")
             Dim text = Await M365Service.GetDriveItemAsTextAsync(
-                context, itemId, If(String.IsNullOrEmpty(driveId), Nothing, driveId), opts, ct).ConfigureAwait(False)
+                context,
+                driveItemId:=itemId,
+                driveId:=If(String.IsNullOrEmpty(driveId), Nothing, driveId),
+                webUrl:=If(String.IsNullOrEmpty(webUrl), Nothing, webUrl),
+                options:=opts,
+                ct:=ct).ConfigureAwait(False)
+
             r.Response = WrapContent("FILE", itemId, text)
             r.Success = True
             Return r
@@ -735,6 +751,11 @@ Namespace SharedLibrary
 
                         Dim toRecipients = TryCast(resource("toRecipients"), JArray)
                         If toRecipients IsNot Nothing Then o("toRecipients") = toRecipients.DeepClone()
+
+                        Dim hasAttachmentsTok = resource("hasAttachments")
+                        If hasAttachmentsTok IsNot Nothing AndAlso hasAttachmentsTok.Type <> JTokenType.Null Then
+                            o("has_attachments") = hasAttachmentsTok.Value(Of Boolean)()
+                        End If
                     End If
 
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint

@@ -395,17 +395,33 @@ Namespace SharedLibrary
 
             If src = M365SearchSources.Mail Then
                 requestObject("fields") = New JArray From {
-                    "id",
-                    "subject",
-                    "from",
-                    "toRecipients",
-                    "ccRecipients",
-                    "receivedDateTime",
-                    "sentDateTime",
-                    "internetMessageId",
-                    "conversationId",
-                    "webLink"
-                }
+                        "id",
+                        "subject",
+                        "from",
+                        "toRecipients",
+                        "ccRecipients",
+                        "receivedDateTime",
+                        "sentDateTime",
+                        "internetMessageId",
+                        "conversationId",
+                        "webLink",
+                        "hasAttachments"
+                    }
+            ElseIf src = M365SearchSources.OneDrive OrElse
+                       src = M365SearchSources.SharePoint Then
+                requestObject("fields") = New JArray From {
+                        "id",
+                        "name",
+                        "webUrl",
+                        "size",
+                        "file",
+                        "folder",
+                        "createdDateTime",
+                        "lastModifiedDateTime",
+                        "createdBy",
+                        "lastModifiedBy",
+                        "parentReference"
+                    }
             End If
 
             Dim req As New JObject From {
@@ -448,22 +464,40 @@ Namespace SharedLibrary
         End Function
 
         Private Function ApplyKqlFilters(query As String, src As M365SearchSources, options As M365SearchOptions) As String
-            Dim sb As New StringBuilder(query.Trim())
+            Dim q = If(query, "").Trim()
+            If String.IsNullOrWhiteSpace(q) Then q = "*"
+
+            Dim sb As New StringBuilder(q)
             Dim dateField As String = Nothing
+
             Select Case src
-                Case M365SearchSources.Mail : dateField = "received"
+                Case M365SearchSources.Mail
+                    dateField = "received"
+
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint,
                      M365SearchSources.SharePointSites, M365SearchSources.SharePointListItems
                     dateField = "lastModifiedDateTime"
-                Case M365SearchSources.Calendar : dateField = "start"
+
+                Case M365SearchSources.Calendar
+                    dateField = "start"
             End Select
+
             If dateField IsNot Nothing Then
-                If options.From.HasValue Then sb.Append($" AND {dateField}>={options.From.Value:yyyy-MM-dd}")
-                If options.To.HasValue Then sb.Append($" AND {dateField}<={options.To.Value:yyyy-MM-dd}")
+                If options.From.HasValue Then
+                    Dim fromDate = options.From.Value.Date
+                    sb.Append($" AND {dateField}>={fromDate:yyyy-MM-dd}")
+                End If
+
+                If options.To.HasValue Then
+                    Dim toExclusive = options.To.Value.Date.AddDays(1)
+                    sb.Append($" AND {dateField}<{toExclusive:yyyy-MM-dd}")
+                End If
             End If
+
             If Not String.IsNullOrWhiteSpace(options.KqlExtra) Then
                 sb.Append(" AND ").Append(options.KqlExtra.Trim())
             End If
+
             Return sb.ToString()
         End Function
 

@@ -1218,6 +1218,13 @@ Partial Public Class ThisAddIn
                                     SharedMethods.ModelSupportsTooling(LastFreestyleModelConfig)
             End If
 
+            Dim ToolTriggerAvailable As Boolean =
+                Not UseSecondAPI AndAlso
+                SharedMethods.HasToolingCapableSpecialTaskModel(_context, INI_AlternateModelPath, "ToolDefaultModel")
+
+            Dim ToolTriggerInstruct As String =
+                If(ToolTriggerAvailable, $"; add '{ToolTrigger}' to perform an agentic search of your selected {ToolFriendlyName.ToLower}", "")
+
             ' Build additional instruction text based on configuration and selection state
             Dim AddOnInstruct As String = AllInstruct
 
@@ -1248,14 +1255,21 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                     AddOnInstruct += MultiModelInstruct.Replace("; add", ", ")
                 End If
-                If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool Then
-                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
-                End If
 
             Else
                 If Not String.IsNullOrWhiteSpace(INI_APICall_Object) Then
                     AddOnInstruct += ObjectInstruct.Replace("; add", ",")
                     DoFileObject = True
+                End If
+            End If
+
+            If Not String.IsNullOrWhiteSpace(ToolTriggerInstruct) Then
+                AddOnInstruct += ToolTriggerInstruct.Replace("; add", ", ")
+            End If
+
+            If UseSecondAPI OrElse ToolTriggerAvailable Then
+                If (Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool) Or ToolTriggerAvailable Then
+                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
                 End If
             End If
 
@@ -2434,6 +2448,47 @@ Partial Public Class ThisAddIn
 
             ' === In-prompt trigger processing ===
 
+            Dim toolTriggerDetected As Boolean = False
+            Dim toolTriggerConfig As ModelConfig = Nothing
+
+            If Not UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                toolTriggerDetected = True
+
+                If Not SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    toolTriggerConfig) Then
+
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                    Return
+                End If
+
+                If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                    Return
+                End If
+
+                OtherPrompt = OtherPrompt.Replace(ToolTrigger, "").Trim()
+
+                If Not originalConfigLoaded Then
+                    originalConfig = GetCurrentConfig(_context)
+                    originalConfigLoaded = True
+                End If
+
+                Dim ErrorFlag As Boolean = False
+                ApplyModelConfig(_context, toolTriggerConfig, ErrorFlag)
+                If ErrorFlag Then
+                    ShowCustomMessageBox("There was an error assigning the tooling model configuration. Aborting.")
+                    Return
+                End If
+
+                UseSecondAPI = True
+                modelSupportsTool = True
+            End If
+
             ' (all) trigger: Select entire document
             If OtherPrompt.IndexOf(AllTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(AllTrigger, "").Trim()
@@ -2670,7 +2725,7 @@ Partial Public Class ThisAddIn
 
             ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
-            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
+            If UseSecondAPI AndAlso Not toolTriggerDetected AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
                 If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso DoChart = 0 Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
@@ -3028,18 +3083,17 @@ Partial Public Class ThisAddIn
 
             ' === Execute LLM processing with configured parameters ===
 
-            ' Invoke ProcessSelectedText with all configured options            
+            ' Invoke ProcessSelectedText with all configured options
             Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
-
-            ' Restore original model configuration if alternate model was used
-            If UseSecondAPI And originalConfigLoaded Then
-                RestoreDefaults(_context, originalConfig)
-                originalConfigLoaded = False
-            End If
 
         Catch ex As System.Exception
             ' Handle any unexpected errors during freestyle execution
             ShowCustomMessageBox("Error in Freestyle: " & ex.Message)
+        Finally
+            If UseSecondAPI AndAlso originalConfigLoaded Then
+                RestoreDefaults(_context, originalConfig)
+                originalConfigLoaded = False
+            End If
         End Try
     End Sub
 
