@@ -460,11 +460,16 @@ Namespace SharedLibrary
                 Case M365SearchSources.Mail
                     Return Await GetMessageAsTextAsync(context, hit.Id, options, ct).ConfigureAwait(False)
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint
-                    Return Await GetDriveItemAsTextAsync(context, hit.Id, hit.ParentId, options, ct).ConfigureAwait(False)
+                    Return Await GetDriveItemAsTextAsync(
+                        context,
+                        driveItemId:=hit.Id,
+                        driveId:=hit.ParentId,
+                        webUrl:=hit.WebUrl,
+                        options:=options,
+                        ct:=ct).ConfigureAwait(False)
                 Case M365SearchSources.Calendar
                     Return Await GetEventAsTextAsync(context, hit.Id, ct).ConfigureAwait(False)
                 Case M365SearchSources.Teams
-                    ' hit.ParentId is chatId for 1:1/group; channel messages come back with channelIdentity
                     Return Await GetChatMessageAsTextAsync(context, hit.Id, chatId:=hit.ParentId, ct:=ct).ConfigureAwait(False)
                 Case M365SearchSources.OneNote
                     Return Await GetOneNotePageAsTextAsync(context, hit.Id, ct).ConfigureAwait(False)
@@ -479,6 +484,20 @@ Namespace SharedLibrary
                         .Text = hit.Summary
                     }
             End Select
+        End Function
+
+        Private Async Function GetDriveItemByWebUrlAsync(context As ISharedContext,
+                                                         webUrl As String,
+                                                         Optional ct As CancellationToken = Nothing) As Task(Of M365DriveItem)
+            If String.IsNullOrWhiteSpace(webUrl) Then Return Nothing
+
+            Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
+            Dim encoded = "u!" & System.Convert.ToBase64String(Encoding.UTF8.GetBytes(webUrl.Trim())) _
+                .TrimEnd("="c).Replace("/"c, "_"c).Replace("+"c, "-"c)
+
+            Dim url = $"{GraphV1}/shares/{encoded}/driveItem"
+            Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
+            Return ParseDriveItem(j)
         End Function
 
         ''' <summary>
@@ -609,18 +628,64 @@ Namespace SharedLibrary
         Public Async Function GetDriveItemAsTextAsync(context As ISharedContext,
                                                       driveItemId As String,
                                                       Optional driveId As String = Nothing,
+                                                      Optional webUrl As String = Nothing,
                                                       Optional options As M365TextOptions = Nothing,
                                                       Optional ct As CancellationToken = Nothing) As Task(Of M365TextResult)
             If options Is Nothing Then options = New M365TextOptions()
             Dim r As New M365TextResult() With {.Source = M365SearchSources.OneDrive, .Id = driveItemId}
 
-            Dim meta = Await GetDriveItemAsync(context, driveItemId, driveId, ct).ConfigureAwait(False)
+            Dim meta As M365DriveItem = Nothing
+            Dim lookupErrors As New List(Of String)()
+
+            If Not String.IsNullOrWhiteSpace(driveId) Then
+                Try
+                    meta = Await GetDriveItemAsync(context, driveItemId, driveId, ct).ConfigureAwait(False)
+                Catch ex As Exception
+                    lookupErrors.Add(ex.Message)
+                End Try
+            ElseIf Not String.IsNullOrWhiteSpace(webUrl) Then
+                Try
+                    meta = Await GetDriveItemByWebUrlAsync(context, webUrl, ct).ConfigureAwait(False)
+                Catch ex As Exception
+                    lookupErrors.Add("/shares metadata lookup failed: " & ex.Message)
+                End Try
+
+                If meta Is Nothing Then
+                    Try
+                        meta = Await GetDriveItemAsync(context, driveItemId, Nothing, ct).ConfigureAwait(False)
+                    Catch ex As Exception
+                        lookupErrors.Add("/me/drive metadata lookup failed: " & ex.Message)
+                    End Try
+                End If
+            Else
+                Try
+                    meta = Await GetDriveItemAsync(context, driveItemId, Nothing, ct).ConfigureAwait(False)
+                Catch ex As Exception
+                    lookupErrors.Add(ex.Message)
+                End Try
+            End If
+
             If meta Is Nothing Then
-                r.Errors.Add("DriveItem not found.")
+                r.WebUrl = If(webUrl, "")
+                If lookupErrors.Count = 0 Then
+                    r.Errors.Add("DriveItem not found.")
+                Else
+                    r.Errors.Add("DriveItem not found. " & String.Join(" | ", lookupErrors.Distinct()))
+                End If
                 Return r
             End If
+
+            If String.IsNullOrWhiteSpace(driveId) Then driveId = If(meta.DriveId, "")
+            If String.IsNullOrWhiteSpace(webUrl) Then webUrl = If(meta.WebUrl, "")
+            If Not String.IsNullOrWhiteSpace(webUrl) AndAlso
+               webUrl.IndexOf("sharepoint", StringComparison.OrdinalIgnoreCase) >= 0 Then
+                r.Source = M365SearchSources.SharePoint
+            End If
+
+            r.Id = If(meta.Id, driveItemId)
             r.Title = meta.Name
-            r.WebUrl = If(meta.WebUrl, "")
+            r.WebUrl = If(meta.WebUrl, webUrl)
+
             If meta.IsFolder Then
                 r.Text = "[Folder] " & meta.Name
                 Return r
@@ -631,7 +696,18 @@ Namespace SharedLibrary
             Dim path = UniquePath(System.IO.Path.Combine(work, MakeSafeFileName(meta.Name, "file.bin")))
 
             Try
-                Await DownloadFileAsync(context, driveItemId, path, driveId, ct).ConfigureAwait(False)
+                If Not String.IsNullOrWhiteSpace(driveId) Then
+                    Await DownloadFileAsync(context, meta.Id, path, driveId, ct).ConfigureAwait(False)
+                ElseIf Not String.IsNullOrWhiteSpace(webUrl) Then
+                    Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
+                    Dim ok = Await TryDownloadSharedUrlAsync(token, webUrl, path, ct).ConfigureAwait(False)
+                    If Not ok Then
+                        Await DownloadFileAsync(context, meta.Id, path, Nothing, ct).ConfigureAwait(False)
+                    End If
+                Else
+                    Await DownloadFileAsync(context, meta.Id, path, Nothing, ct).ConfigureAwait(False)
+                End If
+
                 Dim ex = Await ExtractTextFromLocalFileAsync(context, path, options, ct).ConfigureAwait(False)
                 Dim sb As New StringBuilder()
                 sb.AppendLine($"File: {meta.Name}")
@@ -649,6 +725,7 @@ Namespace SharedLibrary
                     Try : Directory.Delete(work, True) : r.WorkingFolder = Nothing : Catch : End Try
                 End If
             End Try
+
             Return r
         End Function
 
