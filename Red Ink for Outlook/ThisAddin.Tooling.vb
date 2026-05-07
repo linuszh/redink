@@ -3528,6 +3528,316 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Private Function GetToolParameterSchemas(toolConfig As ModelConfig) As Dictionary(Of String, JToken)
+        Dim result As New Dictionary(Of String, JToken)(StringComparer.OrdinalIgnoreCase)
+
+        If toolConfig Is Nothing OrElse String.IsNullOrWhiteSpace(toolConfig.ToolDefinition) Then
+            Return result
+        End If
+
+        Try
+            Dim toolDefinition As JObject = JObject.Parse(toolConfig.ToolDefinition)
+            Dim propertiesObject As JObject = TryCast(toolDefinition.SelectToken("parameters.properties"), JObject)
+
+            If propertiesObject Is Nothing Then
+                Return result
+            End If
+
+            For Each prop As JProperty In propertiesObject.Properties()
+                result(prop.Name) = prop.Value
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn(
+                "Failed to parse tool parameter schemas.",
+                details:=$"ToolName='{If(toolConfig.ToolName, "")}'",
+                ex:=ex)
+        End Try
+
+        Return result
+    End Function
+
+    Private Function GetToolRequiredParameters(toolConfig As ModelConfig) As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If toolConfig Is Nothing OrElse String.IsNullOrWhiteSpace(toolConfig.ToolDefinition) Then
+            Return result
+        End If
+
+        Try
+            Dim toolDefinition As JObject = JObject.Parse(toolConfig.ToolDefinition)
+            Dim requiredArray As JArray = TryCast(toolDefinition.SelectToken("parameters.required"), JArray)
+
+            If requiredArray Is Nothing Then
+                Return result
+            End If
+
+            For Each item As JToken In requiredArray
+                Dim name As String = If(item, "").ToString().Trim()
+                If name <> "" Then
+                    result.Add(name)
+                End If
+            Next
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn(
+                "Failed to parse required tool parameters.",
+                details:=$"ToolName='{If(toolConfig.ToolName, "")}'",
+                ex:=ex)
+        End Try
+
+        Return result
+    End Function
+
+    Private Function GetToolParameterType(schemaToken As JToken) As String
+        If schemaToken Is Nothing Then
+            Return "string"
+        End If
+
+        Dim typeToken As JToken = schemaToken("type")
+        Dim typeName As String = If(typeToken, "").ToString().Trim().ToLowerInvariant()
+
+        If typeName <> "" Then
+            Return typeName
+        End If
+
+        If schemaToken("enum") IsNot Nothing Then
+            Return "string"
+        End If
+
+        Return "string"
+    End Function
+
+    Private Function GetToolParameterEnumValues(schemaToken As JToken) As List(Of String)
+        Dim values As New List(Of String)()
+
+        If schemaToken Is Nothing Then
+            Return values
+        End If
+
+        Dim enumArray As JArray = TryCast(schemaToken("enum"), JArray)
+        If enumArray Is Nothing Then
+            Return values
+        End If
+
+        For Each item As JToken In enumArray
+            Dim value As String = If(item, "").ToString()
+            If value <> "" Then
+                values.Add(value)
+            End If
+        Next
+
+        Return values
+    End Function
+
+    Private Function TryParseBooleanLiteral(value As String, ByRef result As Boolean) As Boolean
+        Dim normalized As String = If(value, "").Trim()
+
+        If Boolean.TryParse(normalized, result) Then
+            Return True
+        End If
+
+        Select Case normalized.ToLowerInvariant()
+            Case "1", "yes", "y"
+                result = True
+                Return True
+            Case "0", "no", "n"
+                result = False
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Function FormatToolValueForPlaceholder(rawValue As String, schemaToken As JToken) As String
+        Dim parameterType As String = GetToolParameterType(schemaToken)
+        Dim safeValue As String = If(rawValue, "").Trim()
+
+        Select Case parameterType
+            Case "boolean"
+                Dim boolValue As Boolean = False
+                If TryParseBooleanLiteral(safeValue, boolValue) Then
+                    Return If(boolValue, "true", "false")
+                End If
+                Return "false"
+
+            Case "integer"
+                Dim longValue As Long
+                If Long.TryParse(safeValue, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture, longValue) OrElse
+                   Long.TryParse(safeValue, longValue) Then
+                    Return longValue.ToString(Globalization.CultureInfo.InvariantCulture)
+                End If
+                Return "0"
+
+            Case "number"
+                Dim doubleValue As Double
+                Dim normalized As String = safeValue.Replace(","c, "."c)
+
+                If Double.TryParse(normalized, Globalization.NumberStyles.Float Or Globalization.NumberStyles.AllowThousands,
+                                   Globalization.CultureInfo.InvariantCulture, doubleValue) OrElse
+                   Double.TryParse(safeValue, doubleValue) Then
+                    Return doubleValue.ToString(Globalization.CultureInfo.InvariantCulture)
+                End If
+
+                Return "0"
+
+            Case "array"
+                If safeValue <> "" Then
+                    Try
+                        Dim parsed As JToken = JToken.Parse(safeValue)
+                        If parsed.Type = JTokenType.Array Then
+                            Return parsed.ToString(Formatting.None)
+                        End If
+                    Catch
+                    End Try
+                End If
+                Return "[]"
+
+            Case "object"
+                If safeValue <> "" Then
+                    Try
+                        Dim parsed As JToken = JToken.Parse(safeValue)
+                        If parsed.Type = JTokenType.Object Then
+                            Return parsed.ToString(Formatting.None)
+                        End If
+                    Catch
+                    End Try
+                End If
+                Return "{}"
+
+            Case Else
+                Return EscapeJsonString(safeValue)
+        End Select
+    End Function
+
+    Private Function ResolveToolDefaultValue(placeholderName As String,
+                                             toolDefaults As IDictionary(Of String, String),
+                                             schemaToken As JToken,
+                                             isRequired As Boolean,
+                                             ByRef shouldRemoveProperty As Boolean) As String
+        shouldRemoveProperty = False
+
+        Dim rawDefault As String = ""
+
+        If toolDefaults IsNot Nothing AndAlso toolDefaults.ContainsKey(placeholderName) Then
+            rawDefault = If(toolDefaults(placeholderName), "")
+        End If
+
+        If String.IsNullOrWhiteSpace(rawDefault) Then
+            Dim enumValues = GetToolParameterEnumValues(schemaToken)
+            If enumValues.Count > 0 Then
+                rawDefault = enumValues(0)
+            End If
+        End If
+
+        If String.IsNullOrWhiteSpace(rawDefault) Then
+            If isRequired Then
+                Return "{" & placeholderName & "}"
+            End If
+
+            shouldRemoveProperty = True
+            Return ""
+        End If
+
+        Return FormatToolValueForPlaceholder(rawDefault, schemaToken)
+    End Function
+
+    Private Function RemoveToolArgumentPlaceholderProperty(apiCall As String, placeholderName As String) As String
+        If String.IsNullOrWhiteSpace(apiCall) OrElse String.IsNullOrWhiteSpace(placeholderName) Then
+            Return apiCall
+        End If
+
+        Dim quotedPropertyName As String = Regex.Escape("""" & placeholderName & """")
+        Dim rawPlaceholder As String = Regex.Escape("{" & placeholderName & "}")
+        Dim quotedPlaceholder As String = Regex.Escape("""{" & placeholderName & "}""")
+
+        Dim patterns As String() = {
+            ",\s*" & quotedPropertyName & "\s*:\s*" & quotedPlaceholder,
+            ",\s*" & quotedPropertyName & "\s*:\s*" & rawPlaceholder,
+            quotedPropertyName & "\s*:\s*" & quotedPlaceholder & "\s*,",
+            quotedPropertyName & "\s*:\s*" & rawPlaceholder & "\s*,",
+            quotedPropertyName & "\s*:\s*" & quotedPlaceholder,
+            quotedPropertyName & "\s*:\s*" & rawPlaceholder
+        }
+
+        Dim result As String = apiCall
+
+        For Each pattern As String In patterns
+            result = Regex.Replace(
+                result,
+                pattern,
+                "",
+                RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+        Next
+
+        result = Regex.Replace(result, ",\s*(\}|\])", "$1", RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+        result = Regex.Replace(result, "(\{|\[)\s*,", "$1", RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+
+        Return result
+    End Function
+
+    Private Function TryExtractToolServiceErrorMessage(rawResponse As String, ByRef errorMessage As String) As Boolean
+        errorMessage = ""
+
+        If String.IsNullOrWhiteSpace(rawResponse) Then
+            Return False
+        End If
+
+        Try
+            Dim root As JObject = JObject.Parse(rawResponse)
+
+            Dim errorToken As JToken = root("error")
+            If errorToken IsNot Nothing Then
+                Dim message As String = If(errorToken("message"), "").ToString().Trim()
+                Dim code As String = If(errorToken("code"), "").ToString().Trim()
+
+                If message = "" Then
+                    message = errorToken.ToString(Formatting.None)
+                End If
+
+                errorMessage = If(code <> "", $"{code}: {message}", message)
+                Return True
+            End If
+
+            Dim isErrorToken As JToken = root.SelectToken("result.isError")
+            Dim isError As Boolean = False
+
+            If isErrorToken IsNot Nothing Then
+                If isErrorToken.Type = JTokenType.Boolean Then
+                    isError = isErrorToken.Value(Of Boolean)()
+                Else
+                    Boolean.TryParse(isErrorToken.ToString(), isError)
+                End If
+            End If
+
+            If Not isError Then
+                Return False
+            End If
+
+            Dim messages As New List(Of String)()
+            Dim contentArray As JArray = TryCast(root.SelectToken("result.content"), JArray)
+
+            If contentArray IsNot Nothing Then
+                For Each item As JToken In contentArray
+                    Dim text As String = If(item("text"), "").ToString().Trim()
+                    If text <> "" Then
+                        messages.Add(text)
+                    End If
+                Next
+            End If
+
+            If messages.Count > 0 Then
+                errorMessage = String.Join(" ", messages)
+            Else
+                Dim resultToken As JToken = root("result")
+                errorMessage = If(resultToken Is Nothing, "Tool service returned an error.", resultToken.ToString(Formatting.None))
+            End If
+
+            Return True
+        Catch
+            Return False
+        End Try
+    End Function
+
+
     ''' <summary>
     ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
     ''' the tool API call payload, and invoking <c>LLM</c> in JSON response mode.
@@ -3545,7 +3855,6 @@ Partial Public Class ThisAddIn
         }
 
         Try
-            ' Check cancellation before starting
             cancellationToken.ThrowIfCancellationRequested()
 
             Dim apiCallTemplate = toolConfig.ToolAPICall
@@ -3561,46 +3870,35 @@ Partial Public Class ThisAddIn
             End If
 
             Dim apiCall = apiCallTemplate
+            Dim parameterSchemas = GetToolParameterSchemas(toolConfig)
+            Dim requiredParameters = GetToolRequiredParameters(toolConfig)
 
             For Each kvp In toolCall.Arguments
                 Dim placeholder = "{" & kvp.Key & "}"
+                Dim schemaToken As JToken = Nothing
+                parameterSchemas.TryGetValue(kvp.Key, schemaToken)
+
                 Dim value As String
                 If kvp.Value Is Nothing Then
                     value = ""
-                ElseIf TypeOf kvp.Value Is Boolean Then
-                    ' JSON requires lowercase true/false
-                    value = If(CBool(kvp.Value), "true", "false")
                 ElseIf TypeOf kvp.Value Is JToken Then
                     Dim jt = DirectCast(kvp.Value, JToken)
                     If jt.Type = JTokenType.String Then
-                        ' Escape the string value for safe JSON embedding in the template
-                        value = JsonConvert.ToString(jt.Value(Of String)())
-                        ' JsonConvert.ToString wraps in quotes → strip the outer quotes
-                        value = value.Substring(1, value.Length - 2)
+                        value = FormatToolValueForPlaceholder(jt.Value(Of String)(), schemaToken)
                     Else
-                        ' Preserve JSON token as-is (handles nested objects/arrays)
                         value = jt.ToString(Formatting.None)
                     End If
-                ElseIf TypeOf kvp.Value Is Double OrElse TypeOf kvp.Value Is Single OrElse TypeOf kvp.Value Is Decimal Then
-                    ' Ensure invariant culture (dot decimal separator)
-                    value = System.Convert.ToDouble(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
-                ElseIf TypeOf kvp.Value Is Long OrElse TypeOf kvp.Value Is Integer OrElse TypeOf kvp.Value Is Short Then
-                    value = System.Convert.ToInt64(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
                 Else
-                    ' Escape the string for safe JSON embedding (handles ", \, newlines, etc.)
-                    Dim raw = kvp.Value.ToString()
-                    Dim escaped = JsonConvert.ToString(raw)
-                    ' JsonConvert.ToString wraps in quotes → strip the outer quotes
-                    value = escaped.Substring(1, escaped.Length - 2)
+                    value = FormatToolValueForPlaceholder(kvp.Value.ToString(), schemaToken)
                 End If
+
                 apiCall = apiCall.Replace(placeholder, value)
             Next
 
             Dim unreplacedPattern As New Regex("\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-
             Dim unreplacedMatches = unreplacedPattern.Matches(apiCall)
-            If unreplacedMatches.Count > 0 Then
 
+            If unreplacedMatches.Count > 0 Then
                 ToolingFileLogger.LogWarn(
                     "Unreplaced placeholders found in tool APICall (defaults will be applied if available).",
                     details:=$"ToolName='{toolCall.ToolName}'; Count={unreplacedMatches.Count}; APICall='{apiCall}'")
@@ -3619,14 +3917,24 @@ Partial Public Class ThisAddIn
 
                 For Each m As Match In unreplacedMatches
                     Dim placeholderName = m.Groups(1).Value
-                    Dim defaultValue As String = ""
-                    If toolDefaults IsNot Nothing AndAlso toolDefaults.ContainsKey(placeholderName) Then
-                        defaultValue = toolDefaults(placeholderName)
+                    Dim schemaToken As JToken = Nothing
+                    parameterSchemas.TryGetValue(placeholderName, schemaToken)
+
+                    Dim shouldRemoveProperty As Boolean = False
+                    Dim replacement As String = ResolveToolDefaultValue(
+                        placeholderName,
+                        toolDefaults,
+                        schemaToken,
+                        requiredParameters.Contains(placeholderName),
+                        shouldRemoveProperty)
+
+                    If shouldRemoveProperty Then
+                        apiCall = RemoveToolArgumentPlaceholderProperty(apiCall, placeholderName)
+                    Else
+                        apiCall = apiCall.Replace(m.Value, replacement)
                     End If
-                    apiCall = apiCall.Replace(m.Value, defaultValue)
                 Next
 
-                ' Re-check: if anything remains unreplaced after applying defaults, that's a real error.
                 Dim remainingMatches = unreplacedPattern.Matches(apiCall)
                 If remainingMatches.Count > 0 Then
                     Dim remainingNames = remainingMatches.
@@ -3658,6 +3966,8 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
 
                 Try
+                    cancellationToken.ThrowIfCancellationRequested()
+
                     Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
                         sseBase, apiCall,
                         If(toolConfig.HeaderA, ""), resolvedHeaderB,
@@ -3666,14 +3976,29 @@ Partial Public Class ThisAddIn
                     ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
 
                     If Not String.IsNullOrWhiteSpace(rawResult) Then
+                        Dim toolErrorMessage As String = ""
+
                         response.Response = rawResult
-                        response.Success = True
+
+                        If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
+                            response.Success = False
+                            response.ErrorMessage = toolErrorMessage
+                            ToolingFileLogger.LogWarn(
+                                "SSE tool service returned a logical error.",
+                                details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                        Else
+                            response.Success = True
+                        End If
                     Else
                         response.Success = False
                         response.ErrorMessage = "Empty response from SSE tool service"
                         ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
                     End If
 
+                Catch ex As OperationCanceledException
+                    response.Success = False
+                    response.ErrorMessage = "Operation was cancelled"
+                    ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled during SSE execution.")
                 Catch ex As Exception
                     response.Success = False
                     response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
@@ -3688,7 +4013,6 @@ Partial Public Class ThisAddIn
             Dim backupConfig = GetCurrentConfig(_context)
 
             Try
-                ' Check cancellation before applying config
                 cancellationToken.ThrowIfCancellationRequested()
 
                 Dim errorFlag As Boolean = False
@@ -3706,10 +4030,8 @@ Partial Public Class ThisAddIn
                 _context.INI_Response_2 = "JSON"
 
                 context.Log($"Calling external service for tool: {toolCall.ToolName}")
-
                 ToolingFileLogger.LogPreToolLlmCallSnapshot(_context)
 
-                ' Pass cancellation token to LLM call
                 Dim result = Await LLM("", "", "", "", 0, True, True, "", "", cancellationToken, EnsureUI:=False)
 
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
@@ -3717,8 +4039,19 @@ Partial Public Class ThisAddIn
                 _context.INI_Response_2 = originalResponse
 
                 If Not String.IsNullOrWhiteSpace(result) Then
+                    Dim toolErrorMessage As String = ""
+
                     response.Response = result
-                    response.Success = True
+
+                    If TryExtractToolServiceErrorMessage(result, toolErrorMessage) Then
+                        response.Success = False
+                        response.ErrorMessage = toolErrorMessage
+                        ToolingFileLogger.LogWarn(
+                            "Tool service returned a logical error.",
+                            details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                    Else
+                        response.Success = True
+                    End If
                 Else
                     response.Success = False
                     response.ErrorMessage = "Empty response from tool service"

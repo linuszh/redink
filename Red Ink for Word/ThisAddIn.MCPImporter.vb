@@ -472,14 +472,33 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Discovers the transport type and initialises the MCP session.
     ''' Strategy:
-    '''   1. Try Streamable HTTP POST to the exact URL.
-    '''   2. Try Streamable HTTP POST to common sub-paths (/mcp, /rpc, …).
-    '''   3. Try SSE transport GET to the URL and common sub-paths (/sse, /events).
+    '''   1. Try SSE transport GET to the exact URL.
+    '''   2. Try SSE transport GET to common sub-paths (/sse, /events).
+    '''   3. Try Streamable HTTP POST to the exact URL.
+    '''   4. Try Streamable HTTP POST to common sub-paths (/mcp, /rpc, …).
     ''' </summary>
     Private Async Function MCPInitializeWithDiscovery(mcpUrl As String, auth As MCPAuthInfo) As Task(Of MCPInitResult)
         Dim baseUrl As String = mcpUrl.TrimEnd("/"c)
 
-        ' ── Phase 1: Try Streamable HTTP on the exact URL ────────────────
+        ' ── Phase 1: Try SSE transport on the exact URL ──────────────────
+        Try
+            Dim r = Await MCPInitializeSSE(baseUrl, auth)
+            r.Transport = "sse"
+            Return r
+        Catch
+        End Try
+
+        ' ── Phase 2: Try SSE transport on common sub-paths ───────────────
+        For Each suffix In MCP_SSE_SUFFIXES
+            Try
+                Dim r = Await MCPInitializeSSE(baseUrl & suffix, auth)
+                r.Transport = "sse"
+                Return r
+            Catch
+            End Try
+        Next
+
+        ' ── Phase 3: Try Streamable HTTP on the exact URL ────────────────
         Try
             Dim r = Await MCPInitializeStreamableHTTP(baseUrl, auth)
             r.ResolvedUrl = baseUrl
@@ -488,7 +507,7 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' ── Phase 2: Try Streamable HTTP on common sub-paths ─────────────
+        ' ── Phase 4: Try Streamable HTTP on common sub-paths ─────────────
         For Each suffix In MCP_PATH_SUFFIXES
             Try
                 Dim candidate = baseUrl & suffix
@@ -500,29 +519,10 @@ Partial Public Class ThisAddIn
             End Try
         Next
 
-        ' ── Phase 3: Try SSE transport on the exact URL ──────────────────
-        Try
-            Dim r = Await MCPInitializeSSE(baseUrl, auth)
-            r.Transport = "sse"
-            Return r
-        Catch
-        End Try
-
-        ' ── Phase 4: Try SSE transport on common sub-paths ───────────────
-        For Each suffix In MCP_SSE_SUFFIXES
-            Try
-                Dim r = Await MCPInitializeSSE(baseUrl & suffix, auth)
-                r.Transport = "sse"
-                Return r
-            Catch
-            End Try
-        Next
-
-        ' Also try /sse from MCP_PATH_SUFFIXES already covered, and bare path
         Throw New Exception(
             $"Could not connect to MCP server at {mcpUrl}.{vbCrLf}{vbCrLf}" &
-            $"Tried Streamable HTTP on: {baseUrl}, {String.Join(", ", MCP_PATH_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}" &
-            $"Tried SSE transport on: {baseUrl}, {String.Join(", ", MCP_SSE_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}{vbCrLf}" &
+            $"Tried SSE transport on: {baseUrl}, {String.Join(", ", MCP_SSE_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}" &
+            $"Tried Streamable HTTP on: {baseUrl}, {String.Join(", ", MCP_PATH_SUFFIXES.Select(Function(s) baseUrl & s))}{vbCrLf}{vbCrLf}" &
             $"Please verify the correct endpoint URL with the server provider.")
     End Function
 
@@ -1045,6 +1045,7 @@ Partial Public Class ThisAddIn
                 Dim minV As Integer
                 If Integer.TryParse(minToken.ToString(), minV) Then p.Minimum = minV
             End If
+
             Dim maxToken = prop.Value("maximum")
             If maxToken IsNot Nothing Then
                 Dim maxV As Integer
@@ -1052,11 +1053,81 @@ Partial Public Class ThisAddIn
             End If
 
             Dim defToken = prop.Value("default")
-            If defToken IsNot Nothing Then p.DefaultValue = defToken.ToString()
+            If defToken IsNot Nothing Then
+                p.DefaultValue = NormalizeMCPDefaultValue(defToken, p.Type)
+            End If
 
             result.Add(p)
         Next
+
         Return result
+    End Function
+
+
+    Private Shared Function NormalizeMCPDefaultValue(defaultToken As JToken, parameterType As String) As String
+        If defaultToken Is Nothing Then
+            Return ""
+        End If
+
+        Select Case If(parameterType, "").Trim().ToLowerInvariant()
+            Case "boolean"
+                Dim boolValue As Boolean
+                If Boolean.TryParse(defaultToken.ToString(), boolValue) Then
+                    Return If(boolValue, "true", "false")
+                End If
+                Return "false"
+
+            Case "integer"
+                Dim longValue As Long
+                If Long.TryParse(defaultToken.ToString(), Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture, longValue) OrElse
+                   Long.TryParse(defaultToken.ToString(), longValue) Then
+                    Return longValue.ToString(Globalization.CultureInfo.InvariantCulture)
+                End If
+                Return "0"
+
+            Case "number"
+                Dim doubleValue As Double
+                Dim normalized As String = defaultToken.ToString().Replace(","c, "."c)
+
+                If Double.TryParse(normalized, Globalization.NumberStyles.Float Or Globalization.NumberStyles.AllowThousands,
+                                   Globalization.CultureInfo.InvariantCulture, doubleValue) OrElse
+                   Double.TryParse(defaultToken.ToString(), doubleValue) Then
+                    Return doubleValue.ToString(Globalization.CultureInfo.InvariantCulture)
+                End If
+
+                Return "0"
+
+            Case "array", "object"
+                Return defaultToken.ToString(Formatting.None)
+
+            Case Else
+                Return defaultToken.ToString()
+        End Select
+    End Function
+
+    Private Shared Function BuildToolParameterDefaultValue(p As MCPParamInfo) As String
+        Dim defVal As String = If(p.DefaultValue, "")
+
+        If String.IsNullOrWhiteSpace(defVal) Then
+            Select Case p.Type
+                Case "integer", "number"
+                    defVal = If(p.Minimum.HasValue, p.Minimum.Value.ToString(Globalization.CultureInfo.InvariantCulture), "0")
+                Case "boolean"
+                    defVal = "false"
+                Case "array"
+                    defVal = "[]"
+                Case "object"
+                    defVal = "{}"
+                Case Else
+                    If p.EnumValues IsNot Nothing AndAlso p.EnumValues.Count > 0 Then
+                        defVal = p.EnumValues(0)
+                    Else
+                        defVal = ""
+                    End If
+            End Select
+        End If
+
+        Return defVal
     End Function
 
     ' ─────────────────────────────────────────────────────────────────────────
@@ -1157,16 +1228,7 @@ Partial Public Class ThisAddIn
         Dim defaults As New JObject()
         For Each p In allParams
             If Not p.IsRequired Then
-                Dim defVal = p.DefaultValue
-                If String.IsNullOrEmpty(defVal) Then
-                    Select Case p.Type
-                        Case "integer", "number" : defVal = If(p.Minimum.HasValue, p.Minimum.Value.ToString(), "0")
-                        Case "boolean" : defVal = "false"
-                        Case "array" : defVal = "[]"
-                        Case Else : defVal = ""
-                    End Select
-                End If
-                defaults(p.Name) = defVal
+                defaults(p.Name) = BuildToolParameterDefaultValue(p)
             End If
         Next
         sb.AppendLine($"ToolParameterDefaults = {defaults.ToString(Formatting.None)}")
@@ -1242,28 +1304,45 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Shared Sub EmitDefaultArgument(args As JObject, p As MCPParamInfo)
-        Dim defVal = p.DefaultValue
+        Dim defVal = BuildToolParameterDefaultValue(p)
+
         Select Case p.Type
             Case "integer"
                 Dim iv As Integer = 0
                 If Not String.IsNullOrEmpty(defVal) Then Integer.TryParse(defVal, iv)
                 If iv = 0 AndAlso p.Minimum.HasValue Then iv = p.Minimum.Value
                 args.Add(New JProperty(p.Name, New JRaw(iv.ToString())))
+
             Case "number"
                 Dim dv As Double = 0
-                If Not String.IsNullOrEmpty(defVal) Then Double.TryParse(defVal.Replace(","c, "."c), Globalization.NumberStyles.Float, Globalization.CultureInfo.InvariantCulture, dv)
+                If Not String.IsNullOrEmpty(defVal) Then
+                    Double.TryParse(defVal.Replace(","c, "."c),
+                                    Globalization.NumberStyles.Float,
+                                    Globalization.CultureInfo.InvariantCulture,
+                                    dv)
+                End If
                 If dv = 0 AndAlso p.Minimum.HasValue Then dv = p.Minimum.Value
                 args.Add(New JProperty(p.Name, New JRaw(dv.ToString("0.###", Globalization.CultureInfo.InvariantCulture))))
+
             Case "boolean"
                 Dim bv As Boolean = False
                 If Not String.IsNullOrEmpty(defVal) Then Boolean.TryParse(defVal, bv)
                 args.Add(New JProperty(p.Name, New JRaw(If(bv, "true", "false"))))
+
             Case "array"
                 If Not String.IsNullOrEmpty(defVal) AndAlso defVal.TrimStart().StartsWith("[") Then
                     args.Add(New JProperty(p.Name, New JRaw(defVal)))
                 Else
                     args.Add(New JProperty(p.Name, New JRaw("[]")))
                 End If
+
+            Case "object"
+                If Not String.IsNullOrEmpty(defVal) AndAlso defVal.TrimStart().StartsWith("{") Then
+                    args.Add(New JProperty(p.Name, New JRaw(defVal)))
+                Else
+                    args.Add(New JProperty(p.Name, New JRaw("{}")))
+                End If
+
             Case Else
                 args(p.Name) = If(defVal, "")
         End Select

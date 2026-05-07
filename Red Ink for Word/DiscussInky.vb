@@ -132,7 +132,7 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
-    Private Const ToolTrigger As String = "(t)"
+    Private Const ToolTrigger As String = "(s)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured

@@ -253,7 +253,7 @@ Public Class frmAIChat
     ''' <summary>Abbreviated name prefixed to comment replies (e.g., "RI: Reply text").</summary>
     Const AN6 As String = "RI"
 
-    Const ToolTrigger As String = "(t)"
+    Const ToolTrigger As String = "(s)"
 
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
