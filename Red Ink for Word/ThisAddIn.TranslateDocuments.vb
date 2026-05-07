@@ -151,6 +151,7 @@ Partial Public Class ThisAddIn
     Friend Function TryCreateActiveDocumentProcessingCopy(ByRef tempCopyPath As String) As Boolean
         Dim wordApp As Word.Application = Nothing
         Dim activeDoc As Word.Document = Nothing
+        Dim copyDoc As Word.Document = Nothing
         Dim tempFolder As String = Nothing
 
         Try
@@ -166,29 +167,38 @@ Partial Public Class ThisAddIn
                 Return False
             End If
 
-            If String.IsNullOrWhiteSpace(activeDoc.Path) OrElse String.IsNullOrWhiteSpace(activeDoc.FullName) Then
-                ShowCustomMessageBox("The active document has never been saved. Please save it first, then try again.")
+            Dim sourceName As String = activeDoc.Name
+            If String.IsNullOrWhiteSpace(sourceName) Then
+                ShowCustomMessageBox("The active document could not be identified.")
                 Return False
             End If
 
-            Dim sourcePath As String = activeDoc.FullName
-            Dim ext As String = Path.GetExtension(sourcePath).ToLowerInvariant()
+            Dim ext As String = Path.GetExtension(sourceName).ToLowerInvariant()
             If ext <> ".doc" AndAlso ext <> ".docx" Then
                 ShowCustomMessageBox($"The active document type '{ext}' is not supported for this workflow.")
                 Return False
             End If
 
+            If String.IsNullOrWhiteSpace(activeDoc.FullName) Then
+                ShowCustomMessageBox("The active document has never been saved. Please save it first, then try again.")
+                Return False
+            End If
+
+            tempFolder = Path.Combine(Path.GetTempPath(), $"{AN2}_active_doc_{Guid.NewGuid():N}")
+            Directory.CreateDirectory(tempFolder)
+            tempCopyPath = Path.Combine(tempFolder, Path.GetFileName(sourceName))
+
             If Not activeDoc.Saved Then
                 Dim saveChoice As Integer = ShowCustomYesNoBox(
-                    "The active Word document has unsaved changes." & vbCrLf & vbCrLf &
-                    "How would you like to continue?",
-                    "Save current version and continue",
-                    "Use last saved version",
-                    AN & " Active Document",
-                    extraButtonText:="Cancel",
-                    extraButtonAction:=Sub()
-                                       End Sub,
-                    CloseAfterExtra:=True)
+                "The active Word document has unsaved changes." & vbCrLf & vbCrLf &
+                "How would you like to continue?",
+                "Save current version and continue",
+                "Use last saved version",
+                AN & " Active Document",
+                extraButtonText:="Cancel",
+                extraButtonAction:=Sub()
+                                   End Sub,
+                CloseAfterExtra:=True)
 
                 If saveChoice = 0 Then
                     tempCopyPath = Nothing
@@ -200,15 +210,26 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            If Not File.Exists(sourcePath) Then
-                Throw New FileNotFoundException("The saved document could not be found on disk.", sourcePath)
+            copyDoc = wordApp.Documents.Open(
+            FileName:=activeDoc.FullName,
+            ReadOnly:=True,
+            Visible:=False,
+            AddToRecentFiles:=False)
+
+            If ext = ".doc" Then
+                copyDoc.SaveAs2(
+                FileName:=tempCopyPath,
+                FileFormat:=WdSaveFormat.wdFormatDocument97,
+                AddToRecentFiles:=False)
+            Else
+                copyDoc.SaveAs2(
+                FileName:=tempCopyPath,
+                FileFormat:=WdSaveFormat.wdFormatXMLDocument,
+                AddToRecentFiles:=False)
             End If
 
-            tempFolder = Path.Combine(Path.GetTempPath(), $"{AN2}_active_doc_{Guid.NewGuid():N}")
-            Directory.CreateDirectory(tempFolder)
-            tempCopyPath = Path.Combine(tempFolder, Path.GetFileName(sourcePath))
-
-            File.Copy(sourcePath, tempCopyPath, overwrite:=True)
+            copyDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            copyDoc = Nothing
 
             If Not File.Exists(tempCopyPath) Then
                 Throw New IOException("The temporary working copy could not be created.")
@@ -219,6 +240,10 @@ Partial Public Class ThisAddIn
         Catch ex As Exception
             tempCopyPath = Nothing
 
+            If copyDoc IsNot Nothing Then
+                Try : copyDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+            End If
+
             If Not String.IsNullOrWhiteSpace(tempFolder) AndAlso Directory.Exists(tempFolder) Then
                 Try : Directory.Delete(tempFolder, recursive:=True) : Catch : End Try
             End If
@@ -227,6 +252,7 @@ Partial Public Class ThisAddIn
             Return False
         End Try
     End Function
+
 
     ''' <summary>
     ''' Returns a non-conflicting file path in the specified directory.
