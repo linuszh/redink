@@ -428,6 +428,181 @@ Namespace SharedLibrary
             End Using
         End Function
 
+        ''' <summary>
+        ''' Marker prefix for INI Endpoint values that require MCP Streamable HTTP
+        ''' initialization before the actual tools/call request is sent.
+        ''' </summary>
+        Public Const MCP_STREAMABLE_PREFIX As String = "mcp:"
+
+        ''' <summary>
+        ''' Performs a complete MCP tool call over Streamable HTTP transport:
+        '''   1. POST "initialize"
+        '''   2. POST "notifications/initialized"
+        '''   3. POST the actual JSON-RPC tool request
+        '''   4. Return the raw JSON-RPC response string
+        ''' </summary>
+        Public Shared Async Function ExecuteMCPStreamableToolCall(
+                mcpUrl As String,
+                requestBody As String,
+                headerA As String,
+                headerB As String,
+                Optional timeoutMs As Integer = 60000) As Task(Of String)
+
+            EnsureTls12()
+
+            Using handler As New HttpClientHandler()
+                ConfigureMCPHandler(handler)
+
+                Using client As New HttpClient(handler)
+                    client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+                    client.DefaultRequestHeaders.Accept.Clear()
+                    client.DefaultRequestHeaders.Accept.Add(
+                        New Headers.MediaTypeWithQualityHeaderValue("application/json"))
+                    client.DefaultRequestHeaders.Accept.Add(
+                        New Headers.MediaTypeWithQualityHeaderValue("text/event-stream"))
+
+                    If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                        client.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
+                    End If
+
+                    Dim initPayload As New JObject From {
+                        {"jsonrpc", "2.0"},
+                        {"id", 1},
+                        {"method", "initialize"},
+                        {"params", New JObject From {
+                            {"protocolVersion", MCP_PROTOCOL_VERSION},
+                            {"capabilities", New JObject()},
+                            {"clientInfo", New JObject From {
+                                {"name", "RedInk"},
+                                {"version", "1.0"}
+                            }}
+                        }}
+                    }
+
+                    Await PostMCPStreamableRequest(
+                        client,
+                        mcpUrl,
+                        initPayload,
+                        timeoutMs,
+                        expectResponse:=True).ConfigureAwait(False)
+
+                    Dim notifPayload As New JObject From {
+                        {"jsonrpc", "2.0"},
+                        {"method", "notifications/initialized"}
+                    }
+
+                    Try
+                        Await PostMCPStreamableRequest(
+                            client,
+                            mcpUrl,
+                            notifPayload,
+                            timeoutMs,
+                            expectResponse:=False).ConfigureAwait(False)
+                    Catch
+                    End Try
+
+                    Dim toolPayload As JObject = JObject.Parse(requestBody)
+                    Dim toolResult As JObject =
+                        Await PostMCPStreamableRequest(
+                            client,
+                            mcpUrl,
+                            toolPayload,
+                            timeoutMs,
+                            expectResponse:=True).ConfigureAwait(False)
+
+                    Return toolResult.ToString(Formatting.None)
+                End Using
+            End Using
+        End Function
+
+        ''' <summary>
+        ''' Sends a single JSON-RPC POST to a Streamable HTTP MCP endpoint and returns the parsed JSON response.
+        ''' </summary>
+        Private Shared Async Function PostMCPStreamableRequest(
+                client As HttpClient,
+                mcpUrl As String,
+                payload As JObject,
+                timeoutMs As Integer,
+                Optional expectResponse As Boolean = True) As Task(Of JObject)
+
+            Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
+            Dim response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
+            Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
+
+            If Not response.IsSuccessStatusCode Then
+                Throw New Exception(
+                    $"MCP Streamable HTTP POST {CInt(response.StatusCode)} ({response.ReasonPhrase}): " &
+                    If(responseText.Length > 300, responseText.Substring(0, 300), responseText))
+            End If
+
+            If Not expectResponse Then
+                Return New JObject()
+            End If
+
+            responseText = ExtractJsonFromMCPResponse(
+                responseText,
+                If(response.Content.Headers.ContentType?.MediaType, ""))
+
+            If String.IsNullOrWhiteSpace(responseText) Then
+                Return New JObject()
+            End If
+
+            Dim result As JObject = JObject.Parse(responseText)
+            CheckJsonRpcError(result)
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Extracts a JSON-RPC message from a body that may be plain JSON or SSE-framed text.
+        ''' </summary>
+        Private Shared Function ExtractJsonFromMCPResponse(responseText As String, contentType As String) As String
+            If String.IsNullOrWhiteSpace(responseText) Then
+                Return responseText
+            End If
+
+            Dim trimmed As String = responseText.TrimStart()
+            Dim mediaType As String = If(contentType, "")
+
+            Dim looksLikeSse As Boolean =
+                mediaType.IndexOf("text/event-stream", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                trimmed.StartsWith("data:", StringComparison.OrdinalIgnoreCase) OrElse
+                trimmed.StartsWith("event:", StringComparison.OrdinalIgnoreCase) OrElse
+                trimmed.StartsWith(":", StringComparison.Ordinal)
+
+            If Not looksLikeSse Then
+                Return responseText
+            End If
+
+            Dim lastJson As String = Nothing
+
+            For Each rawLine As String In responseText.Split(
+                New String() {vbCrLf, vbLf, vbCr},
+                StringSplitOptions.None)
+
+                Dim line As String = If(rawLine, "").Trim()
+
+                If line.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
+                    Dim data As String = line.Substring(5).Trim()
+
+                    If data.Length > 0 AndAlso
+                       Not data.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) AndAlso
+                       data.TrimStart().StartsWith("{") Then
+
+                        Try
+                            Dim candidate As JObject = JObject.Parse(data)
+                            If candidate("result") IsNot Nothing OrElse candidate("error") IsNot Nothing Then
+                                lastJson = data
+                            End If
+                        Catch
+                        End Try
+                    End If
+                End If
+            Next
+
+            Return If(lastJson, responseText)
+        End Function
+
+
     End Class
 
 End Namespace

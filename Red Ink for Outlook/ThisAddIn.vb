@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 7.5.2026
+' 8.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -59,7 +59,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.070526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.080526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -85,6 +85,7 @@ Partial Public Class ThisAddIn
     Private Const ObjectTrigger2 As String = "(clip)"
     Private Const ToolTrigger As String = "(s)"
     Private Const KBTrigger As String = "(kb)"
+    Private Const AddmailTrigger As String = "(addmail)"
 
     Private Const ESC_KEY As Integer = &H1B
 

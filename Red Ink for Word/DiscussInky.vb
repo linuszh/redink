@@ -341,6 +341,7 @@ Public Class DiscussInky
         Me.StartPosition = FormStartPosition.Manual
         Me.MinimumSize = New System.Drawing.Size(780, 480)
         Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
+        Me.TopMost = True
         Try
             Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Catch
@@ -420,6 +421,7 @@ Public Class DiscussInky
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
         AddHandler _txtInput.KeyDown, AddressOf OnInputKeyDown
+        AddHandler _txtInput.KeyPress, AddressOf OnInputKeyPress
         AddHandler _chat.DocumentCompleted, AddressOf Chat_DocumentCompleted
         AddHandler _chat.Navigating, AddressOf Chat_Navigating
         AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
@@ -432,6 +434,7 @@ Public Class DiscussInky
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
         AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
         AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
+        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
     End Sub
 
@@ -1017,12 +1020,35 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Repositions the form after monitor/resolution changes.
+    ''' </summary>
+    Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New MethodInvoker(
+                    Sub()
+                        If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                    End Sub))
+            Else
+                SharedMethods.EnsureVisibleOnScreen(Me)
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Persists geometry, transcript, persona, mission, knowledge path, and checkbox state on close.
     ''' </summary>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
             PersistTranscriptLimited()
             PersistChatHtml()
+            Try
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+            Catch
+            End Try
             If Me.WindowState = FormWindowState.Normal Then
                 My.Settings.DiscussFormLocation = Me.Location
                 My.Settings.DiscussFormSize = Me.Size
@@ -2319,6 +2345,26 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Handles slash-triggered prompt library insertion for the DiscussInky input box.
+    ''' </summary>
+    Private Sub OnInputKeyPress(sender As Object, e As KeyPressEventArgs)
+        If e.KeyChar <> "/"c Then Return
+        If Not _context.INI_PromptLib Then Return
+
+        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+            SharedMethods.HandlePromptLibrarySlash(
+                _txtInput,
+                _context.INI_PromptLibPath,
+                _context.INI_PromptLibPathLocal,
+                _context
+            )
+
+        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+            e.Handled = True
+        End If
+    End Sub
+
+    ''' <summary>
     ''' Handles Enter/Escape shortcuts for sending and closing.
     ''' </summary>
     Private Sub OnInputKeyDown(sender As Object, e As KeyEventArgs)
@@ -2388,6 +2434,10 @@ Public Class DiscussInky
 
         If toolTriggerAvailable Then
             sb.Append($" | Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request.")
+        End If
+
+        If _context.INI_PromptLib Then
+            sb.Append(" | Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library.")
         End If
 
         AppendSystemMessage(sb.ToString())

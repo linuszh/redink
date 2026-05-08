@@ -4,8 +4,8 @@
 ' =============================================================================
 ' File: MultiModelSelectorForm.vb
 ' Purpose: Implements a modal Windows Forms dialog that lets the user select multiple
-'          alternative model configurations from a provided list, with filtering and
-'          a persisted check state across filter changes.
+'          alternative model configurations from a provided list, with filtering,
+'          persisted check state across filter changes, and a Select All / Unselect All toggle.
 '
 ' Architecture:
 '  - UI Layout: Uses a single-column `TableLayoutPanel` (`outer`):
@@ -13,7 +13,7 @@
 '      Row 2: Filter textbox (`txtFilter`) with a Win32 cue-banner placeholder
 '      Row 3: Checked list of models (`chkList`) supporting multi-selection
 '      Row 4: Optional reset checkbox (`chkReset`) (currently hidden via `.Visible = False`)
-'      Row 5: OK/Cancel buttons in a right-aligned `FlowLayoutPanel` (`pnlButtons`)
+'      Row 5: OK/Cancel/toggle buttons in a right-aligned `FlowLayoutPanel` (`pnlButtons`)
 '  - Model Source: Receives a list of `ModelConfig` (`altModels`) from the caller and maps each
 '    display label to its `ModelConfig` via `displayToModel`.
 '  - Display Labels: Uses `ModelDescription` when available; otherwise uses `Model`. Ensures a
@@ -24,6 +24,8 @@
 '    the persisted label set (not only the currently visible items).
 '  - Preselection: Supports single-key preselection (`preselectKey`) and multi-key preselection
 '    (`preselectKeys`) that is resolved during `PopulateList` and `ApplyPreselection`.
+'  - Bulk Selection: `btnToggleAll` toggles the check state of all currently visible items and adapts
+'    its text between "Select All" and "Unselect All".
 ' =============================================================================
 
 Option Strict On
@@ -59,7 +61,10 @@ Namespace SharedLibrary
         ''' <summary>Cancel button closing the dialog with <see cref="DialogResult.Cancel"/>.</summary>
         Private btnCancel As Button
 
-        ''' <summary>Panel containing the OK/Cancel buttons.</summary>
+        ''' <summary>Toggle button to select or unselect all currently visible items.</summary>
+        Private btnToggleAll As Button
+
+        ''' <summary>Panel containing the dialog buttons.</summary>
         Private pnlButtons As System.Windows.Forms.FlowLayoutPanel
 
         ''' <summary>Root layout container.</summary>
@@ -145,7 +150,7 @@ Namespace SharedLibrary
                    Optional instruction As System.String = "")
             Me.altModels = If(models, New System.Collections.Generic.List(Of ModelConfig))
             Me.preselectKey = preselect
-            InitializeComponent(title, resetChecked)
+            InitializeComponent(title, resetChecked, instruction)
             PopulateList()
             ApplyPreselection()
         End Sub
@@ -183,7 +188,7 @@ Namespace SharedLibrary
                     Dim display As String = If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model)
                     If preselectKeys.Contains(display) OrElse preselectKeys.Contains(m.Model) OrElse preselectKeys.Contains(m.ModelDescription) Then
                         ' We don't know the final unique display label yet; we’ll map it during PopulateList
-                        ' by doing the check there (see PopulateList changes below).
+                        ' by doing the check there.
                     End If
                 Next
             End If
@@ -212,7 +217,6 @@ Namespace SharedLibrary
                 displayToModel(unique) = m
                 allDisplayItems.Add(unique)
 
-                ' NEW: seed multi-preselect into selectedLabels (checked state)
                 If preselectKeys.Count > 0 Then
                     If preselectKeys.Contains(unique) OrElse
                        preselectKeys.Contains(display) OrElse
@@ -233,6 +237,8 @@ Namespace SharedLibrary
             Finally
                 isUpdating = False
             End Try
+
+            UpdateToggleAllButtonText()
         End Sub
 
         ''' <summary>
@@ -293,7 +299,7 @@ Namespace SharedLibrary
                 .Text = "Reset to default model after use",
                 .Dock = System.Windows.Forms.DockStyle.Top,
                 .Checked = resetChecked,
-                .Visible = False            ' Hide it for the time being
+                .Visible = False
             }
 
             Me.pnlButtons = New System.Windows.Forms.FlowLayoutPanel() With {
@@ -303,7 +309,6 @@ Namespace SharedLibrary
                 .AutoSize = True
             }
 
-            ' Match ModelSelectorForm: autosize, GrowAndShrink, and padding (10,5,10,5)
             Me.btnOK = New System.Windows.Forms.Button() With {
                 .Text = "OK",
                 .DialogResult = System.Windows.Forms.DialogResult.OK,
@@ -318,8 +323,18 @@ Namespace SharedLibrary
                 .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
                 .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
             }
+            Me.btnToggleAll = New System.Windows.Forms.Button() With {
+                .Text = "Select All",
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+            }
+
+            AddHandler Me.btnToggleAll.Click, AddressOf OnToggleAllClicked
+
             Me.pnlButtons.Controls.Add(Me.btnCancel)
             Me.pnlButtons.Controls.Add(Me.btnOK)
+            Me.pnlButtons.Controls.Add(Me.btnToggleAll)
 
             Me.outer.Controls.Add(Me.lblTitle, 0, 0)
             Me.outer.Controls.Add(Me.txtFilter, 0, 1)
@@ -349,6 +364,61 @@ Namespace SharedLibrary
             Return unique
         End Function
 
+        ''' <summary>
+        ''' Returns True when all currently visible items are checked.
+        ''' </summary>
+        Private Function AreAllVisibleItemsChecked() As Boolean
+            If Me.chkList.Items.Count = 0 Then
+                Return False
+            End If
+
+            For i As Integer = 0 To Me.chkList.Items.Count - 1
+                If Not Me.chkList.GetItemChecked(i) Then
+                    Return False
+                End If
+            Next
+
+            Return True
+        End Function
+
+        ''' <summary>
+        ''' Updates the toggle button caption based on the current visible check state.
+        ''' </summary>
+        Private Sub UpdateToggleAllButtonText()
+            If Me.btnToggleAll Is Nothing Then
+                Return
+            End If
+
+            Me.btnToggleAll.Text = If(AreAllVisibleItemsChecked(), "Unselect All", "Select All")
+        End Sub
+
+        ''' <summary>
+        ''' Toggles all currently visible items between checked and unchecked.
+        ''' </summary>
+        Private Sub OnToggleAllClicked(sender As Object, e As EventArgs)
+            Dim shouldCheckAll As Boolean = Not AreAllVisibleItemsChecked()
+
+            isUpdating = True
+            Me.chkList.BeginUpdate()
+
+            Try
+                For i As Integer = 0 To Me.chkList.Items.Count - 1
+                    Dim label As String = Me.chkList.Items(i).ToString()
+                    Me.chkList.SetItemChecked(i, shouldCheckAll)
+
+                    If shouldCheckAll Then
+                        selectedLabels.Add(label)
+                    Else
+                        selectedLabels.Remove(label)
+                    End If
+                Next
+            Finally
+                Me.chkList.EndUpdate()
+                isUpdating = False
+            End Try
+
+            UpdateToggleAllButtonText()
+        End Sub
 
         ''' <summary>
         ''' Rebuilds the visible checked list based on the current filter text.
@@ -363,7 +433,6 @@ Namespace SharedLibrary
                 Me.chkList.Items.Clear()
                 For Each itemText In allDisplayItems
                     If filter.Length = 0 OrElse itemText.ToLowerInvariant().Contains(filter) Then
-                        ' Restore check state from the persisted selection set
                         Dim isChecked = selectedLabels.Contains(itemText)
                         Me.chkList.Items.Add(itemText, isChecked)
                     End If
@@ -372,6 +441,8 @@ Namespace SharedLibrary
                 Me.chkList.EndUpdate()
                 isUpdating = False
             End Try
+
+            UpdateToggleAllButtonText()
         End Sub
 
         ''' <summary>
@@ -379,12 +450,15 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub OnItemCheck(sender As Object, e As System.Windows.Forms.ItemCheckEventArgs)
             If isUpdating Then Return
+
             Dim label As String = Me.chkList.Items(e.Index).ToString()
             If e.NewValue = CheckState.Checked Then
                 selectedLabels.Add(label)
             Else
                 selectedLabels.Remove(label)
             End If
+
+            Me.BeginInvoke(New MethodInvoker(AddressOf UpdateToggleAllButtonText))
         End Sub
 
         ''' <summary>
@@ -403,14 +477,17 @@ Namespace SharedLibrary
         ''' the display label or underlying model values.
         ''' </summary>
         Private Sub ApplyPreselection()
-            If String.IsNullOrWhiteSpace(preselectKey) Then Return
+            If String.IsNullOrWhiteSpace(preselectKey) Then
+                UpdateToggleAllButtonText()
+                Return
+            End If
 
             ' Try by label first
             For i = 0 To Me.chkList.Items.Count - 1
                 Dim label As System.String = Me.chkList.Items(i).ToString()
                 If String.Equals(label, preselectKey, System.StringComparison.OrdinalIgnoreCase) Then
                     Me.chkList.SetItemChecked(i, True)
-                    ' selectedLabels will be updated by ItemCheck handler
+                    UpdateToggleAllButtonText()
                     Return
                 End If
             Next
@@ -428,12 +505,13 @@ Namespace SharedLibrary
                     End If
                 End If
             Next
+
             If idxToCheck >= 0 Then
                 Me.chkList.SetItemChecked(idxToCheck, True)
-                ' selectedLabels will be updated by ItemCheck handler
             End If
+
+            UpdateToggleAllButtonText()
         End Sub
     End Class
-
 
 End Namespace

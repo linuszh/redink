@@ -60,6 +60,12 @@ Namespace SharedLibrary
         ''' <summary>Second output column width percentage in expanded mode.</summary>
         Private Const EXPANDED_OUTPUT2_PERCENT As Single = 37.5F
 
+        ''' <summary>Minimum width used in expanded mode before screen clamping is applied.</summary>
+        Private Const EXPANDED_MIN_WIDTH As Integer = 750
+
+        ' Track SystemEvents subscription to avoid duplicate handlers
+        Private _isDisplaySettingsHooked As Boolean = False
+
         ' Win32 API for cue banner (placeholder text)
         Private Const EM_SETCUEBANNER As Integer = &H1501
 
@@ -415,11 +421,17 @@ Namespace SharedLibrary
 
         ''' <summary>
         ''' Sets the cue banner text for <see cref="txtSourceLanguage"/> once the window handle exists.
+        ''' Also hooks display-change handling so the widget remains reachable after monitor changes.
         ''' </summary>
         Protected Overrides Sub OnHandleCreated(e As EventArgs)
             MyBase.OnHandleCreated(e)
-            ' Set cue banner (placeholder) for source language field
+
             SendMessage(txtSourceLanguage.Handle, EM_SETCUEBANNER, IntPtr.Zero, "(auto)")
+
+            If Not _isDisplaySettingsHooked Then
+                AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+                _isDisplaySettingsHooked = True
+            End If
         End Sub
 
         ''' <summary>
@@ -435,22 +447,194 @@ Namespace SharedLibrary
                 Dim w As Integer = My.Settings.QuickTranslateWidth
                 Dim h As Integer = My.Settings.QuickTranslateHeight
 
-                If w > 0 AndAlso h > 0 Then
-                    Me.Size = New Size(w, h)
-                End If
+                Dim hasSavedBounds As Boolean = w > 0 AndAlso h > 0
 
-                If x > 0 AndAlso y > 0 Then
-                    Me.Location = New Point(x, y)
+                If hasSavedBounds Then
+                    Me.SetBounds(x, y, w, h)
                 Else
                     PositionOnScreen()
                 End If
 
-                SharedMethods.EnsureVisibleOnScreen(Me)
+                EnsureWidgetVisible()
 
             Catch
                 txtLanguage.Text = _defaultLanguage
                 PositionOnScreen()
+                EnsureWidgetVisible()
             End Try
+        End Sub
+
+        ''' <summary>
+        ''' Applies the current minimum width for collapsed/expanded mode, clamped to the active screen.
+        ''' </summary>
+        Private Sub ApplyCurrentMinimumSize()
+            Dim area As Rectangle = Screen.FromRectangle(Me.Bounds).WorkingArea
+            Dim desiredMinWidth As Integer = If(_isExpanded,
+                                                CInt(EXPANDED_MIN_WIDTH * Me.DeviceDpi / 96.0F),
+                                                _minWidthCollapsed)
+
+            If area.Width > 0 Then
+                desiredMinWidth = Math.Min(desiredMinWidth, area.Width)
+            End If
+
+            Me.MinimumSize = New Size(desiredMinWidth, Me.MinimumSize.Height)
+        End Sub
+
+        ''' <summary>
+        ''' Ensures the widget remains visible and keeps collapsed bounds valid for the current screen.
+        ''' </summary>
+        Private Sub EnsureWidgetVisible()
+            ApplyCurrentMinimumSize()
+            SharedMethods.EnsureVisibleOnScreen(Me)
+
+            If _isExpanded Then
+                UpdateCollapsedBoundsForCurrentScreen()
+            Else
+                _collapsedWidth = Me.Width
+                _collapsedX = Me.Left
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Adjusts stored collapsed bounds so collapsing after a monitor change remains on-screen.
+        ''' </summary>
+        Private Sub UpdateCollapsedBoundsForCurrentScreen()
+            Dim area As Rectangle = Screen.FromRectangle(Me.Bounds).WorkingArea
+            Dim collapsedWidth As Integer = If(_collapsedWidth > 0, _collapsedWidth, Me.Width)
+            Dim minCollapsedWidth As Integer = _minWidthCollapsed
+
+            If area.Width > 0 Then
+                minCollapsedWidth = Math.Min(minCollapsedWidth, area.Width)
+                collapsedWidth = Math.Min(collapsedWidth, area.Width)
+            End If
+
+            collapsedWidth = Math.Max(collapsedWidth, minCollapsedWidth)
+            _collapsedWidth = collapsedWidth
+
+            If collapsedWidth >= area.Width Then
+                _collapsedX = area.Left
+            Else
+                _collapsedX = Math.Min(Math.Max(_collapsedX, area.Left), area.Right - collapsedWidth)
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Repositions the widget after monitor/resolution changes.
+        ''' </summary>
+        Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+            If _isClosing OrElse Me.IsDisposed Then Return
+
+            Try
+                If Me.InvokeRequired Then
+                    Me.BeginInvoke(New MethodInvoker(AddressOf EnsureWidgetVisible))
+                Else
+                    EnsureWidgetVisible()
+                End If
+            Catch
+            End Try
+        End Sub
+
+        ''' <summary>
+        ''' Stops timers, cancels pending translations, unsubscribes display hooks, and persists settings.
+        ''' </summary>
+        Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
+            _isClosing = True
+
+            If _isDisplaySettingsHooked Then
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+                _isDisplaySettingsHooked = False
+            End If
+
+            SaveSettings()
+            CancelOngoingTranslation()
+            CancelOngoingTranslation2()
+            debounceTimer?.Stop()
+            _selectionCopyTimer?.Stop()
+            toolTip?.Dispose()
+
+            MyBase.OnFormClosing(e)
+        End Sub
+
+        ''' <summary>
+        ''' Switches the widget into expanded mode and shows the second output panel.
+        ''' </summary>
+        Private Sub ExpandWindow()
+            If _isExpanded Then Return
+
+            _collapsedWidth = Me.Width
+            _collapsedX = Me.Left
+
+            Dim expandedWidth As Integer = CInt(_collapsedWidth * 1.6)
+            Dim rightEdge As Integer = Me.Right
+            Dim newLeft As Integer = rightEdge - expandedWidth
+
+            Dim wa As Rectangle = Screen.FromControl(Me).WorkingArea
+            If newLeft < wa.Left Then
+                newLeft = wa.Left
+                expandedWidth = rightEdge - newLeft
+            End If
+
+            _isExpanded = True
+            ApplyCurrentMinimumSize()
+
+            mainTable.ColumnStyles(0) = New ColumnStyle(SizeType.Percent, EXPANDED_INPUT_PERCENT)
+            mainTable.ColumnStyles(1) = New ColumnStyle(SizeType.Percent, EXPANDED_OUTPUT1_PERCENT)
+            mainTable.ColumnStyles(2) = New ColumnStyle(SizeType.Percent, EXPANDED_OUTPUT2_PERCENT)
+
+            rtbOutput2.Visible = True
+            btnCollapse.Visible = True
+            btnClear2.Visible = True
+            btnCopy2.Visible = True
+
+            Me.SuspendLayout()
+            Me.SetBounds(newLeft, Me.Top, expandedWidth, Me.Height)
+            Me.ResumeLayout()
+
+            EnsureWidgetVisible()
+        End Sub
+
+        ''' <summary>
+        ''' Returns the widget to collapsed mode and hides the second output panel.
+        ''' </summary>
+        Private Sub CollapseWindow()
+            If Not _isExpanded Then Return
+
+            CancelOngoingTranslation2()
+
+            rtbOutput2.Visible = False
+            rtbOutput2.Text = ""
+            btnCollapse.Visible = False
+            btnClear2.Visible = False
+            btnCopy2.Visible = False
+
+            _isExpanded = False
+            ApplyCurrentMinimumSize()
+
+            mainTable.ColumnStyles(0) = New ColumnStyle(SizeType.Percent, COLLAPSED_INPUT_PERCENT)
+            mainTable.ColumnStyles(1) = New ColumnStyle(SizeType.Percent, COLLAPSED_OUTPUT_PERCENT)
+            mainTable.ColumnStyles(2) = New ColumnStyle(SizeType.Percent, 0.0F)
+
+            Me.SuspendLayout()
+            Me.SetBounds(_collapsedX, Me.Top, _collapsedWidth, Me.Height)
+            Me.ResumeLayout()
+
+            EnsureWidgetVisible()
+        End Sub
+
+        ''' <summary>
+        ''' Shows the widget or brings it to front if already visible.
+        ''' </summary>
+        Public Sub ShowWidget()
+            EnsureWidgetVisible()
+
+            If Me.Visible Then
+                Me.BringToFront()
+                Me.Activate()
+            Else
+                Me.Show()
+            End If
+
+            txtInput.Focus()
         End Sub
 
         ''' <summary>
@@ -479,19 +663,6 @@ Namespace SharedLibrary
             End Try
         End Sub
 
-        ''' <summary>
-        ''' Stops timers, cancels pending translations, and persists settings.
-        ''' </summary>
-        Protected Overrides Sub OnFormClosing(e As FormClosingEventArgs)
-            _isClosing = True
-            SaveSettings()
-            CancelOngoingTranslation()
-            CancelOngoingTranslation2()
-            debounceTimer?.Stop()
-            _selectionCopyTimer?.Stop()
-            toolTip?.Dispose()
-            MyBase.OnFormClosing(e)
-        End Sub
 
         ''' <summary>
         ''' Starts/restarts the debounce timer to trigger translation after the user stops typing.
@@ -1022,70 +1193,7 @@ Namespace SharedLibrary
             Return Nothing
         End Function
 
-        ''' <summary>
-        ''' Switches the widget into expanded mode and shows the second output panel.
-        ''' </summary>
-        Private Sub ExpandWindow()
-            If _isExpanded Then Return
 
-            _collapsedWidth = Me.Width
-            _collapsedX = Me.Left
-
-            Dim expandedWidth As Integer = CInt(_collapsedWidth * 1.6)
-            Dim rightEdge As Integer = Me.Right
-            Dim newLeft As Integer = rightEdge - expandedWidth
-
-            Dim wa As Rectangle = Screen.FromControl(Me).WorkingArea
-            If newLeft < wa.Left Then
-                newLeft = wa.Left
-                expandedWidth = rightEdge - newLeft
-            End If
-
-            Me.MinimumSize = New Size(CInt(750 * Me.DeviceDpi / 96.0F), Me.MinimumSize.Height)
-
-            mainTable.ColumnStyles(0) = New ColumnStyle(SizeType.Percent, EXPANDED_INPUT_PERCENT)
-            mainTable.ColumnStyles(1) = New ColumnStyle(SizeType.Percent, EXPANDED_OUTPUT1_PERCENT)
-            mainTable.ColumnStyles(2) = New ColumnStyle(SizeType.Percent, EXPANDED_OUTPUT2_PERCENT)
-
-            rtbOutput2.Visible = True
-            btnCollapse.Visible = True
-            btnClear2.Visible = True
-            btnCopy2.Visible = True
-
-            Me.SuspendLayout()
-            Me.SetBounds(newLeft, Me.Top, expandedWidth, Me.Height)
-            Me.ResumeLayout()
-
-            _isExpanded = True
-        End Sub
-
-        ''' <summary>
-        ''' Returns the widget to collapsed mode and hides the second output panel.
-        ''' </summary>
-        Private Sub CollapseWindow()
-            If Not _isExpanded Then Return
-
-            CancelOngoingTranslation2()
-
-            rtbOutput2.Visible = False
-            rtbOutput2.Text = ""
-            btnCollapse.Visible = False
-            btnClear2.Visible = False
-            btnCopy2.Visible = False
-
-            ' Restore the correctly calculated minimum width instead of hardcoded 500
-            Me.MinimumSize = New Size(_minWidthCollapsed, Me.MinimumSize.Height)
-
-            mainTable.ColumnStyles(0) = New ColumnStyle(SizeType.Percent, COLLAPSED_INPUT_PERCENT)
-            mainTable.ColumnStyles(1) = New ColumnStyle(SizeType.Percent, COLLAPSED_OUTPUT_PERCENT)
-            mainTable.ColumnStyles(2) = New ColumnStyle(SizeType.Percent, 0.0F)
-
-            Me.SuspendLayout()
-            Me.SetBounds(_collapsedX, Me.Top, _collapsedWidth, Me.Height)
-            Me.ResumeLayout()
-
-            _isExpanded = False
-        End Sub
 
         ''' <summary>
         ''' Flashes a control background briefly to indicate a completed action.
@@ -1118,17 +1226,6 @@ Namespace SharedLibrary
             flashTimer.Start()
         End Sub
 
-        ''' <summary>
-        ''' Shows the widget or brings it to front if already visible.
-        ''' </summary>
-        Public Sub ShowWidget()
-            If Me.Visible Then
-                Me.BringToFront()
-                Me.Activate()
-            Else
-                Me.Show()
-            End If
-            txtInput.Focus()
-        End Sub
+
     End Class
 End Namespace

@@ -212,6 +212,7 @@ Namespace SharedLibrary
             AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
             AddHandler _chkNoTopMost.CheckedChanged, AddressOf OnTopMostChanged
             AddHandler _chkIncludeConfig.CheckedChanged, AddressOf OnIncludeConfigChanged
+            AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
         End Sub
 
         ''' <summary>Writes a diagnostic message to the debug output.</summary>
@@ -262,6 +263,25 @@ Namespace SharedLibrary
             Catch
             End Try
             ApplyTopMostBehavior()
+        End Sub
+
+        ''' <summary>
+        ''' Repositions the form after monitor/resolution changes.
+        ''' </summary>
+        Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+            If Me.IsDisposed Then Return
+
+            Try
+                If Me.InvokeRequired Then
+                    Me.BeginInvoke(New MethodInvoker(
+                        Sub()
+                            If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                        End Sub))
+                Else
+                    SharedMethods.EnsureVisibleOnScreen(Me)
+                End If
+            Catch
+            End Try
         End Sub
 
         ''' <summary>Persists the include-config preference.</summary>
@@ -342,6 +362,10 @@ Namespace SharedLibrary
             Try
                 PersistTranscriptLimited()
                 PersistChatHtml()
+                Try
+                    RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+                Catch
+                End Try
                 If Me.WindowState = FormWindowState.Normal Then
                     My.Settings.HelpMeFormLocation = Me.Location
                     My.Settings.HelpMeFormSize = Me.Size
