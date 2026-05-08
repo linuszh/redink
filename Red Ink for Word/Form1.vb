@@ -697,11 +697,17 @@ Public Class frmAIChat
             ' Layout not ready yet; keep default SplitterDistance
         End Try
 
-        ' Attach input keydown handler (Enter to send, Shift+Enter for newline)
+        ' Attach input handlers
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
+        AddHandler txtUserInput.KeyPress, AddressOf UserInput_KeyPress
+        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
         ' Configure instructions label
         Dim baseInstructions As String = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
+
+        If _context.INI_PromptLib Then
+            baseInstructions &= " Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library."
+        End If
 
         Dim toolTriggerAvailable As Boolean =
             SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
@@ -787,6 +793,25 @@ Public Class frmAIChat
         ' Set focus to user input if empty
         If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
 
+    End Sub
+
+    ''' <summary>
+    ''' Repositions the form after monitor or resolution changes.
+    ''' </summary>
+    Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New MethodInvoker(
+                    Sub()
+                        If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                    End Sub))
+            Else
+                SharedMethods.EnsureVisibleOnScreen(Me)
+            End If
+        Catch
+        End Try
     End Sub
 
     ' =========================================================================
@@ -2079,7 +2104,14 @@ Public Class frmAIChat
     ''' Both plain text and HTML history persisted before close.
     ''' </remarks>
     Private Sub frmAIChat_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
+
         If e.KeyCode = Keys.Escape Then
+
+            Try
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+            Catch
+            End Try
+
             ' Trim conversation to capacity limit
             Dim conversation As String = txtChatHistory.Text
             If conversation.Length > _context.INI_ChatCap Then
@@ -2097,6 +2129,12 @@ Public Class frmAIChat
     ''' Handles btnExit click. Same behavior as ESC key (saves state and closes).
     ''' </summary>
     Private Sub btnExit_Click(sender As Object, e As EventArgs)
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         ' Trim conversation to capacity limit
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
@@ -2121,6 +2159,12 @@ Public Class frmAIChat
     ''' RestoreBounds ensures correct position/size restored when user maximized/minimized.
     ''' </remarks>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         ' Trim and save conversation
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
@@ -2182,6 +2226,26 @@ Public Class frmAIChat
                 btnSend.PerformClick()
                 e.Handled = True
             End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Handles slash-triggered prompt library insertion for the chat input box.
+    ''' </summary>
+    Private Sub UserInput_KeyPress(sender As Object, e As KeyPressEventArgs)
+        If e.KeyChar <> "/"c Then Return
+        If Not _context.INI_PromptLib Then Return
+
+        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+            SharedMethods.HandlePromptLibrarySlash(
+                txtUserInput,
+                _context.INI_PromptLibPath,
+                _context.INI_PromptLibPathLocal,
+                _context
+            )
+
+        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+            e.Handled = True
         End If
     End Sub
 

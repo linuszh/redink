@@ -17,7 +17,9 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Documentation and more", "D
 	ProjectSection(SolutionItems) = preProject
 		Documentation and more\allmodels.ini = Documentation and more\allmodels.ini
 		Documentation and more\API config samples for redink.ini = Documentation and more\API config samples for redink.ini
+		Documentation and more\Deployment\Detect-RedInkAddins.ps1 = Documentation and more\Deployment\Detect-RedInkAddins.ps1
 		Documentation and more\extractorlib.txt = Documentation and more\extractorlib.txt
+		Documentation and more\Deployment\Install_RedInkAddins.ps1 = Documentation and more\Deployment\Install_RedInkAddins.ps1
 		Documentation and more\license.txt = Documentation and more\license.txt
 		Documentation and more\personalib.txt = Documentation and more\personalib.txt
 		Documentation and more\personaliblocal.txt = Documentation and more\personaliblocal.txt
@@ -29,6 +31,7 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Documentation and more", "D
 		Documentation and more\redink-dc-DPA.txt = Documentation and more\redink-dc-DPA.txt
 		Documentation and more\redink-defaultconfig.ini = Documentation and more\redink-defaultconfig.ini
 		Documentation and more\redink-lib-samplecorp.txt = Documentation and more\redink-lib-samplecorp.txt
+		Documentation and more\Deployment\RedInk-Package-Notes.md = Documentation and more\Deployment\RedInk-Package-Notes.md
 		Documentation and more\redink.ini = Documentation and more\redink.ini
 		Documentation and more\Red_Ink_Anleitung.pdf = Documentation and more\Red_Ink_Anleitung.pdf
 		Documentation and more\Red_Ink_Guide.pdf = Documentation and more\Red_Ink_Guide.pdf
@@ -37,7 +40,9 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Documentation and more", "D
 		Documentation and more\Red_Ink_Quick_Reference.pdf = Documentation and more\Red_Ink_Quick_Reference.pdf
 		Documentation and more\Red_Ink_UseCases.pdf = Documentation and more\Red_Ink_UseCases.pdf
 		Documentation and more\renamelib.txt = Documentation and more\renamelib.txt
+		Documentation and more\Deployment\Reset-And-Reinstall-RedInk.ps1 = Documentation and more\Deployment\Reset-And-Reinstall-RedInk.ps1
 		Documentation and more\specialservices.ini = Documentation and more\specialservices.ini
+		Documentation and more\Deployment\Uninstall-RedInkAddins.ps1 = Documentation and more\Deployment\Uninstall-RedInkAddins.ps1
 	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Solution Items", "Solution Items", "{8EC462FD-D22E-90A8-E5CE-7E832BA40C5D}"

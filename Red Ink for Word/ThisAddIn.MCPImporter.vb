@@ -179,6 +179,7 @@ Partial Public Class ThisAddIn
             Dim responseKey As String = ""
             Dim mergePrompt As String = ""
             Dim timeoutVal As Long = 200000
+            Dim normalizeSchemas As Boolean = True
             Dim cancelled As Boolean = False
 
             Await SwitchToUi(Sub()
@@ -193,7 +194,21 @@ Partial Public Class ThisAddIn
                                  selectedTools = ShowMCPToolSelectionDialog(tools, serverName)
                                  If selectedTools Is Nothing OrElse selectedTools.Count = 0 Then
                                      cancelled = True
+                                     Return
                                  End If
+
+                                 Dim normalizeChoice = ShowCustomYesNoBox(
+                                     "Should the imported ToolDefinition schemas be normalized for broad model compatibility?" & vbCrLf & vbCrLf &
+                                     "• Normalize: flattens or removes advanced JSON Schema features such as $ref, $defs, anyOf/oneOf, titles, defaults, and nullable unions. " &
+                                     "Recommended for Gemini and simpler tool-calling models." & vbCrLf &
+                                     "• Keep original: preserves the MCP schema exactly as returned by the server. " &
+                                     "Use this when targeting models that support richer JSON Schema." & vbCrLf & vbCrLf &
+                                     "You can re-import later using the other mode if needed.",
+                                     "Normalize",
+                                     "Keep original",
+                                     $"{AN} MCP Import")
+
+                                 normalizeSchemas = (normalizeChoice <> 2)
                              End Sub)
 
             If cancelled OrElse selectedTools Is Nothing OrElse selectedTools.Count = 0 Then Return
@@ -242,15 +257,13 @@ Partial Public Class ThisAddIn
             sb.AppendLine($"; Server: {serverName}")
             sb.AppendLine($"; Transport: {detectedTransport}")
             sb.AppendLine($"; Protocol: {MCP_PROTOCOL_VERSION}")
+            sb.AppendLine($"; Schema mode: {If(normalizeSchemas, "normalized", "original")}")
             sb.AppendLine($"; Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
-            sb.AppendLine($"; Tools imported: {selectedTools.Count} of {tools.Count} discovered")
+            sb.AppendLine($"; Tools imported: {selectedTools.Count} of {tools.Count} discovered (using Freestyle 'MCP' command)")
             If detectedTransport = "sse" Then
                 sb.AppendLine(";")
                 sb.AppendLine("; NOTE: This server uses the legacy SSE transport. The Endpoint uses the")
                 sb.AppendLine($"; '{MCP_SSE_PREFIX}' prefix to signal that a session handshake is required.")
-                sb.AppendLine("; At runtime, AcquireMCPSSESessionEndpoint() is called to GET the SSE URL,")
-                sb.AppendLine("; obtain a session endpoint, and perform the MCP initialize handshake.")
-                sb.AppendLine("; The resolved session POST URL then replaces the Endpoint for LLM().")
             End If
             sb.AppendLine()
 
@@ -273,7 +286,7 @@ Partial Public Class ThisAddIn
 
                 Dim section As String = BuildINISectionForTool(
                     tool, sectionName, resolvedUrl, sseBaseUrl, authParams,
-                    responseKey, mergePrompt, timeoutVal, paramWarnings, toolOnly)
+                    responseKey, mergePrompt, timeoutVal, paramWarnings, toolOnly, normalizeSchemas)
 
                 sb.AppendLine(section)
             Next
@@ -1014,45 +1027,54 @@ Partial Public Class ThisAddIn
     '  Parameter extraction from JSON Schema
     ' ─────────────────────────────────────────────────────────────────────────
 
-    Private Shared Function ExtractMCPParameters(tool As MCPToolInfo) As List(Of MCPParamInfo)
+    Private Shared Function ExtractMCPParameters(schema As JObject) As List(Of MCPParamInfo)
         Dim result As New List(Of MCPParamInfo)()
-        If tool.InputSchema Is Nothing Then Return result
+        If schema Is Nothing Then Return result
 
-        Dim props = tool.InputSchema("properties")
+        Dim props = schema("properties")
         If props Is Nothing OrElse props.Type <> JTokenType.Object Then Return result
 
-        Dim reqArray = tool.InputSchema("required")
+        Dim reqArray = TryCast(schema("required"), JArray)
         Dim requiredNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        If reqArray IsNot Nothing AndAlso reqArray.Type = JTokenType.Array Then
-            For Each r In reqArray : requiredNames.Add(r.ToString()) : Next
+        If reqArray IsNot Nothing Then
+            For Each r As JToken In reqArray
+                Dim requiredName As String = If(r, "").ToString().Trim()
+                If requiredName <> "" Then requiredNames.Add(requiredName)
+            Next
         End If
 
-        For Each prop In CType(props, JObject).Properties()
+        For Each prop As JProperty In CType(props, JObject).Properties()
+            Dim propSchema As JObject = TryCast(prop.Value, JObject)
+            If propSchema Is Nothing Then Continue For
+
             Dim p As New MCPParamInfo()
             p.Name = prop.Name
             p.IsRequired = requiredNames.Contains(prop.Name)
-            p.Type = If(prop.Value("type")?.ToString(), "string").ToLowerInvariant()
-            p.Description = If(prop.Value("description")?.ToString(), prop.Name)
+            p.Type = GetMCPCompatibleSchemaType(propSchema, schema)
+            If String.IsNullOrWhiteSpace(p.Type) Then p.Type = "string"
+            p.Description = If(propSchema("description")?.ToString(), prop.Name)
 
-            Dim enumArr = prop.Value("enum")
-            If enumArr IsNot Nothing AndAlso enumArr.Type = JTokenType.Array Then
+            Dim enumArr = TryCast(propSchema("enum"), JArray)
+            If enumArr IsNot Nothing AndAlso enumArr.Count > 0 Then
                 p.EnumValues = New List(Of String)()
-                For Each e In enumArr : p.EnumValues.Add(e.ToString()) : Next
+                For Each e As JToken In enumArr
+                    p.EnumValues.Add(e.ToString())
+                Next
             End If
 
-            Dim minToken = prop.Value("minimum")
+            Dim minToken = propSchema("minimum")
             If minToken IsNot Nothing Then
                 Dim minV As Integer
                 If Integer.TryParse(minToken.ToString(), minV) Then p.Minimum = minV
             End If
 
-            Dim maxToken = prop.Value("maximum")
+            Dim maxToken = propSchema("maximum")
             If maxToken IsNot Nothing Then
                 Dim maxV As Integer
                 If Integer.TryParse(maxToken.ToString(), maxV) Then p.Maximum = maxV
             End If
 
-            Dim defToken = prop.Value("default")
+            Dim defToken = propSchema("default")
             If defToken IsNot Nothing Then
                 p.DefaultValue = NormalizeMCPDefaultValue(defToken, p.Type)
             End If
@@ -1063,9 +1085,284 @@ Partial Public Class ThisAddIn
         Return result
     End Function
 
+    Private Shared Function PrepareToolDefinitionSchema(inputSchema As JObject, normalizeSchema As Boolean) As JObject
+        Dim baseSchema As JObject =
+            If(TryCast(inputSchema?.DeepClone(), JObject),
+               New JObject From {
+                   {"type", "object"},
+                   {"properties", New JObject()},
+                   {"required", New JArray()}
+               })
+
+        If Not normalizeSchema Then
+            Return CType(MCPSanitizeJsonStringValues(baseSchema), JObject)
+        End If
+
+        Dim normalized As JObject = TryCast(NormalizeMCPJsonSchema(baseSchema, baseSchema), JObject)
+
+        If normalized Is Nothing Then
+            normalized = New JObject From {
+                {"type", "object"},
+                {"properties", New JObject()},
+                {"required", New JArray()}
+            }
+        End If
+
+        If normalized("type") Is Nothing Then
+            normalized("type") = "object"
+        End If
+
+        If String.Equals(If(normalized("type")?.ToString(), ""), "object", StringComparison.OrdinalIgnoreCase) AndAlso
+           normalized("properties") Is Nothing Then
+            normalized("properties") = New JObject()
+        End If
+
+        Return CType(MCPSanitizeJsonStringValues(normalized), JObject)
+    End Function
+
+    Private Shared Function NormalizeMCPJsonSchema(token As JToken, rootSchema As JObject) As JToken
+        If token Is Nothing Then Return Nothing
+
+        Dim resolvedToken As JToken = ResolveMCPReferenceToken(token, rootSchema)
+        If resolvedToken Is Nothing Then Return Nothing
+
+        Dim schemaObject As JObject = TryCast(resolvedToken, JObject)
+        If schemaObject Is Nothing Then
+            Return resolvedToken.DeepClone()
+        End If
+
+        Dim collapsed As JObject = CollapseMCPCompositeSchema(schemaObject, rootSchema)
+        If collapsed IsNot Nothing AndAlso Not Object.ReferenceEquals(collapsed, schemaObject) Then
+            Return NormalizeMCPJsonSchema(collapsed, rootSchema)
+        End If
+
+        Dim schemaType As String = GetMCPCompatibleSchemaType(schemaObject, rootSchema)
+        If String.IsNullOrWhiteSpace(schemaType) Then schemaType = "string"
+
+        Dim result As New JObject()
+
+        Select Case schemaType
+            Case "object"
+                result("type") = "object"
+
+                Dim normalizedProperties As New JObject()
+                Dim propertiesToken As JObject = TryCast(ResolveMCPReferenceToken(schemaObject("properties"), rootSchema), JObject)
+
+                If propertiesToken IsNot Nothing Then
+                    For Each prop As JProperty In propertiesToken.Properties()
+                        Dim normalizedProp As JObject = TryCast(NormalizeMCPJsonSchema(prop.Value, rootSchema), JObject)
+                        If normalizedProp IsNot Nothing Then
+                            normalizedProperties(prop.Name) = normalizedProp
+                        End If
+                    Next
+                End If
+
+                result("properties") = normalizedProperties
+
+                Dim sourceRequired As JArray = TryCast(schemaObject("required"), JArray)
+                If sourceRequired IsNot Nothing AndAlso sourceRequired.Count > 0 Then
+                    Dim normalizedRequired As New JArray()
+                    For Each req As JToken In sourceRequired
+                        Dim reqName As String = If(req, "").ToString().Trim()
+                        If reqName <> "" AndAlso normalizedProperties(reqName) IsNot Nothing Then
+                            normalizedRequired.Add(reqName)
+                        End If
+                    Next
+
+                    If normalizedRequired.Count > 0 Then
+                        result("required") = normalizedRequired
+                    End If
+                End If
+
+                Dim additionalPropertiesToken As JToken = schemaObject("additionalProperties")
+                If additionalPropertiesToken IsNot Nothing AndAlso additionalPropertiesToken.Type = JTokenType.Boolean Then
+                    result("additionalProperties") = additionalPropertiesToken.DeepClone()
+                End If
+
+            Case "array"
+                result("type") = "array"
+
+                Dim normalizedItems As JObject = TryCast(NormalizeMCPJsonSchema(schemaObject("items"), rootSchema), JObject)
+                If normalizedItems Is Nothing Then
+                    normalizedItems = New JObject From {{"type", "string"}}
+                End If
+
+                result("items") = normalizedItems
+
+            Case Else
+                result("type") = schemaType
+        End Select
+
+        ApplyMCPCompatibleSchemaMetadata(schemaObject, result)
+        Return result
+    End Function
+
+    Private Shared Function CollapseMCPCompositeSchema(schemaObject As JObject, rootSchema As JObject) As JObject
+        If schemaObject Is Nothing Then Return Nothing
+
+        Dim alternatives As JArray = TryCast(schemaObject("anyOf"), JArray)
+        If alternatives Is Nothing OrElse alternatives.Count = 0 Then
+            alternatives = TryCast(schemaObject("oneOf"), JArray)
+        End If
+
+        If alternatives IsNot Nothing AndAlso alternatives.Count > 0 Then
+            Dim bestMatch As JObject = Nothing
+            Dim bestScore As Integer = Integer.MinValue
+
+            For Each candidate As JToken In alternatives
+                Dim candidateObject As JObject = TryCast(ResolveMCPReferenceToken(candidate, rootSchema), JObject)
+                If candidateObject Is Nothing Then Continue For
+
+                Dim candidateType As String = GetMCPCompatibleSchemaType(candidateObject, rootSchema)
+                If String.IsNullOrWhiteSpace(candidateType) OrElse
+                   String.Equals(candidateType, "null", StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+
+                Dim score As Integer = GetMCPTypePreferenceScore(candidateType)
+                If score > bestScore Then
+                    bestScore = score
+                    bestMatch = CType(candidateObject.DeepClone(), JObject)
+                End If
+            Next
+
+            If bestMatch IsNot Nothing Then
+                If bestMatch("description") Is Nothing AndAlso schemaObject("description") IsNot Nothing Then
+                    bestMatch("description") = schemaObject("description").DeepClone()
+                End If
+                Return bestMatch
+            End If
+        End If
+
+        Return schemaObject
+    End Function
+
+    Private Shared Function GetMCPCompatibleSchemaType(schemaObject As JObject, rootSchema As JObject) As String
+        If schemaObject Is Nothing Then Return "string"
+
+        Dim typeToken As JToken = schemaObject("type")
+
+        If typeToken IsNot Nothing Then
+            If typeToken.Type = JTokenType.String Then
+                Dim typeName As String = typeToken.ToString().Trim().ToLowerInvariant()
+                If typeName <> "" AndAlso typeName <> "null" Then Return typeName
+            ElseIf typeToken.Type = JTokenType.Array Then
+                For Each item As JToken In CType(typeToken, JArray)
+                    Dim typeName As String = item.ToString().Trim().ToLowerInvariant()
+                    If typeName <> "" AndAlso typeName <> "null" Then Return typeName
+                Next
+            End If
+        End If
+
+        If schemaObject("properties") IsNot Nothing Then Return "object"
+        If schemaObject("items") IsNot Nothing Then Return "array"
+
+        Dim composite As JObject = CollapseMCPCompositeSchema(schemaObject, rootSchema)
+        If composite IsNot Nothing AndAlso Not Object.ReferenceEquals(composite, schemaObject) Then
+            Return GetMCPCompatibleSchemaType(composite, rootSchema)
+        End If
+
+        If schemaObject("enum") IsNot Nothing Then Return "string"
+
+        Return "string"
+    End Function
+
+    Private Shared Function ResolveMCPReferenceToken(token As JToken, rootSchema As JObject) As JToken
+        If token Is Nothing Then Return Nothing
+
+        Dim obj As JObject = TryCast(token, JObject)
+        If obj Is Nothing Then Return token
+
+        Dim refValue As String = If(obj("$ref")?.ToString(), "").Trim()
+        If String.IsNullOrWhiteSpace(refValue) Then
+            Return obj
+        End If
+
+        Dim resolved As JToken = ResolveMCPJsonPointer(rootSchema, refValue)
+        If resolved Is Nothing Then
+            Return obj
+        End If
+
+        Dim resolvedObject As JObject = TryCast(resolved.DeepClone(), JObject)
+        If resolvedObject Is Nothing Then
+            Return resolved.DeepClone()
+        End If
+
+        For Each prop As JProperty In obj.Properties()
+            If prop.Name.Equals("$ref", StringComparison.OrdinalIgnoreCase) Then Continue For
+            resolvedObject(prop.Name) = prop.Value.DeepClone()
+        Next
+
+        Return resolvedObject
+    End Function
+
+    Private Shared Function ResolveMCPJsonPointer(rootToken As JToken, pointer As String) As JToken
+        If rootToken Is Nothing OrElse String.IsNullOrWhiteSpace(pointer) Then Return Nothing
+        If Not pointer.StartsWith("#/", StringComparison.Ordinal) Then Return Nothing
+
+        Dim current As JToken = rootToken
+
+        For Each rawSegment As String In pointer.Substring(2).Split("/"c)
+            Dim segment As String = rawSegment.Replace("~1", "/").Replace("~0", "~")
+
+            If current Is Nothing Then Return Nothing
+
+            If current.Type = JTokenType.Object Then
+                current = current(segment)
+            ElseIf current.Type = JTokenType.Array Then
+                Dim index As Integer
+                If Not Integer.TryParse(segment, index) Then Return Nothing
+                Dim arr As JArray = CType(current, JArray)
+                If index < 0 OrElse index >= arr.Count Then Return Nothing
+                current = arr(index)
+            Else
+                Return Nothing
+            End If
+        Next
+
+        Return current
+    End Function
+
+    Private Shared Sub ApplyMCPCompatibleSchemaMetadata(source As JObject, target As JObject)
+        If source Is Nothing OrElse target Is Nothing Then Return
+
+        If source("description") IsNot Nothing Then
+            target("description") = source("description").DeepClone()
+        End If
+
+        Dim targetType As String = If(target("type")?.ToString(), "").Trim().ToLowerInvariant()
+
+        If targetType <> "object" AndAlso targetType <> "array" Then
+            Dim enumToken As JArray = TryCast(source("enum"), JArray)
+            If enumToken IsNot Nothing AndAlso enumToken.Count > 0 Then
+                target("enum") = enumToken.DeepClone()
+            End If
+        End If
+
+        If targetType = "integer" OrElse targetType = "number" Then
+            If source("minimum") IsNot Nothing Then target("minimum") = source("minimum").DeepClone()
+            If source("maximum") IsNot Nothing Then target("maximum") = source("maximum").DeepClone()
+        End If
+    End Sub
+
+    Private Shared Function GetMCPTypePreferenceScore(typeName As String) As Integer
+        Select Case If(typeName, "").Trim().ToLowerInvariant()
+            Case "object" : Return 60
+            Case "array" : Return 50
+            Case "string" : Return 40
+            Case "integer" : Return 30
+            Case "number" : Return 20
+            Case "boolean" : Return 10
+            Case Else : Return 0
+        End Select
+    End Function
 
     Private Shared Function NormalizeMCPDefaultValue(defaultToken As JToken, parameterType As String) As String
         If defaultToken Is Nothing Then
+            Return ""
+        End If
+
+        If defaultToken.Type = JTokenType.Null Then
             Return ""
         End If
 
@@ -1108,26 +1405,34 @@ Partial Public Class ThisAddIn
     Private Shared Function BuildToolParameterDefaultValue(p As MCPParamInfo) As String
         Dim defVal As String = If(p.DefaultValue, "")
 
-        If String.IsNullOrWhiteSpace(defVal) Then
-            Select Case p.Type
-                Case "integer", "number"
-                    defVal = If(p.Minimum.HasValue, p.Minimum.Value.ToString(Globalization.CultureInfo.InvariantCulture), "0")
-                Case "boolean"
-                    defVal = "false"
-                Case "array"
-                    defVal = "[]"
-                Case "object"
-                    defVal = "{}"
-                Case Else
-                    If p.EnumValues IsNot Nothing AndAlso p.EnumValues.Count > 0 Then
-                        defVal = p.EnumValues(0)
-                    Else
-                        defVal = ""
-                    End If
-            End Select
+        If Not String.IsNullOrWhiteSpace(defVal) Then
+            Return defVal
         End If
 
-        Return defVal
+        If Not p.IsRequired Then
+            Return ""
+        End If
+
+        Select Case p.Type
+            Case "integer", "number"
+                Return If(p.Minimum.HasValue, p.Minimum.Value.ToString(Globalization.CultureInfo.InvariantCulture), "0")
+
+            Case "boolean"
+                Return "false"
+
+            Case "array"
+                Return "[]"
+
+            Case "object"
+                Return "{}"
+
+            Case Else
+                If p.EnumValues IsNot Nothing AndAlso p.EnumValues.Count > 0 Then
+                    Return p.EnumValues(0)
+                End If
+
+                Return ""
+        End Select
     End Function
 
     ' ─────────────────────────────────────────────────────────────────────────
@@ -1137,9 +1442,15 @@ Partial Public Class ThisAddIn
     Private Function BuildINISectionForTool(tool As MCPToolInfo, sectionName As String, mcpUrl As String,
                                             sseBaseUrl As String, auth As MCPAuthInfo, responseKey As String,
                                             mergePrompt As String, timeout As Long,
-                                            warnings As List(Of String), toolOnly As Boolean) As String
+                                            warnings As List(Of String), toolOnly As Boolean,
+                                            normalizeSchema As Boolean) As String
         Dim sb As New StringBuilder()
-        Dim allParams = ExtractMCPParameters(tool)
+        Dim effectiveSchema As JObject = PrepareToolDefinitionSchema(tool.InputSchema, normalizeSchema)
+
+        Dim parameterSchema As JObject =
+            If(TryCast(tool.InputSchema?.DeepClone(), JObject), effectiveSchema)
+
+        Dim allParams = ExtractMCPParameters(parameterSchema)
 
         Dim primaryParam As MCPParamInfo = Nothing
         For Each p In allParams
@@ -1169,13 +1480,11 @@ Partial Public Class ThisAddIn
             iniParams.Add(remainingParams(i))
         Next
 
-        ' For SSE transport, prefix the endpoint with "sse:" so callers know to
-        ' acquire a session via AcquireMCPSSESessionEndpoint() at runtime.
         Dim endpointValue As String
         If Not String.IsNullOrWhiteSpace(sseBaseUrl) Then
             endpointValue = MCP_SSE_PREFIX & sseBaseUrl
         Else
-            endpointValue = mcpUrl
+            endpointValue = SharedMethods.MCP_STREAMABLE_PREFIX & mcpUrl
         End If
 
         sb.AppendLine($"[{MCPSanitizeINIValue(sectionName)}]")
@@ -1233,7 +1542,6 @@ Partial Public Class ThisAddIn
         Next
         sb.AppendLine($"ToolParameterDefaults = {defaults.ToString(Formatting.None)}")
 
-        ' Sanitize tool description for single-line ToolInstructionsPrompt
         Dim safeDescription As String = If(tool.Description, "").Replace(vbCrLf, " ").Replace(vbLf, " ").Replace(vbCr, " ")
         Dim instrPrompt As New StringBuilder()
         instrPrompt.Append($"{tool.Name}: {safeDescription} Parameters: ")
@@ -1246,12 +1554,18 @@ Partial Public Class ThisAddIn
         Next
         sb.AppendLine($"ToolInstructionsPrompt = {instrPrompt.ToString().Trim()}")
 
-        ' Sanitize descriptions inside the ToolDefinition JSON to avoid embedded newlines
-        Dim safeInputSchema As JObject = If(tool.InputSchema, New JObject From {{"type", "object"}, {"properties", New JObject()}, {"required", New JArray()}})
+        Dim safeInputSchema As JObject =
+            If(effectiveSchema,
+               New JObject From {
+                   {"type", "object"},
+                   {"properties", New JObject()},
+                   {"required", New JArray()}
+               })
+
         Dim toolDef As New JObject From {
             {"name", tool.Name},
             {"description", safeDescription},
-            {"parameters", MCPSanitizeJsonStringValues(safeInputSchema)}
+            {"parameters", safeInputSchema}
         }
         sb.AppendLine($"ToolDefinition = {toolDef.ToString(Formatting.None)}")
         sb.AppendLine()
@@ -1306,6 +1620,10 @@ Partial Public Class ThisAddIn
     Private Shared Sub EmitDefaultArgument(args As JObject, p As MCPParamInfo)
         Dim defVal = BuildToolParameterDefaultValue(p)
 
+        If String.IsNullOrWhiteSpace(defVal) AndAlso Not p.IsRequired Then
+            Return
+        End If
+
         Select Case p.Type
             Case "integer"
                 Dim iv As Integer = 0
@@ -1332,19 +1650,21 @@ Partial Public Class ThisAddIn
             Case "array"
                 If Not String.IsNullOrEmpty(defVal) AndAlso defVal.TrimStart().StartsWith("[") Then
                     args.Add(New JProperty(p.Name, New JRaw(defVal)))
-                Else
+                ElseIf p.IsRequired Then
                     args.Add(New JProperty(p.Name, New JRaw("[]")))
                 End If
 
             Case "object"
                 If Not String.IsNullOrEmpty(defVal) AndAlso defVal.TrimStart().StartsWith("{") Then
                     args.Add(New JProperty(p.Name, New JRaw(defVal)))
-                Else
+                ElseIf p.IsRequired Then
                     args.Add(New JProperty(p.Name, New JRaw("{}")))
                 End If
 
             Case Else
-                args(p.Name) = If(defVal, "")
+                If Not String.IsNullOrWhiteSpace(defVal) OrElse p.IsRequired Then
+                    args(p.Name) = If(defVal, "")
+                End If
         End Select
     End Sub
 
