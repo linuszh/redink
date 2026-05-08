@@ -1548,9 +1548,9 @@ Public NotInheritable Class IniImportManager
                     End If
 
                     If overwrittenCount > 0 Then
-                        sb.AppendLine("Keys that will be overwritten (" & overwrittenCount.ToString() & "): " & System.String.Join(", ", overwritten))
+                        sb.AppendLine("Keys that will be replaced or removed (" & overwrittenCount.ToString() & "): " & System.String.Join(", ", overwritten))
                     Else
-                        sb.AppendLine("Keys that will be overwritten (0): (none)")
+                        sb.AppendLine("Keys that will be replaced or removed (0): (none)")
                     End If
 
                     sb.AppendLine()
@@ -1564,17 +1564,17 @@ Public NotInheritable Class IniImportManager
 
                 If p.OverwrittenKeys IsNot Nothing AndAlso p.OverwrittenKeys.Count > 0 Then
                     sb.AppendLine(
-                        "Keys that will be overwritten (" &
-                        p.OverwrittenKeys.Count.ToString() &
-                        "): " &
-                        System.String.Join(", ", p.OverwrittenKeys)
-                    )
+                                "Keys that will be replaced or removed (" &
+                                p.OverwrittenKeys.Count.ToString() &
+                                "): " &
+                                System.String.Join(", ", p.OverwrittenKeys)
+                            )
                 Else
                     If p.Kind = ImportKind.PrimaryModel OrElse
-                       p.Kind = ImportKind.SecondaryModel OrElse
-                       p.Kind = ImportKind.OtherParameters Then
+                               p.Kind = ImportKind.SecondaryModel OrElse
+                               p.Kind = ImportKind.OtherParameters Then
 
-                        sb.AppendLine("No existing keys will be overwritten (new keys will be appended at the end of the file).")
+                        sb.AppendLine("No existing keys will be replaced or removed (new keys will be appended at the end of the file).")
                     End If
                 End If
 
@@ -2617,18 +2617,18 @@ Public NotInheritable Class IniImportManager
 
             If OverwrittenKeys IsNot Nothing AndAlso OverwrittenKeys.Count > 0 Then
                 sb.AppendLine(
-                    "Keys that will be overwritten (" &
-                    OverwrittenKeys.Count.ToString() &
-                    "): " &
-                    System.String.Join(", ", OverwrittenKeys)
-                )
+                        "Keys that will be replaced or removed (" &
+                        OverwrittenKeys.Count.ToString() &
+                        "): " &
+                        System.String.Join(", ", OverwrittenKeys)
+                    )
                 sb.AppendLine()
             Else
                 If Kind = ImportKind.PrimaryModel OrElse
-                   Kind = ImportKind.SecondaryModel OrElse
-                   Kind = ImportKind.OtherParameters Then
+                       Kind = ImportKind.SecondaryModel OrElse
+                       Kind = ImportKind.OtherParameters Then
 
-                    sb.AppendLine("No existing keys will be overwritten (new keys will be appended at the end of the file).")
+                    sb.AppendLine("No existing keys will be replaced or removed (new keys will be appended at the end of the file).")
                     sb.AppendLine()
                 End If
             End If
@@ -2651,11 +2651,11 @@ Public NotInheritable Class IniImportManager
     ''' Builds a dry-run plan for a target INI file based on import kind and imported content.
     ''' </summary>
     Private Shared Function BuildDryRunPlan(context As ISharedContext,
-                                           kind As ImportKind,
-                                           targetIniPath As System.String,
-                                           targetSectionName As System.String,
-                                           importedLines As System.Collections.Generic.List(Of System.String),
-                                           Optional replaceExisting As System.Boolean = True) As DryRunPlan
+                                       kind As ImportKind,
+                                       targetIniPath As System.String,
+                                       targetSectionName As System.String,
+                                       importedLines As System.Collections.Generic.List(Of System.String),
+                                       Optional replaceExisting As System.Boolean = True) As DryRunPlan
 
         If System.String.IsNullOrWhiteSpace(targetIniPath) Then Throw New System.ArgumentNullException(NameOf(targetIniPath))
         If importedLines Is Nothing OrElse importedLines.Count = 0 Then Throw New System.Exception("No imported lines.")
@@ -2663,17 +2663,17 @@ Public NotInheritable Class IniImportManager
         Dim existingLines As System.Collections.Generic.List(Of System.String) = ReadAllLinesPreserve(targetIniPath)
 
         Dim plan As New DryRunPlan() With {
-            .TargetIniPath = targetIniPath,
-            .Kind = kind,
-            .TargetSectionName = targetSectionName,
-            .NewFileLines = New System.Collections.Generic.List(Of System.String)(existingLines),
-            .RemovedLinesBackup = New System.Collections.Generic.List(Of System.String)(),
-            .OverwrittenKeys = New System.Collections.Generic.List(Of System.String)(),
-            .WillCreateRemovedBackup = False,
-            .SectionNames = New System.Collections.Generic.List(Of System.String)(),
-            .AddedKeysBySection = New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.OrdinalIgnoreCase),
-            .OverwrittenKeysBySection = New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.OrdinalIgnoreCase)
-        }
+        .TargetIniPath = targetIniPath,
+        .Kind = kind,
+        .TargetSectionName = targetSectionName,
+        .NewFileLines = New System.Collections.Generic.List(Of System.String)(existingLines),
+        .RemovedLinesBackup = New System.Collections.Generic.List(Of System.String)(),
+        .OverwrittenKeys = New System.Collections.Generic.List(Of System.String)(),
+        .WillCreateRemovedBackup = False,
+        .SectionNames = New System.Collections.Generic.List(Of System.String)(),
+        .AddedKeysBySection = New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.OrdinalIgnoreCase),
+        .OverwrittenKeysBySection = New System.Collections.Generic.Dictionary(Of System.String, System.Collections.Generic.List(Of System.String))(System.StringComparer.OrdinalIgnoreCase)
+    }
 
         If kind = ImportKind.AlternateModel OrElse kind = ImportKind.SpecialService Then
             Dim newSectionLines As System.Collections.Generic.List(Of System.String) = BuildSectionLines(targetSectionName, importedLines)
@@ -2692,7 +2692,7 @@ Public NotInheritable Class IniImportManager
             End If
         End If
 
-        ApplyMainIniKeyReplaceAppend(plan, existingLines, kv, replaceExisting)
+        ApplyMainIniKeyReplaceAppend(plan, existingLines, kv, replaceExisting, kind)
 
         Return plan
 
@@ -3068,6 +3068,76 @@ Public NotInheritable Class IniImportManager
     '  APPLY: redink.ini key overwrite (remove old lines, append new at end)
     ' =========================================================================================
 
+    Private Shared Function GetKnownMainIniModelKeys(
+    kind As ImportKind
+) As System.Collections.Generic.HashSet(Of System.String)
+
+        Dim keys As New System.Collections.Generic.HashSet(Of System.String)(
+        System.StringComparer.OrdinalIgnoreCase)
+
+        Select Case kind
+            Case ImportKind.PrimaryModel
+                Dim primaryKeys As System.String() = {
+                "APIKey",
+                "Endpoint",
+                "HeaderA",
+                "HeaderB",
+                "Response",
+                "Anon",
+                "TokenCount",
+                "APICall",
+                "APICall_Object",
+                "Timeout",
+                "MaxOutputToken",
+                "Temperature",
+                "Model",
+                "APIKeyEncrypted",
+                "APIKeyPrefix",
+                "OAuth2",
+                "OAuth2ClientMail",
+                "OAuth2Scopes",
+                "OAuth2Endpoint",
+                "OAuth2ATExpiry"
+            }
+
+                For Each key As System.String In primaryKeys
+                    keys.Add(key)
+                Next
+
+            Case ImportKind.SecondaryModel
+                Dim secondaryKeys As System.String() = {
+                "SecondAPI",
+                "APIKey_2",
+                "Endpoint_2",
+                "HeaderA_2",
+                "HeaderB_2",
+                "Response_2",
+                "Anon_2",
+                "TokenCount_2",
+                "APICall_2",
+                "APICall_Object_2",
+                "Timeout_2",
+                "MaxOutputToken_2",
+                "Temperature_2",
+                "Model_2",
+                "APIKeyEncrypted_2",
+                "APIKeyPrefix_2",
+                "OAuth2_2",
+                "OAuth2ClientMail_2",
+                "OAuth2Scopes_2",
+                "OAuth2Endpoint_2",
+                "OAuth2ATExpiry_2"
+            }
+
+                For Each key As System.String In secondaryKeys
+                    keys.Add(key)
+                Next
+        End Select
+
+        Return keys
+
+    End Function
+
     ''' <summary>
     ''' Applies key updates to a main INI file by removing existing key lines (optional) and appending new lines at the end.
     ''' </summary>
@@ -3076,13 +3146,24 @@ Public NotInheritable Class IniImportManager
     ''' <param name="newKeyValues">Key/value pairs to apply.</param>
     ''' <param name="replaceExisting">True to replace existing key lines; False to only add new keys.</param>
     Private Shared Sub ApplyMainIniKeyReplaceAppend(
-        plan As DryRunPlan,
-        existingLines As List(Of String),
-        newKeyValues As Dictionary(Of String, String),
-        Optional replaceExisting As Boolean = True
-    )
+    plan As DryRunPlan,
+    existingLines As List(Of String),
+    newKeyValues As Dictionary(Of String, String),
+    Optional replaceExisting As Boolean = True,
+    Optional kind As ImportKind = ImportKind.OtherParameters
+)
 
-        Dim keys As New System.Collections.Generic.HashSet(Of System.String)(newKeyValues.Keys, System.StringComparer.OrdinalIgnoreCase)
+        Dim keys As New System.Collections.Generic.HashSet(Of System.String)(
+        newKeyValues.Keys,
+        System.StringComparer.OrdinalIgnoreCase)
+
+        If replaceExisting AndAlso
+       (kind = ImportKind.PrimaryModel OrElse kind = ImportKind.SecondaryModel) Then
+
+            For Each modelKey As System.String In GetKnownMainIniModelKeys(kind)
+                keys.Add(modelKey)
+            Next
+        End If
 
         Dim newLines As New System.Collections.Generic.List(Of System.String)()
         Dim removed As New System.Collections.Generic.List(Of System.String)()
@@ -3092,7 +3173,10 @@ Public NotInheritable Class IniImportManager
             Dim parsedKey As System.String = Nothing
             Dim isKeyLine As System.Boolean = TryParseIniKey(line, parsedKey)
 
-            If isKeyLine AndAlso Not System.String.IsNullOrWhiteSpace(parsedKey) AndAlso keys.Contains(parsedKey) Then
+            If isKeyLine AndAlso
+           Not System.String.IsNullOrWhiteSpace(parsedKey) AndAlso
+           keys.Contains(parsedKey) Then
+
                 If replaceExisting Then
                     removed.Add(line)
                     overwritten.Add(parsedKey)

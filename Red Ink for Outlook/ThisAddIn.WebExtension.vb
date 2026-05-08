@@ -1271,6 +1271,9 @@ Partial Public Class ThisAddIn
         hintParts.Add("Enter=send")
         hintParts.Add("Shift+Enter=newline")
         hintParts.Add("Ctrl+L=clear")
+        If INI_PromptLib Then
+            hintParts.Add("/=insert prompt library entry")
+        End If
 
         ' Check if (t) trigger is available (ToolDefaultModel defined in INI)
         Dim toolTriggerAvailable As Boolean = False
@@ -1314,6 +1317,9 @@ Partial Public Class ThisAddIn
         html.AppendLine("function copyText(t){if(navigator.clipboard){return navigator.clipboard.writeText(t);}return new Promise((res,rej)=>{try{const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.left='-9999px';document.body.appendChild(ta);ta.select();document.execCommand('copy');ta.remove();res();}catch(e){rej(e);}});}")
         html.AppendLine("function enhanceCodeBlocks(scope){(scope||document).querySelectorAll('pre').forEach(pre=>{if(pre.dataset.enhanced==='1')return;const btn=document.createElement('button');btn.type='button';btn.className='code-copy-btn';btn.innerHTML='<svg viewBox=""0 0 24 24"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><rect x=""9"" y=""9"" width=""13"" height=""13"" rx=""2"" ry=""2""/><path d=""M5 15H4a2 2 0 0 1-2-2V4c0-1.1.9-2 2-2h9a2 2 0 0 1 2 2v1""/></svg>';btn.addEventListener('click',()=>{const code=pre.querySelector('code');const txt=code?code.innerText:pre.innerText;copyText(txt).then(()=>{btn.classList.add('copied');setTimeout(()=>btn.classList.remove('copied'),1500);});});pre.appendChild(btn);pre.dataset.enhanced='1';});}")
         html.AppendLine("const api=async(cmd,data={})=>{try{const r=await fetch('/inky/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({Command:cmd},data))});const txt=await r.text();try{return JSON.parse(txt);}catch{return{ok:false,error:txt}}}catch(e){return{ok:false,error:e.message||'Network error'}}};")
+        html.AppendLine("function isPromptLibrarySlashTrigger(){const pos=msgEl.selectionStart||0;if(pos<=0)return true;const prev=msgEl.value.charAt(pos-1);return /\s/.test(prev);} ")
+        html.AppendLine("function insertPromptIntoMessage(text){const start=msgEl.selectionStart||0;const end=msgEl.selectionEnd||start;msgEl.setRangeText(String(text||''),start,end,'end');msgEl.focus();} ")
+        html.AppendLine("async function openPromptLibrary(){const r=await api('inky_promptlibpick');if(!r||!r.ok){if(r&&r.error)alert(r.error||'Prompt library failed');return;}if(r.prompt){insertPromptIntoMessage(r.prompt);}};")
 
         html.AppendLine("const chatEl=document.getElementById('chat');")
         html.AppendLine("const msgEl=document.getElementById('msg');")
@@ -1395,7 +1401,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
         html.AppendLine("themeBtn.addEventListener('click',async()=>{if(__currentJobId)return;const target=!dark;setTheme(target);const r=await api('inky_toggletheme');if(!r.ok){setTheme(!target);alert(r.error||'Theme switch failed');return;}if(typeof r.darkMode==='boolean')setTheme(r.darkMode===true);adjustModelSel();});")
-        html.AppendLine("msgEl.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
+        html.AppendLine("msgEl.addEventListener('keydown',async e=>{if(e.key==='/'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&isPromptLibrarySlashTrigger()){e.preventDefault();if(__currentJobId)return;await openPromptLibrary();return;}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();return;}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
@@ -1408,7 +1414,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__agentEnabled=false;agentChk.checked=false;updateAgentFilesDisplay([]);}applyCoupling();}")
         html.AppendLine("function applyCoupling(){if(__agentEnabled){toolingChk.checked=true;toolingChk.disabled=true;}else{toolingChk.disabled=false;}}")
         html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}applyCoupling();});")
-        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools');if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
+        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
+        html.AppendLine("agentChk.addEventListener('change',async()=>{const desired=agentChk.checked;let r=await api('inky_setagent',{Enabled:desired});if((!r||!r.ok)&&desired&&r&&r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr&&sr.ok){if(typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}r=await api('inky_setagent',{Enabled:true});}}if(!r||!r.ok){agentChk.checked=!desired;alert(r&&r.error||'Failed to toggle use-all-tools mode');applyCoupling();return;}__agentEnabled=!!r.enabled;agentChk.checked=__agentEnabled;updateAgentFilesDisplay(r.files||[]);applyCoupling();});")
 
         ' Agent mode checkbox — coupled with sources
         html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
@@ -2709,6 +2716,30 @@ Partial Public Class ThisAddIn
                             Return JsonErr("Cancel failed: " & ex.Message)
                         End Try
 
+                    Case "inky_promptlibpick"
+                        Try
+                            If Not INI_PromptLib Then
+                                Return JsonOk(New With {.ok = True, .prompt = ""})
+                            End If
+
+                            Dim selectedPrompt As String =
+                                Await SwitchToUi(
+                                    Function()
+                                        Return SharedMethods.ShowPromptInsertionSelector(
+                                            INI_PromptLibPath,
+                                            INI_PromptLibPathLocal,
+                                            _context
+                                        )
+                                    End Function).ConfigureAwait(False)
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .prompt = If(selectedPrompt, "")
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open prompt library: " & ex.Message)
+                        End Try
+
                     Case "inky_toword"
 
                         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "LocalChat_ToWord invoked")
@@ -2830,9 +2861,9 @@ Partial Public Class ThisAddIn
                             ChatAgentClearFiles()
                         End If
 
-                        ' Auto-enable tooling and agent mode when switching TO a tooling-capable model
+                        ' Auto-enable tooling when switching TO a tooling-capable model
+                        ' if sources are already selected (or were previously).
                         If supportsTooling Then
-                            ' Auto-enable "Use sources" if tools are already selected (or were previously)
                             If Not st.ToolingEnabled Then
                                 Dim hasTools As Boolean = (st.SelectedToolNames IsNot Nothing AndAlso st.SelectedToolNames.Count > 0) OrElse
                                                           (_selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0)
@@ -2842,11 +2873,11 @@ Partial Public Class ThisAddIn
                                 End If
                             End If
 
-                            ' Auto-enable "Use tools" (agent mode)
-                            If Not st.AgentModeEnabled Then
-                                st.AgentModeEnabled = True
-                                _chatAgentModeEnabled = True
-                            End If
+                            ' IMPORTANT:
+                            ' Do NOT auto-enable AgentModeEnabled ("Use all tools") here.
+                            ' The checkbox must remain a deliberate user choice.
+                            ' When it is unchecked, Local Chat should use only the selected
+                            ' Sources from the normal tooling pipeline.
                         End If
 
                         SaveInkyState(st)

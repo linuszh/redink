@@ -13,7 +13,7 @@
 ; DefaultPath = the default path to be used if none is use (will be expanded)
 ; DefaultFileName = the default filename of the file on the target
 ;
-; 20 April 2026
+; 8 May 2026
 
 Prompt Library; {AppsUrl}{AppsUrlDir}promptlib.txt; Word, Excel, Outlook; PromptLib; True; %APPDATA%\microsoft\word; promptlib.txt
 
@@ -39,6 +39,8 @@ DocCheck Sample 2 (AI Act); {AppsUrl}{AppsUrlDir}redink-dc-AI_Act.txt; Word; Doc
 
 DocCheck (Local); ; Word; DocCheckPathLocal; False; %APPDATA%\microsoft\word;
 
+Assemble Documents (Local); ; Word; AssemblePathLocal; False; %APPDATA%\microsoft\word;
+
 WebAgent Sample 1 (BGer); {AppsUrl}{AppsUrlDir}redink-ag-Bundesgericht_Neuheiten.json; Word; WebAgentPath; False; %APPDATA%\microsoft\word; redink-ag-Bundesgericht_Neuheiten.json
 
 WebAgent Sample 2 (DuckDuckGo); {AppsUrl}{AppsUrlDir}redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json; Word; WebAgentPath; False; %APPDATA%\microsoft\word; redink-ag-DuckDuckGo_WebSearch_AI_PreScreening.json
@@ -52,6 +54,8 @@ Discuss this (Persona library) (Local); {AppsUrl}{AppsUrlDir}personaliblocal.txt
 DocStyle Sample (Contract); {AppsUrl}{AppsUrlDir}redink-ds-General_Contract_Template.json; Word; DocStylePath; False; %APPDATA%\microsoft\word; redink-ds-General_Contract_Template.json
 
 DocStyle (Local); ; Word; DocStylePathLocal; False; %APPDATA%\microsoft\word;
+
+Redaction Instructions; {AppsUrl}{AppsUrlDir}redactionlib.txt; Word; RedactionInstructionsPath; True; %APPDATA%\microsoft\word; redactionlib.txt
 
 Snapshot Library; {AppsUrl}{AppsUrlDir}snapshotlib.txt; Word; SnapshotLibPath; True; %APPDATA%\microsoft\word; snapshotlib.txt
 

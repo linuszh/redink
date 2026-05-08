@@ -1336,6 +1336,8 @@ Partial Public Class ThisAddIn
             Dim FileObject As String = ""
             Dim DoNewDoc As Boolean = False
             Dim DoMyStyle As Boolean = False
+            Dim DoAddMail As Boolean = False
+            Dim MailChainText As String = ""
 
             Dim UseSecondAPI As Boolean = False
 
@@ -1345,6 +1347,7 @@ Partial Public Class ThisAddIn
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}' for overriding formatting defaults"
             Dim MyStyleInstruct As String = $"; add '{MyStyleTrigger}' to apply your personal style"
+            Dim AddMailInstruct As String = $"; add '{AddmailTrigger}' to include the full mailchain as context"
             Dim SecondAPIInstruct As String = If(INI_SecondAPI, $"'{SecondAPICode}' to use {If(String.IsNullOrWhiteSpace(INI_AlternateModelPath), $"the secondary model ({INI_Model_2})", "one of the other models")}", "")
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger2}' for including a clipboard object"
@@ -1358,6 +1361,7 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add ", ", ")
             End If
+            AddOnInstruct += AddMailInstruct.Replace("; add ", ", ")
 
             Dim DefaultPrefix As String = INI_DefaultPrefix
             Dim DefaultPrefixText As String = ""
@@ -1432,20 +1436,24 @@ Partial Public Class ThisAddIn
 
             ' Prompt for the text to process
 
+            Dim InsertButtons As System.Tuple(Of String, String, String)() = {
+                        System.Tuple.Create("📧", $"Include full mailchain ({AddmailTrigger})", AddmailTrigger)
+                    }
+
             If Not NoText Then
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix),
                             System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
                         }
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
             Else
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                         }
 
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
             End If
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
@@ -1570,6 +1578,30 @@ Partial Public Class ThisAddIn
                 DoMyStyle = True
             End If
 
+            If OtherPrompt.IndexOf(AddmailTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                OtherPrompt = OtherPrompt.Replace(AddmailTrigger, "").Trim()
+                DoAddMail = True
+
+                Try
+                    MailChainText = wordEditor.Content.Text
+                Catch
+                    MailChainText = ""
+                End Try
+
+                If String.IsNullOrWhiteSpace(MailChainText) Then
+                    Try
+                        MailChainText = GetMailBody(mailItem)
+                    Catch
+                        MailChainText = ""
+                    End Try
+                End If
+
+                If String.IsNullOrWhiteSpace(MailChainText) Then
+                    ShowCustomMessageBox("The mailchain could not be read.")
+                    Return
+                End If
+            End If
+
             If INI_SecondAPI Then
                 If OtherPrompt.Contains(SecondAPICode) Then
                     UseSecondAPI = True
@@ -1604,13 +1636,30 @@ Partial Public Class ThisAddIn
             ' Call LLM function with selected text
 
             Dim LLMResult As String
+            Dim SystemPrompt As String =
+                InterpolateAtRuntime(If(NoText, SP_FreestyleNoText, SP_FreestyleText)) &
+                If(DoMyStyle, " " & MyStyleInsert, "") &
+                If(DoAddMail,
+                   " You may additionally receive the full surrounding e-mail chain (including a draft response) between the tags <MAILCHAIN> and </MAILCHAIN>. Use it only as additional context for chronology, participants, tone, prior statements, and unanswered points. If <TEXTTOPROCESS> is present, this is the text selected by the user, perform the requested task on <TEXTTOPROCESS>; use <MAILCHAIN> only to understand the context better.",
+                   "")
+
+            Dim UserPrompt As String = ""
 
             If Not NoText Then
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_FreestyleText) & If(DoMyStyle, " " & MyStyleInsert, ""), "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>", "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                UserPrompt = "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>"
+            End If
 
+            If DoAddMail Then
+                If UserPrompt <> "" Then
+                    UserPrompt &= vbCrLf & vbCrLf
+                End If
+                UserPrompt &= "<MAILCHAIN>" & MailChainText & "</MAILCHAIN>"
+            End If
+
+            LLMResult = Await LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+
+            If Not NoText Then
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
-            Else
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_FreestyleNoText) & If(DoMyStyle, " " & MyStyleInsert, ""), "", "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
             End If
 
             If INI_PostCorrection <> "" Then

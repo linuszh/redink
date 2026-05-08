@@ -3722,13 +3722,6 @@ Partial Public Class ThisAddIn
         End If
 
         If String.IsNullOrWhiteSpace(rawDefault) Then
-            Dim enumValues = GetToolParameterEnumValues(schemaToken)
-            If enumValues.Count > 0 Then
-                rawDefault = enumValues(0)
-            End If
-        End If
-
-        If String.IsNullOrWhiteSpace(rawDefault) Then
             If isRequired Then
                 Return "{" & placeholderName & "}"
             End If
@@ -4004,6 +3997,70 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
                     ToolingFileLogger.LogError("SSE tool call failed.",
                         details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
+                End Try
+
+                Return response
+            End If
+
+            ' ── MCP Streamable HTTP transport: full round-trip bypassing LLM() ─
+            If IsMCPStreamableToolCall(toolConfig.Endpoint, apiCall) Then
+                Dim mcpUrl As String = If(toolConfig.Endpoint, "")
+                If mcpUrl.StartsWith(SharedMethods.MCP_STREAMABLE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+                    mcpUrl = mcpUrl.Substring(SharedMethods.MCP_STREAMABLE_PREFIX.Length)
+                End If
+
+                Dim resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
+
+                context.Log($"MCP Streamable HTTP: executing tool {toolCall.ToolName} via {mcpUrl}")
+                ToolingFileLogger.LogStep($"MCP Streamable HTTP round-trip for {toolCall.ToolName} at {mcpUrl}")
+                ToolingFileLogger.LogStep($"MCP Streamable HTTP request body: {apiCall}")
+
+                Try
+                    cancellationToken.ThrowIfCancellationRequested()
+
+                    Dim rawResult = Await SharedMethods.ExecuteMCPStreamableToolCall(
+                        mcpUrl,
+                        apiCall,
+                        If(toolConfig.HeaderA, ""),
+                        resolvedHeaderB,
+                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+
+                    ToolingFileLogger.LogRawResponseStub($"MCP Streamable HTTP tool result ({toolCall.ToolName})", rawResult)
+
+                    If Not String.IsNullOrWhiteSpace(rawResult) Then
+                        Dim toolErrorMessage As String = ""
+
+                        response.Response = rawResult
+
+                        If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
+                            response.Success = False
+                            response.ErrorMessage = toolErrorMessage
+                            ToolingFileLogger.LogWarn(
+                                "MCP Streamable HTTP tool service returned a logical error.",
+                                details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                        Else
+                            response.Success = True
+                        End If
+                    Else
+                        response.Success = False
+                        response.ErrorMessage = "Empty response from MCP Streamable HTTP tool service"
+                        ToolingFileLogger.LogError(
+                            "Empty MCP Streamable HTTP response.",
+                            details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
+                    End If
+
+                Catch ex As OperationCanceledException
+                    response.Success = False
+                    response.ErrorMessage = "Operation was cancelled"
+                    ToolingFileLogger.LogWarn(
+                        $"Tool {toolCall.ToolName} cancelled during MCP Streamable HTTP execution.")
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = $"MCP Streamable HTTP tool call failed: {ex.Message}"
+                    ToolingFileLogger.LogError(
+                        "MCP Streamable HTTP tool call failed.",
+                        details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'",
+                        ex:=ex)
                 End Try
 
                 Return response
@@ -4461,6 +4518,40 @@ Partial Public Class ThisAddIn
         s = s.Replace("]", "\]")
         Return s
     End Function
+
+    Private Function IsMCPStreamableToolCall(endpoint As String, apiCall As String) As Boolean
+        If String.IsNullOrWhiteSpace(endpoint) Then
+            Return False
+        End If
+
+        If endpoint.StartsWith(SharedMethods.MCP_STREAMABLE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        If endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(apiCall) Then
+            Return False
+        End If
+
+        Try
+            Dim requestObj As JObject = JObject.Parse(apiCall)
+
+            Return String.Equals(
+                If(requestObj("jsonrpc")?.ToString(), ""),
+                "2.0",
+                StringComparison.OrdinalIgnoreCase) AndAlso
+                String.Equals(
+                    If(requestObj("method")?.ToString(), ""),
+                    "tools/call",
+                    StringComparison.OrdinalIgnoreCase)
+        Catch
+            Return False
+        End Try
+    End Function
+
 
 #End Region
 

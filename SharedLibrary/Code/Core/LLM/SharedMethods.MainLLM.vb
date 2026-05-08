@@ -1298,7 +1298,7 @@ PostProcess:
                                            Optional ex As System.Exception = Nothing)
             Try
                 Dim sb As New StringBuilder()
-                sb.AppendLine("========== RED INK API ERROR ==========")
+                sb.AppendLine("========== RED INK API LOG ==========")
                 sb.AppendLine("Timestamp: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture))
                 sb.AppendLine("Error: " & If(errorMessage, "(no message)"))
                 If Not String.IsNullOrWhiteSpace(endpoint) Then
@@ -1327,7 +1327,7 @@ PostProcess:
                 sb.AppendLine()
 
                 Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                Dim filePath As String = System.IO.Path.Combine(desktopPath, "RI_Error.txt")
+                Dim filePath As String = System.IO.Path.Combine(desktopPath, "RI_API_Log.txt")
                 System.IO.File.AppendAllText(filePath, sb.ToString(), Encoding.UTF8)
             Catch
                 ' Silent fail — debug logging must never disrupt the main flow.
