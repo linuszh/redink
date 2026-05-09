@@ -33,6 +33,10 @@ Namespace SharedLibrary
         Private remainingSeconds As Integer
         Private baseText As String
         Private countdownCts As System.Threading.CancellationTokenSource
+        Private requestedFormWidth As Integer
+        Private requestedFormHeight As Integer
+
+        Private Const LayoutPadding As Integer = 10
 
         ' Used to wait until the form is loaded before returning from Show()
         Private loadedEvent As System.Threading.ManualResetEventSlim
@@ -88,6 +92,9 @@ Namespace SharedLibrary
 
             MyBase.New()
 
+            requestedFormWidth = formWidth
+            requestedFormHeight = formHeight
+
             ' ─── Form basics ──────────────────────────────────────────
             Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.None
             Me.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen
@@ -120,26 +127,7 @@ Namespace SharedLibrary
                                    customText)
             lblMessage.Text = initialText
 
-            Dim padding As Integer = 10
-            Dim textSize As System.Drawing.Size =
-        System.Windows.Forms.TextRenderer.MeasureText(initialText, stdFont)
-            lblMessage.Size = textSize
-
-            ' logo height == text height (equal vertical padding)
-            Dim logoSize As Integer = textSize.Height
-            picLogo.SetBounds(padding, padding, logoSize, logoSize)
-
-            ' center label vertically next to logo
-            Dim labelX As Integer = picLogo.Right + padding
-            Dim labelY As Integer = padding + (logoSize - textSize.Height) \ 2
-            lblMessage.SetBounds(labelX, labelY, textSize.Width, textSize.Height)
-
-            ' auto-size form (unless overridden)
-            Dim clientW As Integer = lblMessage.Right + padding
-            Dim clientH As Integer = logoSize + padding * 2
-            If formWidth > 0 Then clientW = formWidth
-            If formHeight > 0 Then clientH = formHeight
-            Me.ClientSize = New System.Drawing.Size(clientW, clientH)
+            ApplyMessageLayout(initialText, True)
 
             ' ESC cancels
             AddHandler Me.KeyDown, AddressOf OnKeyDown
@@ -200,6 +188,45 @@ Namespace SharedLibrary
         End Sub
 
         ''' <summary>
+        ''' Applies message text, label bounds, and form size. The form grows when needed,
+        ''' but runtime updates do not shrink it to avoid countdown jitter.
+        ''' </summary>
+        ''' <param name="messageText">Message text to display.</param>
+        ''' <param name="allowShrink">If <c>True</c>, the form may be sized exactly to the message.</param>
+        Private Sub ApplyMessageLayout(ByVal messageText As String, ByVal allowShrink As Boolean)
+            lblMessage.Text = messageText
+
+            Dim textSize As System.Drawing.Size =
+        System.Windows.Forms.TextRenderer.MeasureText(messageText, lblMessage.Font)
+            lblMessage.Size = textSize
+
+            Dim logoSize As Integer = textSize.Height
+            picLogo.SetBounds(LayoutPadding, LayoutPadding, logoSize, logoSize)
+
+            Dim labelX As Integer = picLogo.Right + LayoutPadding
+            Dim labelY As Integer = LayoutPadding + (logoSize - textSize.Height) \ 2
+            lblMessage.SetBounds(labelX, labelY, textSize.Width, textSize.Height)
+
+            Dim clientW As Integer = lblMessage.Right + LayoutPadding
+            Dim clientH As Integer = Math.Max(picLogo.Bottom, lblMessage.Bottom) + LayoutPadding
+
+            If requestedFormWidth > 0 Then
+                clientW = requestedFormWidth
+            ElseIf Not allowShrink Then
+                clientW = Math.Max(Me.ClientSize.Width, clientW)
+            End If
+
+            If requestedFormHeight > 0 Then
+                clientH = requestedFormHeight
+            ElseIf Not allowShrink Then
+                clientH = Math.Max(Me.ClientSize.Height, clientH)
+            End If
+
+            Me.ClientSize = New System.Drawing.Size(clientW, clientH)
+            lblMessage.Refresh()
+        End Sub
+
+        ''' <summary>
         ''' Updates the label text without changing `remainingSeconds` or restarting the countdown.
         ''' </summary>
         ''' <param name="newMessage">The new message to render in the label.</param>
@@ -207,11 +234,7 @@ Namespace SharedLibrary
             If Me.InvokeRequired Then
                 Me.Invoke(New System.Action(Sub() UpdateMessage(newMessage)))
             Else
-                lblMessage.Text = newMessage
-                Dim newSize As System.Drawing.Size =
-            System.Windows.Forms.TextRenderer.MeasureText(newMessage, lblMessage.Font)
-                lblMessage.Size = newSize
-                lblMessage.Refresh()
+                ApplyMessageLayout(newMessage, False)
             End If
         End Sub
 
@@ -262,8 +285,7 @@ Namespace SharedLibrary
                                                                                             lblMessage.Size = System.Windows.Forms.TextRenderer.MeasureText(lblMessage.Text, lblMessage.Font)
                                                                                         End Sub))
                                                         Else
-                                                            lblMessage.Text = $"{baseText} {remainingSeconds}s"
-                                                            lblMessage.Size = System.Windows.Forms.TextRenderer.MeasureText(lblMessage.Text, lblMessage.Font)
+                                                            ApplyMessageLayout($"{baseText} {remainingSeconds}s", False)
                                                         End If
                                                     End If
                                                 End While

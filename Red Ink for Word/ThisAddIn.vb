@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.5.2026
+' 9.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -53,7 +53,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.080526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.090526" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -544,8 +544,34 @@ Partial Public Class ThisAddIn
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
         If DLLDIAGNOSTICS Then WriteDllLoadDiagnosticsIfEnabled()
+
+        ' Restore the previously selected primary model (if multi-model is configured)
+        If _context.INIloaded Then
+            Try
+                Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                If PrimaryModelManager.GetAvailableModels().Count > 0 Then
+                    ' Try saved selection first; fall back to model 1 if it no longer exists
+                    If Not PrimaryModelManager.SelectModel(_context, saved) Then
+                        PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+                    End If
+                End If
+            Catch
+                ' non-critical
+            End Try
+        End If
+
         AddContextMenu()
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
+
+        ' Initialize model menu buttons on the ribbon
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+            End If
+        Catch
+            ' non-critical
+        End Try
+
     End Sub
 
 
