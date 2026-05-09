@@ -233,7 +233,7 @@ Namespace SharedLibrary
 
                 If TimeoutValue = 0 Then TimeoutValue = 30000
 
-                Dim timeoutSeconds = CInt(TimeoutValue \ 1000)
+                Dim timeoutSeconds As Integer = Math.Max(1, CInt(Math.Ceiling(TimeoutValue / 1000.0)))
 
                 If Not SharedMethods.ProcessParameterPlaceholders(APICall) Then
                     If Not Hidesplash Then ShowCustomMessageBox("Aborted by user.") Else Return "Aborted by user."
@@ -338,21 +338,31 @@ Namespace SharedLibrary
                 End If
 
                 ' Create splash & CTS once:
-                splash = New SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, timeoutSeconds)
+                splash = New SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
 
-                'cts = New System.Threading.CancellationTokenSource()
-                'AddHandler splash.CancelRequested, Sub() cts.Cancel()
-                'Dim ct As System.Threading.CancellationToken = cts.Token
-
-                ' Link a local CTS with the external token so both caller cancellation and the splash cancel button apply.
+                ' Link a local CTS with the external token so caller cancellation, timeout, and the splash cancel button apply.
                 cts = System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken)
                 AddHandler splash.CancelRequested, Sub() cts.Cancel()
                 Dim ct As System.Threading.CancellationToken = cts.Token
 
+                Dim restartCountdownAndTimeout As Action(Of String) =
+                        Sub(newBaseText As String)
+                            cts.CancelAfter(TimeSpan.FromMilliseconds(TimeoutValue))
+
+                            If Not Hidesplash Then
+                                If newBaseText Is Nothing Then
+                                    splash.RestartCountdown(timeoutSeconds)
+                                Else
+                                    splash.RestartCountdown(timeoutSeconds, newBaseText)
+                                End If
+                            End If
+                        End Sub
+
                 If Not Hidesplash Then
                     splash.Show()
-                    splash.RestartCountdown(timeoutSeconds)
                 End If
+
+                restartCountdownAndTimeout(Nothing)
 
                 Endpoint = Endpoint.Replace("{promptsystem}", CleanString(Left(promptSystem, 32000)))
                 Endpoint = Endpoint.Replace("{promptuser}", CleanString(Left(promptUser, 32000).Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "").Trim()))
@@ -607,9 +617,7 @@ Namespace SharedLibrary
 
                                     For attempt As Integer = 0 To maxRetries
                                         If attempt > 0 Then
-                                            If Not Hidesplash Then
-                                                splash.RestartCountdown(timeoutSeconds, "Slowing down due to AI...")
-                                            End If
+                                            restartCountdownAndTimeout("Slowing down due to AI...")
                                             Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
                                         End If
 
@@ -636,7 +644,7 @@ Namespace SharedLibrary
                                         postReq.Content = attemptMultipart
                                         ApplyHeaders(postReq.Headers, HeaderA, HeaderB)
 
-                                        splash.RestartCountdown(timeoutSeconds)
+                                        restartCountdownAndTimeout(Nothing)
 
                                         If context.INI_APIDebug Then
                                             Dim multipartInfo As New System.Text.StringBuilder()
@@ -803,13 +811,11 @@ Namespace SharedLibrary
                         For attempt As Integer = 0 To maxRetries
                             ' On retries, wait the specified delay before sending a new request.
                             If attempt > 0 Then
-                                If Not Hidesplash Then
-                                    splash.RestartCountdown(timeoutSeconds, "Slowing down due to AI...")
-                                End If
+                                restartCountdownAndTimeout("Slowing down due to AI...")
                                 Await System.Threading.Tasks.Task.Delay(delayIntervals(attempt - 1), ct)
                             End If
 
-                            splash.RestartCountdown(timeoutSeconds)
+                            restartCountdownAndTimeout(Nothing)
 
                             If context.INI_APIDebug Then
                                 If useGetMethod Then
@@ -859,9 +865,7 @@ Namespace SharedLibrary
                             End If
                         Next
 
-                        If Not Hidesplash Then
-                            splash.RestartCountdown(timeoutSeconds, "Waiting for the AI to respond...")
-                        End If
+                        restartCountdownAndTimeout("Waiting for the AI to respond...")
 
                         If context.INI_APIDebug Then
                             Debug.WriteLine($"RECEIVED FROM API:{Environment.NewLine}{responseText}")
@@ -971,7 +975,7 @@ Namespace SharedLibrary
                                 End Try
                             End If
 
-                            splash.RestartCountdown(timeoutSeconds)
+                            restartCountdownAndTimeout(Nothing)
 
                             ' 4) Send GET request via WebRequest.
                             Dim getResult = Await SendViaWebRequestAsync(
