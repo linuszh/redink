@@ -159,26 +159,34 @@ Public Class DragDropForm
 
     ''' <summary>
     ''' Repositions the buttons below Label2 and resizes the form height to fit all content.
-    ''' Ensures the optional active-document button is wide enough for its full text.
+    ''' Keeps the Browse button at its original size and only enlarges the optional
+    ''' active-document button when necessary for its text.
     ''' </summary>
     Private Sub AdjustFormLayout()
         ' Let the label compute its auto-sized height
         Me.Label2.PerformLayout()
 
-        Dim targetButtonWidth As Integer = Me.btnBrowse.Width
+        Dim browseButtonWidth As Integer = Me.btnBrowse.Width
+        Dim activeDocumentButtonWidth As Integer = browseButtonWidth
 
         If _btnUseActiveDocument IsNot Nothing Then
             Dim measuredTextSize As Size = TextRenderer.MeasureText(_btnUseActiveDocument.Text, _btnUseActiveDocument.Font)
-            targetButtonWidth = Math.Max(targetButtonWidth, measuredTextSize.Width + 24)
+            activeDocumentButtonWidth = Math.Max(browseButtonWidth, measuredTextSize.Width + 24)
         End If
 
-        Me.btnBrowse.Width = targetButtonWidth
+        Me.btnBrowse.Width = browseButtonWidth
 
         If _btnUseActiveDocument IsNot Nothing Then
-            _btnUseActiveDocument.Width = targetButtonWidth
+            _btnUseActiveDocument.Width = activeDocumentButtonWidth
         End If
 
-        Dim requiredClientWidth As Integer = Me.btnBrowse.Left + targetButtonWidth + Me.btnBrowse.Left
+        Dim requiredClientWidth As Integer = Me.ClientSize.Width
+        requiredClientWidth = Math.Max(requiredClientWidth, Me.btnBrowse.Left + browseButtonWidth + Me.btnBrowse.Left)
+
+        If _btnUseActiveDocument IsNot Nothing Then
+            requiredClientWidth = Math.Max(requiredClientWidth, _btnUseActiveDocument.Left + activeDocumentButtonWidth + _btnUseActiveDocument.Left)
+        End If
+
         If requiredClientWidth > Me.ClientSize.Width Then
             Me.ClientSize = New Size(requiredClientWidth, Me.ClientSize.Height)
         End If
