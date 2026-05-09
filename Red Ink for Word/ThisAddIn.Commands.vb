@@ -1040,6 +1040,24 @@ Partial Public Class ThisAddIn
         _win2.ShowRaised()
     End Sub
 
+    Public Shared Sub SelectModel(modelNumber As Integer)
+        Try
+            If PrimaryModelManager.SelectModel(_context, modelNumber) Then
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                    End If
+                Catch
+                    ' non-critical
+                End Try
+            Else
+                SharedMethods.ShowCustomMessageBox($"Model {modelNumber} is not configured.")
+            End If
+        Catch ex As Exception
+            SharedMethods.ShowCustomMessageBox($"Error switching model: {ex.Message}")
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Displays the settings editor window with configuration options and tooltips.
     ''' Updates context menu after settings are changed.
@@ -1154,6 +1172,7 @@ Partial Public Class ThisAddIn
         splash.Close()
 
     End Sub
+
 
 
 
