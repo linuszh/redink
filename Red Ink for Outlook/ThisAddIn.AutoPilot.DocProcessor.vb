@@ -194,7 +194,7 @@ Partial Public Class ThisAddIn
 
             ApDashboardLog($"DocProcessor: extracted {paragraphs.Count} paragraphs from document.xml", "step")
 
-            Dim success = Await APProcessBatches(paragraphs, instruction, ct)
+            Dim success = Await APProcessBatches(paragraphs, instruction, ct, "main body")
             If Not success Then Return False
 
             APApplyTranslations(paragraphs)
@@ -504,7 +504,8 @@ Partial Public Class ThisAddIn
     ''' Batches paragraphs, sends them to the LLM, and stores processed results.
     ''' </summary>
     Private Async Function APProcessBatches(paragraphs As List(Of APParagraphInfo),
-                                             instruction As String, ct As CancellationToken) As Task(Of Boolean)
+                                         instruction As String, ct As CancellationToken,
+                                         Optional contentScope As String = "") As Task(Of Boolean)
 
         Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processable.Count = 0 Then Return True
@@ -588,6 +589,14 @@ Partial Public Class ThisAddIn
             "This marks the position of a footnote or endnote reference. " &
             "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
             "Do NOT move, add, or remove any ‖ characters."
+            ruleNum += 1
+        End If
+
+        If Not String.IsNullOrWhiteSpace(contentScope) Then
+            systemPrompt &= vbCrLf &
+            $"{ruleNum}. Section context: The text to process comes from the document's {contentScope}. " &
+            "Use this only as context for tone, conventions, and typical phrasing. " &
+            "Do not add labels, headings, or explanations, and do not mention the section unless the source text already does."
             ruleNum += 1
         End If
 
@@ -720,6 +729,34 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
+    ''' Determines whether the processed paragraph text is visibly unchanged.
+    ''' If unchanged, the original XML runs are left untouched so run-level formatting
+    ''' and metadata remain exactly as they were.
+    ''' </summary>
+    ''' <param name="para">The paragraph being processed.</param>
+    ''' <param name="translatedText">The LLM-processed paragraph text.</param>
+    ''' <returns><c>True</c> if the visible paragraph text did not change.</returns>
+    Private Function APIsParagraphTextVisiblyUnchanged(para As APParagraphInfo, translatedText As String) As Boolean
+        If para Is Nothing OrElse translatedText Is Nothing Then Return False
+
+        Dim originalVisibleText As String = If(para.FullText, "")
+        Dim processedVisibleText As String = translatedText
+
+        If para.TextRuns IsNot Nothing AndAlso para.TextRuns.Any(Function(r) r.HasNoteReferenceBefore) Then
+            originalVisibleText = originalVisibleText.Replace(AP_NoteRefMarker, "")
+            processedVisibleText = processedVisibleText.Replace(AP_NoteRefMarker, "")
+        End If
+
+        ' Only strip formatting markers when this paragraph was actually sent in marker mode
+        ' and the original visible text itself does not already contain pipe characters.
+        If para.MarkerText IsNot Nothing AndAlso Not originalVisibleText.Contains(AP_RunBoundaryMarker) Then
+            processedVisibleText = processedVisibleText.Replace(AP_RunBoundaryMarker, "")
+        End If
+
+        Return String.Equals(originalVisibleText, processedVisibleText, StringComparison.Ordinal)
+    End Function
+
+    ''' <summary>
     ''' Applies translated text back into the XML text nodes.
     ''' Partitions runs at footnote/endnote reference boundaries so that text
     ''' redistribution never moves content across a reference anchor.
@@ -735,6 +772,10 @@ Partial Public Class ThisAddIn
             If para.TextRuns.Count = 0 Then Continue For
 
             Dim translatedText = para.TranslatedText
+
+            ' If the visible text did not change, do not touch any text nodes.
+            ' This prevents formatting drift caused by redistributing text across runs.
+            If APIsParagraphTextVisiblyUnchanged(para, translatedText) Then Continue For
 
             ' Single run: simple replacement
             If para.TextRuns.Count = 1 Then
@@ -1242,7 +1283,9 @@ Partial Public Class ThisAddIn
         For Each pattern In {"header*.xml", "footer*.xml"}
             For Each filePath In Directory.GetFiles(wordDir, pattern)
                 Try
-                    Await APProcessXmlFile(filePath, instruction, ct)
+                    Dim isHeader As Boolean = Path.GetFileName(filePath).StartsWith("header", StringComparison.OrdinalIgnoreCase)
+                    Dim contentScope As String = If(isHeader, "header", "footer")
+                    Await APProcessXmlFile(filePath, instruction, ct, contentScope)
                 Catch ex As System.Exception
                     Debug.WriteLine("APProcessSubParts error for " & Path.GetFileName(filePath) & ": " & ex.Message)
                 End Try
@@ -1254,7 +1297,17 @@ Partial Public Class ThisAddIn
             Dim filePath = Path.Combine(wordDir, fileName)
             If File.Exists(filePath) Then
                 Try
-                    Await APProcessXmlFile(filePath, instruction, ct)
+                    Dim contentScope As String = ""
+                    Select Case fileName.ToLowerInvariant()
+                        Case "comments.xml"
+                            contentScope = "comments"
+                        Case "footnotes.xml"
+                            contentScope = "footnotes"
+                        Case "endnotes.xml"
+                            contentScope = "endnotes"
+                    End Select
+
+                    Await APProcessXmlFile(filePath, instruction, ct, contentScope)
                 Catch ex As System.Exception
                     Debug.WriteLine("APProcessSubParts error for " & fileName & ": " & ex.Message)
                 End Try
@@ -1263,7 +1316,8 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>Processes a single XML file (header/footer/comments/etc.).</summary>
-    Private Async Function APProcessXmlFile(filePath As String, instruction As String, ct As CancellationToken) As Task
+    Private Async Function APProcessXmlFile(filePath As String, instruction As String, ct As CancellationToken,
+                                        Optional contentScope As String = "") As Task
         Dim xmlDoc As New System.Xml.XmlDocument()
         xmlDoc.PreserveWhitespace = True
         xmlDoc.Load(filePath)
@@ -1275,7 +1329,7 @@ Partial Public Class ThisAddIn
         Dim processable = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processable.Count = 0 Then Return
 
-        Dim success = Await APProcessBatches(paragraphs, instruction, ct)
+        Dim success = Await APProcessBatches(paragraphs, instruction, ct, contentScope)
         If success Then
             APApplyTranslations(paragraphs)
             APExpandMultiLineParagraphs(paragraphs, nsMgr)
