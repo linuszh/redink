@@ -1475,7 +1475,7 @@ Namespace SharedLibrary
 
             Try
                 Dim isRemote = sourcePath.StartsWith("https://", StringComparison.OrdinalIgnoreCase) OrElse
-                               sourcePath.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                       sourcePath.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
 
                 ' Check if remote sources are allowed
                 If isRemote AndAlso Not _iniUpdateContext.INI_UpdateIniAllowRemote Then
@@ -1483,7 +1483,7 @@ Namespace SharedLibrary
                     Return Nothing
                 End If
 
-                Dim content As String = Nothing
+                Dim contentBytes As Byte() = Nothing
                 Dim signatureContent As String = Nothing
                 Dim expandedPath As String = Nothing
 
@@ -1494,15 +1494,15 @@ Namespace SharedLibrary
                     Using client As New HttpClient()
                         client.Timeout = TimeSpan.FromSeconds(30)
 
-                        ' Download main content
+                        ' Download main content as exact bytes
                         Try
-                            Dim contentTask = client.GetStringAsync(sourcePath)
+                            Dim contentTask = client.GetByteArrayAsync(sourcePath)
                             contentTask.Wait()
-                            content = contentTask.Result
+                            contentBytes = contentTask.Result
                         Catch ex As Exception
                             signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                                                 $"ERROR: Failed to download update source" & vbCrLf &
-                                                 $"DETAILS: {ex.Message}")
+                                         $"ERROR: Failed to download update source" & vbCrLf &
+                                         $"DETAILS: {ex.Message}")
                             failedSources?.Add(sourcePath)
                             Return Nothing
                         End Try
@@ -1515,10 +1515,10 @@ Namespace SharedLibrary
                                 signatureContent = sigTask.Result?.Trim()
                             Catch ex As Exception
                                 signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                                                     $"ERROR: Signature file not found or inaccessible" & vbCrLf &
-                                                     $"EXPECTED: {sourcePath}.sig" & vbCrLf &
-                                                     $"DETAILS: {ex.Message}" & vbCrLf &
-                                                     $"ACTION: Ensure the .sig file exists alongside the update file, or contact your administrator.")
+                                             $"ERROR: Signature file not found or inaccessible" & vbCrLf &
+                                             $"EXPECTED: {sourcePath}.sig" & vbCrLf &
+                                             $"DETAILS: {ex.Message}" & vbCrLf &
+                                             $"ACTION: Ensure the .sig file exists alongside the update file, or contact your administrator.")
                                 failedSources?.Add(sourcePath)
                             End Try
                         End If
@@ -1532,11 +1532,11 @@ Namespace SharedLibrary
                     End If
 
                     Try
-                        content = File.ReadAllText(expandedPath, Encoding.UTF8)
+                        contentBytes = File.ReadAllBytes(expandedPath)
                     Catch ex As Exception
                         signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                             $"ERROR: Failed to read update source file" & vbCrLf &
-                                             $"DETAILS: {ex.Message}")
+                                     $"ERROR: Failed to read update source file" & vbCrLf &
+                                     $"DETAILS: {ex.Message}")
                         failedSources?.Add(sourcePath)
                         Return Nothing
                     End Try
@@ -1549,16 +1549,16 @@ Namespace SharedLibrary
                                 signatureContent = File.ReadAllText(sigPath, Encoding.UTF8)?.Trim()
                             Catch ex As Exception
                                 signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                                     $"ERROR: Failed to read signature file" & vbCrLf &
-                                                     $"SIGNATURE FILE: {sigPath}" & vbCrLf &
-                                                     $"DETAILS: {ex.Message}")
+                                             $"ERROR: Failed to read signature file" & vbCrLf &
+                                             $"SIGNATURE FILE: {sigPath}" & vbCrLf &
+                                             $"DETAILS: {ex.Message}")
                                 failedSources?.Add(sourcePath)
                             End Try
                         Else
                             signatureErrors?.Add($"SOURCE: {expandedPath}" & vbCrLf &
-                                                 $"ERROR: Signature file not found" & vbCrLf &
-                                                 $"EXPECTED: {sigPath}" & vbCrLf &
-                                                 $"ACTION: Create a .sig file using the Signature Management tool, or contact your administrator.")
+                                         $"ERROR: Signature file not found" & vbCrLf &
+                                         $"EXPECTED: {sigPath}" & vbCrLf &
+                                         $"ACTION: Create a .sig file using the Signature Management tool, or contact your administrator.")
                             failedSources?.Add(sourcePath)
                         End If
                     End If
@@ -1570,47 +1570,52 @@ Namespace SharedLibrary
 
                     ' If no public key is configured, skip signature verification but add warning
                     If String.IsNullOrWhiteSpace(publicKey) Then
-                        ' Add warning for non-silent mode (will be shown to user)
-                        ' For silent modes (except SignedOnly), this is acceptable - just log it
                         signatureErrors?.Add($"SOURCE: {displayPath}" & vbCrLf &
-                                             $"WARNING: No public key configured - signature verification skipped" & vbCrLf &
-                                             $"NOTE: Updates will proceed without cryptographic verification." & vbCrLf &
-                                             $"ACTION: For better security, add a public key as the third parameter in UpdateSource:" & vbCrLf &
-                                             $"        UpdateSource = path; keys; PUBLIC_KEY_HERE")
-                        ' Mark as failed for SignedOnly mode, but allow content to be returned
+                                     $"WARNING: No public key configured - signature verification skipped" & vbCrLf &
+                                     $"NOTE: Updates will proceed without cryptographic verification." & vbCrLf &
+                                     $"ACTION: For better security, add a public key as the third parameter in UpdateSource:" & vbCrLf &
+                                     $"        UpdateSource = path; keys; PUBLIC_KEY_HERE")
                         failedSources?.Add(sourcePath)
-                        ' Return content anyway - caller will handle based on silent mode
-                        Return content
+                        Return DecodeContentText(contentBytes)
                     End If
 
                     If String.IsNullOrWhiteSpace(signatureContent) Then
-                        ' Error already added above
                         Return Nothing
                     End If
 
-                    If Not VerifyEd25519Signature(content, signatureContent, publicKey) Then
+                    If Not VerifyEd25519SignatureCompatible(contentBytes, signatureContent, publicKey) Then
                         signatureErrors?.Add($"SOURCE: {displayPath}" & vbCrLf &
-                                             $"ERROR: SIGNATURE VERIFICATION FAILED" & vbCrLf &
-                                             $"⚠ This may indicate the file has been tampered with!" & vbCrLf &
-                                             $"POSSIBLE CAUSES:" & vbCrLf &
-                                             $"  - File was modified after signing" & vbCrLf &
-                                             $"  - Wrong public key configured" & vbCrLf &
-                                             $"  - Signature file corrupted or for different file" & vbCrLf &
-                                             $"ACTION: Contact your administrator immediately.")
+                                     $"ERROR: SIGNATURE VERIFICATION FAILED" & vbCrLf &
+                                     $"⚠ This may indicate the file has been tampered with!" & vbCrLf &
+                                     $"POSSIBLE CAUSES:" & vbCrLf &
+                                     $"  - File was modified after signing" & vbCrLf &
+                                     $"  - Wrong public key configured" & vbCrLf &
+                                     $"  - Signature file corrupted or for different file" & vbCrLf &
+                                     $"ACTION: Contact your administrator immediately.")
                         failedSources?.Add(sourcePath)
                         Return Nothing
                     End If
                 End If
 
-                Return content
+                Return DecodeContentText(contentBytes)
 
             Catch ex As Exception
                 signatureErrors?.Add($"SOURCE: {sourcePath}" & vbCrLf &
-                                     $"ERROR: Unexpected error during update check" & vbCrLf &
-                                     $"DETAILS: {ex.Message}")
+                             $"ERROR: Unexpected error during update check" & vbCrLf &
+                             $"DETAILS: {ex.Message}")
                 failedSources?.Add(sourcePath)
                 Return Nothing
             End Try
+        End Function
+
+        Private Shared Function DecodeContentText(contentBytes As Byte()) As String
+            If contentBytes Is Nothing Then Return Nothing
+
+            Using ms As New MemoryStream(contentBytes)
+                Using reader As New StreamReader(ms, Encoding.UTF8, detectEncodingFromByteOrderMarks:=True)
+                    Return reader.ReadToEnd()
+                End Using
+            End Using
         End Function
 
 #End Region
@@ -3201,13 +3206,12 @@ Namespace SharedLibrary
         ''' <param name="signatureBase64">Base64-encoded signature bytes.</param>
         ''' <param name="publicKeyBase64">Base64-encoded Ed25519 public key bytes.</param>
         ''' <returns><c>True</c> if the signature is valid; otherwise <c>False</c>.</returns>
-        Private Shared Function VerifyEd25519Signature(content As String, signatureBase64 As String, publicKeyBase64 As String) As Boolean
+        Private Shared Function VerifyEd25519Signature(contentBytes As Byte(), signatureBase64 As String, publicKeyBase64 As String) As Boolean
             Try
                 Dim pubKeyBytes = System.Convert.FromBase64String(publicKeyBase64)
                 Dim publicKey As New Ed25519PublicKeyParameters(pubKeyBytes, 0)
 
                 Dim signatureBytes = System.Convert.FromBase64String(signatureBase64)
-                Dim contentBytes = Encoding.UTF8.GetBytes(content)
 
                 Dim verifier As New Ed25519Signer()
                 verifier.Init(False, publicKey)
@@ -3217,6 +3221,29 @@ Namespace SharedLibrary
 
             Catch ex As Exception
                 Debug.WriteLine($"Signature verification error: {ex.Message}")
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function VerifyEd25519Signature(content As String, signatureBase64 As String, publicKeyBase64 As String) As Boolean
+            If content Is Nothing Then Return False
+            Return VerifyEd25519Signature(Encoding.UTF8.GetBytes(content), signatureBase64, publicKeyBase64)
+        End Function
+
+        Private Shared Function VerifyEd25519SignatureCompatible(contentBytes As Byte(), signatureBase64 As String, publicKeyBase64 As String) As Boolean
+            If contentBytes Is Nothing Then Return False
+
+            ' Preferred path: verify the exact bytes that were signed.
+            If VerifyEd25519Signature(contentBytes, signatureBase64, publicKeyBase64) Then
+                Return True
+            End If
+
+            ' Compatibility fallback: preserve support for any legacy text-based signatures.
+            Try
+                Dim decodedContent = DecodeContentText(contentBytes)
+                Return VerifyEd25519Signature(decodedContent, signatureBase64, publicKeyBase64)
+            Catch ex As Exception
+                Debug.WriteLine($"Legacy signature compatibility check failed: {ex.Message}")
                 Return False
             End Try
         End Function
@@ -3240,10 +3267,10 @@ Namespace SharedLibrary
                     Return False
                 End If
 
-                Dim content = File.ReadAllText(filePath, Encoding.UTF8)
+                Dim contentBytes = File.ReadAllBytes(filePath)
                 Dim signature = File.ReadAllText(sigPath, Encoding.UTF8).Trim()
 
-                Return VerifyEd25519Signature(content, signature, publicKeyBase64)
+                Return VerifyEd25519SignatureCompatible(contentBytes, signature, publicKeyBase64)
 
             Catch ex As Exception
                 ShowCustomMessageBox($"Error verifying signature: {ex.Message}")
