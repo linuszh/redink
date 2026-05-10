@@ -138,7 +138,7 @@ Partial Public Class ThisAddIn
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
 
-    Private Const AP_MaxToolIterations As Integer = 30
+    Private Const AP_MaxToolIterations As Integer = 50
 
     ''' <summary>
     ''' Product IDs whose Pro license holders are permitted to use AutoPilot.
