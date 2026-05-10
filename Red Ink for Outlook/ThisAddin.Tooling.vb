@@ -1041,6 +1041,9 @@ Partial Public Class ThisAddIn
         ''' <summary>Optional UI log window instance used for user-visible progress logging.</summary>
         Public Property LogWindowForm As LogWindow
 
+        Public Property FailedToolCallCounts As Dictionary(Of String, Integer)
+        Public Property DuplicateFailureAbortThreshold As Integer
+
         ''' <summary>
         ''' Initializes a new tool execution context with default collections and limits.
         ''' </summary>
@@ -1048,6 +1051,8 @@ Partial Public Class ThisAddIn
             SelectedTools = New List(Of ModelConfig)()
             AllToolResponses = New List(Of ToolResponse)()
             LogEntries = New List(Of String)()
+            FailedToolCallCounts = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+            DuplicateFailureAbortThreshold = 2
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
@@ -1271,9 +1276,14 @@ Partial Public Class ThisAddIn
             Dim currentResponse As String = ""
             Dim iteration As Integer = 0
             Dim fullUserPrompt As String = ""
+            Dim abortDueToToolError As Boolean = False
+            Dim abortToolErrorMessage As String = ""
+            Dim abortToolName As String = ""
+            Dim abortToolParamSummary As String = ""
+            Dim abortToolRawCallJson As String = ""
+            Dim abortFactsPrompt As String = ""
 
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
-
             While iteration < context.MaxIterations AndAlso Not context.IsCancelled
 
                 ' Check for cancellation token at each iteration
@@ -1435,6 +1445,25 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        Dim toolCallSignature = BuildToolCallSignature(tc)
+                        Dim previousFailureCount As Integer = 0
+
+                        If context.FailedToolCallCounts.TryGetValue(toolCallSignature, previousFailureCount) AndAlso
+                           previousFailureCount >= context.DuplicateFailureAbortThreshold Then
+
+                            Dim duplicateMsg =
+                                        $"Aborting because the same failing tool call was repeated {previousFailureCount} time(s): {tc.ToolName}. " &
+                                        "The model should revise its plan instead of retrying the identical call."
+
+                            context.LogError(duplicateMsg, details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
+                            abortDueToToolError = True
+                            abortToolName = tc.ToolName
+                            abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                            abortToolRawCallJson = tc.RawJson
+                            abortToolErrorMessage = duplicateMsg
+                            Exit For
+                        End If
+
                         Dim toolResponse = Await ExecuteToolCall(tc, toolConfig, context, cancellationToken)
                         toolResponse.OriginalCallJson = tc.RawJson
                         context.AllToolResponses.Add(toolResponse)
@@ -1444,18 +1473,37 @@ Partial Public Class ThisAddIn
                                 $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
                                 details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
 
+                            If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
+                                context.FailedToolCallCounts(toolCallSignature) += 1
+                            Else
+                                context.FailedToolCallCounts(toolCallSignature) = 1
+                            End If
+
                             Select Case toolConfig.ToolErrorHandling?.ToLowerInvariant()
                                 Case "abort"
                                     context.LogError("Aborting due to tool error (ToolErrorHandling=abort)")
-                                    ShowCustomMessageBox($"Tool execution failed: {toolResponse.ErrorMessage}")
-                                    ToolingFileLogger.EndSession(False, $"Tool error: {toolResponse.ErrorMessage}")
-                                    Return ""
+
+                                    If ShouldShowToolingModalDialogs() Then
+                                        ShowCustomMessageBox($"Tool execution failed: {toolResponse.ErrorMessage}")
+                                    End If
+
+                                    abortDueToToolError = True
+                                    abortToolName = tc.ToolName
+                                    abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                                    abortToolRawCallJson = tc.RawJson
+                                    abortToolErrorMessage = If(toolResponse.ErrorMessage, "Unknown tool error.")
+                                    Exit For
+
                                 Case "retry"
                                     context.LogWarn("Will retry on next iteration (ToolErrorHandling=retry)")
                                 Case Else
                                     context.LogWarn("Skipping tool error (ToolErrorHandling=skip)")
                             End Select
                         Else
+                            If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
+                                context.FailedToolCallCounts.Remove(toolCallSignature)
+                            End If
+
                             context.Log($"Tool completed successfully ({toolResponse.Response?.Length} chars)", "success")
                         End If
                     Next
@@ -1463,6 +1511,11 @@ Partial Public Class ThisAddIn
                     Dim toolResponses = BuildToolResponsesForModel(context.AllToolResponses, context.ToolingModel)
                     INI_APICall_ToolResponses_2 = toolResponses
                     context.Log("Tool responses prepared for next iteration")
+
+                    If abortDueToToolError Then
+                        context.LogWarn("Stopping tooling loop after tool error abort")
+                        Exit While
+                    End If
 
                 Else
                     context.Log("Text response received (no tool calls)")
@@ -1527,6 +1580,118 @@ Partial Public Class ThisAddIn
                 End Using
             End If
 
+            If abortDueToToolError AndAlso
+                   Not context.IsCancelled AndAlso
+                   Not cancellationToken.IsCancellationRequested Then
+
+                context.Log("Forcing final response after tool error abort...")
+
+                ' Disable further tool calls, but keep accumulated tool responses available.
+                INI_APICall_ToolInstructions_2 = ""
+
+                Dim successfulToolFacts As New System.Text.StringBuilder()
+                Dim failedToolFacts As New System.Text.StringBuilder()
+
+                For Each tr In context.AllToolResponses
+                    If tr Is Nothing Then Continue For
+
+                    If tr.Success Then
+                        successfulToolFacts.AppendLine($"- Tool: {tr.ToolName}")
+                        If Not String.IsNullOrWhiteSpace(tr.Response) Then
+                            successfulToolFacts.AppendLine($"  Result: {BuildResultExcerpt(tr.Response, 160)}")
+                        End If
+                    Else
+                        failedToolFacts.AppendLine($"- Tool: {tr.ToolName}")
+                        If Not String.IsNullOrWhiteSpace(tr.ErrorMessage) Then
+                            failedToolFacts.AppendLine($"  Error: {tr.ErrorMessage}")
+                        End If
+                    End If
+                Next
+
+                abortFactsPrompt =
+                        "<TOOL_ABORT_FACTS>" & Environment.NewLine &
+                        "Use ONLY the facts in this block when explaining the failure." & Environment.NewLine &
+                        "Do NOT replace the stated failure with another cause." & Environment.NewLine &
+                        $"Failed tool: {abortToolName}" & Environment.NewLine &
+                        $"Failed tool parameters: {abortToolParamSummary}" & Environment.NewLine &
+                        $"Failed tool raw call JSON: {abortToolRawCallJson}" & Environment.NewLine &
+                        $"Exact failure message: {abortToolErrorMessage}" & Environment.NewLine &
+                        Environment.NewLine &
+                        "<COMPLETED_TOOL_STEPS>" & Environment.NewLine &
+                        If(successfulToolFacts.Length > 0, successfulToolFacts.ToString().TrimEnd(), "(none)") & Environment.NewLine &
+                        "</COMPLETED_TOOL_STEPS>" & Environment.NewLine &
+                        Environment.NewLine &
+                        "<FAILED_TOOL_STEPS>" & Environment.NewLine &
+                        If(failedToolFacts.Length > 0, failedToolFacts.ToString().TrimEnd(), "(none)") & Environment.NewLine &
+                        "</FAILED_TOOL_STEPS>" & Environment.NewLine &
+                        "</TOOL_ABORT_FACTS>"
+
+                Dim abortFinalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    "IMPORTANT: A tool-assisted run has stopped because a tool call failed. Do NOT call any more tools. " &
+                    "Provide a concise, user-friendly status update. " &
+                    "You MUST rely only on the explicitly supplied failure facts and completed-step facts. " &
+                    "Do NOT infer a different cause. Do NOT rewrite the failure into another tool problem. " &
+                    "Treat the exact failure message as authoritative. " &
+                    "If the failed tool parameters indicate action='delete' or action='rmdir', describe it as a delete/remove attempt, not as a move. " &
+                    "If the exact failure says permission was disabled, state that plainly and do not replace it with a path-validation explanation. " &
+                    "Explain clearly: (1) what was completed successfully, (2) what failed, (3) why it failed, and (4) what therefore remains incomplete. " &
+                    "Do not mention internal logs, JSON, raw tool protocols, or hidden implementation details."
+
+                Dim abortFinalUserPrompt As String = fullUserPrompt & Environment.NewLine & Environment.NewLine &
+                            abortFactsPrompt
+
+                ToolingFileLogger.LogStep("Forcing final LLM call without tools after tool error abort")
+                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+                Using timeoutCts As New System.Threading.CancellationTokenSource()
+                    Dim totalTimeout = effectiveTimeout + 60
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+
+                    Using combinedCts As System.Threading.CancellationTokenSource =
+            System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+
+                        Try
+                            Dim finalAbortResponse As String = Await LLM(
+                    abortFinalSysPrompt,
+                    abortFinalUserPrompt,
+                    "", "", 0,
+                    useSecondAPI,
+                    hideSplash,
+                    otherPrompt,
+                    fileObject,
+                    combinedCts.Token,
+                    True, True, binaryOutputDirectory:=binaryOutputDirectory)
+
+                            If Not String.IsNullOrWhiteSpace(finalAbortResponse) Then
+                                currentResponse = finalAbortResponse
+                                context.Log($"Final abort summary received ({currentResponse.Length} chars)")
+                                ToolingFileLogger.LogRawResponseStub("Main LLM() - Tool Error Final", currentResponse)
+                            Else
+                                context.LogWarn("Empty response from final abort-summary LLM call")
+                                currentResponse =
+                        If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                           "The tool-assisted run stopped before completion.",
+                           $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
+                            End If
+
+                        Catch ex As OperationCanceledException
+                            context.LogWarn("Final abort-summary call was cancelled")
+                            currentResponse =
+                    If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                       "The tool-assisted run stopped before completion.",
+                       $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
+
+                        Catch ex As Exception
+                            context.LogError($"Error during final abort-summary call: {ex.Message}", ex:=ex)
+                            currentResponse =
+                    If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                       "The tool-assisted run stopped before completion.",
+                       $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
+                        End Try
+                    End Using
+                End Using
+            End If
+
             If context.IsCancelled OrElse cancellationToken.IsCancellationRequested Then
                 context.LogWarn("Session cancelled")
                 ToolingFileLogger.EndSession(False, "Cancelled")
@@ -1535,7 +1700,9 @@ Partial Public Class ThisAddIn
 
             If iteration >= context.MaxIterations Then
                 context.LogWarn($"Maximum iterations ({context.MaxIterations}) reached")
-                ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
+                If ShouldShowToolingModalDialogs() Then
+                    ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
+                End If
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
             End If
 
@@ -1549,7 +1716,15 @@ Partial Public Class ThisAddIn
 
             currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
 
-            ToolingFileLogger.EndSession(True, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
+            Dim sessionSucceeded As Boolean = Not abortDueToToolError
+            Dim sessionSummary As String =
+    $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}"
+
+            If abortDueToToolError AndAlso Not String.IsNullOrWhiteSpace(abortToolErrorMessage) Then
+                sessionSummary &= $", Aborted due to tool error: {abortToolErrorMessage}"
+            End If
+
+            ToolingFileLogger.EndSession(sessionSucceeded, sessionSummary)
             Return currentResponse
 
         Catch ex As OperationCanceledException
@@ -1559,9 +1734,12 @@ Partial Public Class ThisAddIn
 
         Catch ex As Exception
             context.LogError($"Error in tooling loop: {ex.Message}", ex:=ex)
-            ShowCustomMessageBox($"Error during tool execution: {ex.Message}")
+            If ShouldShowToolingModalDialogs() Then
+                ShowCustomMessageBox($"Error during tool execution: {ex.Message}")
+            End If
+
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
-            Return ""
+            Return $"Error during tool execution: {ex.Message}"
         Finally
             INI_APICall_ToolInstructions_2 = ""
             INI_APICall_ToolResponses_2 = ""
@@ -1609,6 +1787,44 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "Tooling Helper Functions"
+
+    Private Function BuildToolCallSignature(toolCall As ToolCall) As String
+        If toolCall Is Nothing Then Return ""
+
+        Dim parts As New List(Of String)()
+
+        If toolCall.Arguments IsNot Nothing Then
+            For Each kvp In toolCall.Arguments.OrderBy(Function(x) x.Key, StringComparer.OrdinalIgnoreCase)
+                parts.Add(kvp.Key.ToLowerInvariant() & "=" & NormalizeToolArgumentValue(kvp.Value))
+            Next
+        End If
+
+        Return toolCall.ToolName & "|" & String.Join(";", parts)
+    End Function
+
+    Private Function NormalizeToolArgumentValue(value As Object) As String
+        If value Is Nothing Then Return "null"
+
+        If TypeOf value Is JValue Then
+            Return DirectCast(value, JValue).ToString(Formatting.None)
+        End If
+
+        If TypeOf value Is JToken Then
+            Return DirectCast(value, JToken).ToString(Formatting.None)
+        End If
+
+        If TypeOf value Is IEnumerable(Of Object) AndAlso Not TypeOf value Is String Then
+            Dim items = DirectCast(value, IEnumerable(Of Object)).
+                Select(Function(v) NormalizeToolArgumentValue(v))
+            Return "[" & String.Join(",", items) & "]"
+        End If
+
+        Return System.Convert.ToString(value, Globalization.CultureInfo.InvariantCulture)
+    End Function
+
+    Private Function ShouldShowToolingModalDialogs() As Boolean
+        Return Not _chatAgentActive AndAlso Not _apActive
+    End Function
 
     Private Const InternalKnowledgeToolNamePrefix As String = "knowledge_search_store_"
 
@@ -2641,6 +2857,12 @@ Partial Public Class ThisAddIn
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        ' ── Local Chat Agent workspace tools; never available to AutoPilot ──
+        If _chatAgentActive AndAlso Not _apActive AndAlso IsChatAgentWorkspaceTool(toolCall.ToolName) Then
+            Dim workspaceResult = Await ExecuteChatAgentWorkspaceTool(toolCall, context, cancellationToken)
+            Return workspaceResult
+        End If
 
         ' ── AutoPilot / Chat Agent internal tool routing ──
         If (_apActive OrElse _chatAgentActive) AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then

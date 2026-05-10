@@ -300,6 +300,8 @@ Public Class frmAIChat
     ''' </summary>
     Private SystemPrompt As String = ""
 
+
+
     ' =========================================================================
     ' Private Fields - Model Configuration
     ' =========================================================================
@@ -946,7 +948,7 @@ Public Class frmAIChat
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
                         If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
-                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have access to all other open Word documents (the user's request may refer to them)." & vbLf, "") &
+                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") &
                         If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
                            _context.SP_Add_ChatWord_Commands,
                            _context.SP_Add_Chat_NoCommands)
@@ -958,6 +960,21 @@ Public Class frmAIChat
                 If Not String.IsNullOrWhiteSpace(memoryContent) Then
                     SystemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
                 End If
+            End If
+
+            If My.Settings.DoCommands AndAlso (chkIncludeDocText.Checked Or chkIncludeselection.Checked) Then
+                Dim activeDocumentNameForCommands As String = ""
+
+                Try
+                    activeDocumentNameForCommands = Globals.ThisAddIn.Application.ActiveDocument.Name
+                Catch
+                    activeDocumentNameForCommands = "the currently active Word document"
+                End Try
+
+                SystemPrompt &= vbLf &
+                    $"Command scope: All commands are executed only against the currently active Word document '{activeDocumentNameForCommands}'. " &
+                    "Other open documents, if provided, are read-only context. Never issue a command for text that appears only in another document. " &
+                    "If the user asks to work on another document, tell the user to activate that document first."
             End If
 
             ' ──────────────────────────────────────────────────────────────
@@ -2646,11 +2663,17 @@ Public Class frmAIChat
     ''' <param name="input">Text potentially containing command blocks</param>
     ''' <returns>Text with commands removed and whitespace normalized</returns>
     Public Function RemoveCommands(input As String) As String
+        If input Is Nothing Then Return ""
+
         Dim output As String = input
+
         Try
-            ' Remove command blocks along with surrounding whitespace/linebreaks
-            Dim commandPattern As String = "\s*[\r\n]*\s*\[#[^:]+:\s*@@[^@]+@@\s*(?:§§[^§]*§§)?\s*#\]\s*[\r\n]*\s*"
-            Dim regex As New Regex(commandPattern)
+            ' Keep this pattern aligned with ParseCommands:
+            ' - single @ is allowed inside @@...@@
+            ' - single § is allowed inside §§...§§
+            ' - only @@ and §§ close their respective arguments
+            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:§§(?<arg2>(?:[^§]|§(?!§))*?)§§)?\s*#\]\s*[\r\n]*\s*"
+            Dim regex As New Regex(commandPattern, RegexOptions.Singleline)
             output = regex.Replace(input, "")
 
             ' Collapse 3+ consecutive line breaks to single newline
@@ -2675,9 +2698,132 @@ Public Class frmAIChat
     ''' <summary>Tracks commands that failed execution for error reporting to chat</summary>
     Private FailedCommandsList As New List(Of String)()
 
+    ''' <summary>Start position of the last document action performed by chat commands.</summary>
+    Private _lastActionStart As Integer = -1
+
+    ''' <summary>End position of the last document action performed by chat commands.</summary>
+    Private _lastActionEnd As Integer = -1
+
     ' =========================================================================
     ' Main Command Execution Orchestrator
     ' =========================================================================
+
+    ''' <summary>
+    ''' Stores the last active-document range changed or commented by a chat command.
+    ''' </summary>
+    Private Sub RememberLastActionRange(startPos As Integer, endPos As Integer)
+        Try
+            Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+            If doc Is Nothing Then Return
+
+            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+
+            If safeEnd < safeStart Then
+                safeEnd = safeStart
+            End If
+
+            _lastActionStart = safeStart
+            _lastActionEnd = safeEnd
+        Catch
+            _lastActionStart = -1
+            _lastActionEnd = -1
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Selects a range in the currently active document and scrolls it into view.
+    ''' </summary>
+    Private Function SelectAndShowActiveDocumentRange(startPos As Integer, endPos As Integer) As Boolean
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc Is Nothing Then Return False
+
+            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+
+            If safeEnd < safeStart Then
+                safeEnd = safeStart
+            End If
+
+            app.Activate()
+            doc.Activate()
+
+            Dim targetRange As Microsoft.Office.Interop.Word.Range = doc.Range(safeStart, safeEnd)
+            targetRange.Select()
+
+            Try
+                Dim scrollTarget As Object = targetRange
+                app.ActiveWindow.ScrollIntoView(scrollTarget, True)
+            Catch
+                ' Selection is already sufficient if ScrollIntoView is unavailable.
+            End Try
+
+            Return True
+        Catch ex As Exception
+            Debug.WriteLine($"SelectAndShowActiveDocumentRange failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Executes a navigation command in the currently active document.
+    ''' Use "last" to jump to the last chat-command action.
+    ''' </summary>
+    Private Function ExecuteGotoCommand(targetText As String, Optional onlySelection As Boolean = False) As Boolean
+        Try
+            targetText = CleanArgument(targetText)
+
+            If String.IsNullOrWhiteSpace(targetText) OrElse
+           targetText.Equals("last", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("lastaction", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("last action", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("last point of action", StringComparison.OrdinalIgnoreCase) Then
+
+                If _lastActionStart >= 0 AndAlso _lastActionEnd >= _lastActionStart Then
+                    Return SelectAndShowActiveDocumentRange(_lastActionStart, _lastActionEnd)
+                End If
+
+                Debug.WriteLine("Goto: No last action range is available.")
+                Return False
+            End If
+
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc Is Nothing Then Return False
+
+            targetText = DecodeParagraphMarks(targetText)
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
+            Dim searchRange As Microsoft.Office.Interop.Word.Range
+
+            If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
+                searchRange = sel.Range.Duplicate
+            Else
+                searchRange = doc.Content.Duplicate
+            End If
+
+            sel.SetRange(searchRange.Start, searchRange.End)
+
+            If Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then
+                Dim foundStart As Integer = sel.Start
+                Dim foundEnd As Integer = sel.End
+                Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
+            End If
+
+            Debug.WriteLine($"Goto: Target text not found: '{targetText}'.")
+            Return False
+
+        Catch ex As Exception
+            Debug.WriteLine($"ExecuteGotoCommand failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
     ''' <summary>
     ''' Executes parsed bot commands on the active Word document.
@@ -2837,6 +2983,13 @@ Public Class frmAIChat
                     System.Threading.Thread.Sleep(500)
                     Debug.WriteLine("ExecuteInsert")
                     commandSuccess = ExecuteInsertCommand(pc.Argument1)
+
+                Case "goto", "jump", "show", "select"
+                    commandDescription = $"Showing '{pc.Argument1}'"
+                    CommandsList = commandDescription & Environment.NewLine & CommandsList
+                    LastCommandsList = CommandsList
+                    System.Threading.Thread.Sleep(250)
+                    commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection)
 
                 Case Else
                     commandDescription = $"Unknown command: '{pc.Command}'"
@@ -3205,17 +3358,17 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Adds Word comment to all occurrences of search term in document or selection.
+    ''' Adds a Word comment to the first occurrence of search term in document or selection.
     ''' Uses FindLongTextInChunks for reliable matching in large documents.
     ''' </summary>
     ''' <param name="searchTerm">Text to search for as comment anchor</param>
     ''' <param name="commentText">Comment body text (prefixed with AN6)</param>
     ''' <param name="onlySelection">True to restrict to current selection</param>
-    ''' <returns>True if at least one comment added</returns>
+    ''' <returns>True if one comment was added</returns>
     ''' <remarks>
-    ''' Creates empty comment then fills body (avoids issues with special characters).
-    ''' Applies Markdown formatting if chkConvertMarkdown enabled via InsertMarkdownToComment.
-    ''' Restores original selection after operation with boundary guards.
+    ''' Chat-generated addcomment commands are expected to target the first matching anchor.
+    ''' This avoids adding duplicate comments to repeated short phrases and prevents loops
+    ''' caused by Word moving the active selection into the comment after Comments.Add.
     ''' </remarks>
     Private Function ExecuteAddComment(
         ByVal searchTerm As String,
@@ -3225,17 +3378,18 @@ Public Class frmAIChat
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
 
-        ' Validate inputs
         If String.IsNullOrWhiteSpace(searchTerm) Then
             Debug.WriteLine("AddComments: Search term is empty.")
             Return False
         End If
+
         If String.IsNullOrWhiteSpace(commentText) Then
             Debug.WriteLine("AddComments: Comment text is empty.")
             Return False
         End If
 
-        ' Get Word application and active document
+        searchTerm = DecodeParagraphMarks(searchTerm)
+
         Try
             Try
                 app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
@@ -3253,6 +3407,7 @@ Public Class frmAIChat
             Debug.WriteLine("AddComments: No active document found.")
             Return False
         End Try
+
         If doc Is Nothing Then
             Debug.WriteLine("AddComments: No active document found.")
             Return False
@@ -3262,7 +3417,6 @@ Public Class frmAIChat
         Dim originalSelStart As Integer = sel.Start
         Dim originalSelEnd As Integer = sel.End
 
-        ' Determine working range
         Dim workRange As Microsoft.Office.Interop.Word.Range
         If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
             workRange = sel.Range.Duplicate
@@ -3270,51 +3424,50 @@ Public Class frmAIChat
             workRange = doc.Content.Duplicate
         End If
 
-        ' Initialize selection to working range
-        sel.SetRange(workRange.Start, workRange.End)
-        Dim limitEnd As Integer = workRange.End
-
-        Dim added As Integer = 0
-
         Try
+            ' Search only inside the intended working range.
+            sel.SetRange(workRange.Start, workRange.End)
+
+            If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then
+                Debug.WriteLine($"AddComments: Search term not found: '{searchTerm}'.")
+                Return False
+            End If
+
+            If sel Is Nothing OrElse sel.Start >= sel.End Then
+                Debug.WriteLine($"AddComments: Invalid found range for term '{searchTerm}'.")
+                Return False
+            End If
+
+            Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
+            Dim anchorStart As Integer = anchor.Start
+            Dim anchorEnd As Integer = anchor.End
+
+            If anchorStart < workRange.Start OrElse anchorEnd > workRange.End Then
+                Debug.WriteLine($"AddComments: Found range outside working range for term '{searchTerm}'.")
+                Return False
+            End If
+
             Using ThisAddIn.BeginMarkupAuthorScope(app)
-                ' Iterate all matches using robust chunk finder
-                Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) = True
-                    If sel Is Nothing Then Exit Do
+                Dim newComment As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(anchor, String.Empty)
 
-                    Try
-                        ' Anchor comment to found range
-                        Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
-                        Dim newComment As Microsoft.Office.Interop.Word.Comment = Nothing
-
-                        ' Create empty comment then fill body (avoids special char issues)
-                        newComment = doc.Comments.Add(anchor, String.Empty)
-
-                        ' Apply Markdown formatting if enabled
-                        If chkConvertMarkdown.Checked Then
-                            ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
-                        Else
-                            newComment.Range.Text = AN6 & ": " & commentText
-                        End If
-
-                        added += 1
-                    Catch
-                        ' Ignore errors and continue with next occurrence
-                    End Try
-
-                    ' Advance selection beyond current match
-                    sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
-
-                    ' Safety: stop if reached end of working region
-                    If sel.Start >= limitEnd Then Exit Do
-
-                    sel.SetRange(sel.Start, limitEnd)
-                Loop
+                If chkConvertMarkdown.Checked Then
+                    ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
+                Else
+                    newComment.Range.Text = AN6 & ": " & commentText
+                End If
             End Using
+
+            Debug.WriteLine($"AddComments: Added one comment for term '{searchTerm}' at [{anchorStart},{anchorEnd}].")
+
+            RememberLastActionRange(anchorStart, anchorEnd)
+
+            Return True
+
         Catch ex As System.Exception
             Debug.WriteLine($"AddComments failed: {ex.Message}")
+            Return False
+
         Finally
-            ' Restore original selection with boundary guards
             Try
                 Dim s As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelStart, doc.Content.End))
                 Dim e As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelEnd, doc.Content.End))
@@ -3322,10 +3475,8 @@ Public Class frmAIChat
             Catch
             End Try
         End Try
-
-        Debug.WriteLine($"AddComments: Added {added} comments for term '{searchTerm}'.")
-        Return added > 0
     End Function
+
 
     ' =========================================================================
     ' Find Command
@@ -3718,6 +3869,11 @@ Public Class frmAIChat
                         doc.Application.Selection.Text = newText
                         Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
+                        Dim actionEnd As Integer = If(newText.Length > 0,
+                              Math.Min(mStart + newText.Length, doc.Content.End),
+                              mEnd)
+                        RememberLastActionRange(mStart, actionEnd)
+
                         ' Apply Markdown conversion if enabled and text was inserted
                         If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
                             Try
@@ -3935,6 +4091,8 @@ Public Class frmAIChat
                             Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
                             insertRange.Text = newText
 
+                            RememberLastActionRange(insertPosition, Math.Min(insertPosition + Len(newText), doc.Content.End))
+
                             ' Apply Markdown if enabled
                             If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
                                 Try
@@ -4051,9 +4209,12 @@ Public Class frmAIChat
             Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
                 Dim selection = doc.Application.Selection
                 selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
+
+                Dim insertStart As Integer = selection.Start
                 selection.Text = newText
 
-                ' Apply Markdown formatting if enabled
+                RememberLastActionRange(insertStart, Math.Min(insertStart + newText.Length, doc.Content.End))
+
                 If chkConvertMarkdown.Checked Then
                     Globals.ThisAddIn.ConvertMarkdownToWord()
                 End If
