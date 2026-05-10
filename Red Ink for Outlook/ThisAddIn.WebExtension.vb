@@ -44,6 +44,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading
 Imports System.Threading.Tasks
@@ -1206,8 +1207,29 @@ Partial Public Class ThisAddIn
         html.AppendLine(":root.light #agentModelBtn.active{background:#d4e6f1;border-color:#2980b9;color:#1a5276;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine("#agentFiles{font-size:.7rem;color:var(--muted);padding:0 1rem .5rem;display:none;} ")
         html.AppendLine("#agentFiles .file-tag{display:inline-block;background:var(--elev);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin:2px;font-size:.65rem;} ")
+        html.AppendLine("#agentWorkspace{font-size:.7rem;color:var(--muted);padding:0 1rem .35rem;display:none;border-top:1px solid var(--border);background:var(--bg);} ")
+        html.AppendLine("#agentWorkspace .ws-title{font-weight:600;color:var(--fg);margin-right:6px;} ")
+        html.AppendLine("#agentWorkspace .ws-path{opacity:.8;word-break:break-all;} ")
+        html.AppendLine("#agentWorkspace button{font-size:.65rem;padding:2px 6px;margin-left:4px;} ")
+        html.AppendLine(".inky-modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:50;padding:20px;} ")
+        html.AppendLine(".inky-modal-backdrop.show{display:flex;} ")
+        html.AppendLine(".inky-modal{width:min(560px,96vw);max-height:90vh;overflow:auto;background:var(--card);color:var(--fg);border:1px solid var(--border-strong);border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.35);} ")
+        html.AppendLine(".inky-modal-hd{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;border-bottom:1px solid var(--border);} ")
+        html.AppendLine(".inky-modal-ttl{font-weight:700;font-size:1rem;} ")
+        html.AppendLine(".inky-modal-close{padding:.35rem .55rem;line-height:1;} ")
+        html.AppendLine(".inky-modal-bd{padding:16px;} ")
+        html.AppendLine(".inky-modal-ft{display:flex;justify-content:flex-end;gap:8px;padding:14px 16px;border-top:1px solid var(--border);} ")
+        html.AppendLine(".inky-form-row{margin-bottom:14px;} ")
+        html.AppendLine(".inky-form-row:last-child{margin-bottom:0;} ")
+        html.AppendLine(".inky-form-row label.hd{display:block;font-size:.82rem;font-weight:600;color:var(--fg);margin-bottom:6px;} ")
+        html.AppendLine(".inky-help{font-size:.74rem;color:var(--muted);line-height:1.35;} ")
+        html.AppendLine(".inky-radio-list,.inky-check-list{display:flex;flex-direction:column;gap:8px;} ")
+        html.AppendLine(".inky-radio-list label,.inky-check-list label{display:flex;align-items:flex-start;gap:8px;font-size:.85rem;color:var(--fg);} ")
+        html.AppendLine(".inky-radio-list input,.inky-check-list input{margin-top:2px;} ")
+        html.AppendLine(".inky-pathbox{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--elev);font-size:.8rem;word-break:break-all;} ")
+        html.AppendLine(".inky-danger{color:#d35454;} ")
+        html.AppendLine(".inky-inline-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;} ")
         html.AppendLine("</style>")
-
         html.AppendLine("</head><body>")
         html.AppendLine("<div class=""wrap"">")
 
@@ -1263,7 +1285,21 @@ Partial Public Class ThisAddIn
                     "<button id=""cancelBtn"" style=""display:none;"">Cancel</button>" &
                 "</div>")
         html.AppendLine("  </div>")
+        html.AppendLine("  <div id=""agentWorkspace""></div>")
         html.AppendLine("  <div id=""agentFiles""></div>")
+        html.AppendLine("  <div id=""workspaceModalBackdrop"" class=""inky-modal-backdrop"">")
+        html.AppendLine("    <div class=""inky-modal"" role=""dialog"" aria-modal=""true"" aria-labelledby=""workspaceModalTitle"">")
+        html.AppendLine("      <div class=""inky-modal-hd"">")
+        html.AppendLine("        <div id=""workspaceModalTitle"" class=""inky-modal-ttl"">Agent Workspace</div>")
+        html.AppendLine("        <button id=""workspaceModalCloseBtn"" class=""inky-modal-close"" type=""button"" title=""Close"">✕</button>")
+        html.AppendLine("      </div>")
+        html.AppendLine("      <div id=""workspaceModalBody"" class=""inky-modal-bd""></div>")
+        html.AppendLine("      <div class=""inky-modal-ft"">")
+        html.AppendLine("        <button id=""workspaceModalCancelBtn"" type=""button"">Cancel</button>")
+        html.AppendLine("        <button id=""workspaceModalOkBtn"" type=""button"">Save</button>")
+        html.AppendLine("      </div>")
+        html.AppendLine("    </div>")
+        html.AppendLine("  </div>")
 
         ' Build dynamic hint text
         Dim hintParts As New System.Collections.Generic.List(Of String)()
@@ -1343,15 +1379,22 @@ Partial Public Class ThisAddIn
         html.AppendLine("const agentLbl=document.getElementById('agentLbl');")
         html.AppendLine("const toolLogBtn=document.getElementById('toolLogBtn');")
         html.AppendLine("const agentFilesEl=document.getElementById('agentFiles');")
+        html.AppendLine("const agentWorkspaceEl=document.getElementById('agentWorkspace');")
         html.AppendLine("const agentModelBtn=document.getElementById('agentModelBtn');")
+        html.AppendLine("const workspaceModalBackdrop=document.getElementById('workspaceModalBackdrop');")
+        html.AppendLine("const workspaceModalTitle=document.getElementById('workspaceModalTitle');")
+        html.AppendLine("const workspaceModalBody=document.getElementById('workspaceModalBody');")
+        html.AppendLine("const workspaceModalOkBtn=document.getElementById('workspaceModalOkBtn');")
+        html.AppendLine("const workspaceModalCancelBtn=document.getElementById('workspaceModalCancelBtn');")
+        html.AppendLine("const workspaceModalCloseBtn=document.getElementById('workspaceModalCloseBtn');")
         html.AppendLine("let __agentModelActive=false;")
         html.AppendLine("let __agentModelAvailable=false;")
         html.AppendLine("let __agentEnabled=false;")
         html.AppendLine("let __toolLogEnabled=true;")
         html.AppendLine("let __toolingEnabled=false;")
         html.AppendLine("let __modelSupportsTooling=false;")
-        html.AppendLine("let __memoryEnabled=false;")
-        html.AppendLine("const memoryEditLnk=document.getElementById('memoryEditLnk');")
+        html.AppendLine("let __workspaceDialogMode='';")
+        html.AppendLine("function syncAgentUi(state){state=state||{};if(typeof state.agentEnabled==='boolean'){__agentEnabled=!!state.agentEnabled;agentChk.checked=__agentEnabled;}if(typeof state.agentModelAvailable==='boolean'){__agentModelAvailable=!!state.agentModelAvailable;}if(typeof state.agentModelActive==='boolean'){__agentModelActive=!!state.agentModelActive;}updateToolingVisibility();updateAgentModelBtn();const hasWorkspace=Object.prototype.hasOwnProperty.call(state,'agentWorkspace');updateAgentWorkspaceDisplay(hasWorkspace?state.agentWorkspace:null);updateAgentFilesDisplay(Array.isArray(state.agentFiles)?state.agentFiles:[]);applyCoupling();}")
 
         html.AppendLine("function setTheme(isDark){dark=!!isDark;document.documentElement.classList.toggle('light',!dark);var icon=document.getElementById('themeIcon');if(icon){if(dark){icon.innerHTML='<path d=""M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z""/>';}else{icon.innerHTML='<circle cx=""12"" cy=""12"" r=""5""/><line x1=""12"" y1=""1"" x2=""12"" y2=""3""/><line x1=""12"" y1=""21"" x2=""12"" y2=""23""/><line x1=""4.22"" y1=""4.22"" x2=""5.64"" y2=""5.64""/><line x1=""18.36"" y1=""18.36"" x2=""19.78"" y2=""19.78""/><line x1=""1"" y1=""12"" x2=""3"" y2=""12""/><line x1=""21"" y1=""12"" x2=""23"" y2=""12""/><line x1=""4.22"" y1=""19.78"" x2=""5.64"" y2=""18.36""/><line x1=""18.36"" y1=""5.64"" x2=""19.78"" y2=""4.22""/>';}}} ")
         html.AppendLine("function forceExternalLinks(scope){try{(scope||document).querySelectorAll('a[href]').forEach(a=>{a.target='_blank';a.rel='noopener noreferrer';});}catch{}}")
@@ -1376,7 +1419,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("function removeTypingBubble(){if(__typingBubbleId){removeTempBubble(__typingBubbleId);__typingBubbleId=null;}stopElapsedTimer();}")
 
         ' Boot        
-        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting && (!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__agentEnabled=(st.agentEnabled===true);agentChk.checked=__agentEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);__agentModelAvailable=(st.agentModelAvailable===true);__agentModelActive=(st.agentModelActive===true);updateAgentModelBtn();__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';updateToolingVisibility();applyCoupling();adjustModelSel();} ")
+        html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAgentUi({agentEnabled:st.agentEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();}")
 
         ' Poll job
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
@@ -1395,7 +1438,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("const f=files[0];if(!__supportsFiles){addTempAssistantBubble('File uploads are not supported for the current model.');return;}const tempId=addTempAssistantBubble(`Uploading <b>${f.name.replaceAll('&','&amp;')}</b> (${(f.size/1024).toFixed(1)} KB)…`);try{const fr=new FileReader();const dataUrl=await new Promise((res,rej)=>{fr.onerror=()=>rej(new Error('read error'));fr.onload=()=>res(fr.result);fr.readAsDataURL(f);});const r=await api('inky_upload',{Name:f.name,DataUrl:String(dataUrl||'')});if(!r.ok){replaceAssistantBubble(tempId,'Upload failed: '+(r.error||'unknown'));return;}if(r.supported===false){replaceAssistantBubble(tempId,'File uploads are not supported for this model.');return;}__pendingFilePath=r.path||'';replaceAssistantBubble(tempId,`Added file: <b>${(r.name||f.name).replaceAll('&','&amp;')}</b>`);}catch(err){replaceAssistantBubble(tempId,'Upload failed: '+(err&&err.message?err.message:'unknown'));}} ,false);})();")
 
         ' events
-        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}toolingChk.checked=__toolingEnabled;__agentModelActive=false;updateAgentModelBtn();updateToolingVisibility();applyCoupling();});")
+        html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAgentUi({agentEnabled:typeof r.agentEnabled==='boolean'?r.agentEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});});")
         html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
@@ -1406,19 +1449,16 @@ Partial Public Class ThisAddIn
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
         html.AppendLine("chatEl.addEventListener('click',e=>{const a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;if(a.target!=='_blank'){a.target='_blank';a.rel='noopener noreferrer';}});")
-        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);if(typeof r.agentModelActive==='boolean'){__agentModelActive=r.agentModelActive;}if(typeof r.agentModelAvailable==='boolean'){__agentModelAvailable=r.agentModelAvailable;}updateAgentModelBtn();updateModelTooltip();applyCoupling();adjustModelSel();}")
+        html.AppendLine("async function switchChat(n){if(__currentJobId)return;const r=await api('inky_switch',{Chat:String(n)});if(!r.ok){alert(r.error||'Switch failed');return;}setActiveChatBtn(r.activeChat||n);render(r.history||[]);if(r.greeting){msgEl.placeholder=r.greeting;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}syncAgentUi({agentEnabled:r.agentEnabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.agentFiles||[],agentModelAvailable:r.agentModelAvailable===true,agentModelActive:r.agentModelActive===true});updateModelTooltip();adjustModelSel();}")
         html.AppendLine("chat1Btn.addEventListener('click',()=>switchChat(1));")
         html.AppendLine("chat2Btn.addEventListener('click',()=>switchChat(2));")
 
         ' Tooling UI visibility + coupling logic
-        html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__agentEnabled=false;agentChk.checked=false;updateAgentFilesDisplay([]);}applyCoupling();}")
+        html.AppendLine("function updateToolingVisibility(){const show=__modelSupportsTooling===true;toolsBtn.style.display=show?'inline-block':'none';toolingSlot.style.display=show?'flex':'none';toolLogBtn.style.display=show?'flex':'none';if(!show){__toolingEnabled=false;toolingChk.checked=false;__agentEnabled=false;agentChk.checked=false;__agentModelActive=false;updateAgentWorkspaceDisplay(null);updateAgentFilesDisplay([]);}updateAgentModelBtn();applyCoupling();}")
         html.AppendLine("function applyCoupling(){if(__agentEnabled){toolingChk.checked=true;toolingChk.disabled=true;}else{toolingChk.disabled=false;}}")
         html.AppendLine("toolsBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(!r.ok){alert(r.error||'Failed to select tools');return;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{const st=await api('inky_getstate');if(st&&st.ok&&typeof st.toolingEnabled==='boolean'){__toolingEnabled=!!st.toolingEnabled;toolingChk.checked=__toolingEnabled;}}applyCoupling();});")
         html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
-        html.AppendLine("agentChk.addEventListener('change',async()=>{const desired=agentChk.checked;let r=await api('inky_setagent',{Enabled:desired});if((!r||!r.ok)&&desired&&r&&r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr&&sr.ok){if(typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}r=await api('inky_setagent',{Enabled:true});}}if(!r||!r.ok){agentChk.checked=!desired;alert(r&&r.error||'Failed to toggle use-all-tools mode');applyCoupling();return;}__agentEnabled=!!r.enabled;agentChk.checked=__agentEnabled;updateAgentFilesDisplay(r.files||[]);applyCoupling();});")
-
-        ' Agent mode checkbox — coupled with sources
-        html.AppendLine("toolingChk.addEventListener('change',async()=>{if(toolingChk.checked){const r=await api('inky_settooling',{Enabled:true});if(!r.ok){toolingChk.checked=false;if(r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr.ok&&typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}else{__toolingEnabled=false;toolingChk.checked=false;}}else{alert(r.error||'Failed to toggle tooling');}applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}else{const r=await api('inky_settooling',{Enabled:false});if(!r.ok){toolingChk.checked=true;alert(r.error||'Failed to toggle tooling');applyCoupling();return;}__toolingEnabled=!!r.enabled;applyCoupling();}});")
+        html.AppendLine("agentChk.addEventListener('change',async()=>{const desired=agentChk.checked;let r=await api('inky_setagent',{Enabled:desired});if((!r||!r.ok)&&desired&&r&&r.openSources){const sr=await api('inky_selecttools',{IncludeInteractiveM365Tools:true});if(sr&&sr.ok){if(typeof sr.toolingEnabled==='boolean'){__toolingEnabled=!!sr.toolingEnabled;toolingChk.checked=__toolingEnabled;}r=await api('inky_setagent',{Enabled:true});}}if(!r||!r.ok){agentChk.checked=!desired;alert(r&&r.error||'Failed to toggle use-all-tools mode');applyCoupling();return;}syncAgentUi({agentEnabled:r.enabled===true,agentWorkspace:r.agentWorkspace,agentFiles:r.files||[],agentModelAvailable:__agentModelAvailable,agentModelActive:__agentModelActive});});")
 
         ' Tooling log button (toggle)
         html.AppendLine("toolLogBtn.addEventListener('click',async()=>{__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);const r=await api('inky_settoolinglog',{Enabled:__toolLogEnabled});if(!r.ok){__toolLogEnabled=!__toolLogEnabled;toolLogBtn.classList.toggle('active',__toolLogEnabled);}});")
@@ -1430,7 +1470,27 @@ Partial Public Class ThisAddIn
         ' Agent files display
         html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__agentEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
-        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}__agentModelActive=!!r.active;updateAgentModelBtn();if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.agentEnabled==='boolean'){__agentEnabled=!!r.agentEnabled;agentChk.checked=__agentEnabled;}if(r.agentFiles)updateAgentFilesDisplay(r.agentFiles);applyCoupling();adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
+        html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAgentUi({agentEnabled:r.agentEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
+        html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
+        html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__agentEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button>';bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button>';bindWorkspaceButtons();}")
+        html.AppendLine("async function refreshWorkspace(){const r=await api('inky_agentworkspace_get');if(r&&r.ok)updateAgentWorkspaceDisplay(r.workspace);}")
+
+        html.AppendLine("function closeWorkspaceModal(){workspaceModalBackdrop.classList.remove('show');workspaceModalBody.innerHTML='';__workspaceDialogMode='';}")
+        html.AppendLine("function openWorkspaceModal(title,bodyHtml,okText,mode){workspaceModalTitle.textContent=title||'Agent Workspace';workspaceModalBody.innerHTML=bodyHtml||'';workspaceModalOkBtn.textContent=okText||'Save';workspaceModalBackdrop.classList.add('show');__workspaceDialogMode=mode||'';}")
+        html.AppendLine("function getWorkspaceDialogValues(){return{persistUntilRevoked:!!document.getElementById('wsPersistUntilRevoked')?.checked,allowRead:!!document.getElementById('wsAllowRead')?.checked,allowWrite:!!document.getElementById('wsAllowWrite')?.checked,allowMoveCopyRename:!!document.getElementById('wsAllowMoveCopyRename')?.checked,allowDelete:!!document.getElementById('wsAllowDelete')?.checked,saveDroppedFilesToWorkspace:!!document.getElementById('wsSaveDroppedFiles')?.checked,includeHiddenSystem:!!document.getElementById('wsIncludeHiddenSystem')?.checked};}")
+        html.AppendLine("function buildWorkspaceDialogHtml(ws,mode){const connected=!!(ws&&ws.connected);const root=connected?('<div class=""inky-form-row""><label class=""hd"">Current workspace</label><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'';const persist=!!(ws&&ws.persistUntilRevoked);const allowRead=ws&&typeof ws.allowRead==='boolean'?!!ws.allowRead:true;const allowWrite=ws&&typeof ws.allowWrite==='boolean'?!!ws.allowWrite:true;const allowMoveCopyRename=ws&&typeof ws.allowMoveCopyRename==='boolean'?!!ws.allowMoveCopyRename:true;const allowDelete=ws&&typeof ws.allowDelete==='boolean'?!!ws.allowDelete:false;const saveDrops=ws&&typeof ws.saveDroppedFilesToWorkspace==='boolean'?!!ws.saveDroppedFilesToWorkspace:false;const includeHidden=ws&&typeof ws.includeHiddenSystem==='boolean'?!!ws.includeHiddenSystem:false;let intro='';if(mode==='connect'){intro='<div class=""inky-form-row inky-help"">Select how the Local Agent should use the workspace after you choose the folder.</div>';}else if(mode==='revoke'){return '<div class=""inky-form-row""><div class=""inky-help"">Revoke access to the current Local Agent workspace?</div></div>'+(connected?('<div class=""inky-form-row""><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'');}return intro+root+'<div class=""inky-form-row""><label class=""hd"">Access duration</label><div class=""inky-radio-list""><label><input type=""radio"" name=""wsDuration"" id=""wsPersistSessionOnly"" '+(!persist?'checked':'')+'> <span>This session only</span></label><label><input type=""radio"" name=""wsDuration"" id=""wsPersistUntilRevoked"" '+(persist?'checked':'')+'> <span>Until revoked</span></label></div><div class=""inky-help"">Session access disappears when Outlook is closed. Persistent access remains until the user revokes it.</div></div><div class=""inky-form-row""><label class=""hd"">Allowed operations</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsAllowRead"" '+(allowRead?'checked':'')+'> <span>Read and list workspace files</span></label><label><input type=""checkbox"" id=""wsAllowWrite"" '+(allowWrite?'checked':'')+'> <span>Create and overwrite workspace files</span></label><label><input type=""checkbox"" id=""wsAllowMoveCopyRename"" '+(allowMoveCopyRename?'checked':'')+'> <span>Copy, move, and rename files</span></label><label><input type=""checkbox"" id=""wsAllowDelete"" '+(allowDelete?'checked':'')+'> <span class=""inky-danger"">Delete files and remove folders</span></label></div></div><div class=""inky-form-row""><label class=""hd"">Additional options</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsSaveDroppedFiles"" '+(saveDrops?'checked':'')+'> <span>Also save drag-and-drop uploads into the workspace</span></label><label><input type=""checkbox"" id=""wsIncludeHiddenSystem"" '+(includeHidden?'checked':'')+'> <span>Include hidden/system files</span></label></div></div>'; }")
+
+        html.AppendLine("async function connectWorkspace(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}openWorkspaceModal('Connect Agent Workspace',buildWorkspaceDialogHtml(st.workspace||{},'connect'),'Choose folder…','connect');}")
+        html.AppendLine("async function changeWorkspaceDirect(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}const ws=st.workspace||{};const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:!!ws.persistUntilRevoked});if(!r||!r.ok){alert(r&&r.error||'Failed to select workspace');return;}updateAgentWorkspaceDisplay(r.workspace);}")
+        html.AppendLine("async function editWorkspacePermissions(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace permissions');return;}openWorkspaceModal('Workspace Permissions',buildWorkspaceDialogHtml(st.workspace||{},'permissions'),'Save','permissions');}")
+        html.AppendLine("async function confirmWorkspaceRevoke(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}openWorkspaceModal('Revoke Workspace Access',buildWorkspaceDialogHtml(st.workspace||{},'revoke'),'Revoke','revoke');}")
+        html.AppendLine("async function saveWorkspaceDialog(){if(__workspaceDialogMode==='revoke'){const r=await api('inky_agentworkspace_revoke');if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{alert(r&&r.error||'Failed to revoke workspace');}return;}const values=getWorkspaceDialogValues();if(!values.allowRead){alert('Workspace read/list permission must remain enabled.');return;}if(__workspaceDialogMode==='connect'){const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:values.persistUntilRevoked});if(!r||!r.ok){alert(r&&r.error||'Failed to select workspace');return;}const p=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(!p||!p.ok){alert(p&&p.error||'Failed to save workspace permissions');return;}closeWorkspaceModal();updateAgentWorkspaceDisplay(p.workspace);}else if(__workspaceDialogMode==='permissions'){const r=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{alert(r&&r.error||'Failed to update permissions');}}}")
+        html.AppendLine("function bindWorkspaceButtons(){const c=document.getElementById('wsConnectBtn');if(c)c.onclick=connectWorkspace;const ch=document.getElementById('wsChangeBtn');if(ch)ch.onclick=changeWorkspaceDirect;const o=document.getElementById('wsOpenBtn');if(o)o.onclick=async()=>{const r=await api('inky_agentworkspace_open');if(!r.ok)alert(r.error||'Could not open workspace');};const rv=document.getElementById('wsRevokeBtn');if(rv)rv.onclick=confirmWorkspaceRevoke;const p=document.getElementById('wsPermBtn');if(p)p.onclick=editWorkspacePermissions;}")
+        html.AppendLine("workspaceModalCancelBtn.addEventListener('click',closeWorkspaceModal);")
+        html.AppendLine("workspaceModalCloseBtn.addEventListener('click',closeWorkspaceModal);")
+        html.AppendLine("workspaceModalOkBtn.addEventListener('click',saveWorkspaceDialog);")
+        html.AppendLine("workspaceModalBackdrop.addEventListener('click',e=>{if(e.target===workspaceModalBackdrop)closeWorkspaceModal();});")
+        html.AppendLine("document.addEventListener('keydown',e=>{if(e.key==='Escape'&&workspaceModalBackdrop.classList.contains('show')){e.preventDefault();closeWorkspaceModal();}});")
 
         html.AppendLine("boot();")
         html.AppendLine("</script>")
@@ -1518,7 +1578,8 @@ Partial Public Class ThisAddIn
                             Return JsonOk(New With {
                                 .ok = True,
                                 .enabled = enabled,
-                                .files = GetAgentFileListForBrowser()
+                                .files = GetAgentFileListForBrowser(),
+                                .agentWorkspace = GetAgentWorkspaceForBrowser()
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle agent mode: " & ex.Message)
@@ -1582,7 +1643,8 @@ Partial Public Class ThisAddIn
                                     .supportsTooling = supTooling,
                                     .toolingEnabled = effTooling,
                                     .agentEnabled = False,
-                                    .agentFiles = GetAgentFileListForBrowser()
+                                    .agentFiles = GetAgentFileListForBrowser(),
+                                    .agentWorkspace = GetAgentWorkspaceForBrowser()
                                 })
                             Else
                                 ' ── TOGGLE ON: find and apply AgentDefaultModel ──
@@ -1679,7 +1741,8 @@ Partial Public Class ThisAddIn
                                     .supportsTooling = supTooling,
                                     .toolingEnabled = effTooling,
                                     .agentEnabled = True,
-                                    .agentFiles = GetAgentFileListForBrowser()
+                                    .agentFiles = GetAgentFileListForBrowser(),
+                                    .agentWorkspace = GetAgentWorkspaceForBrowser()
                                 })
                             End If
                         Catch ex As Exception
@@ -1725,6 +1788,95 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to clear files: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_get"
+                        Try
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to get workspace state: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_select"
+                        Try
+                            If Not _chatAgentModeEnabled Then Return JsonErr("Agent mode is not enabled.")
+                            If IsChatAgentBlocked() Then Return JsonErr("Agent mode is not available while AutoPilot is running.")
+
+                            Dim persistUntilRevoked As Boolean = CBool(If(j("PersistUntilRevoked"), False))
+                            Dim selectedPath As String = Nothing
+
+                            Await SwitchToUi(Sub()
+                                                 Using dlg As New DragDropForm(DragDropMode.DirectoryOnly)
+                                                     dlg.Text = "Select Agent Workspace Folder"
+                                                     dlg.SetInstructionText("Drag and drop the workspace folder here, or click Browse. The Local Agent will only be allowed to access this folder and its subfolders.")
+                                                     If dlg.ShowDialog() = DialogResult.OK Then
+                                                         selectedPath = dlg.SelectedFilePath
+                                                     End If
+                                                 End Using
+                                             End Sub).ConfigureAwait(False)
+
+                            If String.IsNullOrWhiteSpace(selectedPath) Then
+                                Return JsonErr("No workspace folder selected.")
+                            End If
+
+                            If Not ChatAgentWorkspaceSetRoot(selectedPath, persistUntilRevoked) Then
+                                Return JsonErr("The selected workspace folder is not valid.")
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to select workspace: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_permissions"
+                        Try
+                            ChatAgentWorkspaceSetPermissions(
+                                CBool(If(j("PersistUntilRevoked"), False)),
+                                CBool(If(j("AllowRead"), True)),
+                                CBool(If(j("AllowWrite"), True)),
+                                CBool(If(j("AllowMoveCopyRename"), True)),
+                                CBool(If(j("AllowDelete"), False)),
+                                CBool(If(j("SaveDroppedFilesToWorkspace"), False)),
+                                CBool(If(j("IncludeHiddenSystem"), False)))
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to update workspace permissions: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_revoke"
+                        Try
+                            ChatAgentWorkspaceRevoke()
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .workspace = GetAgentWorkspaceForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to revoke workspace: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentworkspace_open"
+                        Try
+                            Dim ws = GetAgentWorkspaceForBrowser()
+                            Dim rootPath = TryCast(ws.GetType().GetProperty("rootPath")?.GetValue(ws, Nothing), String)
+                            If String.IsNullOrWhiteSpace(rootPath) OrElse Not Directory.Exists(rootPath) Then
+                                Return JsonErr("No workspace is connected.")
+                            End If
+
+                            Process.Start("explorer.exe", rootPath)
+
+                            Return JsonOk(New With {.ok = True})
+                        Catch ex As Exception
+                            Return JsonErr("Failed to open workspace: " & ex.Message)
                         End Try
 
                     Case "inky_settoolinglog"
@@ -1880,6 +2032,7 @@ Partial Public Class ThisAddIn
                             .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
                             .agentEnabled = _chatAgentModeEnabled,
                             .agentFiles = GetAgentFileListForBrowser(),
+                            .agentWorkspace = GetAgentWorkspaceForBrowser(),
                             .agentModelActive = st.AgentModelActive,
                             .agentModelAvailable = IsAgentDefaultModelAvailable(),
                             .inkyMemoryEnabled = My.Settings.Inky_InkyMemory
@@ -1919,6 +2072,7 @@ Partial Public Class ThisAddIn
                                 .models = models,
                                 .agentEnabled = _chatAgentModeEnabled,
                                 .agentFiles = GetAgentFileListForBrowser(),
+                                .agentWorkspace = GetAgentWorkspaceForBrowser(),
                                 .agentModelActive = stSw.AgentModelActive,
                                 .agentModelAvailable = IsAgentDefaultModelAvailable()
                             })
@@ -2225,7 +2379,7 @@ Partial Public Class ThisAddIn
                             sbDialog.AppendLine("</ATTACHED_DOCUMENT>")
                         End If
 
-                        ' Add agent file listing so the model knows which files are loaded
+                        ' Add agent file listing so the model knows which files are already loaded/staged
                         If _chatAgentModeEnabled AndAlso _chatAgentFiles IsNot Nothing AndAlso _chatAgentFiles.Count > 0 Then
                             sbDialog.AppendLine()
                             sbDialog.AppendLine("[LOADED FILES]")
@@ -2237,8 +2391,32 @@ Partial Public Class ThisAddIn
                             Next
                             sbDialog.AppendLine("[/LOADED FILES]")
                             sbDialog.AppendLine()
-                            sbDialog.AppendLine("You have tools available to process these files. Use the appropriate tool (e.g., word_to_pdf to convert a Word document to PDF, read_attachment to read content, process_word_document to edit/translate, etc.).")
+                            sbDialog.AppendLine("These are the files already loaded into the current agent session. Tools such as list_attachments, read_attachment, process_word_document, extract_pdf_text, compare_word_documents, and similar session tools operate on these loaded files.")
                         End If
+
+                        ' Add workspace context independently of whether any files are already staged
+                        If _chatAgentModeEnabled Then
+                            Dim workspacePromptBlock As String = BuildAgentWorkspacePromptBlock()
+                            If Not String.IsNullOrWhiteSpace(workspacePromptBlock) Then
+                                sbDialog.AppendLine()
+                                sbDialog.AppendLine(workspacePromptBlock)
+                            End If
+                        End If
+
+                        If _chatAgentModeEnabled Then
+                            Dim sessionFilesPromptBlock As String = BuildAgentSessionFilesPromptBlock()
+                            If Not String.IsNullOrWhiteSpace(sessionFilesPromptBlock) Then
+                                sbDialog.AppendLine()
+                                sbDialog.AppendLine(sessionFilesPromptBlock)
+                            End If
+
+                            Dim workspaceHistoryPromptBlock As String = BuildAgentWorkspaceHistoryPromptBlock()
+                            If Not String.IsNullOrWhiteSpace(workspaceHistoryPromptBlock) Then
+                                sbDialog.AppendLine()
+                                sbDialog.AppendLine(workspaceHistoryPromptBlock)
+                            End If
+                        End If
+
                         ' Persist state with user turn BEFORE returning (important)
                         SaveInkyState(st)
                         ' ------------------ (D) Prepare system prompt (same logic) ------------------
@@ -2294,6 +2472,9 @@ Partial Public Class ThisAddIn
                                 Dim snapshotTaken As Boolean = False
                                 Dim alternateApplied As Boolean = False
                                 Dim localOutput As String = ""
+                                Dim agentAbortDetected As Boolean = False
+                                Dim agentToolCallLogSnapshot As List(Of AutoPilotToolCallEntry) = Nothing
+                                Dim agentOutputFiles As List(Of String) = Nothing
                                 Try
                                     ' (1) Alternate model application (safer pattern)
                                     If useSecondApiLocal AndAlso Not String.IsNullOrWhiteSpace(selectedModelKeyLocal) Then
@@ -2421,15 +2602,26 @@ Partial Public Class ThisAddIn
                                                 snapshotTaken = False
                                             End If
 
+                                            agentAbortDetected = ShouldBuildChatAgentAbortReport(localOutput, jobCts.IsCancellationRequested)
+
+                                            ' Snapshot before teardown clears the AutoPilot shared state
+                                            agentToolCallLogSnapshot = CloneChatAgentToolCallLog()
+
                                             ' Remove knowledge-store source files not cited by the LLM
                                             RemoveUncitedKnowledgeSourceCopies(localOutput)
 
                                             ' Collect outputs to Desktop\Inky\...
-                                            Dim outputFiles = ChatAgentCollectAndCopyOutputs()
-                                            If outputFiles IsNot Nothing AndAlso outputFiles.Count > 0 Then
-                                                Dim fileList = String.Join(vbCrLf, outputFiles.Select(Function(f) "- " & Path.GetFileName(f)))
+                                            agentOutputFiles = ChatAgentCollectAndCopyOutputs()
+
+                                            If agentAbortDetected Then
+                                                localOutput = BuildChatAgentAbortReport(
+                                                    agentToolCallLogSnapshot,
+                                                    agentOutputFiles,
+                                                    localOutput)
+                                            ElseIf agentOutputFiles IsNot Nothing AndAlso agentOutputFiles.Count > 0 Then
+                                                Dim fileList = String.Join(vbCrLf, agentOutputFiles.Select(Function(f) "- " & Path.GetFileName(f)))
                                                 localOutput = If(localOutput, "") & vbCrLf & vbCrLf &
-                                                "**Output files (" & outputFiles.Count.ToString() & "):**" & vbCrLf & fileList
+                                                    "**Output files (" & agentOutputFiles.Count.ToString() & "):**" & vbCrLf & fileList
                                             End If
 
                                         ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
@@ -2883,13 +3075,17 @@ Partial Public Class ThisAddIn
                         SaveInkyState(st)
 
                         Return JsonOk(New With {
-                            .ok = True,
-                            .supportsFiles = st.SupportsFileUploads,
-                            .activeChat = activeChatId,
-                            .supportsTooling = supportsTooling,
-                            .toolingEnabled = st.ToolingEnabled,
-                            .agentEnabled = st.AgentModeEnabled
-                        })
+                                .ok = True,
+                                .supportsFiles = st.SupportsFileUploads,
+                                .activeChat = activeChatId,
+                                .supportsTooling = supportsTooling,
+                                .toolingEnabled = st.ToolingEnabled,
+                                .agentEnabled = st.AgentModeEnabled,
+                                .agentFiles = GetAgentFileListForBrowser(),
+                                .agentWorkspace = GetAgentWorkspaceForBrowser(),
+                                .agentModelActive = st.AgentModelActive,
+                                .agentModelAvailable = IsAgentDefaultModelAvailable()
+                            })
 
                     Case "inky_toggletheme"
                         ' (Theme toggle)

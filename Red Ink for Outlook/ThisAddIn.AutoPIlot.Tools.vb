@@ -273,10 +273,18 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ListAttachments,
             .ModelDescription = "List Attachments (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ListAttachments & ": Lists all attachments of the current email with name, type, and size.",
+                If(_chatAgentActive,
+                   AP_Tool_ListAttachments & ": Lists files currently loaded into the active Local Agent session. " &
+                   "IMPORTANT: This does NOT list files that merely exist in the connected workspace. " &
+                   "Use agent_workspace_list to inspect workspace files and agent_workspace_stage to load them first.",
+                   AP_Tool_ListAttachments & ": Lists all attachments of the current email with name, type, and size."),
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ListAttachments & """," &
-                """description"":""Lists all email attachments with their filename, type, size, and processing status""," &
+                """description"":""" &
+                If(_chatAgentActive,
+                   "Lists files currently loaded into the Local Agent session. Does not list unstaged workspace files; use agent_workspace_list and agent_workspace_stage for workspace access.",
+                   "Lists all email attachments with their filename, type, size, and processing status") &
+                """," &
                 """parameters"":{""type"":""object"",""properties"":{},""required"":[]}}"
         })
 
