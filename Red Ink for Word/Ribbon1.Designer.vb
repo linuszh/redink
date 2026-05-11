@@ -51,6 +51,7 @@ Partial Class Ribbon1
     'Do not modify it using the code editor.
     <System.Diagnostics.DebuggerStepThrough()>
     Private Sub InitializeComponent()
+        Dim resources As System.ComponentModel.ComponentResourceManager = New System.ComponentModel.ComponentResourceManager(GetType(Ribbon1))
         Dim RibbonDialogLauncherImpl1 As Microsoft.Office.Tools.Ribbon.RibbonDialogLauncher = Me.Factory.CreateRibbonDialogLauncher
         Me.Tab1 = Me.Factory.CreateRibbonTab
         Me.Group1 = Me.Factory.CreateRibbonGroup
@@ -129,7 +130,6 @@ Partial Class Ribbon1
         Me.RI_Image = Me.Factory.CreateRibbonButton
         Me.RI_Transcriptor = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
-
         Me.Menu6 = Me.Factory.CreateRibbonMenu
         Me.RI_Model1 = Me.Factory.CreateRibbonButton
         Me.RI_Model2 = Me.Factory.CreateRibbonButton
@@ -141,7 +141,6 @@ Partial Class Ribbon1
         Me.RI_Model8 = Me.Factory.CreateRibbonButton
         Me.RI_Model9 = Me.Factory.CreateRibbonButton
         Me.RI_Model10 = Me.Factory.CreateRibbonButton
-
         Me.Settings = Me.Factory.CreateRibbonButton
         Me.Group2 = Me.Factory.CreateRibbonGroup
         Me.RI_PrimLang2 = Me.Factory.CreateRibbonButton
@@ -795,11 +794,10 @@ Partial Class Ribbon1
         '
         'RI_ConvertDocToTxt
         '
-        Me.RI_ConvertDocToTxt.Label = "Convert PDFs/Files To Txt"
+        Me.RI_ConvertDocToTxt.Label = "Convert PDFs/Files To .txt/.md"
         Me.RI_ConvertDocToTxt.Name = "RI_ConvertDocToTxt"
         Me.RI_ConvertDocToTxt.OfficeImageId = "ConvertInkMenu"
-        Me.RI_ConvertDocToTxt.ScreenTip = "Will convert PDFs and other supported files in a directory (and subdirectories) t" &
-    "o TXT files for easier analysis by AI (will do OCR, if available)"
+        Me.RI_ConvertDocToTxt.ScreenTip = resources.GetString("RI_ConvertDocToTxt.ScreenTip")
         Me.RI_ConvertDocToTxt.ShowImage = True
         '
         'RI_Stamper

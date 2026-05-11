@@ -254,13 +254,14 @@ Partial Public Class ThisAddIn
             ' Keep normal file loading silent, but allow worksheet picker for explicit single-workbook loads
             Dim silentLoad As Boolean = Not askWorksheetSelection
 
-            ' Load file content with determined OCR settings
+            ' Load file content with determined OCR settings            
             Dim fileResult = Await GetFileContentEx(
                 optionalFilePath:=filePath,
                 Silent:=silentLoad,
                 DoOCR:=doOCR,
                 AskUser:=askUser,
-                AskWorksheetSelection:=askWorksheetSelection
+                AskWorksheetSelection:=askWorksheetSelection,
+                OcrAdditionalInstruction:=Add_OcrMarkdownInstruction
             )
 
             ' Track PDFs that may have incomplete content

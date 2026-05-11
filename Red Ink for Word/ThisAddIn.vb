@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 10.5.2026
+' 11.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -53,7 +53,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.100526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.110526" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -326,6 +326,13 @@ Partial Public Class ThisAddIn
         "When citing information from the results, mention the document name so the user can locate the source."
 
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
+
+
+    Private Const Add_OcrMarkdownInstruction As String =
+            "Provide the output as Markdown. " &
+            "Use Markdown formatting where it helps preserve the original structure, including headings, lists, tables and other tabular content. " &
+            "Return only the Markdown content and no surrounding code fences."
+
 
 
     ' Declare variables publicly so that InterpolateAtRuntime can access them; case-sensitive

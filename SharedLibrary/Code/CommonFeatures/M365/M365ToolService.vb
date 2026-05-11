@@ -155,160 +155,175 @@ Namespace SharedLibrary
 
         Private Function BuildSearchTool(suffix As String) As ModelConfig
             Dim def As New JObject(
-                New JProperty("name", SearchToolName),
-                New JProperty("description",
-                    "Searches the user's Microsoft 365 estate (their own emails, OneDrive/SharePoint files, " &
-                    "SharePoint sites and list items, Teams chats, calendar events, OneNote pages, and people). " &
-                    "Use this whenever the user refers to their own materials — e.g. 'my last email to Peter', " &
-                    "'the contract I drafted with Acme', 'minutes from Tuesday's meeting'. Returns hits with " &
-                    "stable ids you can pass to m365_get_mail, m365_get_mail_thread, m365_get_file, " &
-                    "m365_get_event, m365_get_chat_thread or m365_get_onenote_page to fetch full content. " &
-                    "PRIVACY: only the signed-in user's authenticated content is queried via Microsoft Graph."),
-                New JProperty("parameters",
+        New JProperty("name", SearchToolName),
+        New JProperty("description",
+            "Searches the user's Microsoft 365 estate (their own emails, OneDrive/SharePoint files, " &
+            "SharePoint sites and list items, Teams chats, calendar events, OneNote pages, and people). " &
+            "Use this whenever the user refers to their own materials — e.g. 'my last email to Peter', " &
+            "'the contract I drafted with Acme', 'minutes from Tuesday's meeting'. Returns hits with " &
+            "stable ids you can pass to m365_get_mail, m365_get_mail_thread, m365_get_file, " &
+            "m365_get_event, m365_get_chat_thread or m365_get_onenote_page to fetch full content. " &
+            "For hits with dates, the tool returns both machine-readable ISO UTC values and preformatted " &
+            "unambiguous UTC anchor values with month names. If you mention a date, prefer the anchor value. " &
+            "PRIVACY: only the signed-in user's authenticated content is queried via Microsoft Graph."),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
                     New JObject(
-                        New JProperty("type", "object"),
-                        New JProperty("properties",
-                            New JObject(
-                                New JProperty("query",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description",
-                                                    "KQL-compatible search expression. Never pass an empty string. " &
-                                                    "If the user did not provide search terms and only wants browsing or date filtering, use '*'."))),
-                                New JProperty("sources",
-                                    New JObject(New JProperty("type", "array"),
-                                                New JProperty("items", New JObject(New JProperty("type", "string"))),
-                                                New JProperty("description",
-                                                    "Optional. Any combination of: 'mail', 'onedrive', 'sharepoint', " &
-                                                    "'sharepoint_sites', 'sharepoint_listitems', 'teams', 'calendar', " &
-                                                    "'onenote', 'people'. Convenience: 'all_files', 'all_sharepoint', 'all'. " &
-                                                    "Defaults to 'all' when omitted."))),
-                                New JProperty("max_per_source",
-                                    New JObject(New JProperty("type", "integer"),
-                                                New JProperty("description", "Default 25, server cap 500."))),
-                                New JProperty("from_index",
-                                    New JObject(New JProperty("type", "integer"),
-                                                New JProperty("description", "Optional zero-based offset for paging; default 0."))),
-                                New JProperty("from_date",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
-                                New JProperty("to_date",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
-                                New JProperty("kql_extra",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Optional extra KQL appended verbatim."))))),
-                        New JProperty("required", New JArray("query"))
-                    ))
-            )
+                        New JProperty("query",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description",
+                                            "KQL-compatible search expression. Never pass an empty string. " &
+                                            "If the user did not provide search terms and only wants browsing or date filtering, use '*'."))),
+                        New JProperty("sources",
+                            New JObject(New JProperty("type", "array"),
+                                        New JProperty("items", New JObject(New JProperty("type", "string"))),
+                                        New JProperty("description",
+                                            "Optional. Any combination of: 'mail', 'onedrive', 'sharepoint', " &
+                                            "'sharepoint_sites', 'sharepoint_listitems', 'teams', 'calendar', " &
+                                            "'onenote', 'people'. Convenience: 'all_files', 'all_sharepoint', 'all'. " &
+                                            "Defaults to 'all' when omitted."))),
+                        New JProperty("max_per_source",
+                            New JObject(New JProperty("type", "integer"),
+                                        New JProperty("description", "Default 25, server cap 500."))),
+                        New JProperty("from_index",
+                            New JObject(New JProperty("type", "integer"),
+                                        New JProperty("description", "Optional zero-based offset for paging; default 0."))),
+                        New JProperty("from_date",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
+                        New JProperty("to_date",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Optional ISO date (YYYY-MM-DD), inclusive."))),
+                        New JProperty("kql_extra",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Optional extra KQL appended verbatim."))))),
+                New JProperty("required", New JArray("query"))
+            ))
+    )
 
             Return New ModelConfig() With {
-                .ToolName = SearchToolName,
-                .ToolDefinition = def.ToString(Formatting.None),
-                .ToolInstructionsPrompt =
-                    "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
-                    "USE THIS whenever the user refers to their own materials — do NOT use internet_search " &
-                    "or web_content_retriever for the user's own content. " &
-                    "Provide query (required) and NEVER send it as an empty string. " &
-                    "If the user only wants date-bounded browsing or a broad listing, use query='*'. " &
-                    "from_date is inclusive. to_date is inclusive for the user, but the implementation applies it as the next-day exclusive bound internally. " &
-                    "Optionally narrow with sources, max_per_source, from_index, from_date, to_date, kql_extra. " &
-                    "Each hit has 'n', 'id', 'source', 'title', 'summary', 'date', 'web_url' and source-specific " &
-                    "ids ('conversation_id' for mail, 'drive_id' for files, 'chat_id'/'team_id'/'channel_id' for Teams). " &
-                    "Pass those ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
-                    "m365_get_chat_thread or m365_get_onenote_page to fetch full content.",
-                .ModelDescription = "M365 Search (mail/files/sites/Teams/calendar/notes)" & suffix,
-                .Tool = True,
-                .ToolPriority = 996,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = SearchToolName,
+        .ToolDefinition = def.ToString(Formatting.None),
+        .ToolInstructionsPrompt =
+            "m365_search: Cross-source search of the signed-in user's Microsoft 365 content. " &
+            "USE THIS whenever the user refers to their own materials — do NOT use internet_search " &
+            "or web_content_retriever for the user's own content. " &
+            "Provide query (required) and NEVER send it as an empty string. " &
+            "If the user only wants date-bounded browsing or a broad listing, use query='*'. " &
+            "from_date is inclusive. to_date is inclusive for the user, but the implementation applies it as the next-day exclusive bound internally. " &
+            "Optionally narrow with sources, max_per_source, from_index, from_date, to_date, kql_extra. " &
+            "Each hit has 'n', 'id', 'source', 'title', 'summary', 'web_url' and, where available, " &
+            "'date_iso_utc' and 'date_anchor_utc'. Mail hits may also include 'sentDateTime', 'receivedDateTime', " &
+            "'sent_date_iso_utc', 'sent_date_anchor_utc', 'received_date_iso_utc' and 'received_date_anchor_utc'. " &
+            "Teams hits may include 'createdDateTime', 'created_date_iso_utc' and 'created_date_anchor_utc'. " &
+            "If you mention a date from a hit, copy the corresponding '*_anchor_utc' value exactly. " &
+            "Do not reinterpret, relocalize or reformat numeric ISO dates. " &
+            "Pass ids to m365_get_mail, m365_get_mail_thread, m365_get_file, m365_get_event, " &
+            "m365_get_chat_thread or m365_get_onenote_page to fetch full content.",
+        .ModelDescription = "M365 Search (mail/files/sites/Teams/calendar/notes)" & suffix,
+        .Tool = True,
+        .ToolPriority = 996,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
 
         Private Function BuildGetMailTool(suffix As String) As ModelConfig
             Dim def As New JObject(
-                New JProperty("name", GetMailToolName),
-                New JProperty("description",
-                    "Retrieves the full body of one of the user's emails (and, by default, recursively extracts " &
-                    "the plain text of any attachments — Word/PDF/Excel/PowerPoint/text). Pass the 'id' returned " &
-                    "by m365_search for a mail hit."),
-                New JProperty("parameters",
+        New JProperty("name", GetMailToolName),
+        New JProperty("description",
+            "Retrieves the full body of one of the user's emails (and, by default, recursively extracts " &
+            "the plain text of any attachments — Word/PDF/Excel/PowerPoint/text). Pass the 'id' returned " &
+            "by m365_search for a mail hit. Header dates are emitted as both machine-readable ISO UTC values " &
+            "and preformatted unambiguous UTC anchor values with month names."),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
                     New JObject(
-                        New JProperty("type", "object"),
-                        New JProperty("properties",
-                            New JObject(
-                                New JProperty("message_id",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Graph message id from m365_search."))),
-                                New JProperty("include_attachments",
-                                    New JObject(New JProperty("type", "boolean"),
-                                                New JProperty("description", "Default true."))),
-                                New JProperty("ocr_pdf",
-                                    New JObject(New JProperty("type", "boolean"),
-                                                New JProperty("description", "Default false."))),
-                                New JProperty("max_chars",
-                                    New JObject(New JProperty("type", "integer"),
-                                                New JProperty("description", $"Default {DefaultMaxChars}."))))),
-                        New JProperty("required", New JArray("message_id"))
-                    ))
-            )
+                        New JProperty("message_id",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Graph message id from m365_search."))),
+                        New JProperty("include_attachments",
+                            New JObject(New JProperty("type", "boolean"),
+                                        New JProperty("description", "Default true."))),
+                        New JProperty("ocr_pdf",
+                            New JObject(New JProperty("type", "boolean"),
+                                        New JProperty("description", "Default false."))),
+                        New JProperty("max_chars",
+                            New JObject(New JProperty("type", "integer"),
+                                        New JProperty("description", $"Default {DefaultMaxChars}."))))),
+                New JProperty("required", New JArray("message_id"))
+            ))
+    )
 
             Return New ModelConfig() With {
-                .ToolName = GetMailToolName,
-                .ToolDefinition = def.ToString(Formatting.None),
-                .ToolInstructionsPrompt =
-                    "m365_get_mail: Returns headers, body and (by default) extracted attachment text. " &
-                    "Provide message_id (required). Optional: include_attachments, ocr_pdf, max_chars.",
-                .ModelDescription = "M365: Read e-mail" & suffix,
-                .Tool = True,
-                .ToolPriority = 995,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = GetMailToolName,
+        .ToolDefinition = def.ToString(Formatting.None),
+        .ToolInstructionsPrompt =
+            "m365_get_mail: Returns headers, body and (by default) extracted attachment text. " &
+            "Provide message_id (required). Optional: include_attachments, ocr_pdf, max_chars. " &
+            "If the output contains SentAnchor/SentISO or ReceivedAnchor/ReceivedISO, prefer the *Anchor values " &
+            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
+            "reformat numeric ISO dates.",
+        .ModelDescription = "M365: Read e-mail" & suffix,
+        .Tool = True,
+        .ToolPriority = 995,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Private Function BuildGetMailThreadTool(suffix As String) As ModelConfig
             Dim def As New JObject(
-                New JProperty("name", GetMailThreadToolName),
-                New JProperty("description",
-                    "Retrieves an entire mail conversation flattened into one chronological transcript with " &
-                    "attachments extracted. Pass 'conversation_id' from an m365_search mail hit."),
-                New JProperty("parameters",
+        New JProperty("name", GetMailThreadToolName),
+        New JProperty("description",
+            "Retrieves an entire mail conversation flattened into one chronological transcript with " &
+            "attachments extracted. Pass 'conversation_id' from an m365_search mail hit. " &
+            "Each message's header dates are emitted as both machine-readable ISO UTC values and " &
+            "preformatted unambiguous UTC anchor values with month names."),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
                     New JObject(
-                        New JProperty("type", "object"),
-                        New JProperty("properties",
-                            New JObject(
-                                New JProperty("conversation_id",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Graph conversationId."))),
-                                New JProperty("max_messages",
-                                    New JObject(New JProperty("type", "integer"),
-                                                New JProperty("description", "Default 200."))),
-                                New JProperty("ascending",
-                                    New JObject(New JProperty("type", "boolean"),
-                                                New JProperty("description", "Default true (oldest first)."))),
-                                New JProperty("include_attachments",
-                                    New JObject(New JProperty("type", "boolean"),
-                                                New JProperty("description", "Default true."))),
-                                New JProperty("ocr_pdf",
-                                    New JObject(New JProperty("type", "boolean"),
-                                                New JProperty("description", "Default false."))),
-                                New JProperty("max_chars",
-                                    New JObject(New JProperty("type", "integer"),
-                                                New JProperty("description", $"Default {DefaultMaxChars}."))))),
-                        New JProperty("required", New JArray("conversation_id"))
-                    ))
-            )
+                        New JProperty("conversation_id",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Graph conversationId."))),
+                        New JProperty("max_messages",
+                            New JObject(New JProperty("type", "integer"),
+                                        New JProperty("description", "Default 200."))),
+                        New JProperty("ascending",
+                            New JObject(New JProperty("type", "boolean"),
+                                        New JProperty("description", "Default true (oldest first)."))),
+                        New JProperty("include_attachments",
+                            New JObject(New JProperty("type", "boolean"),
+                                        New JProperty("description", "Default true."))),
+                        New JProperty("ocr_pdf",
+                            New JObject(New JProperty("type", "boolean"),
+                                        New JProperty("description", "Default false."))),
+                        New JProperty("max_chars",
+                            New JObject(New JProperty("type", "integer"),
+                                        New JProperty("description", $"Default {DefaultMaxChars}."))))),
+                New JProperty("required", New JArray("conversation_id"))
+            ))
+    )
 
             Return New ModelConfig() With {
-                .ToolName = GetMailThreadToolName,
-                .ToolDefinition = def.ToString(Formatting.None),
-                .ToolInstructionsPrompt =
-                    "m365_get_mail_thread: Returns every message in a mail conversation as one transcript. " &
-                    "Provide conversation_id. Optional: max_messages, ascending, include_attachments, ocr_pdf, max_chars.",
-                .ModelDescription = "M365: Read mail thread" & suffix,
-                .Tool = True,
-                .ToolPriority = 994,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = GetMailThreadToolName,
+        .ToolDefinition = def.ToString(Formatting.None),
+        .ToolInstructionsPrompt =
+            "m365_get_mail_thread: Returns every message in a mail conversation as one transcript. " &
+            "Provide conversation_id. Optional: max_messages, ascending, include_attachments, ocr_pdf, max_chars. " &
+            "If the transcript contains SentAnchor/SentISO or ReceivedAnchor/ReceivedISO, prefer the *Anchor values " &
+            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
+            "reformat numeric ISO dates.",
+        .ModelDescription = "M365: Read mail thread" & suffix,
+        .Tool = True,
+        .ToolPriority = 994,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Private Function BuildGetFileTool(suffix As String) As ModelConfig
@@ -359,73 +374,81 @@ Namespace SharedLibrary
 
         Private Function BuildGetEventTool(suffix As String) As ModelConfig
             Dim def As New JObject(
-                New JProperty("name", GetEventToolName),
-                New JProperty("description",
-                    "Returns details of a calendar event (subject, organiser, start/end, location, attendees, body). " &
-                    "Pass 'event_id' from an m365_search calendar hit."),
-                New JProperty("parameters",
+        New JProperty("name", GetEventToolName),
+        New JProperty("description",
+            "Returns details of a calendar event (subject, organiser, location, attendees, body). " &
+            "Pass 'event_id' from an m365_search calendar hit. Event date/time fields are emitted as both " &
+            "machine-readable ISO UTC values and preformatted unambiguous UTC anchor values with month names."),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
                     New JObject(
-                        New JProperty("type", "object"),
-                        New JProperty("properties",
-                            New JObject(
-                                New JProperty("event_id",
-                                    New JObject(New JProperty("type", "string"),
-                                                New JProperty("description", "Graph event id."))))),
-                        New JProperty("required", New JArray("event_id"))
-                    ))
-            )
+                        New JProperty("event_id",
+                            New JObject(New JProperty("type", "string"),
+                                        New JProperty("description", "Graph event id."))))),
+                New JProperty("required", New JArray("event_id"))
+            ))
+    )
 
             Return New ModelConfig() With {
-                .ToolName = GetEventToolName,
-                .ToolDefinition = def.ToString(Formatting.None),
-                .ToolInstructionsPrompt = "m365_get_event: Returns calendar event details. Provide event_id.",
-                .ModelDescription = "M365: Read calendar event" & suffix,
-                .Tool = True,
-                .ToolPriority = 992,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = GetEventToolName,
+        .ToolDefinition = def.ToString(Formatting.None),
+        .ToolInstructionsPrompt =
+            "m365_get_event: Returns calendar event details. Provide event_id. " &
+            "If the output contains StartAnchor/StartISO or EndAnchor/EndISO, prefer the *Anchor values " &
+            "when referring to dates or times, and copy them exactly. Do not reinterpret, relocalize or " &
+            "reformat numeric ISO dates.",
+        .ModelDescription = "M365: Read calendar event" & suffix,
+        .Tool = True,
+        .ToolPriority = 992,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Private Function BuildGetChatThreadTool(suffix As String) As ModelConfig
             Dim def As New JObject(
-                New JProperty("name", GetChatThreadToolName),
-                New JProperty("description",
-                    "Returns a Teams conversation as transcript. For 1:1/group chats pass 'chat_id'. " &
-                    "For channel posts pass 'team_id' + 'channel_id' + 'root_message_id' (post + replies). " &
-                    "All ids are returned by m365_search on Teams hits."),
-                New JProperty("parameters",
+        New JProperty("name", GetChatThreadToolName),
+        New JProperty("description",
+            "Returns a Teams conversation as transcript. For 1:1/group chats pass 'chat_id'. " &
+            "For channel posts pass 'team_id' + 'channel_id' + 'root_message_id' (post + replies). " &
+            "All ids are returned by m365_search on Teams hits. Message timestamps are emitted as both " &
+            "machine-readable ISO UTC values and preformatted unambiguous UTC anchor values with month names."),
+        New JProperty("parameters",
+            New JObject(
+                New JProperty("type", "object"),
+                New JProperty("properties",
                     New JObject(
-                        New JProperty("type", "object"),
-                        New JProperty("properties",
-                            New JObject(
-                                New JProperty("chat_id", New JObject(New JProperty("type", "string"),
-                                                                       New JProperty("description", "1:1 / group chat id."))),
-                                New JProperty("team_id", New JObject(New JProperty("type", "string"),
-                                                                       New JProperty("description", "Team id (channel threads)."))),
-                                New JProperty("channel_id", New JObject(New JProperty("type", "string"),
-                                                                          New JProperty("description", "Channel id (channel threads)."))),
-                                New JProperty("root_message_id", New JObject(New JProperty("type", "string"),
-                                                                                New JProperty("description", "Root channel message id."))),
-                                New JProperty("max_messages", New JObject(New JProperty("type", "integer"),
-                                                                            New JProperty("description", "Default 200."))),
-                                New JProperty("ascending", New JObject(New JProperty("type", "boolean"),
-                                                                         New JProperty("description", "Default true."))),
-                                New JProperty("max_chars", New JObject(New JProperty("type", "integer"),
-                                                                         New JProperty("description", $"Default {DefaultMaxChars}.")))))
-                    ))
-            )
+                        New JProperty("chat_id", New JObject(New JProperty("type", "string"),
+                                                               New JProperty("description", "1:1 / group chat id."))),
+                        New JProperty("team_id", New JObject(New JProperty("type", "string"),
+                                                               New JProperty("description", "Team id (channel threads)."))),
+                        New JProperty("channel_id", New JObject(New JProperty("type", "string"),
+                                                                  New JProperty("description", "Channel id (channel threads)."))),
+                        New JProperty("root_message_id", New JObject(New JProperty("type", "string"),
+                                                                        New JProperty("description", "Root channel message id."))),
+                        New JProperty("max_messages", New JObject(New JProperty("type", "integer"),
+                                                                    New JProperty("description", "Default 200."))),
+                        New JProperty("ascending", New JObject(New JProperty("type", "boolean"),
+                                                                 New JProperty("description", "Default true."))),
+                        New JProperty("max_chars", New JObject(New JProperty("type", "integer"),
+                                                                 New JProperty("description", $"Default {DefaultMaxChars}.")))))
+            ))
+    )
 
             Return New ModelConfig() With {
-                .ToolName = GetChatThreadToolName,
-                .ToolDefinition = def.ToString(Formatting.None),
-                .ToolInstructionsPrompt =
-                    "m365_get_chat_thread: Returns a Teams conversation as a transcript. Provide either chat_id " &
-                    "OR team_id + channel_id + root_message_id. Optional: max_messages, ascending, max_chars.",
-                .ModelDescription = "M365: Read Teams thread" & suffix,
-                .Tool = True,
-                .ToolPriority = 991,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = GetChatThreadToolName,
+        .ToolDefinition = def.ToString(Formatting.None),
+        .ToolInstructionsPrompt =
+            "m365_get_chat_thread: Returns a Teams conversation as a transcript. Provide either chat_id " &
+            "OR team_id + channel_id + root_message_id. Optional: max_messages, ascending, max_chars. " &
+            "If the transcript contains DateAnchor/DateISO, prefer DateAnchor when referring to a message " &
+            "date or time, and copy it exactly. Do not reinterpret, relocalize or reformat numeric ISO dates.",
+        .ModelDescription = "M365: Read Teams thread" & suffix,
+        .Tool = True,
+        .ToolPriority = 991,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Private Function BuildGetOneNotePageTool(suffix As String) As ModelConfig
@@ -512,6 +535,10 @@ Namespace SharedLibrary
 
             r.Response = envelope.ToString(Formatting.None)
             r.Success = True
+
+            Debug.WriteLine("[M365Tool][Execute_Search] FINAL RESPONSE:")
+            Debug.WriteLine(envelope.ToString(Formatting.Indented))
+
             Return r
         End Function
 
@@ -535,6 +562,12 @@ Namespace SharedLibrary
             Dim text = Await M365Service.GetMessageAsTextAsync(context, msgId, opts, ct).ConfigureAwait(False)
             r.Response = WrapContent("MAIL", msgId, text)
             r.Success = True
+
+            Debug.WriteLine("[M365Tool][Execute_GetMail] TEXT:")
+            Debug.WriteLine(If(text?.Text, "(null)"))
+            Debug.WriteLine("[M365Tool][Execute_GetMail] FINAL RESPONSE:")
+            Debug.WriteLine(r.Response)
+
             Return r
         End Function
 
@@ -563,6 +596,12 @@ Namespace SharedLibrary
             Dim text = Await M365Service.GetMailThreadAsTextAsync(context, convId, textOpts, threadOpts, ct).ConfigureAwait(False)
             r.Response = WrapContent("MAIL_THREAD", convId, text)
             r.Success = True
+
+            Debug.WriteLine("[M365Tool][Execute_GetMailThread] TEXT:")
+            Debug.WriteLine(If(text?.Text, "(null)"))
+            Debug.WriteLine("[M365Tool][Execute_GetMailThread] FINAL RESPONSE:")
+            Debug.WriteLine(r.Response)
+
             Return r
         End Function
 
@@ -612,6 +651,12 @@ Namespace SharedLibrary
             Dim text = Await M365Service.GetEventAsTextAsync(context, id, ct).ConfigureAwait(False)
             r.Response = WrapContent("EVENT", id, text)
             r.Success = True
+
+            Debug.WriteLine("[M365Tool][Execute_GetEvent] TEXT:")
+            Debug.WriteLine(If(text?.Text, "(null)"))
+            Debug.WriteLine("[M365Tool][Execute_GetEvent] FINAL RESPONSE:")
+            Debug.WriteLine(r.Response)
+
             Return r
         End Function
 
@@ -654,6 +699,10 @@ Namespace SharedLibrary
                 r.Response = WrapContent("CHANNEL_THREAD", $"{teamId}/{channelId}/{rootMsgId}", t)
             End If
             r.Success = True
+
+            Debug.WriteLine("[M365Tool][Execute_GetChatThread] FINAL RESPONSE:")
+            Debug.WriteLine(r.Response)
+
             Return r
         End Function
 
@@ -676,6 +725,32 @@ Namespace SharedLibrary
         ' ════════════════════════════════════════════════════════════════════
         '  HELPERS
         ' ════════════════════════════════════════════════════════════════════
+
+
+        Private Function FormatDateIsoUtc(value As DateTime?) As String
+            If Not value.HasValue Then Return ""
+            Return value.Value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function FormatDateAnchorUtc(value As DateTime?) As String
+            If Not value.HasValue Then Return ""
+            Return value.Value.ToUniversalTime().ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture)
+        End Function
+
+        Private Function TryParseUtcDate(value As String) As DateTime?
+            If String.IsNullOrWhiteSpace(value) Then Return Nothing
+
+            Dim dt As DateTime
+            If DateTime.TryParse(
+        value,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+        dt) Then
+                Return dt
+            End If
+
+            Return Nothing
+        End Function
 
         Private Function GetJsonString(obj As JObject, name As String) As String
             If obj Is Nothing Then Return ""
@@ -731,7 +806,13 @@ Namespace SharedLibrary
             o("title") = If(h.Title, "")
             If Not String.IsNullOrWhiteSpace(h.Summary) Then o("summary") = h.Summary
             If Not String.IsNullOrEmpty(h.Author) Then o("author") = h.Author
-            If h.LastModifiedUtc.HasValue Then o("date") = h.LastModifiedUtc.Value.ToString("u")
+
+            If h.LastModifiedUtc.HasValue Then
+                o("date_iso_utc") = FormatDateIsoUtc(h.LastModifiedUtc)
+                o("date_anchor_utc") = FormatDateAnchorUtc(h.LastModifiedUtc)
+                o("date") = o("date_anchor_utc")
+            End If
+
             If Not String.IsNullOrWhiteSpace(h.WebUrl) Then o("web_url") = h.WebUrl
 
             Select Case h.Source
@@ -744,10 +825,28 @@ Namespace SharedLibrary
                         If Not String.IsNullOrEmpty(imid) Then o("internet_message_id") = imid
 
                         Dim sent = If(resource("sentDateTime")?.ToString(), "")
-                        If Not String.IsNullOrEmpty(sent) Then o("sentDateTime") = sent
+                        If Not String.IsNullOrEmpty(sent) Then
+                            Dim sentUtc As DateTime? = TryParseUtcDate(sent)
+                            If sentUtc.HasValue Then
+                                o("sentDateTime") = FormatDateAnchorUtc(sentUtc)
+                                o("sent_date_iso_utc") = FormatDateIsoUtc(sentUtc)
+                                o("sent_date_anchor_utc") = FormatDateAnchorUtc(sentUtc)
+                            Else
+                                o("sentDateTime") = sent
+                            End If
+                        End If
 
                         Dim received = If(resource("receivedDateTime")?.ToString(), "")
-                        If Not String.IsNullOrEmpty(received) Then o("receivedDateTime") = received
+                        If Not String.IsNullOrEmpty(received) Then
+                            Dim receivedUtc As DateTime? = TryParseUtcDate(received)
+                            If receivedUtc.HasValue Then
+                                o("receivedDateTime") = FormatDateAnchorUtc(receivedUtc)
+                                o("received_date_iso_utc") = FormatDateIsoUtc(receivedUtc)
+                                o("received_date_anchor_utc") = FormatDateAnchorUtc(receivedUtc)
+                            Else
+                                o("receivedDateTime") = received
+                            End If
+                        End If
 
                         Dim toRecipients = TryCast(resource("toRecipients"), JArray)
                         If toRecipients IsNot Nothing Then o("toRecipients") = toRecipients.DeepClone()
@@ -767,6 +866,18 @@ Namespace SharedLibrary
                 Case M365SearchSources.Teams
                     If Not String.IsNullOrEmpty(h.ParentId) Then o("chat_id_or_channel_id") = h.ParentId
                     If resource IsNot Nothing Then
+                        Dim created = If(resource("createdDateTime")?.ToString(), "")
+                        If Not String.IsNullOrEmpty(created) Then
+                            Dim createdUtc As DateTime? = TryParseUtcDate(created)
+                            If createdUtc.HasValue Then
+                                o("createdDateTime") = FormatDateAnchorUtc(createdUtc)
+                                o("created_date_iso_utc") = FormatDateIsoUtc(createdUtc)
+                                o("created_date_anchor_utc") = FormatDateAnchorUtc(createdUtc)
+                            Else
+                                o("createdDateTime") = created
+                            End If
+                        End If
+
                         Dim chanIdent = TryCast(resource("channelIdentity"), JObject)
                         If chanIdent IsNot Nothing Then
                             Dim teamId = If(chanIdent("teamId")?.ToString(), "")
