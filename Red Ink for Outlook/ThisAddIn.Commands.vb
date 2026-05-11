@@ -1219,6 +1219,31 @@ Partial Public Class ThisAddIn
 
             ' Replace the selected text with the processed result
             If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                ' --- Method 4: Interactive review BEFORE any insertion ---
+                If DoMarkup AndAlso MarkupMethod = 4 Then
+
+                    Dim originalForReview As String =
+                        If(KeepFormat, SLib.RemoveHTML(SelectedText), SelectedText)
+                    Dim suggestedForReview As String =
+                        If(KeepFormat, SLib.RemoveHTML(LLMResult), LLMResult)
+
+                    Dim reviewed As String = Nothing
+                    Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
+                        If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                            ' Cancel = do absolutely nothing
+                            Return
+                        End If
+                        reviewed = dlg.ReviewedText
+                    End Using
+
+                    If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+                    ' Use the reviewed text for the normal insertion path; skip any markup append
+                    LLMResult = reviewed
+                    DoMarkup = False
+                End If
+
                 If KeepFormat Then
 
                     Dim Plaintext As String = ""
@@ -1285,14 +1310,12 @@ Partial Public Class ThisAddIn
                         Else
                             CompareAndInsertTextCompareDocs(SelectedText, LLMResult)
                         End If
-
                     End If
 
                 End If
 
             Else
                 ShowCustomMessageBox("The LLM did not return any content to insert.")
-
             End If
 
             ' End Using
@@ -2070,8 +2093,8 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "Replace text (other commands)"},
                         {"ReplaceText2Override", "Replace text (other commands) [override]"},
                         {"DoMarkupOutlook", "Also do a markup (other commands)"},
-                        {"MarkupMethodOutlook", "Markup method (1 = Word, 2 = Diff, 3 = DiffW)"},
-                        {"MarkupMethodOutlookOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW) [override]"},
+                        {"MarkupMethodOutlook", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Review Changes)"},
+                        {"MarkupMethodOutlookOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Review Changes) [override]"},
                         {"MarkupDiffCap", "Maximum characters for Diff Markup"},
                         {"PreCorrection", "Additional instruction for prompts"},
                         {"PostCorrection", "Prompt to apply after queries"},
@@ -2107,7 +2130,7 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "If selected, the response of the LLM for other commands (than translate) will replace the original text"},
                         {"ReplaceText2Override", "Leave empty to not override the above value; use 0 or 'false' to disable and 1 or 'true' to enable 'Replace text' as a personal override"},
                         {"DoMarkupOutlook", "Whether a markup should be done for functions that change only parts of a text"},
-                        {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window"},
+                                                {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
                         {"MarkupMethodOutlookOverride", "Leave empty to not override the above value; otherwise enter the personal override value for 'markup method'"},
                         {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},

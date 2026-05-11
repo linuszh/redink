@@ -2449,6 +2449,11 @@ Partial Public Class ThisAddIn
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
 
+                        If _chatAgentModeEnabled Then
+                            sysPromptBase &= Environment.NewLine &
+                                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
+                        End If
+
                         ' Inject InkyMemory into system prompt if enabled
                         If My.Settings.Inky_InkyMemory Then
                             Dim memoryContent = ReadInkyMemory(_context.INI_InkyMemoryCap)
@@ -2643,9 +2648,12 @@ Partial Public Class ThisAddIn
                                                     agentOutputFiles,
                                                     localOutput)
                                             ElseIf agentOutputFiles IsNot Nothing AndAlso agentOutputFiles.Count > 0 Then
-                                                Dim fileList = String.Join(vbCrLf, agentOutputFiles.Select(Function(f) "- " & Path.GetFileName(f)))
-                                                localOutput = If(localOutput, "") & vbCrLf & vbCrLf &
-                                                    "**Output files (" & agentOutputFiles.Count.ToString() & "):**" & vbCrLf & fileList
+                                                localOutput = RemoveGeneratedOutputFilesSections(If(localOutput, String.Empty))
+
+                                                Dim outputFilesMarkdown As String = BuildOutputFilesMarkdown(agentOutputFiles)
+                                                If Not String.IsNullOrWhiteSpace(outputFilesMarkdown) Then
+                                                    localOutput = localOutput.TrimEnd() & vbCrLf & vbCrLf & outputFilesMarkdown
+                                                End If
                                             End If
 
                                         ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
@@ -3540,6 +3548,32 @@ Partial Public Class ThisAddIn
         End If
 
         Return list
+    End Function
+
+    Private Function RemoveGeneratedOutputFilesSections(ByVal markdown As String) As String
+        If String.IsNullOrWhiteSpace(markdown) Then Return If(markdown, String.Empty)
+
+        Dim pattern As String =
+        "(?ims)^\s*(?:\*\*)?Output files\s*\(\d+\)\s*:?(?:\*\*)?\s*\r?\n(?:\s*[-*]?\s*[^\r\n]+\r?\n?)+"
+
+        Dim cleaned As String = System.Text.RegularExpressions.Regex.Replace(markdown, pattern, "").TrimEnd()
+        Return cleaned
+    End Function
+
+    Private Function BuildOutputFilesMarkdown(ByVal outputFiles As List(Of String)) As String
+        If outputFiles Is Nothing OrElse outputFiles.Count = 0 Then Return String.Empty
+
+        Dim distinctFiles = outputFiles.
+        Where(Function(f) Not String.IsNullOrWhiteSpace(f)).
+        Select(Function(f) Path.GetFileName(f)).
+        Where(Function(f) Not String.IsNullOrWhiteSpace(f)).
+        Distinct(StringComparer.OrdinalIgnoreCase).
+        ToList()
+
+        If distinctFiles.Count = 0 Then Return String.Empty
+
+        Dim fileList = String.Join(vbCrLf, distinctFiles.Select(Function(f) "- " & f))
+        Return "**Output files (" & distinctFiles.Count.ToString() & "):**" & vbCrLf & fileList
     End Function
 
 

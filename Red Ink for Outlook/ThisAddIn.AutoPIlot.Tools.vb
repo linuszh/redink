@@ -894,54 +894,69 @@ Partial Public Class ThisAddIn
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
                 .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
                 .ToolInstructionsPrompt =
-                    AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
-                    "Supports two modes: " &
-                    "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
-                    "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
-                    "(2) 'audiobook' — reads the text paragraph by paragraph with alternating voices for variety. " &
-                    "Use this when the user wants a straightforward narration or audio version of a document. " &
-                    "The text parameter accepts the full text to convert. For document attachments, first use " &
-                    "read_attachment to extract the text, then pass the extracted text to this tool. " &
-                    "If the user specifies a particular voice (e.g., 'use the voice alloy'), pass it as voice_a or voice_b. " &
-                    "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
-                    "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
-                    "IMPORTANT: You MUST provide the 'language' parameter and it MUST match the language of the text content " &
-                    "using a full BCP-47 locale such as 'de-DE', 'de-CH', 'fr-FR', or 'en-US'. " &
-                    "Do NOT omit language and do NOT rely on defaults. " &
-                    "For German text, especially when it contains umlauts such as ä, ö, ü, or ß, use 'de-DE' or 'de-CH' as appropriate. " &
-                    "Preserve the original spelling in the text exactly as written; do not replace umlauts or ß with simplified forms." &
-                    engineHint &
-                    " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
-                    "Output is an MP3 file attached to the reply.",
+                AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
+                "Supports two modes: " &
+                "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
+                "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
+                "(2) 'audiobook' — reads the text as narrated audio. " &
+                "Use this when the user wants a straightforward narration or audio version of a document. " &
+                "The text parameter accepts the full text to convert. For document attachments, first use " &
+                "read_attachment to extract the text, then pass the extracted text to this tool. " &
+                "For podcast mode, speaker names and TTS voice IDs are different. " &
+                "Use host_name and guest_name for the names of the persons in the generated script. " &
+                "Use host_gender and guest_gender to let the code select appropriate voices. " &
+                "If the user says 'Marie and Marc' or gives other person names, treat them as speaker names, not as TTS voice IDs. " &
+                "Do NOT put ordinary human names into voice_a or voice_b. " &
+                "Only use voice_a or voice_b when the user explicitly provides a real provider voice ID such as an OpenAI voice name or a full Google voice ID. " &
+                "For audiobook mode, use single_voice=true when the user wants a normal single narrator or simple audio file. " &
+                "Use narrator_gender to choose the narrator voice for single-voice audiobook mode. " &
+                "Only use single_voice=false when the user explicitly wants alternating narration voices. " &
+                "If no speaker names are provided in podcast mode, choose suitable names. " &
+                "If no genders are provided in podcast mode, choose sensible genders from context; if still unclear, use female for the host and male for the guest. " &
+                "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
+                "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
+                "IMPORTANT: You MUST provide the 'language' parameter and it MUST match the language of the text content " &
+                "using a full BCP-47 locale such as 'de-DE', 'de-CH', 'fr-FR', or 'en-US'. " &
+                "Do NOT omit language and do NOT rely on defaults. " &
+                "For German text, especially when it contains umlauts such as ä, ö, ü, or ß, use 'de-DE' or 'de-CH' as appropriate. " &
+                "Preserve the original spelling in the text exactly as written; do not replace umlauts or ß with simplified forms." &
+                engineHint &
+                " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
+                "Output is an MP3 file attached to the reply.",
                 .ToolDefinition =
                     "{""name"":""" & AP_Tool_CreateAudioFile & """," &
                     """description"":""Generates an MP3 audio file from text using text-to-speech. " &
                     "Supports 'podcast' mode (two-speaker dialogue generated by LLM) and 'audiobook' mode " &
-                    "(paragraph-by-paragraph narration with alternating voices). " &
+                    "(single-voice or alternating narration). " &
                     "For document attachments, first extract text using read_attachment, then pass it here. " &
                     "CRITICAL: You MUST set 'language' to the actual language of the text using a full BCP-47 locale such as " &
                     "'de-DE', 'de-CH', 'fr-FR', or 'en-US'. Do NOT omit it. " &
                     "For German text with umlauts (ä, ö, ü, ß), use 'de-DE' or 'de-CH' and preserve the original spelling exactly. " &
-                    "For non-English text, prefer engine='google' for native pronunciation.""," &
+                    "For non-English text, prefer engine='google' for native pronunciation. " &
+                    "Use host_name and guest_name for podcast speaker names, host_gender and guest_gender for podcast voice selection, " &
+                    "single_voice and narrator_gender for simple audiobook narration, and reserve voice_a and voice_b for explicit provider voice IDs only.""," &
                     """parameters"":{""type"":""object"",""properties"":{" &
                     """text"":{""type"":""string"",""description"":""The full text content to convert to audio. " &
                     "Preserve original spelling exactly, including diacritics and special characters such as ä, ö, ü, and ß. " &
                     "For large documents, pass the complete extracted text.""}," &
                     """mode"":{""type"":""string"",""enum"":[""podcast"",""audiobook""]," &
                     """description"":""Audio generation mode. 'podcast' = LLM-generated two-speaker dialogue. " &
-                    "'audiobook' = direct paragraph-by-paragraph narration. Default: 'audiobook'""}," &
+                    "'audiobook' = narrated audio. Default: 'audiobook'""}," &
                     """language"":{""type"":""string"",""description"":""REQUIRED. Full BCP-47 language code matching the text content, " &
                     "for example 'en-US', 'de-DE', 'de-CH', or 'fr-FR'. This is critical for correct pronunciation. " &
                     "For German text with umlauts, use 'de-DE' or 'de-CH' as appropriate.""}," &
                     """engine"":{""type"":""string"",""enum"":[""google"",""openai"",""auto""]," &
                     """description"":""TTS engine to use. 'google' = Google Cloud TTS (best for non-English languages). " &
                     "'openai' = OpenAI TTS (best for English). 'auto' = automatically select based on language. Default: 'auto'""}," &
-                    """voice_a"":{""type"":""string"",""description"":""Primary voice name (host in podcast mode, narrator A in audiobook). " &
-                    "If omitted, a default voice is used.""}," &
-                    """voice_b"":{""type"":""string"",""description"":""Secondary voice name (guest in podcast mode, narrator B in audiobook). " &
-                    "If omitted, a default voice is used.""}," &
-                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). " &
-                    "Ignored in audiobook mode. Default: '5 minutes'""}," &
+                    """host_name"":{""type"":""string"",""description"":""Podcast mode only. Name of the host / speaker A. This is a person name for the generated script, not a TTS voice ID.""}," &
+                    """guest_name"":{""type"":""string"",""description"":""Podcast mode only. Name of the guest / speaker B. This is a person name for the generated script, not a TTS voice ID.""}," &
+                    """host_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Podcast mode only. Gender of the host / speaker A. Used to select the voice. If omitted, the caller should choose sensibly; default fallback is female.""}," &
+                    """guest_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Podcast mode only. Gender of the guest / speaker B. Used to select the voice. If omitted, the caller should choose sensibly; default fallback is male.""}," &
+                    """single_voice"":{""type"":""boolean"",""description"":""Audiobook mode only. true = one narrator voice for the whole audio. false = alternating narration voices. For a normal simple audio file, use true.""}," &
+                    """narrator_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Audiobook mode only. Narrator gender for single_voice=true. Used to select the narrator voice. Default fallback is female.""}," &
+                    """voice_a"":{""type"":""string"",""description"":""Optional explicit provider TTS voice ID for host / narrator A. Do NOT use ordinary human names here. Example OpenAI: 'nova'. Example Google: 'de-DE-Chirp3-HD-Achernar'.""}," &
+                    """voice_b"":{""type"":""string"",""description"":""Optional explicit provider TTS voice ID for guest / narrator B. Do NOT use ordinary human names here. Example OpenAI: 'ash'. Example Google: 'de-DE-Chirp3-HD-Achird'.""}," &
+                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). Ignored in audiobook mode. Default: '5 minutes'""}," &
                     """instructions"":{""type"":""string"",""description"":""Specific instructions for the podcast script generation (e.g., 'Focus on the financial details', 'Be humorous', 'Explain for a child'). Optional.""}," &
                     """context"":{""type"":""string"",""description"":""Additional context or background info to help generating the podcast script. Optional.""}," &
                     """output_filename"":{""type"":""string"",""description"":""Filename for the output MP3 file (default: 'audiobook.mp3')""}" &

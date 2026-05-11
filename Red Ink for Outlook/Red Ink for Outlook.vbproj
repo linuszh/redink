@@ -479,6 +479,9 @@
     <Compile Include="LogWindow.vb">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="ReviewChangesDialog.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Ribbon1.Designer.vb">
       <DependentUpon>Ribbon1.vb</DependentUpon>
     </Compile>
