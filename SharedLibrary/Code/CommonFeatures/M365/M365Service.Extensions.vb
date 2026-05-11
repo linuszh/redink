@@ -458,6 +458,10 @@ Namespace SharedLibrary
 
             Select Case hit.Source
                 Case M365SearchSources.Mail
+
+
+
+
                     Return Await GetMessageAsTextAsync(context, hit.Id, options, ct).ConfigureAwait(False)
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint
                     Return Await GetDriveItemAsTextAsync(
@@ -525,8 +529,8 @@ Namespace SharedLibrary
             sb.AppendLine("From: " & FormatAddr(msg.From, msg.FromAddress))
             If msg.To_.Count > 0 Then sb.AppendLine("To: " & String.Join("; ", msg.To_))
             If msg.Cc.Count > 0 Then sb.AppendLine("Cc: " & String.Join("; ", msg.Cc))
-            sb.AppendLine($"Sent: {If(msg.SentUtc.HasValue, msg.SentUtc.Value.ToString("u"), "")}")
-            sb.AppendLine($"Received: {If(msg.ReceivedUtc.HasValue, msg.ReceivedUtc.Value.ToString("u"), "")}")
+            AppendDateLines(sb, "Sent", msg.SentUtc)
+            AppendDateLines(sb, "Received", msg.ReceivedUtc)
             sb.AppendLine("Subject: " & If(msg.Subject, ""))
             sb.AppendLine()
             Dim body = If(msg.Body, "")
@@ -558,16 +562,31 @@ Namespace SharedLibrary
             Return r
         End Function
 
+        Private Sub AppendDateLines(sb As StringBuilder, label As String, value As DateTime?)
+            If sb Is Nothing OrElse String.IsNullOrWhiteSpace(label) Then Return
+
+            If Not value.HasValue Then
+                sb.AppendLine(label & ": ")
+                Return
+            End If
+
+            Dim utc = value.Value.ToUniversalTime()
+
+            Debug.WriteLine($"[M365Date] {label}: rawUtc='{If(value.HasValue, value.Value.ToString("o"), "")}' rendered='{If(value.HasValue, value.Value.ToUniversalTime().ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture), "")}'")
+
+            sb.AppendLine(label & ": " & utc.ToString("dd MMM yyyy HH:mm 'UTC'", Globalization.CultureInfo.InvariantCulture))
+        End Sub
+
         ''' <summary>
         ''' Recursively renders an expanded attachment node into <paramref name="sb"/> as plain text,
         ''' invoking the appropriate file extractor.
         ''' </summary>
         Private Async Function AppendAttachmentTextAsync(context As ISharedContext,
-                                                         a As M365ExpandedAttachment,
-                                                         sb As StringBuilder,
-                                                         r As M365TextResult,
-                                                         options As M365TextOptions,
-                                                         ct As CancellationToken) As Task
+                                                 a As M365ExpandedAttachment,
+                                                 sb As StringBuilder,
+                                                 r As M365TextResult,
+                                                 options As M365TextOptions,
+                                                 ct As CancellationToken) As Task
             sb.AppendLine()
             sb.AppendLine($"═══ Attachment: {If(a.Name, "(unnamed)")} ({a.Kind}) ═══")
             If Not String.IsNullOrEmpty(a.ErrorMessage) Then
@@ -581,7 +600,7 @@ Namespace SharedLibrary
                         Dim text = Await ExtractTextFromLocalFileAsync(context, a.LocalPath, options, ct).ConfigureAwait(False)
                         sb.AppendLine(text.Text)
                         r.AttachmentTexts.Add(New M365AttachmentText() With {
-                            .Name = a.Name, .LocalPath = a.LocalPath, .Text = text.Text, .Errors = text.ErrorMessage})
+                    .Name = a.Name, .LocalPath = a.LocalPath, .Text = text.Text, .Errors = text.ErrorMessage})
                         If Not String.IsNullOrEmpty(text.ErrorMessage) Then r.Errors.Add($"{a.Name}: {text.ErrorMessage}")
                     ElseIf a.Kind = M365ExpandedAttachmentKind.ReferenceAttachment Then
                         sb.AppendLine($"[Reference URL: {a.ReferenceUrl}]")
@@ -589,28 +608,33 @@ Namespace SharedLibrary
 
                 Case M365ExpandedAttachmentKind.ItemAttachment
                     If a.NestedMessage IsNot Nothing Then
-                        sb.AppendLine($"From: {FormatAddr(a.NestedMessage.From, a.NestedMessage.FromAddress)}")
+                        sb.AppendLine("From: " & FormatAddr(a.NestedMessage.From, a.NestedMessage.FromAddress))
                         If a.NestedMessage.To_.Count > 0 Then sb.AppendLine("To: " & String.Join("; ", a.NestedMessage.To_))
-                        sb.AppendLine($"Sent: {If(a.NestedMessage.SentUtc.HasValue, a.NestedMessage.SentUtc.Value.ToString("u"), "")}")
-                        sb.AppendLine($"Subject: {If(a.NestedMessage.Subject, "")}")
+                        If a.NestedMessage.Cc.Count > 0 Then sb.AppendLine("Cc: " & String.Join("; ", a.NestedMessage.Cc))
+                        AppendDateLines(sb, "Sent", a.NestedMessage.SentUtc)
+                        AppendDateLines(sb, "Received", a.NestedMessage.ReceivedUtc)
+                        sb.AppendLine("Subject: " & If(a.NestedMessage.Subject, ""))
                         sb.AppendLine()
+
                         Dim body = If(a.NestedMessage.Body, "")
                         If String.Equals(a.NestedMessage.BodyContentType, "html", StringComparison.OrdinalIgnoreCase) Then body = StripHtml(body)
                         sb.AppendLine(body.Trim())
-                        ' Recurse into children that were materialised inline
+
                         For Each child In a.Children
                             Await AppendAttachmentTextAsync(context, child, sb, r, options, ct).ConfigureAwait(False)
                         Next
+
                     ElseIf a.NestedEvent IsNot Nothing Then
                         Dim ev = a.NestedEvent
-                        sb.AppendLine($"Event: {ev.Subject}")
-                        If Not String.IsNullOrEmpty(ev.Organizer) Then sb.AppendLine($"Organizer: {ev.Organizer}")
-                        If Not String.IsNullOrEmpty(ev.Location) Then sb.AppendLine($"Location: {ev.Location}")
-                        sb.AppendLine($"Start: {If(ev.StartUtc.HasValue, ev.StartUtc.Value.ToString("u"), "")}")
-                        sb.AppendLine($"End: {If(ev.EndUtc.HasValue, ev.EndUtc.Value.ToString("u"), "")}")
+                        sb.AppendLine("Event: " & If(ev.Subject, ""))
+                        If Not String.IsNullOrEmpty(ev.Organizer) Then sb.AppendLine("Organizer: " & ev.Organizer)
+                        If Not String.IsNullOrEmpty(ev.Location) Then sb.AppendLine("Location: " & ev.Location)
+                        AppendDateLines(sb, "Start", ev.StartUtc)
+                        AppendDateLines(sb, "End", ev.EndUtc)
                         If ev.Attendees.Count > 0 Then sb.AppendLine("Attendees: " & String.Join("; ", ev.Attendees))
                         sb.AppendLine()
                         sb.AppendLine(If(ev.BodyPreview, "").Trim())
+
                     ElseIf Not String.IsNullOrEmpty(a.NestedEventSubject) Then
                         sb.AppendLine($"[Embedded event: {a.NestedEventSubject}]")
                     Else
@@ -621,6 +645,8 @@ Namespace SharedLibrary
                     sb.AppendLine("[Unknown attachment type]")
             End Select
         End Function
+
+
 
         ''' <summary>
         ''' Downloads a DriveItem (OneDrive / SharePoint) to a temp file and returns its plain text.
@@ -733,50 +759,58 @@ Namespace SharedLibrary
         ''' Plain-text rendering of an Outlook calendar event.
         ''' </summary>
         Public Async Function GetEventAsTextAsync(context As ISharedContext,
-                                                  eventId As String,
-                                                  Optional ct As CancellationToken = Nothing) As Task(Of M365TextResult)
+                                          eventId As String,
+                                          Optional ct As CancellationToken = Nothing) As Task(Of M365TextResult)
             Dim r As New M365TextResult() With {.Source = M365SearchSources.Calendar, .Id = eventId}
             Dim ev = Await GetEventAsync(context, eventId, ct).ConfigureAwait(False)
             If ev Is Nothing Then
                 r.Errors.Add("Event not found.")
                 Return r
             End If
+
             r.Title = ev.Subject
             r.WebUrl = If(ev.WebLink, "")
+
             Dim sb As New StringBuilder()
-            sb.AppendLine($"Subject: {ev.Subject}")
-            sb.AppendLine($"Organizer: {ev.Organizer}")
-            sb.AppendLine($"Location: {ev.Location}")
-            sb.AppendLine($"Start: {If(ev.StartUtc.HasValue, ev.StartUtc.Value.ToString("u"), "")}")
-            sb.AppendLine($"End: {If(ev.EndUtc.HasValue, ev.EndUtc.Value.ToString("u"), "")}")
+            sb.AppendLine("Subject: " & If(ev.Subject, ""))
+            sb.AppendLine("Organizer: " & If(ev.Organizer, ""))
+            sb.AppendLine("Location: " & If(ev.Location, ""))
+            AppendDateLines(sb, "Start", ev.StartUtc)
+            AppendDateLines(sb, "End", ev.EndUtc)
             If ev.Attendees.Count > 0 Then sb.AppendLine("Attendees: " & String.Join("; ", ev.Attendees))
             sb.AppendLine()
-            sb.AppendLine(ev.BodyPreview)
+            sb.AppendLine(If(ev.BodyPreview, ""))
+
             r.Text = sb.ToString().Trim()
             Return r
         End Function
 
+
         ''' <summary>Plain-text rendering of a single Teams chat message.</summary>
         Public Async Function GetChatMessageAsTextAsync(context As ISharedContext,
-                                                        messageId As String,
-                                                        Optional chatId As String = Nothing,
-                                                        Optional teamId As String = Nothing,
-                                                        Optional channelId As String = Nothing,
-                                                        Optional ct As CancellationToken = Nothing) As Task(Of M365TextResult)
+                                                messageId As String,
+                                                Optional chatId As String = Nothing,
+                                                Optional teamId As String = Nothing,
+                                                Optional channelId As String = Nothing,
+                                                Optional ct As CancellationToken = Nothing) As Task(Of M365TextResult)
             Dim r As New M365TextResult() With {.Source = M365SearchSources.Teams, .Id = messageId}
             Dim cm = Await GetChatMessageAsync(context, messageId, chatId, teamId, channelId, ct).ConfigureAwait(False)
             If cm Is Nothing Then
                 r.Errors.Add("Chat message not found.")
                 Return r
             End If
+
             r.Title = TruncatePlain(StripHtml(If(cm.Content, "")), 80)
+
             Dim sb As New StringBuilder()
-            sb.AppendLine($"From: {cm.From}")
-            sb.AppendLine($"At: {If(cm.CreatedUtc.HasValue, cm.CreatedUtc.Value.ToString("u"), "")}")
+            sb.AppendLine("From: " & If(cm.From, ""))
+            AppendDateLines(sb, "At", cm.CreatedUtc)
             sb.AppendLine()
+
             Dim body = If(cm.Content, "")
             If String.Equals(cm.ContentType, "html", StringComparison.OrdinalIgnoreCase) Then body = StripHtml(body)
             sb.AppendLine(body.Trim())
+
             r.Text = sb.ToString().Trim()
             Return r
         End Function

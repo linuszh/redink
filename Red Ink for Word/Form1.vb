@@ -935,6 +935,12 @@ Public Class frmAIChat
         Dim promptToRestore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userPrompt}".Trim(), userPrompt)
 
         Try
+            My.Settings.LastPromptChat = promptToRestore
+            My.Settings.Save()
+        Catch
+        End Try
+
+        Try
             ' ──────────────────────────────────────────────────────────────
             ' STEP 1: Build System Prompt with Conditional Capabilities
             ' ──────────────────────────────────────────────────────────────
@@ -2207,19 +2213,6 @@ Public Class frmAIChat
     ' Input Keyboard Handlers
     ' =========================================================================
 
-    ''' <summary>
-    ''' Legacy keyboard handler for user input. Triggers Send on Ctrl+Enter.
-    ''' </summary>
-    ''' <remarks>
-    ''' This handler is not currently attached to any control but preserved for compatibility.
-    ''' Modern behavior uses UserInput_KeyDown which sends on Enter (not Ctrl+Enter).
-    ''' </remarks>
-    Private Sub oldUserInput_KeyDown(sender As Object, e As KeyEventArgs)
-        If e.Control AndAlso e.KeyCode = Keys.Enter Then
-            btnSend.PerformClick()
-            e.Handled = True
-        End If
-    End Sub
 
     ''' <summary>
     ''' Handles KeyDown event for txtUserInput. Sends message on Enter, allows Shift+Enter for newline.
@@ -2233,12 +2226,30 @@ Public Class frmAIChat
     ''' Handler attached in frmAIChat_Load event.
     ''' </remarks>
     Private Sub UserInput_KeyDown(sender As Object, e As KeyEventArgs)
+        If e.Control AndAlso e.KeyCode = Keys.P Then
+            Dim lastPrompt As String = My.Settings.LastPromptChat
+
+            If Not String.IsNullOrWhiteSpace(lastPrompt) Then
+                Dim insertionIndex As Integer = txtUserInput.SelectionStart
+                Dim selectionLength As Integer = txtUserInput.SelectionLength
+
+                Dim newText As String =
+                    txtUserInput.Text.Remove(insertionIndex, selectionLength).Insert(insertionIndex, lastPrompt)
+
+                txtUserInput.Text = newText
+                txtUserInput.SelectionStart = insertionIndex + lastPrompt.Length
+                txtUserInput.SelectionLength = 0
+            End If
+
+            e.SuppressKeyPress = True
+            e.Handled = True
+            Return
+        End If
+
         If e.KeyCode = Keys.Enter Then
             If e.Shift Then
-                ' Allow Shift+Enter to insert newline (default TextBox behavior)
                 Return
             Else
-                ' Enter alone sends message
                 e.SuppressKeyPress = True
                 btnSend.PerformClick()
                 e.Handled = True
@@ -2258,7 +2269,8 @@ Public Class frmAIChat
                 txtUserInput,
                 _context.INI_PromptLibPath,
                 _context.INI_PromptLibPathLocal,
-                _context
+                _context,
+                My.Settings.LastPromptChat
             )
 
         If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then

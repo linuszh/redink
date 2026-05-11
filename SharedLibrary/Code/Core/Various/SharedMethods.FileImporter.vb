@@ -421,12 +421,14 @@ Namespace SharedLibrary
         ''' <param name="DoOCR">If <c>True</c>, enables OCR heuristics and (if confirmed) OCR execution.</param>
         ''' <param name="AskUser">If <c>True</c>, prompts the user before performing OCR.</param>
         ''' <param name="context">Shared context used for OCR-capable model configuration and LLM invocation.</param>
+        ''' <param name="ocrAdditionalInstruction">Additional instructions for OCR processing when reading PDF files.</param>
         ''' <returns>A PdfReadResult containing the extracted text and whether OCR was skipped despite being suggested.</returns>
         Public Shared Async Function ReadPdfAsTextEx(ByVal pdfPath As String,
                                             Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
                                             Optional ByVal DoOCR As Boolean = False,
                                             Optional ByVal AskUser As Boolean = True,
-                                            Optional ByVal context As ISharedContext = Nothing) As Task(Of PdfReadResult)
+                                            Optional ByVal context As ISharedContext = Nothing,
+                                            Optional ByVal ocrAdditionalInstruction As String = Nothing) As Task(Of PdfReadResult)
 
             Dim result As New PdfReadResult()
 
@@ -608,7 +610,7 @@ Namespace SharedLibrary
                         End If
                     End If
 
-                    Dim ocrText As String = Await PerformOCR(pdfPath, context, AskUser)
+                    Dim ocrText As String = Await PerformOCR(pdfPath, context, AskUser, ocrAdditionalInstruction)
                     If Not String.IsNullOrWhiteSpace(ocrText) Then
                         result.Content = ocrText
                         Return result
@@ -634,8 +636,9 @@ Namespace SharedLibrary
                                             Optional ByVal ReturnErrorInsteadOfEmpty As Boolean = True,
                                             Optional ByVal DoOCR As Boolean = False,
                                             Optional ByVal AskUser As Boolean = True,
-                                            Optional ByVal context As ISharedContext = Nothing) As Task(Of String)
-            Dim result = Await ReadPdfAsTextEx(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context)
+                                            Optional ByVal context As ISharedContext = Nothing,
+                                            Optional ByVal ocrAdditionalInstruction As String = Nothing) As Task(Of String)
+            Dim result = Await ReadPdfAsTextEx(pdfPath, ReturnErrorInsteadOfEmpty, DoOCR, AskUser, context, ocrAdditionalInstruction)
             Return result.Content
         End Function
 
@@ -731,8 +734,12 @@ Namespace SharedLibrary
         ''' <param name="pdfPath">Path to the PDF file to OCR.</param>
         ''' <param name="context">Shared context containing model and API configuration.</param>
         ''' <param name="askUser">If False, suppresses all UI dialogs (for non-interactive callers like AutoPilot).</param>
+        ''' <param name="additionalInstruction">Additional instructions to include in the system prompt for OCR processing.</param>
         ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
-        Private Shared Async Function PerformOCR(ByVal pdfPath As String, context As ISharedContext, Optional askUser As Boolean = True) As Task(Of String)
+        Private Shared Async Function PerformOCR(ByVal pdfPath As String,
+                                              context As ISharedContext,
+                                              Optional askUser As Boolean = True,
+                                              Optional additionalInstruction As String = Nothing) As Task(Of String)
 
             ' Use the comprehensive OCR availability check
             If Not IsOcrAvailable(context) Then
@@ -755,7 +762,12 @@ Namespace SharedLibrary
                 End If
             End If
 
-            Dim result As System.String = Await LLM(context, context.SP_InsertClipboard, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", pdfPath)
+            Dim systemPrompt As String = context.SP_InsertClipboard
+            If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
+                systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
+            End If
+
+            Dim result As System.String = Await LLM(context, systemPrompt, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", pdfPath)
 
             ' Restore model if temporarily switched
             If UseSecondAPI AndAlso originalConfigLoaded Then

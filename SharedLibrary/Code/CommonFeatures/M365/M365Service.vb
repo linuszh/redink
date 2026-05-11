@@ -332,10 +332,18 @@ Namespace SharedLibrary
                 Throw
             End Try
 
+            Try
+                Await CanonicalizeSearchHitDatesAsync(context, result.Hits, ct).ConfigureAwait(False)
+            Catch ex As OperationCanceledException
+                Throw
+            Catch ex As Exception
+                Debug.WriteLine("[M365] CanonicalizeSearchHitDatesAsync failed: " & ex.ToString())
+            End Try
+
             result.TotalEstimated = totalHits
             result.FinishedUtc = DateTime.UtcNow
             Report(progress, M365ProgressStage.Completed, M365SearchSources.None,
-                   $"Completed: {totalHits} hits", 100, totalHits)
+       $"Completed: {totalHits} hits", 100, totalHits)
             Return result
         End Function
 
@@ -502,6 +510,217 @@ Namespace SharedLibrary
         End Function
 
 
+        Private Async Function CanonicalizeSearchHitDatesAsync(context As ISharedContext,
+                                                       hits As IList(Of M365SearchHit),
+                                                       ct As CancellationToken) As Task
+            If context Is Nothing OrElse hits Is Nothing OrElse hits.Count = 0 Then Return
+
+            Await CanonicalizeMailSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
+            Await CanonicalizeCalendarSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
+            Await CanonicalizeTeamsSearchHitDatesAsync(context, hits, ct).ConfigureAwait(False)
+        End Function
+
+        Private Async Function CanonicalizeMailSearchHitDatesAsync(context As ISharedContext,
+                                                           hits As IList(Of M365SearchHit),
+                                                           ct As CancellationToken) As Task
+            Dim mailHits As List(Of M365SearchHit) =
+        hits.
+            Where(Function(h) h IsNot Nothing AndAlso
+                              h.Source = M365SearchSources.Mail AndAlso
+                              Not String.IsNullOrWhiteSpace(h.Id)).
+            ToList()
+
+            If mailHits.Count = 0 Then Return
+
+            Dim messages As List(Of M365Message) =
+        Await GetMessagesBatchAsync(
+            context,
+            mailHits.Select(Function(h) h.Id),
+            M365MessageFields.Headers,
+            ct).ConfigureAwait(False)
+
+            Dim byId As New Dictionary(Of String, M365Message)(StringComparer.OrdinalIgnoreCase)
+            For Each msg In messages
+                If msg Is Nothing OrElse String.IsNullOrWhiteSpace(msg.Id) Then Continue For
+                If Not byId.ContainsKey(msg.Id) Then
+                    byId.Add(msg.Id, msg)
+                End If
+            Next
+
+            For Each hit In mailHits
+                ct.ThrowIfCancellationRequested()
+
+                Dim msg As M365Message = Nothing
+                If Not byId.TryGetValue(hit.Id, msg) OrElse msg Is Nothing Then Continue For
+
+                Dim preferredDate As DateTime? = If(msg.SentUtc, msg.ReceivedUtc)
+                If preferredDate.HasValue Then
+                    hit.LastModifiedUtc = preferredDate.Value
+                End If
+
+                If Not String.IsNullOrWhiteSpace(msg.Subject) Then
+                    hit.Title = msg.Subject
+                End If
+
+                If Not String.IsNullOrWhiteSpace(msg.WebLink) Then
+                    hit.WebUrl = msg.WebLink
+                End If
+
+                Dim resource As JObject = EnsureHitResource(hit)
+                resource("id") = msg.Id
+                resource("subject") = If(msg.Subject, "")
+                resource("webLink") = If(msg.WebLink, "")
+                resource("internetMessageId") = If(msg.InternetMessageId, "")
+                resource("conversationId") = If(msg.ConversationId, "")
+
+                If msg.SentUtc.HasValue Then
+                    resource("sentDateTime") = FormatGraphIsoUtc(msg.SentUtc.Value)
+                End If
+
+                If msg.ReceivedUtc.HasValue Then
+                    resource("receivedDateTime") = FormatGraphIsoUtc(msg.ReceivedUtc.Value)
+                End If
+            Next
+        End Function
+
+        Private Async Function CanonicalizeCalendarSearchHitDatesAsync(context As ISharedContext,
+                                                               hits As IList(Of M365SearchHit),
+                                                               ct As CancellationToken) As Task
+            Dim eventHits As List(Of M365SearchHit) =
+        hits.
+            Where(Function(h) h IsNot Nothing AndAlso
+                              h.Source = M365SearchSources.Calendar AndAlso
+                              Not String.IsNullOrWhiteSpace(h.Id)).
+            ToList()
+
+            For Each hit In eventHits
+                ct.ThrowIfCancellationRequested()
+
+                Dim ev As M365Event = Nothing
+                Try
+                    ev = Await GetEventAsync(context, hit.Id, ct).ConfigureAwait(False)
+                Catch ex As Exception
+                    Debug.WriteLine("[M365] CanonicalizeCalendarSearchHitDatesAsync failed for " & hit.Id & ": " & ex.Message)
+                End Try
+
+                If ev Is Nothing Then Continue For
+
+                If ev.StartUtc.HasValue Then
+                    hit.LastModifiedUtc = ev.StartUtc.Value
+                End If
+
+                If Not String.IsNullOrWhiteSpace(ev.Subject) Then
+                    hit.Title = ev.Subject
+                End If
+
+                If Not String.IsNullOrWhiteSpace(ev.WebLink) Then
+                    hit.WebUrl = ev.WebLink
+                End If
+
+                Dim resource As JObject = EnsureHitResource(hit)
+                resource("id") = ev.Id
+                resource("subject") = If(ev.Subject, "")
+                resource("webLink") = If(ev.WebLink, "")
+
+                Dim startObj As JObject = TryCast(resource("start"), JObject)
+                If startObj Is Nothing Then
+                    startObj = New JObject()
+                    resource("start") = startObj
+                End If
+
+                Dim endObj As JObject = TryCast(resource("end"), JObject)
+                If endObj Is Nothing Then
+                    endObj = New JObject()
+                    resource("end") = endObj
+                End If
+
+                If ev.StartUtc.HasValue Then
+                    startObj("dateTime") = FormatGraphIsoUtc(ev.StartUtc.Value)
+                End If
+
+                If ev.EndUtc.HasValue Then
+                    endObj("dateTime") = FormatGraphIsoUtc(ev.EndUtc.Value)
+                End If
+            Next
+        End Function
+
+        Private Async Function CanonicalizeTeamsSearchHitDatesAsync(context As ISharedContext,
+                                                            hits As IList(Of M365SearchHit),
+                                                            ct As CancellationToken) As Task
+            Dim chatHits As List(Of M365SearchHit) =
+        hits.
+            Where(Function(h) h IsNot Nothing AndAlso
+                              h.Source = M365SearchSources.Teams AndAlso
+                              Not String.IsNullOrWhiteSpace(h.Id)).
+            ToList()
+
+            For Each hit In chatHits
+                ct.ThrowIfCancellationRequested()
+
+                Dim resource As JObject = EnsureHitResource(hit)
+
+                Dim chatId As String = SafeStr(resource, "chatId")
+                Dim chanIdent As JObject = TryCast(resource("channelIdentity"), JObject)
+                Dim teamId As String = SafeStr(chanIdent, "teamId")
+                Dim channelId As String = SafeStr(chanIdent, "channelId")
+
+                Dim cm As M365ChatMessage = Nothing
+
+                Try
+                    If Not String.IsNullOrWhiteSpace(teamId) AndAlso Not String.IsNullOrWhiteSpace(channelId) Then
+                        cm = Await GetChatMessageAsync(
+                    context,
+                    hit.Id,
+                    Nothing,
+                    teamId,
+                    channelId,
+                    ct).ConfigureAwait(False)
+                    ElseIf Not String.IsNullOrWhiteSpace(chatId) Then
+                        cm = Await GetChatMessageAsync(
+                    context,
+                    hit.Id,
+                    chatId,
+                    Nothing,
+                    Nothing,
+                    ct).ConfigureAwait(False)
+                    End If
+                Catch ex As Exception
+                    Debug.WriteLine("[M365] CanonicalizeTeamsSearchHitDatesAsync failed for " & hit.Id & ": " & ex.Message)
+                End Try
+
+                If cm Is Nothing Then Continue For
+
+                If cm.CreatedUtc.HasValue Then
+                    hit.LastModifiedUtc = cm.CreatedUtc.Value
+                    resource("createdDateTime") = FormatGraphIsoUtc(cm.CreatedUtc.Value)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(cm.WebUrl) Then
+                    hit.WebUrl = cm.WebUrl
+                    resource("webUrl") = cm.WebUrl
+                End If
+            Next
+        End Function
+
+        Private Function EnsureHitResource(hit As M365SearchHit) As JObject
+            If hit Is Nothing Then Return New JObject()
+
+            If hit.RawJson Is Nothing Then
+                hit.RawJson = New JObject()
+            End If
+
+            Dim resource As JObject = TryCast(hit.RawJson("resource"), JObject)
+            If resource Is Nothing Then
+                resource = New JObject()
+                hit.RawJson("resource") = resource
+            End If
+
+            Return resource
+        End Function
+
+        Private Function FormatGraphIsoUtc(value As DateTime) As String
+            Return value.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", Globalization.CultureInfo.InvariantCulture)
+        End Function
 
 
         Private Function ParseSearchHit(h As JObject, src As M365SearchSources,
@@ -882,6 +1101,7 @@ Namespace SharedLibrary
             m.InternetMessageId = SafeStr(j, "internetMessageId")
             m.ConversationId = SafeStr(j, "conversationId")
             m.WebLink = SafeStr(j, "webLink")
+
             m.ReceivedUtc = TryDate(j, "receivedDateTime")
             m.SentUtc = TryDate(j, "sentDateTime")
 
@@ -1239,16 +1459,69 @@ Namespace SharedLibrary
 
         Private Function TryDate(j As JObject, name As String) As DateTime?
             If j Is Nothing Then Return Nothing
+
             Dim t = j(name)
             If t Is Nothing OrElse t.Type = JTokenType.Null Then Return Nothing
-            Dim s = t.ToString()
+
+            Dim s As String = t.ToString().Trim()
             If String.IsNullOrWhiteSpace(s) Then Return Nothing
+
             Dim d As DateTime
-            If DateTime.TryParse(s, Globalization.CultureInfo.InvariantCulture,
-                                 Globalization.DateTimeStyles.AdjustToUniversal Or
-                                 Globalization.DateTimeStyles.AssumeUniversal, d) Then
+
+            ' 1) First handle explicit day-first dotted formats returned by some Graph search responses.
+            Dim dottedDayFirstFormats As String() = {
+        "dd.MM.yyyy HH:mm:ss",
+        "d.MM.yyyy HH:mm:ss",
+        "dd.M.yyyy HH:mm:ss",
+        "d.M.yyyy HH:mm:ss",
+        "dd.MM.yyyy HH:mm",
+        "d.MM.yyyy HH:mm",
+        "dd.M.yyyy HH:mm",
+        "d.M.yyyy HH:mm",
+        "dd.MM.yyyy",
+        "d.MM.yyyy",
+        "dd.M.yyyy",
+        "d.M.yyyy"
+    }
+
+            If DateTime.TryParseExact(
+        s,
+        dottedDayFirstFormats,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+        d) Then
                 Return d
             End If
+
+            ' 2) Then try strict ISO-style formats commonly returned by Graph.
+            Dim isoFormats As String() = {
+        "yyyy-MM-dd'T'HH:mm:ss'Z'",
+        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
+        "yyyy-MM-dd'T'HH:mm:ssK",
+        "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd HH:mm",
+        "yyyy-MM-dd"
+    }
+
+            If DateTime.TryParseExact(
+        s,
+        isoFormats,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+        d) Then
+                Return d
+            End If
+
+            ' 3) Fallback: invariant parse for anything else.
+            If DateTime.TryParse(
+        s,
+        Globalization.CultureInfo.InvariantCulture,
+        Globalization.DateTimeStyles.AssumeUniversal Or Globalization.DateTimeStyles.AdjustToUniversal,
+        d) Then
+                Return d
+            End If
+
             Return Nothing
         End Function
 

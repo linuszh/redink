@@ -2065,6 +2065,8 @@ Partial Public Class ThisAddIn
         Dim doOcr As Boolean = False
         Dim askUserPerFile As Boolean = False
         Dim flattenBeforeOcr As Boolean = False
+        Dim useMarkdownOutputForFlattenedOcr As Boolean = False
+        Dim ocrMarkdownInstruction As String = String.Empty
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -2110,6 +2112,24 @@ Partial Public Class ThisAddIn
                 Return ' User aborted
             End If
             flattenBeforeOcr = (flattenChoice = 1)
+        End If
+
+        ' Only ask about Markdown if OCR is enabled AND PDFs will be flattened first
+        If doOcr AndAlso flattenBeforeOcr Then
+            Dim markdownChoice As Integer = ShowCustomYesNoBox(
+                "Do you want OCR results for those flattened PDFs to be saved as Markdown files (.md) instead of plain text (.txt)?" & vbCrLf & vbCrLf &
+                "If yes, the OCR prompt will explicitly request Markdown output and the saved file extension will be changed to .md.",
+                "Yes, save OCR results as Markdown",
+                "No, keep plain text")
+            If markdownChoice = 0 Then
+                Return ' User aborted
+            End If
+
+            useMarkdownOutputForFlattenedOcr = (markdownChoice = 1)
+
+            If useMarkdownOutputForFlattenedOcr Then
+                ocrMarkdownInstruction = Add_OcrMarkdownInstruction
+            End If
         End If
 
         ' Create output subdirectory if needed
@@ -2162,6 +2182,9 @@ Partial Public Class ThisAddIn
                     ' Determine OCR settings for this file
                     Dim isPdf As Boolean = IO.Path.GetExtension(filePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
+                    Dim useMarkdownForThisFile As Boolean =
+                        isPdf AndAlso useOcrForThisFile AndAlso flattenBeforeOcr AndAlso useMarkdownOutputForFlattenedOcr
+                    Dim outputExtension As String = If(useMarkdownForThisFile, ".md", ".txt")
 
                     ' If flattening is requested for PDFs, flatten to temp file first
                     Dim effectiveFilePath As String = filePath
@@ -2189,8 +2212,13 @@ Partial Public Class ThisAddIn
                     Try
                         ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
                         ' preventing the countdown splash from interrupting batch processing.
-                        ' The user has already made all choices upfront (OCR on/off, flatten on/off).
-                        Dim content As String = Await GetFileContent(effectiveFilePath, Silent:=True, DoOCR:=useOcrForThisFile, AskUser:=False)
+                        ' The user has already made all choices upfront (OCR on/off, flatten on/off, Markdown on/off).
+                        Dim content As String = Await GetFileContent(
+                            effectiveFilePath,
+                            Silent:=True,
+                            DoOCR:=useOcrForThisFile,
+                            AskUser:=False,
+                            OcrAdditionalInstruction:=If(useMarkdownForThisFile, ocrMarkdownInstruction, ""))
 
                         If String.IsNullOrWhiteSpace(content) Then
                             emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
@@ -2215,15 +2243,14 @@ Partial Public Class ThisAddIn
                                         IO.Directory.CreateDirectory(targetDir)
                                     End If
                                 End If
-                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
+                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & outputExtension)
                             Else
-                                outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
+                                outputPath = IO.Path.Combine(outputBaseDir, fileName & outputExtension)
                             End If
                         Else
-                            outputPath = filePath & ".txt"
+                            outputPath = filePath & outputExtension
                         End If
 
-                        ' Save as text file
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         successCount += 1
 
@@ -2265,6 +2292,9 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"OCR was enabled for PDF files.")
             If flattenBeforeOcr Then
                 summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
+                If useMarkdownOutputForFlattenedOcr Then
+                    summary.AppendLine("Flattened PDF OCR results were saved as Markdown (.md).")
+                End If
             End If
         End If
 
@@ -2999,19 +3029,129 @@ Partial Public Class ThisAddIn
         Return removed
     End Function
 
+
     ''' <summary>
-    ''' Prompts user to select a text file and inserts its content at the current cursor position.
+    ''' Prompts user to select a file and inserts its content at the current cursor position.
+    ''' For PDFs, if OCR is available, the user can choose a formatting-preserving import
+    ''' that uses flattening + OCR + Markdown insertion.
     ''' </summary>
-    ''' <remarks>
-    ''' Uses GetFileContent helper with optional object detection based on INI_APICall_Object configuration.
-    ''' Collapses selection to end point before insertion.
-    ''' </remarks>
     Public Async Sub ImportTextFile()
-        Dim sel As Word.Range = Globals.ThisAddIn.Application.Selection.Range
-        Dim Doc = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
-        sel.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-        sel.Text = Doc
-        sel.Select()
+        Dim app As Word.Application = Globals.ThisAddIn.Application
+        Dim sel As Word.Range = app.Selection.Range
+        Dim filePath As String = GetFileName()
+
+        If String.IsNullOrWhiteSpace(filePath) Then
+            Exit Sub
+        End If
+
+        Dim docText As String = String.Empty
+        Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
+        Dim preserveFormattingImport As Boolean = False
+        Dim tempFlattenedPath As String = Nothing
+        Dim splash As Slib.SplashScreen = Nothing
+
+        Try
+            If ext = ".pdf" AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim preserveChoice As Integer = ShowCustomYesNoBox(
+                    "Do you want to preserve the formatting/structure when importing this PDF?" & vbCrLf & vbCrLf &
+                    "If yes, the PDF will be flattened, OCR will be performed, and the OCR result will be inserted as Markdown so that Word can render the formatting.",
+                    "Yes, preserve formatting",
+                    "No, import as plain text",
+                    AN & " Import File")
+
+                If preserveChoice = 0 Then
+                    Exit Sub
+                End If
+
+                preserveFormattingImport = (preserveChoice = 1)
+            End If
+
+            If preserveFormattingImport Then
+                Dim effectiveFilePath As String = filePath
+
+                splash = New Slib.SplashScreen("Preparing PDF for OCR ...")
+                splash.Show()
+                splash.Refresh()
+                System.Windows.Forms.Application.DoEvents()
+
+                Try
+                    splash.UpdateMessage("Flattening PDF for OCR ...")
+                    tempFlattenedPath = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_import_flatten_{Guid.NewGuid():N}.pdf")
+                    Await System.Threading.Tasks.Task.Run(Sub() FlattenPdfToImageOnly(filePath, tempFlattenedPath, 200))
+                    effectiveFilePath = tempFlattenedPath
+                Catch
+                    effectiveFilePath = filePath
+                    If tempFlattenedPath IsNot Nothing Then
+                        Try
+                            If IO.File.Exists(tempFlattenedPath) Then
+                                IO.File.Delete(tempFlattenedPath)
+                            End If
+                        Catch
+                        End Try
+                    End If
+                    tempFlattenedPath = Nothing
+                End Try
+
+                splash.UpdateMessage("AI is extracting the PDF content via OCR ...")
+                System.Windows.Forms.Application.DoEvents()
+
+                docText = Await GetFileContent(
+                    effectiveFilePath,
+                    False,
+                    True,
+                    False,
+                    False,
+                    OcrAdditionalInstruction:=Add_OcrMarkdownInstruction)
+
+                If String.IsNullOrWhiteSpace(docText) Then
+                    Exit Sub
+                End If
+
+                splash.UpdateMessage("Inserting OCR result into Word ...")
+                System.Windows.Forms.Application.DoEvents()
+            Else
+                docText = Await GetFileContent(filePath, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
+
+                If String.IsNullOrWhiteSpace(docText) Then
+                    Exit Sub
+                End If
+            End If
+
+            sel.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+            sel.Select()
+
+            If preserveFormattingImport Then
+                InsertTextWithMarkdown(app.Selection, docText, False)
+
+                Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
+                If Regex.IsMatch(docText, pattern) Then
+                    Dim rng As Word.Range = app.Selection.Range
+                    RestoreSpecialTextElements(rng)
+                    rng.Document.Fields.Update()
+                End If
+            Else
+                sel.Text = docText
+                sel.Select()
+            End If
+
+        Finally
+            If splash IsNot Nothing Then
+                Try
+                    splash.Close()
+                    splash.Dispose()
+                Catch
+                End Try
+            End If
+
+            If tempFlattenedPath IsNot Nothing Then
+                Try
+                    If IO.File.Exists(tempFlattenedPath) Then
+                        IO.File.Delete(tempFlattenedPath)
+                    End If
+                Catch
+                End Try
+            End If
+        End Try
     End Sub
 
     ''' <summary>

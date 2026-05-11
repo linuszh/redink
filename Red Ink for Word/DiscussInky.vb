@@ -2200,6 +2200,14 @@ Public Class DiscussInky
             End If
         End If
 
+        Dim promptToStore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
+
+        Try
+            My.Settings.LastPromptDiscussInky = promptToStore
+            My.Settings.Save()
+        Catch
+        End Try
+
         AppendUserHtml(userText)
         _history.Add(("user", userText))
         _txtInput.Clear()
@@ -2356,7 +2364,8 @@ Public Class DiscussInky
                 _txtInput,
                 _context.INI_PromptLibPath,
                 _context.INI_PromptLibPathLocal,
-                _context
+                _context,
+                My.Settings.LastPromptDiscussInky
             )
 
         If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
@@ -2368,6 +2377,26 @@ Public Class DiscussInky
     ''' Handles Enter/Escape shortcuts for sending and closing.
     ''' </summary>
     Private Sub OnInputKeyDown(sender As Object, e As KeyEventArgs)
+        If e.Control AndAlso e.KeyCode = Keys.P Then
+            Dim lastPrompt As String = My.Settings.LastPromptDiscussInky
+
+            If Not String.IsNullOrWhiteSpace(lastPrompt) Then
+                Dim insertionIndex As Integer = _txtInput.SelectionStart
+                Dim selectionLength As Integer = _txtInput.SelectionLength
+
+                Dim newText As String =
+                    _txtInput.Text.Remove(insertionIndex, selectionLength).Insert(insertionIndex, lastPrompt)
+
+                _txtInput.Text = newText
+                _txtInput.SelectionStart = insertionIndex + lastPrompt.Length
+                _txtInput.SelectionLength = 0
+            End If
+
+            e.SuppressKeyPress = True
+            e.Handled = True
+            Return
+        End If
+
         If e.KeyCode = Keys.Enter AndAlso Not e.Shift Then
             e.SuppressKeyPress = True
             OnSend(Me, EventArgs.Empty)
