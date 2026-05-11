@@ -36,6 +36,7 @@ Partial Public Class ThisAddIn
     ''' <param name="DoOCR">Enables OCR while reading PDF files when True.</param>
     ''' <param name="AskUser">Indicates whether PDF processing may prompt the user.</param>
     ''' <param name="AskWorksheetSelection">
+    ''' <param name="OcrAdditionalInstruction">Additional instructions for OCR processing when reading PDF files.</param>
     ''' For Excel workbooks, when <c>True</c> and <paramref name="Silent"/> is <c>False</c>,
     ''' allows the user to choose one worksheet or all worksheets.
     ''' </param>
@@ -46,7 +47,9 @@ Partial Public Class ThisAddIn
                                            Optional Silent As Boolean = False,
                                            Optional DoOCR As Boolean = False,
                                            Optional AskUser As Boolean = True,
-                                           Optional AskWorksheetSelection As Boolean = False) As Task(Of FileReadResult)
+                                           Optional AskWorksheetSelection As Boolean = False,
+                                           Optional OcrAdditionalInstruction As String = Nothing) As Task(Of FileReadResult)
+
         Dim result As New FileReadResult()
         Dim filePath As String = ""
 
@@ -102,7 +105,13 @@ Partial Public Class ThisAddIn
                     Case ".pptx"
                         FromFile = ReadPptxSandboxed(filePath)
                     Case ".pdf"
-                        Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, DoOCR, AskUser, _context)
+                        Dim pdfResult = Await ReadPdfAsTextEx(
+                            filePath,
+                            True,
+                            DoOCR,
+                            AskUser,
+                            _context,
+                            OcrAdditionalInstruction)
                         FromFile = pdfResult.Content
                         result.PdfMayBeIncomplete = pdfResult.OcrWasSkippedDueToHeuristics
                     Case ".eml"
@@ -156,8 +165,9 @@ Partial Public Class ThisAddIn
                                          Optional Silent As Boolean = False,
                                          Optional DoOCR As Boolean = False,
                                          Optional AskUser As Boolean = True,
-                                         Optional AskWorksheetSelection As Boolean = False) As Task(Of String)
-        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection)
+                                         Optional AskWorksheetSelection As Boolean = False,
+                                         Optional OcrAdditionalInstruction As String = Nothing) As Task(Of String)
+        Dim result = Await GetFileContentEx(optionalFilePath, Silent, DoOCR, AskUser, AskWorksheetSelection, OcrAdditionalInstruction)
         Return result.Content
     End Function
 

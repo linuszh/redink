@@ -1540,6 +1540,30 @@ Namespace My
                 Me("DiscussInkyMemory") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastPromptDiscussInky() As String
+            Get
+                Return CType(Me("LastPromptDiscussInky"),String)
+            End Get
+            Set
+                Me("LastPromptDiscussInky") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property LastPromptChat() As String
+            Get
+                Return CType(Me("LastPromptChat"),String)
+            End Get
+            Set
+                Me("LastPromptChat") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

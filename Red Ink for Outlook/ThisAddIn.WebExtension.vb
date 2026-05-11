@@ -76,6 +76,18 @@ Partial Public Class ThisAddIn
     ''' <summary>Whether agent mode (document tools) is enabled for the chat.</summary>
     Private _chatAgentModeEnabled As Boolean = False
 
+    ''' <summary>Returns the persisted effective agent-mode state and keeps the in-memory flag synchronized.</summary>
+    Private Function GetEffectiveAgentModeEnabled() As Boolean
+        Try
+            Dim st = LoadInkyState()
+            Dim enabled As Boolean = (st IsNot Nothing AndAlso st.AgentModeEnabled)
+            _chatAgentModeEnabled = enabled
+            Return enabled
+        Catch
+            Return _chatAgentModeEnabled
+        End Try
+    End Function
+
     ''' <summary>
     ''' Represents a single LLM background job (request/response lifecycle, cancellation, file context).
     ''' </summary>
@@ -1229,6 +1241,9 @@ Partial Public Class ThisAddIn
         html.AppendLine(".inky-pathbox{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--elev);font-size:.8rem;word-break:break-all;} ")
         html.AppendLine(".inky-danger{color:#d35454;} ")
         html.AppendLine(".inky-inline-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;} ")
+        html.AppendLine(".inky-message-box{padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--elev);font-size:.82rem;line-height:1.45;white-space:pre-wrap;word-break:break-word;} ")
+        html.AppendLine(".inky-message-box.error{border-color:#8f3d3d;background:rgba(170,56,56,.12);color:#ffd7d7;} ")
+        html.AppendLine(":root.light .inky-message-box.error{border-color:#d7a2a2;background:#fff1f1;color:#7a1f1f;} ")
         html.AppendLine("</style>")
         html.AppendLine("</head><body>")
         html.AppendLine("<div class=""wrap"">")
@@ -1345,6 +1360,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("let __typingBubbleId=null;")
         html.AppendLine("let __jobStartTs=0;")
         html.AppendLine("let __elapsedTimer=null;")
+        html.AppendLine("let __lastPrompt=" & Newtonsoft.Json.JsonConvert.SerializeObject(My.Settings.Inky_LastPrompt) & ";")
 
         ' Press feedback
         html.AppendLine("(function(){const pressOn=e=>{const b=e.target.closest('button');if(!b||b.disabled)return;b.classList.add('is-pressed');};const pressOff=()=>{document.querySelectorAll('button.is-pressed').forEach(b=>b.classList.remove('is-pressed'));};['mousedown','touchstart'].forEach(ev=>document.addEventListener(ev,pressOn,{passive:true}));['mouseup','mouseleave','blur'].forEach(ev=>document.addEventListener(ev,pressOff));document.addEventListener('keydown',e=>{if((e.key===' '||e.key==='Enter')){const b=e.target.closest('button');if(b&&!b.disabled)b.classList.add('is-pressed');}});document.addEventListener('keyup',e=>{if(e.key===' '||e.key==='Enter')pressOff();});})();")
@@ -1425,10 +1441,10 @@ Partial Public Class ThisAddIn
         html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
-        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' PureSend
-        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
+        html.AppendLine("async function pureSend(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${('Pure: '+t).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_pure',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
 
         ' drag/drop
         html.AppendLine("(function(){const stop=e=>{e.preventDefault();e.stopPropagation();};['dragenter','dragover','dragleave','drop'].forEach(ev=>document.addEventListener(ev,stop,false));document.addEventListener('drop',async e=>{const files=[...(e.dataTransfer&&e.dataTransfer.files)||[]];if(!files.length)return;")
@@ -1444,7 +1460,7 @@ Partial Public Class ThisAddIn
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
         html.AppendLine("themeBtn.addEventListener('click',async()=>{if(__currentJobId)return;const target=!dark;setTheme(target);const r=await api('inky_toggletheme');if(!r.ok){setTheme(!target);alert(r.error||'Theme switch failed');return;}if(typeof r.darkMode==='boolean')setTheme(r.darkMode===true);adjustModelSel();});")
-        html.AppendLine("msgEl.addEventListener('keydown',async e=>{if(e.key==='/'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&isPromptLibrarySlashTrigger()){e.preventDefault();if(__currentJobId)return;await openPromptLibrary();return;}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();return;}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
+        html.AppendLine("msgEl.addEventListener('keydown',async e=>{if(e.ctrlKey&&e.key.toLowerCase()==='p'){e.preventDefault();if(__lastPrompt){insertPromptIntoMessage(__lastPrompt);}return;}if(e.key==='/'&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&isPromptLibrarySlashTrigger()){e.preventDefault();if(__currentJobId)return;await openPromptLibrary();return;}if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();return;}if(e.ctrlKey&&e.key.toLowerCase()==='l'){e.preventDefault();clearBtn.click();}});")
         html.AppendLine("sendBtn.addEventListener('click',send);")
         html.AppendLine("pureBtn.addEventListener('click',pureSend);")
         html.AppendLine("cancelBtn.addEventListener('click',async()=>{if(!__currentJobId)return;__jobCanceled=true;await api('inky_cancel',{Job:__currentJobId});});")
@@ -1475,23 +1491,24 @@ Partial Public Class ThisAddIn
         html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__agentEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button>';bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button>';bindWorkspaceButtons();}")
         html.AppendLine("async function refreshWorkspace(){const r=await api('inky_agentworkspace_get');if(r&&r.ok)updateAgentWorkspaceDisplay(r.workspace);}")
 
-        html.AppendLine("function closeWorkspaceModal(){workspaceModalBackdrop.classList.remove('show');workspaceModalBody.innerHTML='';__workspaceDialogMode='';}")
-        html.AppendLine("function openWorkspaceModal(title,bodyHtml,okText,mode){workspaceModalTitle.textContent=title||'Agent Workspace';workspaceModalBody.innerHTML=bodyHtml||'';workspaceModalOkBtn.textContent=okText||'Save';workspaceModalBackdrop.classList.add('show');__workspaceDialogMode=mode||'';}")
+        html.AppendLine("function closeWorkspaceModal(){workspaceModalBackdrop.classList.remove('show');workspaceModalBody.innerHTML='';workspaceModalOkBtn.textContent='Save';workspaceModalCancelBtn.style.display='';__workspaceDialogMode='';}")
+        html.AppendLine("function openWorkspaceModal(title,bodyHtml,okText,mode,showCancel){workspaceModalTitle.textContent=title||'Agent Workspace';workspaceModalBody.innerHTML=bodyHtml||'';workspaceModalOkBtn.textContent=okText||'Save';workspaceModalCancelBtn.style.display=(showCancel===false)?'none':'';workspaceModalBackdrop.classList.add('show');__workspaceDialogMode=mode||'';}")
+        html.AppendLine("function showWorkspaceModalMessage(title,message,isError){const html='<div class=""inky-form-row""><div class=""inky-message-box'+(isError===true?' error':'')+'"">'+esc(message||'Unexpected error.')+'</div></div>';openWorkspaceModal(title||'Agent Workspace',html,'OK','message',false);}")
+        html.AppendLine("function showWorkspaceError(message,title){showWorkspaceModalMessage(title||'Workspace Error',message||'Unexpected error.',true);}")
         html.AppendLine("function getWorkspaceDialogValues(){return{persistUntilRevoked:!!document.getElementById('wsPersistUntilRevoked')?.checked,allowRead:!!document.getElementById('wsAllowRead')?.checked,allowWrite:!!document.getElementById('wsAllowWrite')?.checked,allowMoveCopyRename:!!document.getElementById('wsAllowMoveCopyRename')?.checked,allowDelete:!!document.getElementById('wsAllowDelete')?.checked,saveDroppedFilesToWorkspace:!!document.getElementById('wsSaveDroppedFiles')?.checked,includeHiddenSystem:!!document.getElementById('wsIncludeHiddenSystem')?.checked};}")
         html.AppendLine("function buildWorkspaceDialogHtml(ws,mode){const connected=!!(ws&&ws.connected);const root=connected?('<div class=""inky-form-row""><label class=""hd"">Current workspace</label><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'';const persist=!!(ws&&ws.persistUntilRevoked);const allowRead=ws&&typeof ws.allowRead==='boolean'?!!ws.allowRead:true;const allowWrite=ws&&typeof ws.allowWrite==='boolean'?!!ws.allowWrite:true;const allowMoveCopyRename=ws&&typeof ws.allowMoveCopyRename==='boolean'?!!ws.allowMoveCopyRename:true;const allowDelete=ws&&typeof ws.allowDelete==='boolean'?!!ws.allowDelete:false;const saveDrops=ws&&typeof ws.saveDroppedFilesToWorkspace==='boolean'?!!ws.saveDroppedFilesToWorkspace:false;const includeHidden=ws&&typeof ws.includeHiddenSystem==='boolean'?!!ws.includeHiddenSystem:false;let intro='';if(mode==='connect'){intro='<div class=""inky-form-row inky-help"">Select how the Local Agent should use the workspace after you choose the folder.</div>';}else if(mode==='revoke'){return '<div class=""inky-form-row""><div class=""inky-help"">Revoke access to the current Local Agent workspace?</div></div>'+(connected?('<div class=""inky-form-row""><div class=""inky-pathbox"">'+esc(ws.rootPath||'')+'</div></div>'):'');}return intro+root+'<div class=""inky-form-row""><label class=""hd"">Access duration</label><div class=""inky-radio-list""><label><input type=""radio"" name=""wsDuration"" id=""wsPersistSessionOnly"" '+(!persist?'checked':'')+'> <span>This session only</span></label><label><input type=""radio"" name=""wsDuration"" id=""wsPersistUntilRevoked"" '+(persist?'checked':'')+'> <span>Until revoked</span></label></div><div class=""inky-help"">Session access disappears when Outlook is closed. Persistent access remains until the user revokes it.</div></div><div class=""inky-form-row""><label class=""hd"">Allowed operations</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsAllowRead"" '+(allowRead?'checked':'')+'> <span>Read and list workspace files</span></label><label><input type=""checkbox"" id=""wsAllowWrite"" '+(allowWrite?'checked':'')+'> <span>Create and overwrite workspace files</span></label><label><input type=""checkbox"" id=""wsAllowMoveCopyRename"" '+(allowMoveCopyRename?'checked':'')+'> <span>Copy, move, and rename files</span></label><label><input type=""checkbox"" id=""wsAllowDelete"" '+(allowDelete?'checked':'')+'> <span class=""inky-danger"">Delete files and remove folders</span></label></div></div><div class=""inky-form-row""><label class=""hd"">Additional options</label><div class=""inky-check-list""><label><input type=""checkbox"" id=""wsSaveDroppedFiles"" '+(saveDrops?'checked':'')+'> <span>Also save drag-and-drop uploads into the workspace</span></label><label><input type=""checkbox"" id=""wsIncludeHiddenSystem"" '+(includeHidden?'checked':'')+'> <span>Include hidden/system files</span></label></div></div>'; }")
-
-        html.AppendLine("async function connectWorkspace(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}openWorkspaceModal('Connect Agent Workspace',buildWorkspaceDialogHtml(st.workspace||{},'connect'),'Choose folder…','connect');}")
-        html.AppendLine("async function changeWorkspaceDirect(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}const ws=st.workspace||{};const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:!!ws.persistUntilRevoked});if(!r||!r.ok){alert(r&&r.error||'Failed to select workspace');return;}updateAgentWorkspaceDisplay(r.workspace);}")
-        html.AppendLine("async function editWorkspacePermissions(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace permissions');return;}openWorkspaceModal('Workspace Permissions',buildWorkspaceDialogHtml(st.workspace||{},'permissions'),'Save','permissions');}")
-        html.AppendLine("async function confirmWorkspaceRevoke(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){alert(st&&st.error||'Could not load workspace state');return;}openWorkspaceModal('Revoke Workspace Access',buildWorkspaceDialogHtml(st.workspace||{},'revoke'),'Revoke','revoke');}")
-        html.AppendLine("async function saveWorkspaceDialog(){if(__workspaceDialogMode==='revoke'){const r=await api('inky_agentworkspace_revoke');if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{alert(r&&r.error||'Failed to revoke workspace');}return;}const values=getWorkspaceDialogValues();if(!values.allowRead){alert('Workspace read/list permission must remain enabled.');return;}if(__workspaceDialogMode==='connect'){const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:values.persistUntilRevoked});if(!r||!r.ok){alert(r&&r.error||'Failed to select workspace');return;}const p=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(!p||!p.ok){alert(p&&p.error||'Failed to save workspace permissions');return;}closeWorkspaceModal();updateAgentWorkspaceDisplay(p.workspace);}else if(__workspaceDialogMode==='permissions'){const r=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{alert(r&&r.error||'Failed to update permissions');}}}")
-        html.AppendLine("function bindWorkspaceButtons(){const c=document.getElementById('wsConnectBtn');if(c)c.onclick=connectWorkspace;const ch=document.getElementById('wsChangeBtn');if(ch)ch.onclick=changeWorkspaceDirect;const o=document.getElementById('wsOpenBtn');if(o)o.onclick=async()=>{const r=await api('inky_agentworkspace_open');if(!r.ok)alert(r.error||'Could not open workspace');};const rv=document.getElementById('wsRevokeBtn');if(rv)rv.onclick=confirmWorkspaceRevoke;const p=document.getElementById('wsPermBtn');if(p)p.onclick=editWorkspacePermissions;}")
+        html.AppendLine("async function connectWorkspace(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Connect Agent Workspace');return;}openWorkspaceModal('Connect Agent Workspace',buildWorkspaceDialogHtml(st.workspace||{},'connect'),'Choose folder…','connect');}")
+        html.AppendLine("async function changeWorkspaceDirect(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Change Agent Workspace');return;}const ws=st.workspace||{};const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:!!ws.persistUntilRevoked});if(!r||!r.ok){if(r&&r.error==='No workspace folder selected.')return;showWorkspaceError(r&&r.error||'Failed to select workspace','Change Agent Workspace');return;}updateAgentWorkspaceDisplay(r.workspace);}")
+        html.AppendLine("async function editWorkspacePermissions(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace permissions','Workspace Permissions');return;}openWorkspaceModal('Workspace Permissions',buildWorkspaceDialogHtml(st.workspace||{},'permissions'),'Save','permissions');}")
+        html.AppendLine("async function confirmWorkspaceRevoke(){const st=await api('inky_agentworkspace_get');if(!st||!st.ok){showWorkspaceError(st&&st.error||'Could not load workspace state','Revoke Workspace Access');return;}openWorkspaceModal('Revoke Workspace Access',buildWorkspaceDialogHtml(st.workspace||{},'revoke'),'Revoke','revoke');}")
+        html.AppendLine("async function saveWorkspaceDialog(){if(__workspaceDialogMode==='message'){closeWorkspaceModal();return;}if(__workspaceDialogMode==='revoke'){const r=await api('inky_agentworkspace_revoke');if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{showWorkspaceError(r&&r.error||'Failed to revoke workspace','Revoke Workspace Access');}return;}const values=getWorkspaceDialogValues();if(!values.allowRead){showWorkspaceError('Workspace read/list permission must remain enabled.','Workspace Permissions');return;}if(__workspaceDialogMode==='connect'){const r=await api('inky_agentworkspace_select',{PersistUntilRevoked:values.persistUntilRevoked});if(!r||!r.ok){if(r&&r.error==='No workspace folder selected.')return;showWorkspaceError(r&&r.error||'Failed to select workspace','Connect Agent Workspace');return;}const p=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(!p||!p.ok){showWorkspaceError(p&&p.error||'Failed to save workspace permissions','Connect Agent Workspace');return;}closeWorkspaceModal();updateAgentWorkspaceDisplay(p.workspace);}else if(__workspaceDialogMode==='permissions'){const r=await api('inky_agentworkspace_permissions',{PersistUntilRevoked:values.persistUntilRevoked,AllowRead:values.allowRead,AllowWrite:values.allowWrite,AllowMoveCopyRename:values.allowMoveCopyRename,AllowDelete:values.allowDelete,SaveDroppedFilesToWorkspace:values.saveDroppedFilesToWorkspace,IncludeHiddenSystem:values.includeHiddenSystem});if(r&&r.ok){closeWorkspaceModal();updateAgentWorkspaceDisplay(r.workspace);}else{showWorkspaceError(r&&r.error||'Failed to update permissions','Workspace Permissions');}}}")
+        html.AppendLine("function bindWorkspaceButtons(){const c=document.getElementById('wsConnectBtn');if(c)c.onclick=connectWorkspace;const ch=document.getElementById('wsChangeBtn');if(ch)ch.onclick=changeWorkspaceDirect;const o=document.getElementById('wsOpenBtn');if(o)o.onclick=async()=>{const r=await api('inky_agentworkspace_open');if(!r.ok)showWorkspaceError(r.error||'Could not open workspace','Agent Workspace');};const rv=document.getElementById('wsRevokeBtn');if(rv)rv.onclick=confirmWorkspaceRevoke;const p=document.getElementById('wsPermBtn');if(p)p.onclick=editWorkspacePermissions;}")
         html.AppendLine("workspaceModalCancelBtn.addEventListener('click',closeWorkspaceModal);")
         html.AppendLine("workspaceModalCloseBtn.addEventListener('click',closeWorkspaceModal);")
         html.AppendLine("workspaceModalOkBtn.addEventListener('click',saveWorkspaceDialog);")
         html.AppendLine("workspaceModalBackdrop.addEventListener('click',e=>{if(e.target===workspaceModalBackdrop)closeWorkspaceModal();});")
-        html.AppendLine("document.addEventListener('keydown',e=>{if(e.key==='Escape'&&workspaceModalBackdrop.classList.contains('show')){e.preventDefault();closeWorkspaceModal();}});")
 
+        html.AppendLine("document.addEventListener('keydown',e=>{if(e.key==='Escape'&&workspaceModalBackdrop.classList.contains('show')){e.preventDefault();closeWorkspaceModal();}});")
         html.AppendLine("boot();")
         html.AppendLine("</script>")
         html.AppendLine("</body></html>")
@@ -1752,7 +1769,7 @@ Partial Public Class ThisAddIn
                     Case "inky_agentaddfiles"
                         ' Called after drag-and-drop when agent mode is on
                         Try
-                            If Not _chatAgentModeEnabled Then
+                            If Not GetEffectiveAgentModeEnabled() Then
                                 Return JsonErr("Agent mode is not enabled.")
                             End If
                             If IsChatAgentBlocked() Then
@@ -1802,7 +1819,7 @@ Partial Public Class ThisAddIn
 
                     Case "inky_agentworkspace_select"
                         Try
-                            If Not _chatAgentModeEnabled Then Return JsonErr("Agent mode is not enabled.")
+                            If Not GetEffectiveAgentModeEnabled() Then Return JsonErr("Agent mode is not enabled.")
                             If IsChatAgentBlocked() Then Return JsonErr("Agent mode is not available while AutoPilot is running.")
 
                             Dim persistUntilRevoked As Boolean = CBool(If(j("PersistUntilRevoked"), False))
@@ -1994,6 +2011,7 @@ Partial Public Class ThisAddIn
 
                     Case "inky_getstate"
                         Dim st As InkyState = LoadInkyState()
+                        _chatAgentModeEnabled = st.AgentModeEnabled
 
                         Try
                             st.DarkMode = My.Settings.Inky_DarkMode
@@ -2030,7 +2048,7 @@ Partial Public Class ThisAddIn
                             .supportsTooling = supportsTooling,
                             .toolingLogEnabled = INI_ToolingLogWindow,
                             .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                            .agentEnabled = _chatAgentModeEnabled,
+                                                        .agentEnabled = st.AgentModeEnabled,
                             .agentFiles = GetAgentFileListForBrowser(),
                             .agentWorkspace = GetAgentWorkspaceForBrowser(),
                             .agentModelActive = st.AgentModelActive,
@@ -2044,6 +2062,7 @@ Partial Public Class ThisAddIn
                         Dim which As String = j("Chat")?.ToString()
                         activeChatId = If(which = "2", 2, 1)
                         Dim stSw = LoadInkyState()
+                        _chatAgentModeEnabled = stSw.AgentModeEnabled
                         If stSw.History.Count = 0 AndAlso Not stSw.DarkMode Then stSw.DarkMode = True
                         Dim greetingSwitch As String = If(stSw.History.Count = 0, GetFriendlyGreeting(), Nothing)
 
@@ -2070,7 +2089,7 @@ Partial Public Class ThisAddIn
                                 .supportsTooling = supportsTooling,
                                 .toolingLogEnabled = INI_ToolingLogWindow,
                                 .models = models,
-                                .agentEnabled = _chatAgentModeEnabled,
+                                .agentEnabled = stSw.AgentModeEnabled,
                                 .agentFiles = GetAgentFileListForBrowser(),
                                 .agentWorkspace = GetAgentWorkspaceForBrowser(),
                                 .agentModelActive = stSw.AgentModelActive,
@@ -2208,6 +2227,11 @@ Partial Public Class ThisAddIn
                         If System.String.IsNullOrWhiteSpace(textBody) Then
                             Return JsonErr("Please enter a message.")
                         End If
+                        Try
+                            My.Settings.Inky_LastPrompt = textBody
+                            My.Settings.Save()
+                        Catch
+                        End Try
                         Dim st As InkyState = LoadInkyState()
                         ' Recompute upload capability (client may be stale)
                         Dim supportsFilesNow As System.Boolean = False
@@ -2425,6 +2449,11 @@ Partial Public Class ThisAddIn
                         sysPromptBase &= Environment.NewLine & "Current local date/time: " & nowLocal
                         sysPromptBase &= Environment.NewLine & $"Your name is '{AN6}'. "
 
+                        If _chatAgentModeEnabled Then
+                            sysPromptBase &= Environment.NewLine &
+                                "Local Chat Agent behavior: Tools are optional. If the user's latest request can be answered directly, especially for creative writing, drafting, rewriting, brainstorming, summarizing, explanation, or ordinary chat, answer directly without using tools. Do not claim that you are unable to perform a normal language-generation task merely because no tool, attachment, or workspace action is required. Use tools only when they are actually needed for files, workspace operations, document processing, or external/source-backed work."
+                        End If
+
                         ' Inject InkyMemory into system prompt if enabled
                         If My.Settings.Inky_InkyMemory Then
                             Dim memoryContent = ReadInkyMemory(_context.INI_InkyMemoryCap)
@@ -2619,9 +2648,12 @@ Partial Public Class ThisAddIn
                                                     agentOutputFiles,
                                                     localOutput)
                                             ElseIf agentOutputFiles IsNot Nothing AndAlso agentOutputFiles.Count > 0 Then
-                                                Dim fileList = String.Join(vbCrLf, agentOutputFiles.Select(Function(f) "- " & Path.GetFileName(f)))
-                                                localOutput = If(localOutput, "") & vbCrLf & vbCrLf &
-                                                    "**Output files (" & agentOutputFiles.Count.ToString() & "):**" & vbCrLf & fileList
+                                                localOutput = RemoveGeneratedOutputFilesSections(If(localOutput, String.Empty))
+
+                                                Dim outputFilesMarkdown As String = BuildOutputFilesMarkdown(agentOutputFiles)
+                                                If Not String.IsNullOrWhiteSpace(outputFilesMarkdown) Then
+                                                    localOutput = localOutput.TrimEnd() & vbCrLf & vbCrLf & outputFilesMarkdown
+                                                End If
                                             End If
 
                                         ElseIf ShouldUseTooling(stForTooling) AndAlso _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0 Then
@@ -2745,6 +2777,11 @@ Partial Public Class ThisAddIn
                         If String.IsNullOrWhiteSpace(textBody) Then
                             Return JsonErr("Please enter a message.")
                         End If
+                        Try
+                            My.Settings.Inky_LastPrompt = textBody
+                            My.Settings.Save()
+                        Catch
+                        End Try
                         Dim stPure As InkyState = LoadInkyState()
                         ' Decide model context (still respect selected model choice)
                         Dim useSecondApiLocal As Boolean = stPure.UseSecondApi
@@ -2920,7 +2957,9 @@ Partial Public Class ThisAddIn
                                         Return SharedMethods.ShowPromptInsertionSelector(
                                             INI_PromptLibPath,
                                             INI_PromptLibPathLocal,
-                                            _context
+                                            _context,
+                                            Nothing,
+                                            My.Settings.Inky_LastPrompt
                                         )
                                     End Function).ConfigureAwait(False)
 
@@ -3509,6 +3548,32 @@ Partial Public Class ThisAddIn
         End If
 
         Return list
+    End Function
+
+    Private Function RemoveGeneratedOutputFilesSections(ByVal markdown As String) As String
+        If String.IsNullOrWhiteSpace(markdown) Then Return If(markdown, String.Empty)
+
+        Dim pattern As String =
+        "(?ims)^\s*(?:\*\*)?Output files\s*\(\d+\)\s*:?(?:\*\*)?\s*\r?\n(?:\s*[-*]?\s*[^\r\n]+\r?\n?)+"
+
+        Dim cleaned As String = System.Text.RegularExpressions.Regex.Replace(markdown, pattern, "").TrimEnd()
+        Return cleaned
+    End Function
+
+    Private Function BuildOutputFilesMarkdown(ByVal outputFiles As List(Of String)) As String
+        If outputFiles Is Nothing OrElse outputFiles.Count = 0 Then Return String.Empty
+
+        Dim distinctFiles = outputFiles.
+        Where(Function(f) Not String.IsNullOrWhiteSpace(f)).
+        Select(Function(f) Path.GetFileName(f)).
+        Where(Function(f) Not String.IsNullOrWhiteSpace(f)).
+        Distinct(StringComparer.OrdinalIgnoreCase).
+        ToList()
+
+        If distinctFiles.Count = 0 Then Return String.Empty
+
+        Dim fileList = String.Join(vbCrLf, distinctFiles.Select(Function(f) "- " & f))
+        Return "**Output files (" & distinctFiles.Count.ToString() & "):**" & vbCrLf & fileList
     End Function
 
 

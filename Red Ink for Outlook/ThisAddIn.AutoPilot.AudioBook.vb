@@ -74,6 +74,13 @@ Partial Public Class ThisAddIn
     Private Shared ReadOnly AB_HostTags As String() = {"H:", "Host:", "A:", "1:"}
     Private Shared ReadOnly AB_GuestTags As String() = {"G:", "Guest:", "Gast:", "B:", "2:"}
 
+
+    Private Const AB_GoogleFemaleVoiceStem As String = "Chirp3-HD-Achernar"
+    Private Const AB_GoogleMaleVoiceStem As String = "Chirp3-HD-Achird"
+    Private Const AB_OpenAIFemaleVoice As String = "nova"
+    Private Const AB_OpenAIMaleVoice As String = "ash"
+
+
     Private Shared AB_AccessToken1 As String = String.Empty
     Private Shared AB_TokenExpiry1 As DateTime = DateTime.MinValue
     Private Shared AB_AccessToken2 As String = String.Empty
@@ -159,66 +166,147 @@ Partial Public Class ThisAddIn
         &H0, &H0, &H0
     }
 
-    ' ═══════════════════════════════════════════════════════════════════════════
-    '  TTS — GOOGLE VOICE DEFAULTS PER LANGUAGE
-    ' ═══════════════════════════════════════════════════════════════════════════
 
-    ''' <summary>
-    ''' Returns a pair of default Google Cloud TTS voice names for the given
-    ''' language code. Google TTS requires the voice name prefix to match the
-    ''' language code exactly (e.g. "de-DE-Studio-B" for language "de-DE").
-    ''' Falls back to Standard voices when Studio is not known for a language.
-    ''' </summary>
-    Private Shared Function AB_GetGoogleDefaultVoices(languageCode As String) As (VoiceA As String, VoiceB As String)
-        ' Normalise to full BCP-47 if only a 2-letter code was supplied
-        Dim lang = If(String.IsNullOrWhiteSpace(languageCode), "en-US", languageCode.Trim())
+    Private Shared Function AB_NormalizeLanguageForStandardAudio(languageCode As String) As String
+        Dim lang = If(String.IsNullOrWhiteSpace(languageCode), AB_DefaultLanguage, languageCode.Trim())
 
-        Select Case lang.ToLowerInvariant()
-            Case "en-us", "en"
-                Return ("en-US-Journey-D", "en-US-Journey-F")
-            Case "en-gb"
-                Return ("en-GB-Journey-D", "en-GB-Journey-F")
-            Case "de-de", "de"
-                Return ("de-DE-Journey-D", "de-DE-Journey-F")
-            Case "de-ch"
-                Return ("de-DE-Journey-D", "de-DE-Journey-F")
-            Case "fr-fr", "fr"
-                Return ("fr-FR-Journey-D", "fr-FR-Journey-F")
-            Case "fr-ch"
-                Return ("fr-FR-Journey-D", "fr-FR-Journey-F")
-            Case "it-it", "it"
-                Return ("it-IT-Journey-D", "it-IT-Journey-F")
-            Case "es-es", "es"
-                Return ("es-ES-Journey-D", "es-ES-Journey-F")
-            Case "pt-br", "pt"
-                Return ("pt-BR-Standard-B", "pt-BR-Standard-C")
-            Case "nl-nl", "nl"
-                Return ("nl-NL-Standard-A", "nl-NL-Standard-B")
-            Case "ja-jp", "ja"
-                Return ("ja-JP-Standard-C", "ja-JP-Standard-B")
-            Case "ko-kr", "ko"
-                Return ("ko-KR-Standard-C", "ko-KR-Standard-B")
-            Case "zh-cn", "zh"
-                Return ("cmn-CN-Standard-C", "cmn-CN-Standard-B")
-            Case "ru-ru", "ru"
-                Return ("ru-RU-Standard-C", "ru-RU-Standard-B")
-            Case "pl-pl", "pl"
-                Return ("pl-PL-Standard-C", "pl-PL-Standard-B")
+        If lang.StartsWith("de", StringComparison.OrdinalIgnoreCase) Then
+            Return "de-DE"
+        End If
+
+        Return lang
+    End Function
+
+    Private Shared Function AB_BuildStandardLanguageInstruction(languageCode As String) As String
+        Dim lang = If(String.IsNullOrWhiteSpace(languageCode), AB_DefaultLanguage, languageCode.Trim())
+        Dim twoLetter = If(lang.Length > 2, lang.Substring(0, 2), lang)
+
+        If twoLetter.Equals("de", StringComparison.OrdinalIgnoreCase) Then
+            Return "[IMPORTANT: Write the script in Standard German (Hochdeutsch). Never use Swiss German, Alemannic, Austrian dialect, regional dialect, dialect spelling, or dialect vocabulary, even if the locale is Switzerland, Austria, Liechtenstein, or any other German-speaking region.]"
+        End If
+
+        Return $"[IMPORTANT: Write the script in standard {twoLetter} language. Do not use {twoLetter} dialects.]"
+    End Function
+
+
+    Private Shared Function AB_NormalizeSpeakerGender(gender As String, fallbackGender As String) As String
+        Dim g = If(gender, "").Trim().ToLowerInvariant()
+
+        Select Case g
+            Case "f", "female", "woman", "w", "weiblich", "frau"
+                Return "female"
+            Case "m", "male", "man", "mann", "männlich"
+                Return "male"
             Case Else
-                ' Generic fallback: attempt to construct a Standard voice name
-                ' from the language code. Google uses the pattern {lang}-Standard-A.
-                ' If the language code is too short, fall back to en-US.
-                If lang.Length >= 5 AndAlso lang.Contains("-"c) Then
-                    Return (lang & "-Standard-A", lang & "-Standard-B")
-                ElseIf lang.Length = 2 Then
-                    ' Try common mappings for 2-letter codes
-                    Dim full = lang.ToLowerInvariant() & "-" & lang.ToUpperInvariant()
-                    Return (full & "-Standard-A", full & "-Standard-B")
-                Else
-                    Return ("en-US-Studio-O", "en-US-Studio-Q")
-                End If
+                Return fallbackGender
         End Select
     End Function
+
+    Private Shared Function AB_BuildGoogleVoiceNameForGender(languageCode As String, gender As String) As String
+        Dim lang = AB_NormalizeLanguageForStandardAudio(languageCode)
+        Dim normalizedGender = AB_NormalizeSpeakerGender(gender, "female")
+
+        If normalizedGender.Equals("male", StringComparison.OrdinalIgnoreCase) Then
+            Return lang & "-" & AB_GoogleMaleVoiceStem
+        End If
+
+        Return lang & "-" & AB_GoogleFemaleVoiceStem
+    End Function
+
+    Private Shared Function AB_IsLikelyGoogleVoiceName(voiceName As String) As Boolean
+        If String.IsNullOrWhiteSpace(voiceName) Then Return False
+
+        Return Regex.IsMatch(
+        voiceName.Trim(),
+        "^[a-z]{2,3}-[A-Z]{2}-[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$",
+        RegexOptions.CultureInvariant)
+    End Function
+
+    Private Shared Function AB_RewriteGoogleVoiceLanguagePrefix(voiceName As String, languageCode As String) As String
+        If String.IsNullOrWhiteSpace(voiceName) Then Return ""
+
+        Dim normalizedLanguage = AB_NormalizeLanguageForStandardAudio(languageCode)
+        Dim m = Regex.Match(voiceName.Trim(), "^[a-z]{2,3}-[A-Z]{2}-(.+)$", RegexOptions.CultureInvariant)
+
+        If m.Success Then
+            Return normalizedLanguage & "-" & m.Groups(1).Value
+        End If
+
+        Return voiceName.Trim()
+    End Function
+
+    Private Shared Function AB_IsOpenAIVoiceName(voiceName As String) As Boolean
+        Dim v = If(voiceName, "").Trim().ToLowerInvariant()
+        If v = "" Then Return False
+
+        Dim validVoices As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+        "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"
+    }
+
+        Return validVoices.Contains(v)
+    End Function
+
+    Private Shared Function AB_ResolveVoiceNameForEngine(voiceName As String, languageCode As String, gender As String) As String
+        If AB_SelectedEngine = ABEngine.Google Then
+            If AB_IsLikelyGoogleVoiceName(voiceName) Then
+                Return AB_RewriteGoogleVoiceLanguagePrefix(voiceName, languageCode)
+            End If
+
+            Return AB_BuildGoogleVoiceNameForGender(languageCode, gender)
+        End If
+
+        If AB_IsOpenAIVoiceName(voiceName) Then
+            Return voiceName.Trim().ToLowerInvariant()
+        End If
+
+        If AB_NormalizeSpeakerGender(gender, "female").Equals("male", StringComparison.OrdinalIgnoreCase) Then
+            Return AB_OpenAIMaleVoice
+        End If
+
+        Return AB_OpenAIFemaleVoice
+    End Function
+
+    Private Shared Sub AB_ResolveAudioSpeakerAndVoiceInputs(
+    mode As String,
+    languageCode As String,
+    ByRef hostName As String,
+    ByRef guestName As String,
+    ByRef hostGender As String,
+    ByRef guestGender As String,
+    ByRef voiceA As String,
+    ByRef voiceB As String,
+    Optional singleVoice As Boolean = False,
+    Optional narratorGender As String = Nothing)
+
+        Dim isPodcast = String.Equals(mode, "podcast", StringComparison.OrdinalIgnoreCase)
+
+        If isPodcast Then
+            If String.IsNullOrWhiteSpace(hostName) Then hostName = "Marie"
+            If String.IsNullOrWhiteSpace(guestName) Then guestName = "Marc"
+
+            hostGender = AB_NormalizeSpeakerGender(hostGender, "female")
+            guestGender = AB_NormalizeSpeakerGender(guestGender, "male")
+
+            voiceA = AB_ResolveVoiceNameForEngine(voiceA, languageCode, hostGender)
+            voiceB = AB_ResolveVoiceNameForEngine(voiceB, languageCode, guestGender)
+            Return
+        End If
+
+        Dim effectiveNarratorGender = AB_NormalizeSpeakerGender(narratorGender, "female")
+
+        If singleVoice Then
+            voiceA = AB_ResolveVoiceNameForEngine(voiceA, languageCode, effectiveNarratorGender)
+            voiceB = voiceA
+            Return
+        End If
+
+        hostGender = AB_NormalizeSpeakerGender(hostGender, "female")
+        guestGender = AB_NormalizeSpeakerGender(guestGender, "male")
+
+        voiceA = AB_ResolveVoiceNameForEngine(voiceA, languageCode, hostGender)
+        voiceB = AB_ResolveVoiceNameForEngine(voiceB, languageCode, guestGender)
+    End Sub
+
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TTS — ENGINE DETECTION
@@ -820,38 +908,47 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     Private Async Function AB_GenerateAudioFileAsync(
-            text As String,
-            outputPath As String,
-            mode As String,
-            language As String,
-            voiceA As String,
-            voiceB As String,
-            podcastDuration As String,
-            podcastContext As String,
-            podcastInstructions As String,
-            ct As CancellationToken) As Task(Of Boolean)
+        text As String,
+        outputPath As String,
+        mode As String,
+        language As String,
+        voiceA As String,
+        voiceB As String,
+        podcastDuration As String,
+        podcastContext As String,
+        podcastInstructions As String,
+        podcastHostName As String,
+        podcastGuestName As String,
+        podcastHostGender As String,
+        podcastGuestGender As String,
+        singleVoice As Boolean,
+        narratorGender As String,
+        ct As CancellationToken) As Task(Of Boolean)
 
         If String.IsNullOrWhiteSpace(language) Then language = AB_DefaultLanguage
+        language = AB_NormalizeLanguageForStandardAudio(language)
 
-        If String.IsNullOrWhiteSpace(voiceA) Then
-            If AB_SelectedEngine = ABEngine.OpenAI Then
-                voiceA = AB_DefaultVoiceA_OpenAI
-            Else
-                voiceA = AB_GetGoogleDefaultVoices(language).VoiceA
-            End If
-        End If
-        If String.IsNullOrWhiteSpace(voiceB) Then
-            If AB_SelectedEngine = ABEngine.OpenAI Then
-                voiceB = AB_DefaultVoiceB_OpenAI
-            Else
-                voiceB = AB_GetGoogleDefaultVoices(language).VoiceB
-            End If
-        End If
         If String.IsNullOrWhiteSpace(mode) Then mode = "audiobook"
         If String.IsNullOrWhiteSpace(podcastDuration) Then podcastDuration = "5 minutes"
 
-        Debug.WriteLine($"[AB-TTS] Orchestrator: engine={AB_SelectedEngine} lang={language} voiceA={voiceA} voiceB={voiceB} mode={mode}")
+        Dim effectiveHostName As String = podcastHostName
+        Dim effectiveGuestName As String = podcastGuestName
+        Dim effectiveHostGender As String = podcastHostGender
+        Dim effectiveGuestGender As String = podcastGuestGender
 
+        AB_ResolveAudioSpeakerAndVoiceInputs(
+                        mode,
+                        language,
+                        effectiveHostName,
+                        effectiveGuestName,
+                        effectiveHostGender,
+                        effectiveGuestGender,
+                        voiceA,
+                        voiceB,
+                        singleVoice,
+                        narratorGender)
+
+        Debug.WriteLine($"[AB-TTS] Orchestrator: engine={AB_SelectedEngine} lang={language} voiceA={voiceA} voiceB={voiceB} mode={mode} singleVoice={singleVoice} narratorGender={narratorGender} host={effectiveHostName}/{effectiveHostGender} guest={effectiveGuestName}/{effectiveGuestGender}")
         Dim segments As List(Of Tuple(Of String, String))
 
         ' Normalise literal \n escape sequences that arrive from JSON-encoded
@@ -883,8 +980,8 @@ Partial Public Class ThisAddIn
                 ' so the full BCP-47 code (e.g. "de-DE") remains intact for TTS.
                 ApDashboardLog("🎙 Generating podcast dialogue script via LLM...", "step")
 
-                HostName = "Alex"
-                GuestName = "Lisa"
+                HostName = effectiveHostName
+                GuestName = effectiveGuestName
                 TargetAudience = "General audience"
                 Duration = podcastDuration
                 DialogueContext = If(String.IsNullOrWhiteSpace(podcastContext), "None", podcastContext)
@@ -906,7 +1003,7 @@ Partial Public Class ThisAddIn
                 Dim systemPrompt = InterpolateAtRuntime(SP_Podcast)
                 ' Explicitly instruct the LLM to use the generic Standard language (e.g. "de")
                 ' to prevent it from writing in dialects (like Swiss German) when the locale is specific (e.g. "de-CH").
-                Dim langInstruction = $"[IMPORTANT: Write the script in standard {llmLanguage} language. Do not use {llmLanguage} dialects.]"
+                Dim langInstruction = AB_BuildStandardLanguageInstruction(language)
                 Dim userPrompt = langInstruction & vbCrLf & vbCrLf & "<TEXTTOPROCESS>" & cleanText & "</TEXTTOPROCESS>"
 
                 Dim script = Await LLM(systemPrompt, userPrompt,
@@ -1082,11 +1179,22 @@ Partial Public Class ThisAddIn
             Dim language = If(GetArgString(toolCall.Arguments, "language"), AB_DefaultLanguage)
             Dim voiceA = GetArgString(toolCall.Arguments, "voice_a")
             Dim voiceB = GetArgString(toolCall.Arguments, "voice_b")
+            Dim hostName = GetArgString(toolCall.Arguments, "host_name")
+            Dim guestName = GetArgString(toolCall.Arguments, "guest_name")
+            Dim hostGender = GetArgString(toolCall.Arguments, "host_gender")
+            Dim guestGender = GetArgString(toolCall.Arguments, "guest_gender")
+            Dim singleVoice = GetArgBool(toolCall.Arguments, "single_voice", False)
+            Dim narratorGender = GetArgString(toolCall.Arguments, "narrator_gender")
             Dim duration = If(GetArgString(toolCall.Arguments, "duration"), "5 minutes")
             Dim instructions = GetArgString(toolCall.Arguments, "instructions")
             Dim topicContext = GetArgString(toolCall.Arguments, "context")
             Dim outputFilename = If(GetArgString(toolCall.Arguments, "output_filename"), AB_DefaultFile)
             Dim enginePref = GetArgString(toolCall.Arguments, "engine")
+
+            If mode.Equals("audiobook", StringComparison.OrdinalIgnoreCase) AndAlso
+   (toolCall.Arguments Is Nothing OrElse Not toolCall.Arguments.ContainsKey("single_voice")) Then
+                singleVoice = True
+            End If
 
             For Each c In Path.GetInvalidFileNameChars()
                 outputFilename = outputFilename.Replace(c, "_"c)
@@ -1107,7 +1215,7 @@ Partial Public Class ThisAddIn
             AB_SelectBestEngine(enginePref, language)
 
             Dim textLen = text.Length
-            context.Log($"Generating {mode} audio: {textLen} chars, language={language}, engine={AB_SelectedEngine}, voices={If(voiceA, "default")}/{If(voiceB, "default")}")
+            context.Log($"Generating {mode} audio: {textLen} chars, language={language}, engine={AB_SelectedEngine}, single_voice={singleVoice}, narrator_gender={If(narratorGender, "default")}, speakers={If(hostName, "default")}/{If(guestName, "default")}, genders={If(hostGender, "default")}/{If(guestGender, "default")}, voices={If(voiceA, "auto")}/{If(voiceB, "auto")}")
             ApDashboardLog($"🔊 Creating {mode} audio ({textLen:N0} chars, {language}, {AB_SelectedEngine})...", "step")
 
             ' Do NOT call AB_DetectTTSEngines() here. The detection already ran
@@ -1130,8 +1238,10 @@ Partial Public Class ThisAddIn
             End If
 
             Dim success = Await AB_GenerateAudioFileAsync(
-                          text, outputPath, mode, language,
-                          voiceA, voiceB, duration, topicContext, instructions, ct)
+              text, outputPath, mode, language,
+              voiceA, voiceB, duration, topicContext, instructions,
+              hostName, guestName, hostGender, guestGender,
+              singleVoice, narratorGender, ct)
 
             If success AndAlso File.Exists(outputPath) Then
 

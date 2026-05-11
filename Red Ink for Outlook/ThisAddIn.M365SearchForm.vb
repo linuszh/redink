@@ -1596,9 +1596,14 @@ Public Class M365SearchTestForm
             toText = If(If(hit?.AdditionalText, ""), "")
         End If
 
-        Dim dtText As String = ""
+        Dim dtIsoText As String = ""
+        Dim dtAnchorText As String = ""
         Dim dt = If(msg?.SentUtc, If(msg?.ReceivedUtc, GetMailDate(hit)))
-        If dt.HasValue Then dtText = dt.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+        If dt.HasValue Then
+            Dim dtLocal = dt.Value.ToLocalTime()
+            dtIsoText = dtLocal.ToString("yyyy-MM-dd HH:mm", Globalization.CultureInfo.InvariantCulture)
+            dtAnchorText = dtLocal.ToString("dd MMM yyyy HH:mm", Globalization.CultureInfo.InvariantCulture)
+        End If
 
         Dim bodyText As String = ""
         If msg IsNot Nothing Then
@@ -1613,7 +1618,8 @@ Public Class M365SearchTestForm
 
         Dim sb As New System.Text.StringBuilder()
         sb.AppendLine($"<EMAIL ref=""{item.GlobalRef}"">")
-        sb.AppendLine("Date: " & dtText)
+        sb.AppendLine("DateISO: " & dtIsoText)
+        sb.AppendLine("DateAnchor: " & dtAnchorText)
         sb.AppendLine("From: " & fromText)
         sb.AppendLine("To: " & toText)
         sb.AppendLine("Subject: " & subjectText)

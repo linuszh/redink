@@ -849,4 +849,72 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    ''' <summary>
+    ''' Shows an interactive "Review changes" dialog comparing the original selection and the
+    ''' LLM corrected text. The user can accept/reject individual word-level changes. The
+    ''' reviewed result is appended at the end of the current email body, below a
+    ''' "REVIEWED:" marker, similar to how DiffW (method 3) shows its markup window after
+    ''' the corrected text has already been inserted.
+    ''' </summary>
+    Private Sub ReviewChangesAndInsertAtEnd(originalText As String, suggestedText As String)
+
+        If String.IsNullOrEmpty(originalText) AndAlso String.IsNullOrEmpty(suggestedText) Then Return
+
+        Dim reviewed As String = String.Empty
+
+        Using dlg As New ReviewChangesDialog(originalText, suggestedText)
+            Dim res As DialogResult = dlg.ShowDialog()
+            If res <> DialogResult.OK Then Return
+            reviewed = If(dlg.ReviewedText, String.Empty)
+        End Using
+
+        If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+        Dim inspector As Microsoft.Office.Interop.Outlook.Inspector = Nothing
+        Dim wordDoc As Microsoft.Office.Interop.Word.Document = Nothing
+
+        Try
+            inspector = ComRetry(Function() TryCast(Globals.ThisAddIn.Application.ActiveInspector,
+                                                    Microsoft.Office.Interop.Outlook.Inspector))
+            If inspector Is Nothing Then Return
+
+            wordDoc = ComRetry(Function() TryCast(inspector.WordEditor,
+                                                  Microsoft.Office.Interop.Word.Document))
+            If wordDoc Is Nothing Then Return
+
+            Dim app As Microsoft.Office.Interop.Word.Application = wordDoc.Application
+            Dim oldScreen As Boolean = app.ScreenUpdating
+            app.ScreenUpdating = False
+
+            Try
+                ' Append at the end of the body (after the already-inserted corrected text)
+                Dim endRange As Microsoft.Office.Interop.Word.Range = wordDoc.Content
+                endRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+
+                Dim headerText As String = vbCrLf & vbCrLf & "REVIEWED:" & vbCrLf
+                endRange.InsertAfter(headerText & reviewed & vbCrLf)
+
+                ' Position selection at end so the user immediately sees the reviewed block
+                Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+                sel.SetRange(endRange.End, endRange.End)
+
+            Finally
+                app.ScreenUpdating = oldScreen
+            End Try
+
+        Catch ex As System.Exception
+            MessageBox.Show("Error in ReviewChangesAndInsertAtEnd: " & ex.Message,
+                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        Finally
+            If wordDoc IsNot Nothing Then
+                Marshal.ReleaseComObject(wordDoc)
+                wordDoc = Nothing
+            End If
+            If inspector IsNot Nothing Then
+                Marshal.ReleaseComObject(inspector)
+                inspector = Nothing
+            End If
+        End Try
+    End Sub
+
 End Class

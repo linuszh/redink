@@ -203,8 +203,8 @@ Namespace SharedLibrary
             sb.AppendLine("From: " & FormatAddr(msg.From, msg.FromAddress))
             If msg.To_.Count > 0 Then sb.AppendLine("To: " & String.Join("; ", msg.To_))
             If msg.Cc.Count > 0 Then sb.AppendLine("Cc: " & String.Join("; ", msg.Cc))
-            sb.AppendLine($"Sent: {If(msg.SentUtc.HasValue, msg.SentUtc.Value.ToString("u"), "")}")
-            sb.AppendLine($"Received: {If(msg.ReceivedUtc.HasValue, msg.ReceivedUtc.Value.ToString("u"), "")}")
+            AppendDateLines(sb, "Sent", msg.SentUtc)
+            AppendDateLines(sb, "Received", msg.ReceivedUtc)
             sb.AppendLine($"Subject: {If(msg.Subject, "")}")
             sb.AppendLine()
             Dim body = If(msg.Body, "")
@@ -230,8 +230,10 @@ Namespace SharedLibrary
 
         Private Sub RenderChatMessage(m As M365ChatMessage, sb As StringBuilder)
             If m Is Nothing Then Return
-            Dim ts = If(m.CreatedUtc.HasValue, m.CreatedUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm"), "")
-            sb.AppendLine($"[{ts}] {If(m.From, "(unknown)")}:")
+
+            sb.AppendLine("From: " & If(m.From, "(unknown)"))
+            AppendDateLines(sb, "Date", m.CreatedUtc)
+
             Dim body = If(m.Content, "")
             If String.Equals(m.ContentType, "html", StringComparison.OrdinalIgnoreCase) Then body = StripHtml(body)
             sb.AppendLine(body.Trim())
