@@ -3,36 +3,30 @@
 '
 ' =============================================================================
 ' File: SharedMethods.MainLLM.vb
-' Purpose: Contains the main shared LLM invocation pipeline, including optional post-correction,
-'          anonymization/re-identification, request construction (GET/POST), optional multipart
-'          object upload, retry/timeout/cancellation handling, response parsing, and token usage logging.
+' Purpose: Implements the shared LLM invocation pipeline, including prompt
+'          preparation, anonymization and re-identification, request templating,
+'          OAuth token refresh, HTTP execution, response extraction, and token
+'          usage logging.
 '
 ' Architecture:
-'  - PostCorrection: Optional second-stage call to `LLM` driven by `context.INI_PostCorrection`.
-'  - LLM (core pipeline):
-'      - Cancellation: Returns empty string early if `cancellationToken` is already canceled; links a local
-'        token source to support both caller cancellation and splash-screen cancellation.
-'      - Anonymization: Applies `AnonymizeText` / `ReidentifyText` based on model-specific settings and
-'        preserves optional `<TEXTTOPROCESS>` wrapping.
-'      - OAuth2 API key refresh (optional): Uses `GetFreshAccessToken` to refresh `context.DecodedAPI`
-'        or `context.DecodedAPI_2` and sets token expiry timestamps.
-'      - Endpoint/APICall templating: Replaces placeholders (model, prompts, temperature, API key, session id).
-'      - Dual-call mode (optional): Splits endpoint/body/response key on the Unicode "¦" separator to run
-'        a POST followed by a GET whose URL/body is filled from selected POST response tokens.
-'      - HTTP: Supports GET via `get:` endpoint prefix; otherwise POST. Retries 429 responses with backoff.
-'      - Response normalization: Detects simple SSE framing and extracts "data:" payloads, then validates JSON.
-'      - Response extraction: Uses `HandleObject` and `JsonTemplateFormatter.FormatJsonWithTemplate` and may
-'        append citations via `ExtractCitations`.
-'      - Output cleanup: Optional replacement of ß, dash normalization, whitespace cleanup, hidden marker removal,
-'        and optional removal of content up to the last `</THINK>` tag.
-'  - Prompt log and token spending log: `LogTokenSpending` persists recent prompts in settings and optionally
-'    appends a cost/token line to a desktop log file with retry/exclusive-lock writing.
-'  - JSON helpers: `HandleObject` and `FindJsonProperty` read selected values and detect error payloads.
-'  - OAuth2 helper: `GetFreshAccessToken` prepares a PEM key for `GoogleOAuthHelper` and refreshes access tokens.
-'  - Utility helpers: `CleanString` JSON-escapes prompt strings, `EstimateTokenCount` approximates token usage,
-'    `FixMimeType` normalizes MIME aliases used for object uploads.
+'  - Post-processing:
+'      - `PostCorrection` optionally runs a second-stage corrective LLM pass.
+'  - Core pipeline (`LLM`):
+'      - Applies cancellation, anonymization, and prompt normalization.
+'      - Refreshes OAuth-backed API credentials when configured.
+'      - Builds endpoint and request payloads from model templates.
+'      - Supports GET/POST execution, dual-call flows, retries, and timeouts.
+'      - Normalizes SSE-style payloads and extracts configured response content.
+'      - Re-identifies text, cleans output, and appends citations where needed.
+'  - Diagnostics and accounting:
+'      - Logs token usage, prompts, and optional cost records.
+'  - Utility helpers:
+'      - JSON extraction, MIME normalization, and token estimation helpers.
+'
+' Notes:
+'  - This file is the central shared LLM runtime used across add-ins and
+'    special-service/tooling scenarios.
 ' =============================================================================
-
 Option Strict On
 Option Explicit On
 

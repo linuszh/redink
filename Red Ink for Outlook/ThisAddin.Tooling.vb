@@ -1,42 +1,41 @@
-﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
-' Purpose:
-'   Implements a model-agnostic tool/function-calling loop for LLM interactions.
-'   Detects tool calls in model output, executes internal/external tools, and
-'   injects tool responses into subsequent model iterations until a final answer
-'   is produced or limits/cancellation are reached.
+' Purpose: Implements a model-agnostic "tooling loop" for LLM tool/function calling, including
+'          tool selection, tool call detection/extraction, per-tool execution, and response
+'          injection back into subsequent LLM iterations.
 '
-' Responsibilities:
-'   - Tool loop orchestration via `ExecuteToolingLoop`:
-'       * Build enhanced system prompt with tool usage guidance.
-'       * Generate model-specific tool definition payloads for `INI_APICall_ToolInstructions_2`.
-'       * Invoke `LLM(...)` iteratively, detect tool calls, and inject responses via
-'         `INI_APICall_ToolResponses_2`.
-'       * Enforce iteration limits, timeouts, cancellation, and forced final synthesis.
-'   - Tool call parsing:
-'       * Detect tool calls via regex (`ContainsToolCalls`) using tooling model patterns.
-'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided map.
-'   - Tool execution:
-'       * Internal tool: `retrieve_web_content` with SSRF safeguards (WebView2 or HTTP fallback).
-'       * External tools: apply selected `ModelConfig`, build API call payloads, force JSON
-'         response mode, invoke the model, and restore prior config.
-'       * AutoPilot routing for internal tools when AutoPilot is active.
-'   - Tool selection and persistence:
-'       * Load tool configurations from `INI_SpecialServicePath`.
-'       * Add a built-in web retrieval tool.
-'       * Persist selected tool names and restore them on demand.
-'   - Diagnostics:
-'       * Optional per-run file logging via `ToolingFileLogger` (controlled by `INI_APIDebug`).
-'       * Optional UI logging via `LogWindow` when enabled.
+' Architecture:
+'  - Tooling execution loop (`ExecuteToolingLoop`):
+'      - Builds system prompt augmentation via `BuildToolInstructionsPrompt`.
+'      - Injects model-specific tool definitions into `INI_APICall_ToolInstructions_2`.
+'      - Calls `LLM(...)` iteratively until no tool calls are detected or `MaxIterations` is reached.
+'      - When tool calls are present:
+'          - Detects tool calls using `ContainsToolCalls` (regex).
+'          - Extracts tool calls using `ExtractToolCalls` (JSON + extraction map).
+'          - Executes each tool via `ExecuteToolCall`, collecting `ToolResponse` objects.
+'          - Builds the next-iteration response payload via `BuildToolResponsesForModel` and assigns it to
+'            `INI_APICall_ToolResponses_2`.
+'  - Tool execution:
+'      - Internal tool: `retrieve_web_content` retrieves web content for caller-provided URLs.
+'      - External tools: `ExecuteExternalTool` applies the selected tool `ModelConfig`, prepares the
+'        API call payload, forces JSON response mode, invokes `LLM(...)`, and restores prior settings.
+'      - Tool errors are handled according to `ModelConfig.ToolErrorHandling` (abort/retry/skip).
+'  - Tool selection and persistence:
+'      - Loads tools from `INI_SpecialServicePath` with `LoadToolingServices`.
+'      - Adds the internal web retrieval tool via `GetInternalWebTool`.
+'      - Persists selections through `My.Settings.SelectedToolNames` and restores them with
+'        `LoadPersistedToolSelection`.
+'  - Diagnostics:
+'      - `ToolingFileLogger` writes a single per-run log file when `INI_APIDebug` is enabled.
+'      - Optional UI logging uses a `LogWindow` instance when enabled.
 '
-' Notes:
-'   - This file is a partial definition of `ThisAddIn` and depends on shared configuration
-'     values (INI variables), `_context`, and the `LLM(...)` entry point provided elsewhere.
-'   - Web retrieval uses WebView2 when enabled to capture JavaScript-rendered content.
+' External Dependencies:
+'  - SharedLibrary.SharedMethods: `LLM`, `InterpolateAtRuntime`, `LoadAlternativeModels`, `GetCurrentConfig`,
+'    `ApplyModelConfig`, `RestoreDefaults`, `ShowCustomMessageBox`, `ShowCustomYesNoBox`.
+'  - Newtonsoft.Json: used for parsing/formatting tool calls and tool responses.
+'  - WebView2: used for JavaScript-capable web retrieval when enabled.
 ' =============================================================================
 
 Option Explicit On

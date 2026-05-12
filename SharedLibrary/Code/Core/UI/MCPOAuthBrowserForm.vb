@@ -1,4 +1,25 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: MCPOAuthBrowserForm.vb
+' Purpose: Hosts an embedded WebView2-based OAuth sign-in window for MCP and
+'          related authentication flows, captures the redirect callback URL,
+'          and returns authorization results without requiring copy/paste.
+'
+' Responsibilities:
+'  - Initializes an embedded WebView2 browser with a temporary user-data folder.
+'  - Navigates to the supplied authorization URL.
+'  - Intercepts navigation to the configured redirect URI prefix.
+'  - Captures callback URLs and OAuth error parameters for the caller.
+'  - Redirects popup/new-window requests back into the same embedded browser.
+'
+' Notes:
+'  - Intended for interactive OAuth sign-in within desktop add-ins.
+'  - Uses WebView2 to support modern identity providers and SSO flows.
+' =============================================================================
+
+
 
 Option Strict On
 Option Explicit On

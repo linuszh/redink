@@ -3,8 +3,28 @@
 '
 ' =============================================================================
 ' File: SharedMethods.MCPOAuth.vb
-' Purpose: Provides methods for acquiring OAuth tokens for MCP-protected resources.
+' Purpose: Provides OAuth helpers for MCP-protected resources, including bearer
+'          challenge discovery, authorization-server metadata lookup, dynamic
+'          client registration, device flow, authorization-code flow, and token
+'          caching for MCP tool execution.
 '
+' Architecture:
+'  - Discovery:
+'      - Probes protected resources for `WWW-Authenticate` bearer challenges.
+'      - Resolves resource metadata and authorization server metadata.
+'  - Client setup:
+'      - Reuses configured client credentials when available.
+'      - Falls back to dynamic client registration when required by the server.
+'  - Authentication flows:
+'      - Uses device authorization flow when advertised.
+'      - Otherwise runs interactive authorization-code flow.
+'  - Token lifecycle:
+'      - Caches acquired tokens by client and endpoint configuration.
+'      - Exposes helpers for lookup, storage, and debug logging.
+'
+' Types:
+'  - `MCPProtectedResourceOAuthResult`
+'  - `MCPCachedToken`
 ' =============================================================================
 
 

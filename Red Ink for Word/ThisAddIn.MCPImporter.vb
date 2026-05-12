@@ -1,41 +1,33 @@
 ﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.MCPImporter.vb
-' Purpose:
-'   Imports tool metadata from an MCP server and generates ready-to-use
-'   Special Service INI sections (one section per selected MCP tool).
+' Purpose: Imports tool metadata from MCP servers and generates Special Service
+'          INI sections for selected tools, including transport probing,
+'          schema mapping, response-path inference, and user-driven export.
 '
 ' Architecture:
 '  - Endpoint discovery:
-'      * Probes Streamable HTTP first (base URL + common MCP suffixes).
-'      * Falls back to legacy SSE transport (base URL + common SSE suffixes).
+'      - Probes Streamable HTTP endpoints first.
+'      - Falls back to legacy SSE transport when needed.
 '  - MCP protocol flow:
-'      * Sends JSON-RPC `initialize` and `tools/list`.
-'      * Supports paged tool discovery via `nextCursor`.
-'  - SSE runtime model:
-'      * Opens SSE stream, reads `endpoint` event, posts JSON-RPC to that endpoint,
-'        and reads responses from SSE data events.
-'      * Stores temporary session state in `MCPSSESession`.
-'  - Response-path probing:
-'      * Executes a sample `tools/call` to infer suitable INI `Response` path
-'        (e.g. `result.content[0].text`, `result.output`, etc.).
-'  - Schema mapping:
-'      * Converts JSON Schema tool parameters to INI parameters (`Parameter1..4`),
-'        preserving overflow parameters in ToolAPICall/ToolDefinition metadata.
+'      - Sends JSON-RPC `initialize` and `tools/list`.
+'      - Supports paged tool discovery via cursor-based continuation.
+'  - Tool inspection and mapping:
+'      - Executes sample calls to infer response paths.
+'      - Maps JSON Schema parameters to INI `Parameter1..4` fields and preserves
+'        overflow metadata in generated tool definitions.
 '  - User workflow:
-'      * Collects auth/header settings and optional live probe API key.
-'      * Lets user choose tools and output behavior (`ToolOnly` vs mixed mode).
-'      * Prompts for optional merge prompt / timeout and output file location.
+'      - Collects auth/header settings and optional live probe credentials.
+'      - Lets the user choose tools, output mode, timeout, and output file.
 '  - INI generation:
-'      * Emits APICall + ToolAPICall JSON, defaults, instructions, and definitions.
-'      * Sanitizes multiline values for INI-safe single-line output.
+'      - Emits `APICall`, `ToolAPICall`, defaults, tool instructions, and tool
+'        definitions in INI-safe single-line form.
 '
 ' Dependencies:
 '  - System.Net.Http for MCP transport requests.
-'  - Newtonsoft.Json / LINQ-to-JSON for payload construction and parsing.
+'  - Newtonsoft.Json for payload construction and parsing.
 '  - SharedLibrary UI helpers for dialogs and selection forms.
 ' =============================================================================
 

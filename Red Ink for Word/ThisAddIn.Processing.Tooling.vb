@@ -3,40 +3,33 @@
 '
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.vb
-' Purpose: Implements a model-agnostic "tooling loop" for LLM tool/function calling, including
-'          tool selection, tool call detection/extraction, per-tool execution, and response
-'          injection back into subsequent LLM iterations.
+' Purpose: Implements a model-agnostic "tooling loop" for LLM tool/function
+'          calling, including tool selection, tool call detection/extraction,
+'          per-tool execution, and response injection back into subsequent LLM
+'          iterations.
 '
 ' Architecture:
 '  - Tooling execution loop (`ExecuteToolingLoop`):
 '      - Builds system prompt augmentation via `BuildToolInstructionsPrompt`.
 '      - Injects model-specific tool definitions into `INI_APICall_ToolInstructions_2`.
-'      - Calls `LLM(...)` iteratively until no tool calls are detected or `MaxIterations` is reached.
-'      - When tool calls are present:
-'          - Detects tool calls using `ContainsToolCalls` (regex).
-'          - Extracts tool calls using `ExtractToolCalls` (JSON + `ToolCallExtractionMap`).
-'          - Executes each tool via `ExecuteToolCall`, collecting `ToolResponse` objects.
-'          - Builds the next-iteration response payload via `BuildToolResponsesForModel` and assigns it to
-'            `INI_APICall_ToolResponses_2`.
+'      - Calls `LLM(...)` iteratively until no tool calls are detected or
+'        `MaxIterations` is reached.
+'      - Detects, extracts, executes, and feeds back tool responses between iterations.
 '  - Tool execution:
-'      - Internal tool: `ExecuteInternalWebTool` retrieves web content for caller-provided URLs.
-'      - External tools: `ExecuteExternalTool` applies the selected tool `ModelConfig` into `_context`,
-'        sets `_context.INI_APICall_2`, forces JSON response mode, and invokes `LLM` to execute the tool.
-'      - Tool errors are handled according to `ModelConfig.ToolErrorHandling` (abort/retry/skip).
+'      - Internal tools include web retrieval, internet search, knowledge-store
+'        search, and Microsoft 365 helpers.
+'      - External tools execute via model-driven `ModelConfig` definitions.
+'      - Tool errors are handled according to `ModelConfig.ToolErrorHandling`.
 '  - Tool selection and persistence:
-'      - Loads tools from `INI_SpecialServicePath` with `LoadToolingServices` (INI-backed models).
-'      - Adds an internal web retrieval tool via `GetInternalWebTool`.
-'      - Persists selections through `My.Settings.SelectedToolNames` and restores them with
-'        `LoadPersistedToolSelection`.
+'      - Loads tool-capable services from `INI_SpecialServicePath`.
+'      - Adds built-in internal tools and restores persisted user selections.
 '  - Diagnostics:
-'      - `ToolingFileLogger` writes a single per-run log file to the user's Desktop when `INI_APIDebug` is enabled.
-'      - Optional UI logging uses a `LogWindow` instance when `INI_ToolingLogWindow` is enabled.
+'      - `ToolingFileLogger` records per-run diagnostics and raw-response stubs.
+'      - Optional `LogWindow` output provides user-visible progress.
 '
 ' External Dependencies:
-'  - SharedLibrary.SharedMethods: `LLM`, `InterpolateAtRuntime`, `LoadAlternativeModels`, `GetCurrentConfig`,
-'    `ApplyModelConfig`, `RestoreDefaults`, `ShowCustomMessageBox`, `ShowCustomYesNoBox`.
-'  - Newtonsoft.Json: used for parsing/formatting tool calls and tool responses.
-'  - `RetrieveWebsiteContent`: called by `ExecuteInternalWebTool` (implemented elsewhere in this project).
+'  - SharedLibrary.SharedMethods and shared context/config helpers.
+'  - Newtonsoft.Json for parsing and formatting tool calls and responses.
 ' =============================================================================
 
 Option Explicit On
