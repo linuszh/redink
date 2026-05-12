@@ -1202,11 +1202,14 @@ Namespace SharedLibrary
         End Sub
 
         Private Shared Function ShowAddPromptLibraryEntryDialog(targetPath As String,
-                                                                defaultCategory As String,
-                                                                lastPromptForCtrlP As String,
-                                                                ByRef newTitle As String,
-                                                                ByRef newPrompt As String,
-                                                                ByRef newCategory As String) As Boolean
+                                                        defaultCategory As String,
+                                                        lastPromptForCtrlP As String,
+                                                        ByRef newTitle As String,
+                                                        ByRef newPrompt As String,
+                                                        ByRef newCategory As String,
+                                                        Optional ownerHandle As IntPtr = Nothing) As Boolean
+
+
             newTitle = Nothing
             newPrompt = Nothing
             newCategory = Nothing
@@ -1385,11 +1388,30 @@ Namespace SharedLibrary
                 End Sub
 
             AddHandler form.Shown,
-                Sub()
-                    titleTextBox.Focus()
-                End Sub
+    Sub()
+        titleTextBox.Focus()
+        Try
+            form.BringToFront()
+            form.Activate()
+            SharedLibrary.NativeMethods.SetForegroundWindow(form.Handle)
+        Catch
+        End Try
+    End Sub
 
-            Dim result As System.Windows.Forms.DialogResult = form.ShowDialog()
+            Dim result As System.Windows.Forms.DialogResult
+            Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+            If ownerHandle <> System.IntPtr.Zero Then
+                owner = New WindowWrapper(ownerHandle)
+            Else
+                owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            If owner IsNot Nothing Then
+                result = form.ShowDialog(owner)
+            Else
+                result = form.ShowDialog()
+            End If
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 newTitle = pendingTitle
@@ -1406,10 +1428,11 @@ Namespace SharedLibrary
         ''' Returns an empty string if the user cancels or no prompt is available.
         ''' </summary>
         Public Shared Function ShowPromptInsertionSelector(filePath As String,
-                                                           filepathlocal As String,
-                                                           Context As ISharedContext,
-                                                           Optional initialFilter As String = Nothing,
-                                                           Optional lastPromptForCtrlP As String = Nothing) As String
+                                                   filepathlocal As String,
+                                                   Context As ISharedContext,
+                                                   Optional initialFilter As String = Nothing,
+                                                   Optional lastPromptForCtrlP As String = Nothing,
+                                                   Optional ownerHandle As IntPtr = Nothing) As String
 
             Dim centralPath As String = ExpandEnvironmentVariables(filePath)
             Dim localPath As String = ExpandEnvironmentVariables(filepathlocal)
@@ -1834,7 +1857,7 @@ Namespace SharedLibrary
                         Dim addedPrompt As String = Nothing
                         Dim addedCategory As String = Nothing
 
-                        If Not ShowAddPromptLibraryEntryDialog(target, selectedCategory, lastPromptForCtrlP, addedTitle, addedPrompt, addedCategory) Then
+                        If Not ShowAddPromptLibraryEntryDialog(target, selectedCategory, lastPromptForCtrlP, addedTitle, addedPrompt, addedCategory, ownerHandle) Then
                             Return
                         End If
 
@@ -1883,9 +1906,10 @@ Namespace SharedLibrary
                         EnsurePromptLibraryDirectoryExists(target)
 
                         ShowTextFileEditor(
-                            target,
-                            $"You can now edit your {targetKind} prompts (stored at {target}). Make sure that on each prompt line, the description and the prompt are separated by a '|'; you can use ';' for comments; optional category blocks use <Category Name> and </Category Name>."
-                        )
+                                target,
+                                $"You can now edit your {targetKind} prompts (stored at {target}). Make sure that on each prompt line, the description and the prompt are separated by a '|'; you can use ';' for comments; optional category blocks use <Category Name> and </Category Name>.",
+                                ownerHandle:=ownerHandle
+                            )
 
                         ReloadPromptEntries()
                         RefreshCategoryFilter(previousCategory)
@@ -1901,13 +1925,34 @@ Namespace SharedLibrary
             RefreshVisiblePromptList(Nothing)
 
             AddHandler pickerForm.Shown,
-                Sub()
-                    searchTextBox.Focus()
-                    searchTextBox.SelectionStart = 0
-                    searchTextBox.SelectionLength = searchTextBox.TextLength
-                End Sub
+                    Sub()
+                        searchTextBox.Focus()
+                        searchTextBox.SelectionStart = 0
+                        searchTextBox.SelectionLength = searchTextBox.TextLength
+                        Try
+                            pickerForm.BringToFront()
+                            pickerForm.Activate()
+                            SharedLibrary.NativeMethods.SetForegroundWindow(pickerForm.Handle)
+                        Catch
+                        End Try
+                    End Sub
 
-            Dim result As System.Windows.Forms.DialogResult = pickerForm.ShowDialog()
+            Dim result As System.Windows.Forms.DialogResult
+            Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+            If ownerHandle <> System.IntPtr.Zero Then
+                owner = New WindowWrapper(ownerHandle)
+            Else
+                owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            If owner IsNot Nothing Then
+                result = pickerForm.ShowDialog(owner)
+            Else
+                result = pickerForm.ShowDialog()
+            End If
+
+
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex As Integer = titleListBox.SelectedIndex

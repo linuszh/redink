@@ -480,25 +480,35 @@ Namespace SharedLibrary
 
             Select Case src
                 Case M365SearchSources.Mail
+                    ' KQL keyword for mail (received/sent) — culture-independent literal.
                     dateField = "received"
 
                 Case M365SearchSources.OneDrive, M365SearchSources.SharePoint,
                      M365SearchSources.SharePointSites, M365SearchSources.SharePointListItems
-                    dateField = "lastModifiedDateTime"
+                    ' SharePoint Search managed property name (NOT the Graph JSON name
+                    ' "lastModifiedDateTime", which KQL doesn't recognise).
+                    dateField = "LastModifiedTime"
 
                 Case M365SearchSources.Calendar
-                    dateField = "start"
+                    ' /search/query for event entities does not honour a "start" KQL
+                    ' refiner reliably — date bounding is applied client-side after
+                    ' canonicalisation. Leave dateField Nothing here.
+                    dateField = Nothing
             End Select
 
             If dateField IsNot Nothing Then
+                Dim inv = Globalization.CultureInfo.InvariantCulture
+
                 If options.From.HasValue Then
                     Dim fromDate = options.From.Value.Date
-                    sb.Append($" AND {dateField}>={fromDate:yyyy-MM-dd}")
+                    sb.Append(" AND ").Append(dateField).Append(">=").
+                       Append(fromDate.ToString("yyyy-MM-dd", inv))
                 End If
 
                 If options.To.HasValue Then
                     Dim toExclusive = options.To.Value.Date.AddDays(1)
-                    sb.Append($" AND {dateField}<{toExclusive:yyyy-MM-dd}")
+                    sb.Append(" AND ").Append(dateField).Append("<").
+                       Append(toExclusive.ToString("yyyy-MM-dd", inv))
                 End If
             End If
 
@@ -508,7 +518,6 @@ Namespace SharedLibrary
 
             Return sb.ToString()
         End Function
-
 
         Private Async Function CanonicalizeSearchHitDatesAsync(context As ISharedContext,
                                                        hits As IList(Of M365SearchHit),

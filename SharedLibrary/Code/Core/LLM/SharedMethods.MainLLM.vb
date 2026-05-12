@@ -2242,7 +2242,7 @@ PostProcess:
         ''' <param name="TLife">Lifetime in seconds used to compute expiry timestamps in <paramref name="context"/>.</param>
         ''' <param name="SecondAPI">If <c>True</c>, updates the secondary token fields in <paramref name="context"/>.</param>
         ''' <returns>Access token string; returns an empty string on errors.</returns>
-        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False) As Task(Of String)
+        Public Shared Async Function GetFreshAccessToken(context As ISharedContext, ByVal clientEmail As String, ByVal ClientScopes As String, ByVal PrivateKey As String, ByVal AuthServer As String, ByVal TLife As Long, ByVal SecondAPI As Boolean, Optional ByVal silent As Boolean = False, Optional ByVal forceRefresh As Boolean = False) As Task(Of String)
             Try
 
                 Dim accessToken As String = String.Empty
@@ -2270,6 +2270,52 @@ PostProcess:
                     dbg.AppendLine($"  UtcNow          = {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC")
                     dbg.AppendLine($"  Token expired?  = {DateTime.UtcNow >= currentexpiry}")
                     WriteDebugError(dbg.ToString())
+                End If
+
+                If Not String.IsNullOrWhiteSpace(AuthServer) AndAlso AuthServer.Contains("¦") Then
+                    Dim cacheKey As String = BuildMCPTokenCacheKey(clientEmail, AuthServer)
+                    Dim cached As MCPCachedToken = GetCachedMCPToken(cacheKey)
+
+                    If Not forceRefresh AndAlso
+                       cached IsNot Nothing AndAlso
+                       Not String.IsNullOrEmpty(cached.AccessToken) AndAlso
+                       DateTime.UtcNow < cached.ExpiryUtc Then
+
+                        If context.INI_APIDebug Then
+                            WriteDebugError("[OAuth2 Debug] Using cached MCP access token from MCP token cache.")
+                        End If
+
+                        Return cached.AccessToken
+                    End If
+
+                    If context.INI_APIDebug Then
+                        WriteDebugError("[OAuth2 Debug] MCP token cache miss, expired, or forced refresh — acquiring fresh token via interactive flow.")
+                    End If
+
+                    SetMCPOAuthDebugEnabled(context.INI_APIDebug)
+
+                    Dim oauthResult As MCPProtectedResourceOAuthResult =
+                        Await GetInteractiveMCPAccessTokenAsync(
+                            clientEmail,
+                            ClientScopes,
+                            PrivateKey,
+                            AuthServer,
+                            silent).ConfigureAwait(False)
+
+                    Dim freshToken As String = If(oauthResult?.AccessToken, "")
+                    If String.IsNullOrEmpty(freshToken) Then
+                        Return String.Empty
+                    End If
+
+                    Dim expiresInSeconds As Integer = If(TLife > 0, CInt(TLife), 3600)
+                    If oauthResult IsNot Nothing AndAlso oauthResult.ExpiresIn > 0 Then
+                        expiresInSeconds = oauthResult.ExpiresIn
+                    End If
+
+                    Dim freshExpiryUtc As DateTime = DateTime.UtcNow.AddSeconds(Math.Max(60, expiresInSeconds - 300))
+                    StoreCachedMCPToken(cacheKey, freshToken, freshExpiryUtc)
+
+                    Return freshToken
                 End If
 
                 PrivateKey = PrivateKey.Replace("\n", "")

@@ -129,45 +129,116 @@ Partial Public Class ThisAddIn
             If String.IsNullOrWhiteSpace(mcpUrl) Then Return
             mcpUrl = mcpUrl.TrimEnd("/"c)
 
-            ' ── 2. Collect auth info up-front ────────────────────────────────
-            Dim authParams As MCPAuthInfo = CollectMCPAuthInfo()
-            If authParams Is Nothing Then Return
+            ' ── 2. Initialize + discover tools; if needed, bootstrap OAuth and retry ──
+            Dim authParams As New MCPAuthInfo()
 
-            If String.IsNullOrWhiteSpace(authParams.LiveAPIKey) AndAlso
-               Not String.IsNullOrWhiteSpace(authParams.APIKeyPlaceholder) AndAlso
-               authParams.APIKeyPlaceholder.StartsWith("[[") Then
-
-                Dim liveKey As String = ShowCustomInputBox(
-                    "The API key is a placeholder. Enter the actual key for the server probe " &
-                    "(will NOT be stored in the INI file), or leave blank for open servers:",
-                    $"{AN} MCP Import", True).Trim()
-                authParams.LiveAPIKey = liveKey
-            End If
-
-            ' ── 3. Initialize + discover tools ───────────────────────────────
             Dim tools As List(Of MCPToolInfo) = Nothing
             Dim serverName As String = ""
             Dim resolvedUrl As String = mcpUrl
             Dim sseBaseUrl As String = ""
             Dim detectedTransport As String = ""
 
+            Dim initResult As MCPInitResult = Nothing
+            Dim firstDiscoveryError As Exception = Nothing
+
             Try
-                Dim initResult = Await MCPInitializeWithDiscovery(mcpUrl, authParams)
+                initResult = Await MCPInitializeWithDiscovery(mcpUrl, authParams)
                 resolvedUrl = initResult.ResolvedUrl
                 sseBaseUrl = initResult.SseBaseUrl
                 serverName = initResult.ServerName
                 detectedTransport = initResult.Transport
                 tools = Await MCPListTools(resolvedUrl, authParams)
             Catch ex As Exception
-                mainThreadControl.Invoke(New MethodInvoker(
-                    Sub() ShowCustomMessageBox($"Failed to query MCP server: {ex.Message}")))
-                Return
+                firstDiscoveryError = ex
             Finally
                 If _mcpSseSession IsNot Nothing Then
                     _mcpSseSession.Dispose()
                     _mcpSseSession = Nothing
                 End If
             End Try
+
+            If firstDiscoveryError IsNot Nothing Then
+                Dim discoveredOAuth As SLib.MCPProtectedResourceOAuthResult = Nothing
+                Dim oauthBootstrapError As Exception = Nothing
+
+                SLib.SetMCPOAuthDebugEnabled(INI_APIDebug)
+
+                Try
+                    discoveredOAuth = Await SLib.AcquireMCPProtectedResourceOAuthAsync(mcpUrl).ConfigureAwait(False)
+                Catch ex As Exception
+                    oauthBootstrapError = ex
+                End Try
+
+                If oauthBootstrapError IsNot Nothing Then
+                    Await SwitchToUi(
+                        Sub()
+                            ShowCustomMessageBox(
+                                "Failed to query the MCP server before OAuth bootstrap:" & vbCrLf & vbCrLf &
+                                firstDiscoveryError.Message & vbCrLf & vbCrLf &
+                                "Automatic OAuth bootstrap also failed:" & vbCrLf & vbCrLf &
+                                oauthBootstrapError.Message,
+                                $"{AN} MCP Import")
+                        End Sub)
+                    Return
+                End If
+
+                If discoveredOAuth Is Nothing Then
+                    Await SwitchToUi(
+                        Sub()
+                            ShowCustomMessageBox(
+                                "Failed to query the MCP server:" & vbCrLf & vbCrLf &
+                                firstDiscoveryError.Message & vbCrLf & vbCrLf &
+                                "No OAuth challenge or protected-resource metadata could be discovered at the MCP URL.",
+                                $"{AN} MCP Import")
+                        End Sub)
+                    Return
+                End If
+
+                ApplyDiscoveredMCPOAuth(authParams, discoveredOAuth)
+
+                Await SwitchToUi(
+                    Sub()
+                        ShowCustomMessageBox(
+                            "The MCP server requires OAuth authentication." & vbCrLf & vbCrLf &
+                            "Authentication completed successfully. The importer will now retry server discovery.",
+                            $"{AN} MCP Import")
+                    End Sub)
+
+                Dim secondDiscoveryError As Exception = Nothing
+                initResult = Nothing
+                tools = Nothing
+                serverName = ""
+                resolvedUrl = mcpUrl
+                sseBaseUrl = ""
+                detectedTransport = ""
+
+                Try
+                    initResult = Await MCPInitializeWithDiscovery(mcpUrl, authParams)
+                    resolvedUrl = initResult.ResolvedUrl
+                    sseBaseUrl = initResult.SseBaseUrl
+                    serverName = initResult.ServerName
+                    detectedTransport = initResult.Transport
+                    tools = Await MCPListTools(resolvedUrl, authParams)
+                Catch ex As Exception
+                    secondDiscoveryError = ex
+                Finally
+                    If _mcpSseSession IsNot Nothing Then
+                        _mcpSseSession.Dispose()
+                        _mcpSseSession = Nothing
+                    End If
+                End Try
+
+                If secondDiscoveryError IsNot Nothing Then
+                    Await SwitchToUi(
+                        Sub()
+                            ShowCustomMessageBox(
+                                "OAuth authentication succeeded, but querying the MCP server still failed:" & vbCrLf & vbCrLf &
+                                secondDiscoveryError.Message,
+                                $"{AN} MCP Import")
+                        End Sub)
+                    Return
+                End If
+            End If
 
             If tools Is Nothing OrElse tools.Count = 0 Then
                 Await SwitchToUi(Sub() ShowCustomMessageBox("The MCP server did not return any tools."))
@@ -358,6 +429,17 @@ Partial Public Class ThisAddIn
         Public Property APIKeyPrefix As String = ""
         Public Property HeaderA As String = ""
         Public Property HeaderB As String = ""
+
+        Public Property OAuth2 As Boolean = False
+        Public Property OAuth2ClientId As String = ""
+        Public Property OAuth2ClientSecret As String = ""
+        Public Property OAuth2AuthorizationEndpoint As String = ""
+        Public Property OAuth2TokenEndpoint As String = ""
+        Public Property OAuth2DeviceAuthorizationEndpoint As String = ""
+        Public Property OAuth2Scope As String = ""
+        Public Property OAuth2Resource As String = ""
+        Public Property OAuth2ExpiresIn As Integer = 3600
+        Public Property OAuth2UseDeviceFlow As Boolean = False
     End Class
 
     Private Class MCPInitResult
@@ -429,6 +511,46 @@ Partial Public Class ThisAddIn
         End If
         Return info
     End Function
+
+    Private Shared Sub ApplyDiscoveredMCPOAuth(auth As MCPAuthInfo, oauth As SLib.MCPProtectedResourceOAuthResult)
+        auth.OAuth2 = True
+        auth.OAuth2ClientId = oauth.ClientId
+        auth.OAuth2ClientSecret = oauth.ClientSecret
+        auth.OAuth2AuthorizationEndpoint = oauth.AuthorizationEndpoint
+        auth.OAuth2TokenEndpoint = oauth.TokenEndpoint
+        auth.OAuth2DeviceAuthorizationEndpoint = oauth.DeviceAuthorizationEndpoint
+        auth.OAuth2Scope = oauth.Scope
+        auth.OAuth2Resource = oauth.Resource
+        auth.OAuth2ExpiresIn = oauth.ExpiresIn
+        auth.OAuth2UseDeviceFlow = oauth.UseDeviceFlow
+
+        auth.APIKeyPlaceholder = oauth.ClientSecret
+        auth.LiveAPIKey = oauth.AccessToken
+        auth.APIKeyEncrypted = False
+        auth.APIKeyPrefix = ""
+        auth.HeaderA = "Authorization"
+        auth.HeaderB = "Bearer {apikey}"
+
+        ' Build the OAuth2Endpoint exactly the same way it will be stored in the INI,
+        ' so the runtime cache key matches.
+        Dim oauthEndpointValue As String
+
+        If oauth.UseDeviceFlow Then
+            oauthEndpointValue = "device:" & oauth.DeviceAuthorizationEndpoint & "¦" & oauth.TokenEndpoint
+        Else
+            oauthEndpointValue = oauth.AuthorizationEndpoint & "¦" & oauth.TokenEndpoint
+        End If
+
+        If Not String.IsNullOrWhiteSpace(oauth.Resource) Then
+            oauthEndpointValue &= "¦" & oauth.Resource
+        End If
+
+        Dim cacheKey As String = SLib.BuildMCPTokenCacheKey(oauth.ClientId, oauthEndpointValue)
+        Dim expiresInSeconds As Integer = If(oauth.ExpiresIn > 0, oauth.ExpiresIn, 3600)
+        Dim expiryUtc As DateTime = DateTime.UtcNow.AddSeconds(Math.Max(60, expiresInSeconds - 300))
+
+        SLib.StoreCachedMCPToken(cacheKey, oauth.AccessToken, expiryUtc)
+    End Sub
 
     ' ─────────────────────────────────────────────────────────────────────────
     '  Tool selection dialog
@@ -1497,6 +1619,27 @@ Partial Public Class ThisAddIn
         sb.AppendLine($"APIKey = {MCPSanitizeINIValue(auth.APIKeyPlaceholder)}")
         sb.AppendLine($"APIKeyPrefix = {MCPSanitizeINIValue(auth.APIKeyPrefix)}")
         sb.AppendLine($"APIKeyEncrypted = {auth.APIKeyEncrypted}")
+
+        If auth.OAuth2 Then
+            Dim oauthEndpointValue As String
+
+            If auth.OAuth2UseDeviceFlow Then
+                oauthEndpointValue = "device:" & auth.OAuth2DeviceAuthorizationEndpoint & "¦" & auth.OAuth2TokenEndpoint
+            Else
+                oauthEndpointValue = auth.OAuth2AuthorizationEndpoint & "¦" & auth.OAuth2TokenEndpoint
+            End If
+
+            If Not String.IsNullOrWhiteSpace(auth.OAuth2Resource) Then
+                oauthEndpointValue &= "¦" & auth.OAuth2Resource
+            End If
+
+            sb.AppendLine("OAuth2 = True")
+            sb.AppendLine($"OAuth2ClientMail = {MCPSanitizeINIValue(auth.OAuth2ClientId)}")
+            sb.AppendLine($"OAuth2Scopes = {MCPSanitizeINIValue(auth.OAuth2Scope)}")
+            sb.AppendLine($"OAuth2Endpoint = {MCPSanitizeINIValue(oauthEndpointValue)}")
+            sb.AppendLine($"OAuth2ATExpiry = {auth.OAuth2ExpiresIn}")
+        End If
+
         sb.AppendLine($"Model = {MCPSanitizeINIValue(sectionName)}")
         sb.AppendLine($"Endpoint = {MCPSanitizeINIValue(endpointValue)}")
         sb.AppendLine($"HeaderA = {MCPSanitizeINIValue(auth.HeaderA)}")

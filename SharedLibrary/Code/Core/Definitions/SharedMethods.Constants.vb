@@ -364,7 +364,7 @@ Namespace SharedLibrary
         Public Const DEFAULT_KEEPFORMAT_CAP As Integer = 5000
         Public Const DEFAULT_MARKUP_METHOD_HELPER As Integer = 2
         Public Const DEFAULT_MARKUP_METHOD_WORD As Integer = 2
-        Public Const DEFAULT_MARKUP_METHOD_OUTLOOK As Integer = 3
+        Public Const DEFAULT_MARKUP_METHOD_OUTLOOK As Integer = 4
         Public Const DEFAULT_MARKUP_DIFF_CAP As Integer = 50000
         Public Const DEFAULT_MARKUP_REGEX_CAP As Integer = 30000
         Public Const DEFAULT_CHAT_CAP As Integer = 50000
