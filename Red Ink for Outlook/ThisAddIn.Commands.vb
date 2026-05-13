@@ -43,6 +43,114 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
+    Private Class ParagraphFormattingSnapshot
+        Public Property Style As Object
+        Public Property Font As Microsoft.Office.Interop.Word.Font
+        Public Property ParagraphFormat As Microsoft.Office.Interop.Word.ParagraphFormat
+    End Class
+
+    Private Shared Function RangeWithoutTrailingParagraphMark(sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+        Dim result As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate
+
+        If result.End <= result.Start Then Return result
+
+        Try
+            Dim lastChar As String = result.Document.Range(result.End - 1, result.End).Text
+            If lastChar = vbCr OrElse lastChar = vbLf Then
+                result.End -= 1
+            End If
+        Catch
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function TextOnlyParagraphRange(paragraphRange As Microsoft.Office.Interop.Word.Range,
+                                               limitEnd As Integer) As Microsoft.Office.Interop.Word.Range
+        Dim result As Microsoft.Office.Interop.Word.Range = paragraphRange.Duplicate
+
+        If result.End > limitEnd Then
+            result.End = limitEnd
+        End If
+
+        If result.End <= result.Start Then Return result
+
+        Try
+            Dim lastChar As String = result.Document.Range(result.End - 1, result.End).Text
+            If lastChar = vbCr OrElse lastChar = vbLf Then
+                result.End -= 1
+            End If
+        Catch
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function CaptureParagraphFormatting(sourceRange As Microsoft.Office.Interop.Word.Range) As List(Of ParagraphFormattingSnapshot)
+        Dim snapshots As New List(Of ParagraphFormattingSnapshot)()
+
+        If sourceRange Is Nothing Then Return snapshots
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(sourceRange)
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+
+            If paragraphRange.Start >= effectiveRange.End Then Continue For
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Dim textRange As Microsoft.Office.Interop.Word.Range =
+            TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+
+            snapshots.Add(New ParagraphFormattingSnapshot() With {
+            .Style = paragraphRange.Style,
+            .Font = textRange.Font.Duplicate,
+            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate
+        })
+        Next
+
+        Return snapshots
+    End Function
+
+    Private Shared Sub ApplyParagraphFormatting(targetRange As Microsoft.Office.Interop.Word.Range,
+                                             snapshots As List(Of ParagraphFormattingSnapshot))
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim index As Integer = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+
+            If paragraphRange.Start >= effectiveRange.End Then Continue For
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(Math.Min(index, snapshots.Count - 1))
+
+            Try
+                paragraphRange.Style = snapshot.Style
+            Catch
+            End Try
+
+            Try
+                paragraphRange.ParagraphFormat = snapshot.ParagraphFormat
+            Catch
+            End Try
+
+            Try
+                Dim textRange As Microsoft.Office.Interop.Word.Range =
+                TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+
+                If textRange.End > textRange.Start Then
+                    textRange.Font = snapshot.Font
+                End If
+            Catch
+            End Try
+
+            index += 1
+        Next
+    End Sub
+
     ''' <summary>
     ''' Main command dispatcher. Guards reentrancy, ensures configuration is loaded, validates active MailItem,
     ''' and executes the requested RI_Command (translate, summarize, improve, style, markup, freestyle, etc.).
@@ -1179,8 +1287,12 @@ Partial Public Class ThisAddIn
             If KeepFormat Then
                 SelectedText = SLib.GetRangeHtml(selection.Range)
             Else
-                If INI_MarkdownConvert Then ConvertRangeToMarkdown(selection.Range)
-                SelectedText = selection.Text
+                If INI_MarkdownConvert Then
+                    ConvertRangeToMarkdown(selection.Range)
+                    SelectedText = CleanMarkdownTextForLlm(selection.Text)
+                Else
+                    SelectedText = selection.Text
+                End If
             End If
 
             If String.IsNullOrWhiteSpace(SelectedText) Then
@@ -1273,8 +1385,8 @@ Partial Public Class ThisAddIn
                         End If
                     Else
                         ' Insert two new line breaks and select final position while preserving formatting.
+                        Dim sourceFormatting As List(Of ParagraphFormattingSnapshot) = CaptureParagraphFormatting(range)
                         Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
-                        Dim originalFont As Microsoft.Office.Interop.Word.Font = selRange.Font.Duplicate
 
                         selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         selRange.Text = vbCrLf & vbCrLf
@@ -1283,13 +1395,16 @@ Partial Public Class ThisAddIn
                         Dim newEnd As Integer = selRange.End
                         selection.SetRange(newStart, newEnd)
 
-                        selection.Font = originalFont
-
                         If DoMarkup And MarkupMethod <> 3 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
                         End If
+
+                        Dim insertedRange As Microsoft.Office.Interop.Word.Range =
+                            wordEditor.Range(newStart, selection.Range.End)
+
+                        ApplyParagraphFormatting(insertedRange, sourceFormatting)
                     End If
 
                     ' Use Find to locate the nearest line break backward and adjust selection

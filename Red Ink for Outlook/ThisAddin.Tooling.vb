@@ -50,6 +50,7 @@ Imports System.Windows.Forms
 Imports Microsoft.Web.WebView2.Core
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
@@ -2851,11 +2852,27 @@ Partial Public Class ThisAddIn
     }
     End Function
 
+    Private Sub LogAgentToolCallStatistic(toolName As String)
+        Dim surface As String = ""
+
+        If _apActive Then
+            surface = "Outlook_AutoPilot"
+        ElseIf _chatAgentActive Then
+            surface = "Outlook_LocalChatAgent"
+        Else
+            Return
+        End If
+
+        SharedLogger.LogAgentToolCall(_context, _context.RDV, surface, toolName)
+    End Sub
+
     ''' <summary>
     ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        LogAgentToolCallStatistic(toolCall.ToolName)
 
         ' ── Local Chat Agent workspace tools; never available to AutoPilot ──
         If _chatAgentActive AndAlso Not _apActive AndAlso IsChatAgentWorkspaceTool(toolCall.ToolName) Then
@@ -4214,6 +4231,7 @@ Partial Public Class ThisAddIn
                         resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
 
                         Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                            _context,
                             sseBase, apiCall,
                             If(toolConfig.HeaderA, ""), resolvedHeaderB,
                             CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))

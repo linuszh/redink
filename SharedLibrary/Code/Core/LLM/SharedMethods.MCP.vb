@@ -34,6 +34,7 @@ Imports System.Text
 Imports System.Threading.Tasks
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
@@ -129,6 +130,15 @@ Namespace SharedLibrary
         End Function
 
 
+        Private Shared Sub WriteMCPDebugFile(fileName As String, content As String)
+            Try
+                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                Dim debugFilePath As String = Path.Combine(desktopPath, fileName)
+                File.WriteAllText(debugFilePath, If(content, ""))
+            Catch
+            End Try
+        End Sub
+
         ''' <summary>
         ''' Performs a complete MCP tool call over SSE transport:
         '''   1. GET the SSE base URL → read "event: endpoint" → obtain session POST URL
@@ -148,6 +158,7 @@ Namespace SharedLibrary
         ''' <returns>The raw JSON response string from the MCP server.</returns>
         ''' <exception cref="Exception">Thrown when the handshake, request, or response reading fails.</exception>
         Public Shared Async Function ExecuteMCPSSEToolCall(
+                context As ISharedContext,
                 sseBaseUrl As String,
                 requestBody As String,
                 headerA As String,
@@ -194,6 +205,19 @@ Namespace SharedLibrary
                 End If
 
                 postEndpoint = ResolveSSEEndpoint(sseBaseUrl, postEndpoint)
+
+                If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                    Dim sentDebug As New StringBuilder()
+                    sentDebug.AppendLine($"SENT TO API (SSE GET): {sseBaseUrl}")
+                    sentDebug.AppendLine($"SSE POST ENDPOINT: {postEndpoint}")
+                    sentDebug.AppendLine($"HeaderA: {headerA}")
+                    sentDebug.AppendLine($"HeaderB: {headerB}")
+                    sentDebug.AppendLine("SSE TOOL REQUEST:")
+                    sentDebug.AppendLine(requestBody)
+
+                    Debug.WriteLine(sentDebug.ToString())
+                    WriteMCPDebugFile("RI_Debug_Sent.json", sentDebug.ToString())
+                End If
 
                 ' ── Step 2: POST initialize handshake ────────────────────────
                 Using postHandler As New HttpClientHandler()
@@ -247,7 +271,14 @@ Namespace SharedLibrary
                             Try
                                 Dim directResult = JObject.Parse(postBody)
                                 If directResult("result") IsNot Nothing OrElse directResult("error") IsNot Nothing Then
-                                    Return directResult.ToString(Formatting.None)
+                                    Dim directResultText As String = directResult.ToString(Formatting.None)
+
+                                    If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                                        Debug.WriteLine($"RECEIVED FROM API (SSE):{Environment.NewLine}{directResultText}")
+                                        WriteMCPDebugFile("RI_Debug_Received.json", directResultText)
+                                    End If
+
+                                    Return directResultText
                                 End If
                             Catch
                             End Try
@@ -264,7 +295,14 @@ Namespace SharedLibrary
                 End Try
 
                 Dim responseJson = Await WaitForSSEResponse(reader, expectedId, timeoutMs).ConfigureAwait(False)
-                Return responseJson.ToString(Formatting.None)
+                Dim responseJsonText As String = responseJson.ToString(Formatting.None)
+
+                If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                    Debug.WriteLine($"RECEIVED FROM API (SSE):{Environment.NewLine}{responseJsonText}")
+                    WriteMCPDebugFile("RI_Debug_Received.json", responseJsonText)
+                End If
+
+                Return responseJsonText
 
             Finally
                 Try : reader?.Dispose() : Catch : End Try

@@ -2937,7 +2937,7 @@ Partial Public Class ThisAddIn
             outputFileName = "workspace_inventory_" & DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)
         End If
 
-        If Not IsLeafNameOnly(outputFileName) AndAlso Path.GetFileName(outputFileName) <> outputFileName Then
+        If Not IsLeafNameOnly(outputFileName) OrElse Path.GetFileName(outputFileName) <> outputFileName Then
             Return "Error: output_filename must be a leaf file name only."
         End If
 

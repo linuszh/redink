@@ -56,6 +56,8 @@ Namespace SharedLibrary
             ' Escape "[Cell:" / "[Value:" / "[Formula:" / "[Comment:" at the start of a line so Markdig will not parse them as links.
             markdownText = EscapeExcelInstructionMarkers(markdownText)
 
+            markdownText = NormalizeMarkdownLinkTargets(markdownText)
+
             'markdownText = System.Text.RegularExpressions.Regex.Unescape(markdownText)
             markdownText = System.Text.RegularExpressions.Regex.Replace(
                 markdownText,
@@ -605,6 +607,33 @@ Optional fnDefs As Dictionary(Of String, Markdig.Extensions.Footnotes.Footnote) 
             rtf.AppendLine("\par")
         End Sub
 
+        Private Function NormalizeHyperlinkUrl(url As String) As String
+            If String.IsNullOrWhiteSpace(url) Then
+                Return ""
+            End If
+
+            Return url.Trim().Replace(" ", "%20")
+        End Function
+
+        Private Function NormalizeMarkdownLinkTargets(markdownText As String) As String
+            If String.IsNullOrWhiteSpace(markdownText) Then
+                Return markdownText
+            End If
+
+            Return System.Text.RegularExpressions.Regex.Replace(
+                markdownText,
+                "\[(?<label>[^\]]+)\]\((?<url>https?://[^)\r\n]+)\)",
+                Function(m As System.Text.RegularExpressions.Match)
+                    Dim label As String = m.Groups("label").Value
+                    Dim url As String = m.Groups("url").Value
+
+                    url = url.Replace(" ", "%20")
+
+                    Return $"[{label}]({url})"
+                End Function,
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+        End Function
+
 
         ''' <summary>
         ''' Renders all inline elements within a Markdig <see cref="Markdig.Syntax.Inlines.ContainerInline"/> into RTF.
@@ -677,10 +706,12 @@ Optional visitedFootnotes As System.Collections.Generic.HashSet(Of String) = Not
                             rtf.Append("[Image: " & EscapeRtf(alt) & "] ")
                         Else
                             ' Hyperlink (RTF field).
+                            Dim hyperlinkUrl As String = EscapeRtf(NormalizeHyperlinkUrl(link.Url))
+
                             If link.FirstChild Is Nothing Then
-                                rtf.Append("{\field{\*\fldinst HYPERLINK """ & EscapeRtf(link.Url) & """}{\fldrslt " & EscapeRtf(link.Url) & "}}")
+                                rtf.Append("{\field{\*\fldinst HYPERLINK """ & hyperlinkUrl & """}{\fldrslt " & hyperlinkUrl & "}}")
                             Else
-                                rtf.Append("{\field{\*\fldinst HYPERLINK """ & EscapeRtf(link.Url) & """}{\fldrslt ")
+                                rtf.Append("{\field{\*\fldinst HYPERLINK """ & hyperlinkUrl & """}{\fldrslt ")
                                 ConvertInline(rtf, link, fnDefs, visitedFootnotes)
                                 rtf.Append("}}")
                             End If

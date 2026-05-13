@@ -299,25 +299,34 @@ Partial Public Class ThisAddIn
             Dim llmresult As String
 
             If INI_Endpoint_2.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
-                ' SSE transport: full round-trip bypassing LLM()
                 Dim sseBase = INI_Endpoint_2.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
                 Dim resolvedHeaderB = INI_HeaderB_2.Replace("{apikey}", _context.DecodedAPI_2)
 
-                ' Build the final request body from the APICall with user text substituted
                 Dim sseRequestBody As String = INI_APICall_2
                 sseRequestBody = sseRequestBody.Replace("{promptuser}", SLib.CleanString(SelectedText))
 
+                Dim splash As SharedLibrary.SharedLibrary.SplashScreenCountDown = Nothing
+
                 Try
+                    splash = New SharedLibrary.SharedLibrary.SplashScreenCountDown("Waiting for the AI to respond...", 0, 0, 0)
+                    splash.Show()
+
                     llmresult = Await SharedMethods.ExecuteMCPSSEToolCall(
-                        sseBase, sseRequestBody,
-                        INI_HeaderA_2, resolvedHeaderB,
+                        _context,
+                        sseBase,
+                        sseRequestBody,
+                        INI_HeaderA_2,
+                        resolvedHeaderB,
                         CInt(Math.Min(INI_Timeout_2, Integer.MaxValue)))
                 Catch ex As Exception
                     ShowCustomMessageBox($"SSE tool call failed: {ex.Message}")
                     Return
+                Finally
+                    If splash IsNot Nothing Then
+                        splash.Close()
+                    End If
                 End Try
 
-                ' Apply the Response key extraction if configured and not "JSON"
                 If Not String.IsNullOrWhiteSpace(llmresult) AndAlso
                    Not String.IsNullOrWhiteSpace(INI_Response_2) AndAlso
                    Not INI_Response_2.Equals("JSON", StringComparison.OrdinalIgnoreCase) Then
