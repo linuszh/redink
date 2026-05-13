@@ -203,6 +203,24 @@ Partial Public Class ThisAddIn
 
     End Sub
 
+    Private Shared Function ShouldExpandRangeToIncludeOwnParagraphMark(rng As Word.Range) As Boolean
+        If rng Is Nothing Then Return False
+        If rng.End >= rng.Document.Content.End - 1 Then Return False
+        If rng.End <= rng.Start Then Return False
+
+        Try
+            Dim lastIncludedChar As String = rng.Document.Range(rng.End - 1, rng.End).Text
+            If lastIncludedChar = vbCr OrElse lastIncludedChar = vbLf Then
+                Return False
+            End If
+
+            Dim nextChar As String = rng.Document.Range(rng.End, rng.End + 1).Text
+            Return nextChar = vbCr OrElse nextChar = vbLf
+        Catch
+            Return False
+        End Try
+    End Function
+
     ''' <summary>
     ''' Converts Word paragraphs and character formatting in a range to Markdown equivalents (headings, lists, bold, italic, underline via HTML <u>, strikethrough).
     ''' </summary>
@@ -211,14 +229,20 @@ Partial Public Class ThisAddIn
         Dim listRegex As New Regex("^(\s*)([-*+]|\d+[\.\)])\s+", RegexOptions.Compiled)
 
         Dim rng As Word.Range = WorkingRange.Duplicate
-        If rng.End < rng.Document.Content.End - 1 Then
+        Dim expandedEndForParagraphMark As Boolean = False
+
+        If ShouldExpandRangeToIncludeOwnParagraphMark(rng) Then
             rng.End = rng.End + 1
+            expandedEndForParagraphMark = True
         End If
 
+        Dim originalEnd As Integer = rng.End
         Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
 
         ' 0) Headings & lists
         For Each para As Microsoft.Office.Interop.Word.Paragraph In rng.Paragraphs
+            If para.Range.Start >= originalEnd Then Continue For
+
             Dim styleName As String = CType(para.Style, Microsoft.Office.Interop.Word.Style).NameLocal
 
             Select Case styleName
@@ -415,11 +439,82 @@ Partial Public Class ThisAddIn
                             rep.StrikeThrough = False
                         End Sub)
 
+        RemoveEmptyMarkdownFormattingMarkers(rng)
+
         ' Restore selection
-        rng.End = rng.End - 1
+        If expandedEndForParagraphMark AndAlso rng.End > rng.Start Then
+            rng.End = rng.End - 1
+        End If
+
         rng.Select()
 
     End Sub
+
+
+    Private Shared Sub RemoveEmptyMarkdownFormattingMarkers(rng As Word.Range)
+        If rng Is Nothing Then Return
+
+        Dim originalStart As Integer = rng.Start
+        Dim text As String = rng.Text
+
+        If String.IsNullOrEmpty(text) Then Return
+
+        Dim cleaned As String = CleanMarkdownTextForLlm(text)
+
+        If cleaned = text Then Return
+
+        rng.Text = cleaned
+        rng.SetRange(originalStart, originalStart + cleaned.Length)
+    End Sub
+
+    Private Shared Function CleanMarkdownTextForLlm(text As String) As String
+        If String.IsNullOrEmpty(text) Then Return text
+
+        Dim newline As String = vbCrLf
+        If text.Contains(vbCrLf) Then
+            newline = vbCrLf
+        ElseIf text.Contains(vbCr) Then
+            newline = vbCr
+        ElseIf text.Contains(vbLf) Then
+            newline = vbLf
+        End If
+
+        Dim normalized As String = text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim lines As String() = normalized.Split(ControlChars.Lf)
+
+        For i As Integer = 0 To lines.Length - 1
+            Dim line As String = lines(i)
+            Dim trimmed As String = line.Trim()
+            Dim compact As String = Regex.Replace(trimmed, "[ \t]", "")
+
+            ' Remove lines that contain only generated Markdown markers.
+            ' Examples:
+            '   *
+            '   **
+            '   ***
+            '   ****
+            '   *** ***
+            '   ~~~~
+            '   <u></u>
+            If Regex.IsMatch(compact, "^(?:\*{1,12}|~{2,12}|<u></u>)$", RegexOptions.IgnoreCase) Then
+                lines(i) = ""
+                Continue For
+            End If
+
+            ' Remove generated empty bold/bold+italic/strike marker runs at line end.
+            ' Examples:
+            '   Text****
+            '   Text******
+            '   Text~~~~
+            line = Regex.Replace(line, "(\S)(?:\*{4,12}|~{4,12})([ \t]*)$", "$1$2")
+
+            lines(i) = line
+        Next
+
+        Return String.Join(newline, lines)
+    End Function
+
+
 
     ''' <summary>
     ''' Performs iterative find/replace operations within a constrained range; prevents replacements from exceeding original bounds.

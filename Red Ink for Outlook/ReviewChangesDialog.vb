@@ -384,9 +384,10 @@ Public Class ReviewChangesDialog
             If raw.Length = 0 Then Continue For
 
             Dim restored As String = raw _
-                .Replace("{vbCrLf}", vbCrLf) _
-                .Replace("{vbCr}", vbCrLf) _
-                .Replace("{vbLf}", vbCrLf)
+            .Replace("{br}", vbCrLf) _
+            .Replace("{vbCrLf}", vbCrLf) _
+            .Replace("{vbCr}", vbCrLf) _
+            .Replace("{vbLf}", vbCrLf)
 
             If restored.Length = 0 Then Continue For
 
@@ -404,22 +405,117 @@ Public Class ReviewChangesDialog
             End Select
 
             _segments.Add(New Segment() With {
-                .Kind = kind,
-                .Text = displayText,
-                .Accepted = True
-            })
+            .Kind = kind,
+            .Text = displayText,
+            .Accepted = True
+        })
         Next
+
+        ConsolidateEquivalentLineBreakChanges()
     End Sub
 
     Private Shared Function NormalizeForDiff(s As String) As String
         If s Is Nothing Then Return ""
-        s = s.Replace(vbCrLf, " {vbCrLf} ") _
-             .Replace(vbCr, " {vbCr} ") _
-             .Replace(vbLf, " {vbLf} ")
+
+        s = s.Replace(vbCrLf, " {br} ") _
+         .Replace(vbCr, " {br} ") _
+         .Replace(vbLf, " {br} ")
+
         Do While s.Contains("  ")
             s = s.Replace("  ", " ")
         Loop
+
         Return s.Trim()
+    End Function
+
+    Private Sub ConsolidateEquivalentLineBreakChanges()
+        If _segments.Count < 2 Then Return
+
+        Dim consolidated As New List(Of Segment)(_segments.Count)
+        Dim i As Integer = 0
+
+        While i < _segments.Count
+            If i < _segments.Count - 1 AndAlso IsEquivalentLineBreakChange(_segments(i), _segments(i + 1)) Then
+                consolidated.Add(New Segment() With {
+                .Kind = SegmentKind.Equal,
+                .Text = CanonicalLineBreakText(_segments(i).Text),
+                .Accepted = True
+            })
+                i += 2
+            Else
+                consolidated.Add(_segments(i))
+                i += 1
+            End If
+        End While
+
+        _segments.Clear()
+        _segments.AddRange(consolidated)
+    End Sub
+
+    Private Shared Function IsEquivalentLineBreakChange(first As Segment, second As Segment) As Boolean
+        If first Is Nothing OrElse second Is Nothing Then Return False
+
+        Dim isOppositeChange As Boolean =
+        (first.Kind = SegmentKind.Deletion AndAlso second.Kind = SegmentKind.Insertion) OrElse
+        (first.Kind = SegmentKind.Insertion AndAlso second.Kind = SegmentKind.Deletion)
+
+        If Not isOppositeChange Then Return False
+        If Not IsLineBreakOnly(first.Text) OrElse Not IsLineBreakOnly(second.Text) Then Return False
+
+        Return CountLineBreaks(first.Text) = CountLineBreaks(second.Text)
+    End Function
+
+    Private Shared Function IsLineBreakOnly(text As String) As Boolean
+        If String.IsNullOrEmpty(text) Then Return False
+        If CountLineBreaks(text) = 0 Then Return False
+
+        For Each ch As Char In text
+            Select Case ch
+                Case " "c, ControlChars.Cr, ControlChars.Lf
+                    Continue For
+                Case Else
+                    Return False
+            End Select
+        Next
+
+        Return True
+    End Function
+
+    Private Shared Function CountLineBreaks(text As String) As Integer
+        If text Is Nothing Then Return 0
+
+        Dim count As Integer = 0
+        Dim i As Integer = 0
+
+        While i < text.Length
+            If text(i) = ControlChars.Cr Then
+                count += 1
+                If i < text.Length - 1 AndAlso text(i + 1) = ControlChars.Lf Then
+                    i += 2
+                Else
+                    i += 1
+                End If
+            ElseIf text(i) = ControlChars.Lf Then
+                count += 1
+                i += 1
+            Else
+                i += 1
+            End If
+        End While
+
+        Return count
+    End Function
+
+    Private Shared Function CanonicalLineBreakText(text As String) As String
+        Dim count As Integer = CountLineBreaks(text)
+        If count <= 0 Then Return ""
+
+        Dim sb As New StringBuilder(count * 2)
+        For i As Integer = 1 To count
+            sb.Append(vbCrLf)
+        Next
+
+        Return sb.ToString()
     End Function
 
     ' ----------------------------------------------------------- Fast RTF
