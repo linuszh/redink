@@ -312,10 +312,9 @@ Namespace SharedLibrary
 
             ' Show dialog.
             inputForm.TopMost = True
-
-            Dim hwndOwner As IntPtr = GetOfficeApplicationHwnd() ' Uses OpusApp/XLMAIN/rctrl_renwnd32
-            If hwndOwner <> IntPtr.Zero Then
-                inputForm.ShowDialog(New WindowWrapper(hwndOwner))
+            Dim ownerWnd As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            If ownerWnd IsNot Nothing Then
+                inputForm.ShowDialog(ownerWnd)
             Else
                 inputForm.ShowDialog()
             End If
@@ -644,11 +643,27 @@ Namespace SharedLibrary
                     SendMessage(outlookHwnd, WM_SYSCOMMAND, New IntPtr(SC_RESTORE), IntPtr.Zero)
                     SetForegroundWindow(outlookHwnd)
                 End If
+
                 inputForm.Opacity = 1
-                Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
+
+                If outlookHwnd <> IntPtr.Zero Then
+                    Result = inputForm.ShowDialog(New WindowWrapper(outlookHwnd))
+                Else
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    If __owner IsNot Nothing Then
+                        Result = inputForm.ShowDialog(__owner)
+                    Else
+                        Result = inputForm.ShowDialog()
+                    End If
+                End If
             Else
                 inputForm.Opacity = 1
-                Result = inputForm.ShowDialog()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                If __owner IsNot Nothing Then
+                    Result = inputForm.ShowDialog(__owner)
+                Else
+                    Result = inputForm.ShowDialog()
+                End If
             End If
 
             ' Return the entered text or appropriate default.
@@ -994,7 +1009,12 @@ Namespace SharedLibrary
                 messageForm.Dispose()
             Else
                 ' Show modal (original behavior)
-                messageForm.ShowDialog()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                If __owner IsNot Nothing Then
+                    messageForm.ShowDialog(__owner)
+                Else
+                    messageForm.ShowDialog()
+                End If
             End If
 
             Return result
@@ -1224,7 +1244,12 @@ Namespace SharedLibrary
                                 messageForm.Activate()
                                 messageForm.BringToFront()
                             End Sub
-                    messageForm.ShowDialog()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    If __owner IsNot Nothing Then
+                        messageForm.ShowDialog(__owner)
+                    Else
+                        messageForm.ShowDialog()
+                    End If
                 Else
                     messageForm.Show()
                     System.Windows.Forms.Application.DoEvents()
@@ -1244,7 +1269,13 @@ Namespace SharedLibrary
                         End Sub
 
                 messageForm.Opacity = 1
-                messageForm.ShowDialog()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                If __owner IsNot Nothing Then
+                    messageForm.ShowDialog(__owner)
+                Else
+                    messageForm.ShowDialog()
+                End If
+
             End If
         End Sub
 
@@ -1510,8 +1541,12 @@ Namespace SharedLibrary
                     End Sub
 
                 RTFMessageForm.Opacity = 1
-                RTFMessageForm.ShowDialog()
-
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                If __owner IsNot Nothing Then
+                    RTFMessageForm.ShowDialog(__owner)
+                Else
+                    RTFMessageForm.ShowDialog()
+                End If
                 Return result
             End If
 
@@ -1716,7 +1751,13 @@ Namespace SharedLibrary
                 End Sub
 
             HTMLMessageForm.Opacity = 1
-            HTMLMessageForm.ShowDialog()
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            If __owner IsNot Nothing Then
+                HTMLMessageForm.ShowDialog(__owner)
+            Else
+                HTMLMessageForm.ShowDialog()
+            End If
+
         End Sub
 
         Private Shared Sub ShowHTMLCustomMessageBoxNonModal(
@@ -2325,7 +2366,13 @@ Namespace SharedLibrary
                     End If
                 End Sub
 
-            Dim result = inputForm.ShowDialog()
+            Dim result As DialogResult
+            Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+            If __owner IsNot Nothing Then
+                result = inputForm.ShowDialog(__owner)
+            Else
+                result = inputForm.ShowDialog()
+            End If
 
             If result = DialogResult.OK Then
                 For Each param In params
@@ -2793,10 +2840,20 @@ Namespace SharedLibrary
                 If officeHwnd <> IntPtr.Zero Then
                     styledForm.ShowDialog(New WindowWrapper(officeHwnd))
                 Else
-                    styledForm.ShowDialog()
+                    Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                    If __owner IsNot Nothing Then
+                        styledForm.ShowDialog(__owner)
+                    Else
+                        styledForm.ShowDialog()
+                    End If
                 End If
             Else
-                styledForm.ShowDialog()
+                Dim __owner As System.Windows.Forms.IWin32Window = SharedMethods.ResolveDialogOwner()
+                If __owner IsNot Nothing Then
+                    styledForm.ShowDialog(__owner)
+                Else
+                    styledForm.ShowDialog()
+                End If
             End If
 
             Return returnValue

@@ -266,19 +266,32 @@ Namespace SharedLibrary
         ''' <param name="defaultValue">Default selected value.</param>
         ''' <param name="prompt">Prompt shown above the selection list.</param>
         ''' <param name="header">Optional window title. If missing/blank, <c>AN</c> is used.</param>
+        ''' <param name="owner">
+        ''' Optional explicit owner window. If <c>Nothing</c>, falls back to the ambient
+        ''' dialog owner (see <see cref="SharedMethods.PushDialogOwner"/>) and then to the
+        ''' Office host window. Ensures correct Z-order when called from TopMost parent forms.
+        ''' </param>
         ''' <returns>The selected value, or 0 when canceled or when <paramref name="items"/> is Nothing.</returns>
         Public Shared Function SelectValue(items As IEnumerable(Of SelectionItem),
                                            defaultValue As Integer,
                                            Optional prompt As String = "Please choose …",
-                                           Optional header As String = Nothing) As Integer
+                                           Optional header As String = Nothing,
+                                           Optional owner As System.Windows.Forms.IWin32Window = Nothing) As Integer
 
             If items Is Nothing Then
                 System.Windows.Forms.MessageBox.Show("SelectValue Error: Items collection must not be null.")
                 Return 0
             End If
 
+            Dim effectiveOwner As System.Windows.Forms.IWin32Window =
+                If(owner, SharedMethods.ResolveDialogOwner())
+
             Using frm As New SelectionFormSmall(items.ToList(), defaultValue, prompt, header)
-                frm.ShowDialog()
+                If effectiveOwner IsNot Nothing Then
+                    frm.ShowDialog(effectiveOwner)
+                Else
+                    frm.ShowDialog()
+                End If
                 Return frm.Result
             End Using
         End Function

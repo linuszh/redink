@@ -47,6 +47,7 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 
@@ -2026,6 +2027,8 @@ Partial Public Class ThisAddIn
             .ToolName = toolCall.ToolName
         }
 
+        SharedLogger.LogAgentToolCall(_context, _context.RDV, "Word_Agent", toolCall.ToolName)
+
         ' Build condensed parameter summary for log window
         Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
         context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
@@ -3069,6 +3072,7 @@ Partial Public Class ThisAddIn
 
                     Try
                         Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                            _context,
                             sseBase, apiCall,
                             If(toolConfig.HeaderA, ""), resolvedHeaderB,
                             CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))

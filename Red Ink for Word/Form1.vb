@@ -2869,6 +2869,7 @@ Public Class frmAIChat
         CommandsList = ""
         FailedCommandsList.Clear()
         Dim LastCommandsList As String = ""
+        Dim activateDocumentAfterCommands As Boolean = False
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application
         Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
@@ -2876,9 +2877,6 @@ Public Class frmAIChat
         ' ═════════════════════════════════════════════════════════════════════════════
         ' ENSURE CURSOR IN MAIN STORY (NOT HEADER/FOOTER/COMMENT/FOOTNOTE)
         ' ═════════════════════════════════════════════════════════════════════════════
-        ' Word can be editing special stories (headers, footers, footnotes, comments).
-        ' If not in main text story, force return to print view and move to main document
-        ' without creating a selection, then collapse to insertion point.
         Try
             wordApp = Globals.ThisAddIn.Application
 
@@ -2887,28 +2885,20 @@ Public Class frmAIChat
                 Dim currentSel As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
                 Dim currentStory As Word.WdStoryType = currentSel.StoryType
 
-                ' Only act if NOT already in main text story
                 If currentStory <> Word.WdStoryType.wdMainTextStory Then
-                    ' Force print view to exit special editing modes
                     wordApp.ActiveWindow.View.Type = Microsoft.Office.Interop.Word.WdViewType.wdPrintView
 
-                    ' Move to start of main document story without selecting
                     Dim mainStoryRange As Word.Range = currentDoc.StoryRanges(Word.WdStoryType.wdMainTextStory)
                     mainStoryRange.Collapse(Word.WdCollapseDirection.wdCollapseStart)
                     mainStoryRange.Select()
 
-                    ' Collapse to insertion point (no selection)
                     currentSel.Collapse(Word.WdCollapseDirection.wdCollapseStart)
                 End If
             End If
         Catch ex As Exception
-            ' Best-effort; continue even if this fails
             Debug.WriteLine($"Warning: Could not reset to main story: {ex.Message}")
         End Try
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' PREPARE WORD VIEW FOR COMMAND EXECUTION
-        ' ═════════════════════════════════════════════════════════════════════════════
         If commands.Count() > 0 Then
             Globals.ThisAddIn.Application.Activate()
             System.Threading.Thread.Sleep(200)
@@ -2920,13 +2910,9 @@ Public Class frmAIChat
             End With
         End If
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' ITERATE AND EXECUTE EACH COMMAND
-        ' ═════════════════════════════════════════════════════════════════════════════
         For Each pc In commands
             Debug.WriteLine($"Command: '{pc.Command}' with '{pc.Argument1}' '{pc.Argument2}'")
 
-            ' Check for ESC key abort
             If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And 1) <> 0 Then
                 Exit For
             End If
@@ -2939,7 +2925,6 @@ Public Class frmAIChat
                     commandDescription = $"Finding '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection)
 
@@ -2947,7 +2932,6 @@ Public Class frmAIChat
                     commandDescription = $"Adding comment '{pc.Argument2}' to the text '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection)
 
@@ -2955,7 +2939,6 @@ Public Class frmAIChat
                     commandDescription = $"Replying to comment '{pc.Argument1}' with '{pc.Argument2}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2)
 
@@ -3002,13 +2985,13 @@ Public Class frmAIChat
                     LastCommandsList = CommandsList
                     System.Threading.Thread.Sleep(250)
                     commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection)
+                    activateDocumentAfterCommands = activateDocumentAfterCommands OrElse commandSuccess
 
                 Case Else
                     commandDescription = $"Unknown command: '{pc.Command}'"
                     commandSuccess = False
             End Select
 
-            ' Track failed commands for reporting
             If Not commandSuccess AndAlso Not String.IsNullOrWhiteSpace(commandDescription) Then
                 FailedCommandsList.Add($"Failed: {commandDescription}")
             End If
@@ -3018,33 +3001,40 @@ Public Class frmAIChat
             End If
         Next
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' CLEANUP AND RESTORE
-        ' ═════════════════════════════════════════════════════════════════════════════
         If commands.Count() > 0 Then
-            ' Remove MarkerChar (U+E000) cleanup markers from document
-            'InfoBox.ShowInfoBox("Cleaning up ... almost done.")
             ReplaceSpecialCharacter(OnlySelection)
 
             InfoBox.ShowInfoBox("")
 
-            ' Restore revision view with markups visible
             With wordApp.ActiveWindow.View
                 .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = True
             End With
         End If
 
-        ' Release COM object
         If wordApp IsNot Nothing Then
             System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
             wordApp = Nothing
         End If
 
         Me.TopMost = topmost
-        Me.Focus()
 
-        ' Report any failures to chat
+        If activateDocumentAfterCommands Then
+            Try
+                Dim activeApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                If activeApp IsNot Nothing Then
+                    activeApp.Activate()
+
+                    If activeApp.ActiveDocument IsNot Nothing Then
+                        activeApp.ActiveDocument.Activate()
+                    End If
+                End If
+            Catch
+            End Try
+        Else
+            Me.Focus()
+        End If
+
         If FailedCommandsList.Count > 0 Then
             ReportFailedCommands()
         End If

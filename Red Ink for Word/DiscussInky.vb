@@ -341,7 +341,10 @@ Public Class DiscussInky
         Me.StartPosition = FormStartPosition.Manual
         Me.MinimumSize = New System.Drawing.Size(780, 480)
         Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
-        Me.TopMost = True
+        ' Do NOT set Me.TopMost = True.
+        ' Child dialogs are parented via SharedMethods.PushDialogOwner(Me) and the
+        ' shared Show* helpers already re-assert TopMost themselves on Shown,
+        ' so they will always come to the foreground even over Word.
         Try
             Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Catch
@@ -410,7 +413,6 @@ Public Class DiscussInky
         ' Event handlers
         AddHandler Me.Load, AddressOf OnLoadForm
         AddHandler Me.FormClosing, AddressOf OnFormClosing
-        AddHandler Me.Activated, AddressOf OnActivated
         AddHandler _btnSend.Click, AddressOf OnSend
         AddHandler _btnClear.Click, AddressOf OnClear
         AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
@@ -568,12 +570,40 @@ Public Class DiscussInky
         _txtInput.SelectAll()
     End Sub
 
+    ' Ambient dialog-owner scope. Lifetime is bound to the form's window handle
+    ' (NOT to Activated/Deactivate) because those events are pumped asynchronously:
+    ' when a child modal returns, the next user line of code can call ShowCustom...
+    ' BEFORE Activated has fired, which would leave the stack empty and cause the
+    ' new dialog to be parented to the Office host (Word) instead of this form.
+    Private _ownerScope As IDisposable
+
     ''' <summary>
-    ''' Handles form activation; TopMost behavior is disabled.
+    ''' Pushes this form onto the SharedLibrary dialog-owner stack as soon as it
+    ''' has a window handle, so every shared modal dialog opened from this form
+    ''' (or after a child modal returns) is correctly parented here.
     ''' </summary>
-    Private Sub OnActivated(sender As Object, e As EventArgs)
-        ' No longer applying TopMost behavior
+    Protected Overrides Sub OnHandleCreated(e As EventArgs)
+        MyBase.OnHandleCreated(e)
+        If _ownerScope Is Nothing Then
+            _ownerScope = SharedMethods.PushDialogOwner(Me)
+        End If
     End Sub
+
+    ''' <summary>
+    ''' Pops this form from the SharedLibrary dialog-owner stack when its handle
+    ''' is destroyed (form closing/disposing).
+    ''' </summary>
+    Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+        Dim scope = _ownerScope
+        _ownerScope = Nothing
+        If scope IsNot Nothing Then
+            Try : scope.Dispose() : Catch : End Try
+        End If
+        MyBase.OnHandleDestroyed(e)
+    End Sub
+
+
+
 
     ''' <summary>
     ''' Persists the 'include active document' checkbox state when changed.
@@ -1043,6 +1073,11 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
+            Dim scope = _ownerScope
+            _ownerScope = Nothing
+            If scope IsNot Nothing Then
+                Try : scope.Dispose() : Catch : End Try
+            End If
             PersistTranscriptLimited()
             PersistChatHtml()
             Try

@@ -185,7 +185,13 @@ Namespace SharedLibrary
                 Dim displayText As String = If(String.IsNullOrEmpty(model.ModelDescription), model.Model, model.ModelDescription)
                 lstModels.Items.Add(displayText)
             Next
-            lstModels.SelectedIndex = 0
+
+            If lstModels.Items.Count > 0 Then
+                lstModels.SelectedIndex = 0
+            Else
+                btnOK.Enabled = False
+            End If
+
             AddHandler lstModels.DoubleClick, AddressOf lstModels_DoubleClick
 
             Me.ClientSize = New System.Drawing.Size(580, 450)
@@ -220,6 +226,13 @@ Namespace SharedLibrary
         ''' </summary>
         Private Sub btnOK_Click(sender As Object, e As EventArgs)
             Try
+
+                If lstModels.Items.Count = 0 OrElse lstModels.SelectedIndex < 0 Then
+                    Me.DialogResult = DialogResult.Cancel
+                    Me.Close()
+                    Return
+                End If
+
                 If hasDefaultEntry AndAlso lstModels.SelectedIndex = 0 Then
                     UseDefault = True
                 Else
