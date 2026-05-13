@@ -22,13 +22,12 @@ Namespace SharedLibrary
     ''' </summary>
     Public Class NativeMethods
 
-        ''' <summary>
-        ''' Brings the specified window to the foreground (activates it).
-        ''' </summary>
-        ''' <param name="hWnd">Handle to the window to activate.</param>
-        ''' <returns><see langword="True" /> if the window was brought to the foreground; otherwise <see langword="False" />.</returns>
         <Runtime.InteropServices.DllImport("user32.dll")>
         Public Shared Function SetForegroundWindow(hWnd As IntPtr) As Boolean
+        End Function
+
+        <Runtime.InteropServices.DllImport("user32.dll")>
+        Public Shared Function GetForegroundWindow() As IntPtr
         End Function
 
     End Class

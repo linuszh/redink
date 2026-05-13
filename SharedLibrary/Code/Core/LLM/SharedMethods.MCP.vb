@@ -1,18 +1,28 @@
 ﻿' Part of "SharedLibrary"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: SharedMethods.MCP.vb
-' Purpose: Runtime helpers for MCP SSE transport used by tooling and
-'          special-service callers in all add-ins (Word, Outlook, Excel).
+' Purpose: Provides shared runtime helpers for executing MCP tool calls over
+'          SSE transport, including session endpoint discovery, initialize
+'          handshake, request dispatch, and SSE response collection.
 '
 ' Contains:
-'   - MCP_SSE_PREFIX constant (endpoint marker for SSE transport)
-'   - MCP_PROTOCOL_VERSION constant (JSON-RPC initialize handshake version)
-'   - AcquireMCPSSESessionEndpoint: SSE handshake → session POST URL
-'   - ExecuteMCPSSEToolCall: full SSE round-trip (handshake + tool call + response)
-'   - WaitForSSEResponse: reads SSE stream until JSON-RPC response arrives
+'  - Transport constants:
+'      - `MCP_SSE_PREFIX`
+'      - `MCP_PROTOCOL_VERSION`
+'  - Session bootstrap:
+'      - `AcquireMCPSSESessionEndpoint` opens the SSE stream, reads the
+'        advertised POST endpoint, and performs the MCP initialize handshake.
+'  - Tool execution:
+'      - `ExecuteMCPSSEToolCall` performs a complete SSE-based MCP round-trip.
+'  - SSE helpers:
+'      - Reads endpoint and response events from the event stream.
+'      - Resolves relative SSE endpoints and validates transport responses.
+'
+' Notes:
+'  - These helpers bypass `LLM(...)` because SSE transport returns the effective
+'    tool result on the GET stream rather than in the POST response body.
 ' =============================================================================
 
 Option Explicit On

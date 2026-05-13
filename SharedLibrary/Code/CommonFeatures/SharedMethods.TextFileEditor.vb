@@ -47,7 +47,13 @@ Namespace SharedLibrary
         ''' Optional shared context. If provided and JSON mode is active, an additional button "Check JSON with AI"
         ''' is shown to run an LLM check and display the result.
         ''' </param>
-        Public Shared Sub ShowTextFileEditor(ByVal filePath As System.String, ByVal headerText As System.String, Optional ForceJson As Boolean = False, Optional _context As ISharedContext = Nothing, Optional ByRef wasSaved As System.Boolean? = Nothing)
+        Public Shared Sub ShowTextFileEditor(ByVal filePath As System.String,
+                                        ByVal headerText As System.String,
+                                        Optional ForceJson As Boolean = False,
+                                        Optional _context As ISharedContext = Nothing,
+                                        Optional ByRef wasSaved As System.Boolean? = Nothing,
+                                        Optional ownerHandle As System.IntPtr = Nothing)
+
             ' --- Guard & Input Validation ---
             Try
                 If filePath Is Nothing OrElse filePath.Trim().Length = 0 Then
@@ -467,19 +473,33 @@ Namespace SharedLibrary
 
             ' Sets the initial cursor/selection when the form is shown.
             AddHandler editorForm.Shown,
-                Sub(sender As System.Object, e As System.EventArgs)
-                    Try
-                        textEditor.SelectionStart = 0
-                        textEditor.SelectionLength = 0
-                    Catch ex As System.Exception
-                    End Try
-                End Sub
+                    Sub(sender As System.Object, e As System.EventArgs)
+                        Try
+                            textEditor.SelectionStart = 0
+                            textEditor.SelectionLength = 0
+                        Catch ex As System.Exception
+                        End Try
+
+                        Try
+                            editorForm.BringToFront()
+                            editorForm.Activate()
+                            NativeMethods.SetForegroundWindow(editorForm.Handle)
+                        Catch
+                        End Try
+                    End Sub
 
             ' Show modal window
             Try
-                Dim active As System.Windows.Forms.IWin32Window = System.Windows.Forms.Form.ActiveForm
-                If active IsNot Nothing Then
-                    editorForm.ShowDialog(active)
+                Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+                If ownerHandle <> System.IntPtr.Zero Then
+                    owner = New WindowWrapper(ownerHandle)
+                Else
+                    owner = System.Windows.Forms.Form.ActiveForm
+                End If
+
+                If owner IsNot Nothing Then
+                    editorForm.ShowDialog(owner)
                 Else
                     editorForm.ShowDialog()
                 End If

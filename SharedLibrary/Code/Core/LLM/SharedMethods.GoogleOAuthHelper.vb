@@ -3,18 +3,25 @@
 '
 ' =============================================================================
 ' File: SharedMethods.GoogleOAuthHelper.vb
-' Purpose: Builds and signs a Google-style OAuth 2.0 JWT assertion (RS256) and exchanges it
-'          for an access token by POSTing the assertion to the configured token endpoint.
+' Purpose: Builds and signs a Google-style OAuth 2.0 JWT bearer assertion
+'          (RS256) and exchanges it for an access token at the configured
+'          token endpoint.
 '
 ' Architecture:
-'  - Configuration Inputs (shared fields): `client_email`, `private_key`, `scopes`, `token_uri`,
-'    `token_life` (currently not used by this implementation).
-'  - JWT Construction: Creates a compact JWT with header `{alg=RS256, typ=JWT}` and payload containing
-'    `iss`, `scope`, `aud`, `exp`, `iat`, then Base64Url-encodes header/payload.
-'  - Signing: Uses BouncyCastle to parse a PEM RSA private key and signs `<header>.<payload>` via
-'    SHA256withRSA (RS256), then Base64Url-encodes the signature.
-'  - Token Exchange: Sends JSON `{ grant_type, assertion }` to `token_uri` and returns `access_token`
-'    from the JSON response.
+'  - Configuration inputs:
+'      - `client_email`, `private_key`, `scopes`, `token_uri`, `token_life`
+'  - JWT generation:
+'      - Builds a compact JWT with standard header and OAuth assertion claims.
+'      - Uses Base64Url encoding for header, payload, and signature.
+'  - Signing:
+'      - Parses PEM RSA keys via BouncyCastle.
+'      - Signs the assertion using SHA256 with RSA.
+'  - Token exchange:
+'      - Posts the signed assertion to the configured token endpoint.
+'      - Returns the received `access_token` from the JSON response.
+'
+' Notes:
+'  - Intended for service-account style OAuth flows used by shared LLM helpers.
 ' =============================================================================
 
 Option Strict On
