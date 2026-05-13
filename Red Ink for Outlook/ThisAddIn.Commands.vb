@@ -1875,65 +1875,146 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Inspector context: insert at cursor — we are on the UI/STA thread here
-            Dim wordEditor As Microsoft.Office.Interop.Word.Document =
-                ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+            ' Inspector context: insert at cursor — we are on the UI/STA thread here.
+            ' Re-validate state because the await may have changed it (focus loss,
+            ' inspector closed, user switched to reading pane, mail sent, etc.).
+            Try : ComRetry(Function()
+                               inspector.Activate()
+                               Return 0
+                           End Function) : Catch : End Try
 
-            If wordEditor Is Nothing Then
-                ' Fallback to clipboard path — stay on UI thread for COM safety
-                Dim txtObj As New DataObject()
-                txtObj.SetData(DataFormats.UnicodeText, result)
-                txtObj.SetData(DataFormats.Text, result)
-                Dim clipOk = Await SetClipboardRobustAsync(txtObj)
+            ' Pump a couple of messages so Outlook can finish activating the editor
+            ' before we touch the Word object model.
+            System.Windows.Forms.Application.DoEvents()
+            System.Threading.Thread.Sleep(50)
+            System.Windows.Forms.Application.DoEvents()
 
-                If clipOk Then
-                    SLib.ShowCustomMessageBox("Could not access the mail editor; result copied to clipboard instead.")
-                Else
-                    Dim edited As String = SLib.ShowCustomWindow(
-                        "Could not access the mail editor; clipboard is busy. Copy manually or edit and press OK:",
-                        result,
-                        "If copying still fails, the text will be saved to a temporary file.",
-                        AN, False)
+            Dim mailItem As Microsoft.Office.Interop.Outlook.MailItem =
+                TryCast(curr, Microsoft.Office.Interop.Outlook.MailItem)
 
-                    If Not String.IsNullOrWhiteSpace(edited) Then
-                        Dim editedObj As New DataObject()
-                        editedObj.SetData(DataFormats.UnicodeText, edited)
-                        editedObj.SetData(DataFormats.Text, edited)
-                        Dim editedOk = Await SetClipboardRobustAsync(editedObj)
-                        If Not editedOk Then
-                            Dim tmp = SaveTextToTempFile(edited)
-                            If Not String.IsNullOrWhiteSpace(tmp) Then
-                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                            Else
-                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                            End If
-                        Else
-                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                        End If
+            Dim editorUsable As Boolean = False
+            Dim wordEditor As Microsoft.Office.Interop.Word.Document = Nothing
+            Try
+                If mailItem IsNot Nothing AndAlso Not mailItem.Sent Then
+                    wordEditor = ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+                    If wordEditor IsNot Nothing Then
+                        ' wdNoProtection = -1
+                        Dim prot As Integer = ComRetry(Function() CInt(wordEditor.ProtectionType))
+                        editorUsable = (prot = -1)
                     End If
                 End If
-                Return
-            End If
+            Catch
+                editorUsable = False
+            End Try
 
-            Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
-            If selection IsNot Nothing Then
-                If selection.Start <> selection.End Then
-                    selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            If editorUsable Then
+                Dim inserted As Boolean = False
+                Dim lastComEx As System.Runtime.InteropServices.COMException = Nothing
+
+                ' Up to 3 attempts: re-fetch Selection each time, because a stale
+                ' Selection from before the await is a frequent cause of the
+                ' "document is locked for editing" error.
+                For attempt As Integer = 1 To 3
+                    Dim selection As Microsoft.Office.Interop.Word.Selection = Nothing
+                    Try
+                        selection = ComRetry(Function() wordEditor.Application.Selection)
+                        If selection Is Nothing Then
+                            System.Threading.Thread.Sleep(100)
+                            Continue For
+                        End If
+
+                        ComRetry(Function()
+                                     If selection.Start <> selection.End Then
+                                         selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                                     End If
+                                     selection.TypeParagraph()
+                                     Return 0
+                                 End Function)
+
+                        InsertTextWithMarkdown(selection, result, True)
+                        inserted = True
+                        Exit For
+
+                    Catch ex As System.Runtime.InteropServices.COMException
+                        lastComEx = ex
+                        ' 0x800A1769 = CommandNotAvailable ("document locked for editing")
+                        ' 0x800AC472 = Word busy
+                        System.Windows.Forms.Application.DoEvents()
+                        System.Threading.Thread.Sleep(150 * attempt)
+                    Finally
+                        If selection IsNot Nothing Then
+                            Try : Marshal.ReleaseComObject(selection) : Catch : End Try
+                            selection = Nothing
+                        End If
+                    End Try
+                Next
+
+                If inserted Then
+                    Try : inspector.Display() : Catch : End Try
+                Else
+                    ' Body refused the edit – fall back to clipboard so the user
+                    ' can paste manually rather than losing the AI result.
+                    Await FallbackToClipboardAsync(result,
+                        "The mail body is currently locked for editing. " &
+                        "The result has been copied to the clipboard instead.")
                 End If
-                selection.TypeParagraph()
-                InsertTextWithMarkdown(selection, result, True)
+            Else
+                ' No usable editor (mail sent, read-only, switched to reading pane, …)
+                Await FallbackToClipboardAsync(result,
+                    "The mail editor is not available for editing. " &
+                    "The result has been copied to the clipboard instead.")
             End If
 
-            inspector.Display()
-
-            If selection IsNot Nothing Then Marshal.ReleaseComObject(selection) : selection = Nothing
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing
             If inspector IsNot Nothing Then Marshal.ReleaseComObject(inspector) : inspector = Nothing
 
+        Catch ex As System.Runtime.InteropServices.COMException When ex.HResult = &H800A1769
+            ' Document locked for editing – last-resort fallback so the result is not lost.
+            Try
+                Dim txtObj As New DataObject()
+                txtObj.SetData(DataFormats.UnicodeText, ex.Message)
+            Catch
+            End Try
+            SLib.ShowCustomMessageBox("The mail body is locked for editing right now. Please click into the message body and try again.")
         Catch ex As System.Runtime.InteropServices.ExternalException
-            SLib.ShowCustomMessageBox($"InsertClipboard clipboard error (probably locked): {ex.Message}")
+            SLib.ShowCustomMessageBox($"InsertClipboard COM error: 0x{ex.HResult:X8} – {ex.Message}")
         Catch ex As System.Exception
             SLib.ShowCustomMessageBox($"InsertClipboard failed: {ex.GetType().FullName}: {ex.Message}")
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Copies the given text to the clipboard (RTF + Unicode) and shows a message.
+    ''' Used as a fallback when the Outlook body cannot be edited.
+    ''' </summary>
+    Private Async Function FallbackToClipboardAsync(text As String, message As String) As System.Threading.Tasks.Task
+        Try
+            Dim dataObj As New System.Windows.Forms.DataObject()
+            If text.Length < 350000 Then
+                Try
+                    Dim rtf = MarkdownToRtfConverter.Convert(text)
+                    If Not String.IsNullOrEmpty(rtf) Then
+                        dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtf)
+                    End If
+                Catch
+                End Try
+            End If
+            dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, text)
+            dataObj.SetData(System.Windows.Forms.DataFormats.Text, text)
+
+            Dim ok = Await SetClipboardRobustAsync(dataObj)
+            If ok Then
+                SLib.ShowCustomMessageBox(message)
+            Else
+                Dim tmp = SaveTextToTempFile(text)
+                If Not String.IsNullOrWhiteSpace(tmp) Then
+                    SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
+                Else
+                    SLib.ShowCustomMessageBox("Clipboard and editor are both unavailable; the result could not be saved.")
+                End If
+            End If
+        Catch ex As System.Exception
+            SLib.ShowCustomMessageBox($"Fallback failed: {ex.Message}")
         End Try
     End Function
 

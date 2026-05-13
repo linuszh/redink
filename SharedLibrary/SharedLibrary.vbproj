@@ -452,6 +452,7 @@
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Core\UI\LogWindow.vb" />
+    <Compile Include="Code\Core\UI\SharedMethods.DialogOwner.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.Infobox.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.Pane.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.SelectionFormSmall.vb" />
