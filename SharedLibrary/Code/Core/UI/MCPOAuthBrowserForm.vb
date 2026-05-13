@@ -63,6 +63,17 @@ Namespace SharedLibrary
             InitializeWebViewAsync()
         End Sub
 
+        Protected Overrides Sub OnShown(e As EventArgs)
+            MyBase.OnShown(e)
+
+            Try
+                Me.TopMost = True
+                Me.Activate()
+                Me.BringToFront()
+            Catch
+            End Try
+        End Sub
+
         Private Sub InitializeComponent()
             Me.Text = $"{AN} – OAuth Sign-In"
             Me.ClientSize = New Size(720, 800)
@@ -71,6 +82,7 @@ Namespace SharedLibrary
             Me.MaximizeBox = True
             Me.FormBorderStyle = FormBorderStyle.Sizable
             Me.ShowInTaskbar = True
+            Me.TopMost = True
             Me.KeyPreview = True
 
             Try
