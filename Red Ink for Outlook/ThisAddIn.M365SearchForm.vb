@@ -3601,7 +3601,25 @@ Public Class M365SearchTestForm
     Private Shared Function ParseNullableDate(value As String) As Date?
         If String.IsNullOrWhiteSpace(value) Then Return Nothing
         Dim dt As DateTime
-        If DateTime.TryParse(value, dt) Then Return dt.Date
+        Dim inv = Globalization.CultureInfo.InvariantCulture
+        Dim styles = Globalization.DateTimeStyles.AssumeUniversal Or
+                     Globalization.DateTimeStyles.AdjustToUniversal
+
+        ' Strict ISO first (what the LLM / tool args always send).
+        Dim isoFormats As String() = {
+            "yyyy-MM-dd",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ssK",
+            "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.FFFFFFFK"
+        }
+        If DateTime.TryParseExact(value.Trim(), isoFormats, inv, styles, dt) Then
+            Return dt.Date
+        End If
+
+        ' Fallback: invariant general parse (never current culture).
+        If DateTime.TryParse(value, inv, styles, dt) Then Return dt.Date
         Return Nothing
     End Function
 

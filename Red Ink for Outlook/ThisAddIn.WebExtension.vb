@@ -55,6 +55,7 @@ Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
+Imports System.Linq
 
 Partial Public Class ThisAddIn
 
@@ -614,7 +615,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Returns display key for model (prefers ModelDescription, falls back to Model).
     ''' </summary>
-    Private Function GetModelDisplayKey(ByVal model As SharedLibrary.SharedLibrary.ModelConfig) As System.String
+    Private Function GetModelDisplayKey(ByVal model As ModelConfig) As System.String
         If model Is Nothing Then Return ""
         ' Prefer descriptive label:
         If Not System.String.IsNullOrWhiteSpace(model.ModelDescription) Then
@@ -711,7 +712,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Second API, alternate model -> read APICall_Object
-            Dim alts As System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.ModelConfig) = Nothing
+            Dim alts As System.Collections.Generic.List(Of ModelConfig) = Nothing
             Try
                 alts = LoadAlternativeModels(INI_AlternateModelPath, _context)
             Catch
@@ -719,8 +720,8 @@ Partial Public Class ThisAddIn
             End Try
             If alts Is Nothing Then Return False
 
-            Dim sel As SharedLibrary.SharedLibrary.ModelConfig =
-                alts.FirstOrDefault(Function(m As SharedLibrary.SharedLibrary.ModelConfig)
+            Dim sel As ModelConfig =
+                alts.FirstOrDefault(Function(m As ModelConfig)
                                         If m Is Nothing Then Return False
                                         If Not System.String.IsNullOrWhiteSpace(m.ModelDescription) AndAlso
                                            System.String.Equals(m.ModelDescription, selectedKey, System.StringComparison.OrdinalIgnoreCase) Then
@@ -742,7 +743,7 @@ Partial Public Class ThisAddIn
             Catch
                 Try
                     Dim p As System.Reflection.PropertyInfo =
-                        GetType(SharedLibrary.SharedLibrary.ModelConfig).GetProperty("APICall_Object",
+                        GetType(ModelConfig).GetProperty("APICall_Object",
                             System.Reflection.BindingFlags.Public Or System.Reflection.BindingFlags.Instance)
                     If p IsNot Nothing Then
                         Dim o As System.Object = p.GetValue(sel, Nothing)
@@ -1604,8 +1605,14 @@ Partial Public Class ThisAddIn
 
                     Case "inky_editmemory"
                         Try
+                            Dim ownerHandle As IntPtr = IntPtr.Zero
+                            Try
+                                ownerHandle = NativeMethods.GetForegroundWindow()
+                            Catch
+                            End Try
+
                             Await SwitchToUi(Sub()
-                                                 SharedMethods.EditInkyMemoryFile(_context)
+                                                 SharedMethods.EditInkyMemoryFile(_context, ownerHandle)
                                              End Sub).ConfigureAwait(False)
                             Return JsonOk(New With {.ok = True})
                         Catch ex As Exception
@@ -2951,6 +2958,12 @@ Partial Public Class ThisAddIn
                                 Return JsonOk(New With {.ok = True, .prompt = ""})
                             End If
 
+                            Dim ownerHandle As IntPtr = IntPtr.Zero
+                            Try
+                                ownerHandle = NativeMethods.GetForegroundWindow()
+                            Catch
+                            End Try
+
                             Dim selectedPrompt As String =
                                 Await SwitchToUi(
                                     Function()
@@ -2959,7 +2972,8 @@ Partial Public Class ThisAddIn
                                             INI_PromptLibPathLocal,
                                             _context,
                                             Nothing,
-                                            My.Settings.Inky_LastPrompt
+                                            My.Settings.Inky_LastPrompt,
+                                            ownerHandle
                                         )
                                     End Function).ConfigureAwait(False)
 
@@ -3454,7 +3468,7 @@ Partial Public Class ThisAddIn
         Dim hasSecondary As Boolean = hasSecondApi AndAlso hasSecondModelName
 
         ' Alt list
-        Dim alts As System.Collections.Generic.List(Of SharedLibrary.SharedLibrary.ModelConfig) = Nothing
+        Dim alts As System.Collections.Generic.List(Of ModelConfig) = Nothing
         Dim altCount As Integer = 0
         Try
             If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then

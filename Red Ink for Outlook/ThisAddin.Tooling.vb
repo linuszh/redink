@@ -1,42 +1,41 @@
-﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
-' Purpose:
-'   Implements a model-agnostic tool/function-calling loop for LLM interactions.
-'   Detects tool calls in model output, executes internal/external tools, and
-'   injects tool responses into subsequent model iterations until a final answer
-'   is produced or limits/cancellation are reached.
+' Purpose: Implements a model-agnostic "tooling loop" for LLM tool/function calling, including
+'          tool selection, tool call detection/extraction, per-tool execution, and response
+'          injection back into subsequent LLM iterations.
 '
-' Responsibilities:
-'   - Tool loop orchestration via `ExecuteToolingLoop`:
-'       * Build enhanced system prompt with tool usage guidance.
-'       * Generate model-specific tool definition payloads for `INI_APICall_ToolInstructions_2`.
-'       * Invoke `LLM(...)` iteratively, detect tool calls, and inject responses via
-'         `INI_APICall_ToolResponses_2`.
-'       * Enforce iteration limits, timeouts, cancellation, and forced final synthesis.
-'   - Tool call parsing:
-'       * Detect tool calls via regex (`ContainsToolCalls`) using tooling model patterns.
-'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided map.
-'   - Tool execution:
-'       * Internal tool: `retrieve_web_content` with SSRF safeguards (WebView2 or HTTP fallback).
-'       * External tools: apply selected `ModelConfig`, build API call payloads, force JSON
-'         response mode, invoke the model, and restore prior config.
-'       * AutoPilot routing for internal tools when AutoPilot is active.
-'   - Tool selection and persistence:
-'       * Load tool configurations from `INI_SpecialServicePath`.
-'       * Add a built-in web retrieval tool.
-'       * Persist selected tool names and restore them on demand.
-'   - Diagnostics:
-'       * Optional per-run file logging via `ToolingFileLogger` (controlled by `INI_APIDebug`).
-'       * Optional UI logging via `LogWindow` when enabled.
+' Architecture:
+'  - Tooling execution loop (`ExecuteToolingLoop`):
+'      - Builds system prompt augmentation via `BuildToolInstructionsPrompt`.
+'      - Injects model-specific tool definitions into `INI_APICall_ToolInstructions_2`.
+'      - Calls `LLM(...)` iteratively until no tool calls are detected or `MaxIterations` is reached.
+'      - When tool calls are present:
+'          - Detects tool calls using `ContainsToolCalls` (regex).
+'          - Extracts tool calls using `ExtractToolCalls` (JSON + extraction map).
+'          - Executes each tool via `ExecuteToolCall`, collecting `ToolResponse` objects.
+'          - Builds the next-iteration response payload via `BuildToolResponsesForModel` and assigns it to
+'            `INI_APICall_ToolResponses_2`.
+'  - Tool execution:
+'      - Internal tool: `retrieve_web_content` retrieves web content for caller-provided URLs.
+'      - External tools: `ExecuteExternalTool` applies the selected tool `ModelConfig`, prepares the
+'        API call payload, forces JSON response mode, invokes `LLM(...)`, and restores prior settings.
+'      - Tool errors are handled according to `ModelConfig.ToolErrorHandling` (abort/retry/skip).
+'  - Tool selection and persistence:
+'      - Loads tools from `INI_SpecialServicePath` with `LoadToolingServices`.
+'      - Adds the internal web retrieval tool via `GetInternalWebTool`.
+'      - Persists selections through `My.Settings.SelectedToolNames` and restores them with
+'        `LoadPersistedToolSelection`.
+'  - Diagnostics:
+'      - `ToolingFileLogger` writes a single per-run log file when `INI_APIDebug` is enabled.
+'      - Optional UI logging uses a `LogWindow` instance when enabled.
 '
-' Notes:
-'   - This file is a partial definition of `ThisAddIn` and depends on shared configuration
-'     values (INI variables), `_context`, and the `LLM(...)` entry point provided elsewhere.
-'   - Web retrieval uses WebView2 when enabled to capture JavaScript-rendered content.
+' External Dependencies:
+'  - SharedLibrary.SharedMethods: `LLM`, `InterpolateAtRuntime`, `LoadAlternativeModels`, `GetCurrentConfig`,
+'    `ApplyModelConfig`, `RestoreDefaults`, `ShowCustomMessageBox`, `ShowCustomYesNoBox`.
+'  - Newtonsoft.Json: used for parsing/formatting tool calls and tool responses.
+'  - WebView2: used for JavaScript-capable web retrieval when enabled.
 ' =============================================================================
 
 Option Explicit On
@@ -4169,6 +4168,27 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            If toolConfig.OAuth2 Then
+                toolConfig.DecodedAPI = Await SharedMethods.GetFreshAccessToken(
+                    _context,
+                    toolConfig.OAuth2ClientMail,
+                    toolConfig.OAuth2Scopes,
+                    toolConfig.APIKey,
+                    toolConfig.OAuth2Endpoint,
+                    toolConfig.OAuth2ATExpiry,
+                    True,
+                    False).ConfigureAwait(False)
+
+                If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
+                    response.Success = False
+                    response.ErrorMessage = "OAuth2 authentication failed."
+                    ToolingFileLogger.LogError(
+                        "OAuth2 authentication failed before MCP tool execution.",
+                        details:=$"ToolName='{toolCall.ToolName}'")
+                    Return response
+                End If
+            End If
+
             ' ── SSE transport: full round-trip bypassing LLM() ───────────
             If Not String.IsNullOrWhiteSpace(toolConfig.Endpoint) AndAlso
                toolConfig.Endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
@@ -4180,46 +4200,75 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogStep($"SSE round-trip for {toolCall.ToolName} at {sseBase}")
                 ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
 
-                Try
-                    cancellationToken.ThrowIfCancellationRequested()
+                Dim sseAttemptedRefresh As Boolean = False
+                Dim sseEx As Exception = Nothing
+                Dim sseDone As Boolean = False
+                Dim sseCancelled As Boolean = False
 
-                    Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
-                        sseBase, apiCall,
-                        If(toolConfig.HeaderA, ""), resolvedHeaderB,
-                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+                Do
+                    sseEx = Nothing
 
-                    ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
+                    Try
+                        cancellationToken.ThrowIfCancellationRequested()
 
-                    If Not String.IsNullOrWhiteSpace(rawResult) Then
-                        Dim toolErrorMessage As String = ""
+                        resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
 
-                        response.Response = rawResult
+                        Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
+                            sseBase, apiCall,
+                            If(toolConfig.HeaderA, ""), resolvedHeaderB,
+                            CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
 
-                        If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
-                            response.Success = False
-                            response.ErrorMessage = toolErrorMessage
-                            ToolingFileLogger.LogWarn(
-                                "SSE tool service returned a logical error.",
-                                details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                        ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
+
+                        If Not String.IsNullOrWhiteSpace(rawResult) Then
+                            Dim toolErrorMessage As String = ""
+                            response.Response = rawResult
+
+                            If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
+                                response.Success = False
+                                response.ErrorMessage = toolErrorMessage
+                                ToolingFileLogger.LogWarn(
+                                    "SSE tool service returned a logical error.",
+                                    details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                            Else
+                                response.Success = True
+                            End If
                         Else
-                            response.Success = True
+                            response.Success = False
+                            response.ErrorMessage = "Empty response from SSE tool service"
+                            ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
                         End If
-                    Else
-                        response.Success = False
-                        response.ErrorMessage = "Empty response from SSE tool service"
-                        ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
-                    End If
 
-                Catch ex As OperationCanceledException
+                        sseDone = True
+
+                    Catch ex As OperationCanceledException
+                        sseCancelled = True
+                        response.Success = False
+                        response.ErrorMessage = "Operation was cancelled"
+                        ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled during SSE execution.")
+                    Catch ex As Exception
+                        sseEx = ex
+                    End Try
+
+                    If sseDone OrElse sseCancelled Then Exit Do
+                    If sseAttemptedRefresh Then Exit Do
+                    If Not ShouldRetryMCPAfterUnauthorized(toolConfig, sseEx) Then Exit Do
+
+                    sseAttemptedRefresh = True
+                    ToolingFileLogger.LogWarn(
+                        "SSE tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
+                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'")
+
+                    Dim sseRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    If Not sseRefreshOk Then Exit Do
+                Loop
+
+                If Not sseDone AndAlso Not sseCancelled AndAlso sseEx IsNot Nothing Then
                     response.Success = False
-                    response.ErrorMessage = "Operation was cancelled"
-                    ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled during SSE execution.")
-                Catch ex As Exception
-                    response.Success = False
-                    response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
+                    response.ErrorMessage = $"SSE tool call failed: {sseEx.Message}"
                     ToolingFileLogger.LogError("SSE tool call failed.",
-                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
-                End Try
+                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=sseEx)
+                End If
 
                 Return response
             End If
@@ -4237,53 +4286,82 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogStep($"MCP Streamable HTTP round-trip for {toolCall.ToolName} at {mcpUrl}")
                 ToolingFileLogger.LogStep($"MCP Streamable HTTP request body: {apiCall}")
 
-                Try
-                    cancellationToken.ThrowIfCancellationRequested()
+                Dim streamAttemptedRefresh As Boolean = False
+                Dim streamEx As Exception = Nothing
+                Dim streamDone As Boolean = False
+                Dim streamCancelled As Boolean = False
 
-                    Dim rawResult = Await SharedMethods.ExecuteMCPStreamableToolCall(
-                        mcpUrl,
-                        apiCall,
-                        If(toolConfig.HeaderA, ""),
-                        resolvedHeaderB,
-                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
+                Do
+                    streamEx = Nothing
 
-                    ToolingFileLogger.LogRawResponseStub($"MCP Streamable HTTP tool result ({toolCall.ToolName})", rawResult)
+                    Try
+                        cancellationToken.ThrowIfCancellationRequested()
 
-                    If Not String.IsNullOrWhiteSpace(rawResult) Then
-                        Dim toolErrorMessage As String = ""
+                        resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
 
-                        response.Response = rawResult
+                        Dim rawResult = Await SharedMethods.ExecuteMCPStreamableToolCall(
+                            mcpUrl,
+                            apiCall,
+                            If(toolConfig.HeaderA, ""),
+                            resolvedHeaderB,
+                            CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
 
-                        If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
-                            response.Success = False
-                            response.ErrorMessage = toolErrorMessage
-                            ToolingFileLogger.LogWarn(
-                                "MCP Streamable HTTP tool service returned a logical error.",
-                                details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                        ToolingFileLogger.LogRawResponseStub($"MCP Streamable HTTP tool result ({toolCall.ToolName})", rawResult)
+
+                        If Not String.IsNullOrWhiteSpace(rawResult) Then
+                            Dim toolErrorMessage As String = ""
+                            response.Response = rawResult
+
+                            If TryExtractToolServiceErrorMessage(rawResult, toolErrorMessage) Then
+                                response.Success = False
+                                response.ErrorMessage = toolErrorMessage
+                                ToolingFileLogger.LogWarn(
+                                    "MCP Streamable HTTP tool service returned a logical error.",
+                                    details:=$"ToolName='{toolCall.ToolName}'; Error='{toolErrorMessage}'")
+                            Else
+                                response.Success = True
+                            End If
                         Else
-                            response.Success = True
+                            response.Success = False
+                            response.ErrorMessage = "Empty response from MCP Streamable HTTP tool service"
+                            ToolingFileLogger.LogError(
+                                "Empty MCP Streamable HTTP response.",
+                                details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
                         End If
-                    Else
-                        response.Success = False
-                        response.ErrorMessage = "Empty response from MCP Streamable HTTP tool service"
-                        ToolingFileLogger.LogError(
-                            "Empty MCP Streamable HTTP response.",
-                            details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
-                    End If
 
-                Catch ex As OperationCanceledException
-                    response.Success = False
-                    response.ErrorMessage = "Operation was cancelled"
+                        streamDone = True
+
+                    Catch ex As OperationCanceledException
+                        streamCancelled = True
+                        response.Success = False
+                        response.ErrorMessage = "Operation was cancelled"
+                        ToolingFileLogger.LogWarn(
+                            $"Tool {toolCall.ToolName} cancelled during MCP Streamable HTTP execution.")
+                    Catch ex As Exception
+                        streamEx = ex
+                    End Try
+
+                    If streamDone OrElse streamCancelled Then Exit Do
+                    If streamAttemptedRefresh Then Exit Do
+                    If Not ShouldRetryMCPAfterUnauthorized(toolConfig, streamEx) Then Exit Do
+
+                    streamAttemptedRefresh = True
                     ToolingFileLogger.LogWarn(
-                        $"Tool {toolCall.ToolName} cancelled during MCP Streamable HTTP execution.")
-                Catch ex As Exception
+                        "MCP Streamable HTTP tool call returned Unauthorized. Forcing MCP OAuth refresh and retrying once.",
+                        details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'")
+
+                    Dim streamRefreshOk As Boolean = Await ForceRefreshToolOAuthToken(toolConfig, toolCall.ToolName).ConfigureAwait(False)
+                    If Not streamRefreshOk Then Exit Do
+                Loop
+
+                If Not streamDone AndAlso Not streamCancelled AndAlso streamEx IsNot Nothing Then
                     response.Success = False
-                    response.ErrorMessage = $"MCP Streamable HTTP tool call failed: {ex.Message}"
+                    response.ErrorMessage = $"MCP Streamable HTTP tool call failed: {streamEx.Message}"
                     ToolingFileLogger.LogError(
                         "MCP Streamable HTTP tool call failed.",
                         details:=$"ToolName='{toolCall.ToolName}'; Endpoint='{mcpUrl}'",
-                        ex:=ex)
-                End Try
+                        ex:=streamEx)
+                End If
 
                 Return response
             End If
@@ -4770,6 +4848,47 @@ Partial Public Class ThisAddIn
                     "tools/call",
                     StringComparison.OrdinalIgnoreCase)
         Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ShouldRetryMCPAfterUnauthorized(toolConfig As ModelConfig, ex As Exception) As Boolean
+        If toolConfig Is Nothing OrElse Not toolConfig.OAuth2 Then Return False
+        If ex Is Nothing Then Return False
+
+        Dim message As String = If(ex.Message, "")
+        Return message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               message.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               message.IndexOf("Invalid or expired access token", StringComparison.OrdinalIgnoreCase) >= 0
+    End Function
+
+    Private Async Function ForceRefreshToolOAuthToken(toolConfig As ModelConfig, toolName As String) As Task(Of Boolean)
+        Try
+            toolConfig.DecodedAPI = Await SharedMethods.GetFreshAccessToken(
+                _context,
+                toolConfig.OAuth2ClientMail,
+                toolConfig.OAuth2Scopes,
+                toolConfig.APIKey,
+                toolConfig.OAuth2Endpoint,
+                toolConfig.OAuth2ATExpiry,
+                True,
+                False,
+                forceRefresh:=True).ConfigureAwait(False)
+
+            If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
+                ToolingFileLogger.LogError(
+                    "Forced MCP OAuth refresh returned an empty token.",
+                    details:=$"ToolName='{toolName}'")
+                Return False
+            End If
+
+            Return True
+
+        Catch refreshEx As Exception
+            ToolingFileLogger.LogError(
+                "Forced MCP OAuth refresh failed.",
+                details:=$"ToolName='{toolName}'",
+                ex:=refreshEx)
             Return False
         End Try
     End Function

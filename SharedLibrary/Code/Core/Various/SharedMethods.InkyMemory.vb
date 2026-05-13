@@ -103,7 +103,8 @@ Namespace SharedLibrary
         ''' a default header if it does not yet exist.
         ''' </summary>
         ''' <param name="_context">Optional shared context (kept for API consistency).</param>
-        Public Shared Sub EditInkyMemoryFile(Optional _context As ISharedContext = Nothing)
+        Public Shared Sub EditInkyMemoryFile(Optional _context As ISharedContext = Nothing,
+                                     Optional ownerHandle As IntPtr = Nothing)
             Try
                 Dim filePath As String = GetInkyMemoryFilePath()
                 Dim folder As String = Path.GetDirectoryName(filePath)
@@ -118,7 +119,11 @@ Namespace SharedLibrary
                     WriteFileWithRetry(filePath, GetDefaultMemoryFileContent())
                 End If
 
-                ShowTextFileEditor(filePath, "Inky Memory — Edit your persistent preferences and learning items below.")
+                ShowTextFileEditor(
+            filePath,
+            "Inky Memory — Edit your persistent preferences and learning items below.",
+            ownerHandle:=ownerHandle
+        )
             Catch ex As Exception
                 ShowCustomMessageBox($"Could not open memory file: {ex.Message}")
             End Try

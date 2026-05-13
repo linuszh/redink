@@ -568,11 +568,11 @@ Partial Public Class ThisAddIn
     End Sub
 
 
-    Private _quickTranslateWidget As SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
+    Private _quickTranslateWidget As Global.SharedLibrary.SharedLibrary.QuickTranslateWidget = Nothing
 
     Public Sub ShowQuickTranslate()
         If _quickTranslateWidget Is Nothing OrElse _quickTranslateWidget.IsDisposed Then
-            _quickTranslateWidget = New SharedLibrary.SharedLibrary.QuickTranslateWidget(
+            _quickTranslateWidget = New Global.SharedLibrary.SharedLibrary.QuickTranslateWidget(
                 Async Function(text, lang, sourcelang, token)
                     TranslateLanguage = lang
                     SourceLanguage = sourcelang
