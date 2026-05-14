@@ -401,7 +401,7 @@ Namespace SharedLibrary
 
         Public Const LLM_APICall_Placeholder_ToolDefinitions As String = "{toolinstructions}"
         Public Const LLM_APICall_Placeholder_ToolResponses As String = "{toolresponses}"
-        Public Const ToolingSuffix As String = " (can use sources)" ' Suffix displayed for tooling-enabled models in selection dialogs.
+        Public Const ToolingSuffix As String = " (can use agents)" ' Suffix displayed for tooling-enabled models in selection dialogs.
         Public Const ToolCallMatchingStart As String = "(toolcall:"   ' it follows <pattern> with the pattern to detect tool calls in LLM response, enclosed by < and >
         Public Const ToolCallMatchingMiddle As String = ":"
         Public Const ToolCallMatchingEnd As String = ")"

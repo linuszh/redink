@@ -1282,6 +1282,10 @@ Partial Public Class ThisAddIn
             'Try
             'Using New WordUndoScope(wordEditor, $"{AN} Changes")
 
+            If Not KeepFormat Then
+                EncodeHyperlinksAsMarkdown(selection.Range)
+            End If
+
             If INI_KeepFormatCap > 0 Then If Len(selection.Text) > INI_KeepFormatCap Then KeepFormat = False
 
             If KeepFormat Then
@@ -1405,6 +1409,7 @@ Partial Public Class ThisAddIn
                             wordEditor.Range(newStart, selection.Range.End)
 
                         ApplyParagraphFormatting(insertedRange, sourceFormatting)
+
                     End If
 
                     ' Use Find to locate the nearest line break backward and adjust selection
