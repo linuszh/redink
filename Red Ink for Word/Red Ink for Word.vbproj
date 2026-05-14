@@ -714,6 +714,7 @@
     <Compile Include="Ribbon1.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.AgentHost.vb" />
     <Compile Include="ThisAddIn.AssembleDocuments.vb" />
     <Compile Include="ThisAddIn.Commands.Freestyle.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
@@ -757,12 +758,16 @@
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
+    <Compile Include="ThisAddIn.WordDocHost.vb" />
     <Compile Include="ThisAddIn.WordHelpers,ImageGeneration.vb" />
     <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
+    <Compile Include="WordWorkspaceForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <None Include="Resources\Red_Ink_Logo_Large.png" />
     <None Include="Resources\Red_Ink_Logo_Medium.png" />
     <Content Include="VBA Helper\RI_Helper_Code_Word.bas" />

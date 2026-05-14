@@ -604,27 +604,39 @@ Partial Public Class ThisAddIn
         ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
         Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
 
+        ''' <summary>Nested tooling-session depth. Prevents sub-agent runs from tearing down the parent log session.</summary>
+        Private Shared _sessionDepth As Integer = 0
+
         ''' <summary>
         ''' Starts a tooling log session and writes the log header.
         ''' Logging is enabled only when <c>INI_APIDebug</c> is <c>True</c>.
         ''' </summary>
         Public Shared Sub StartSession()
-            _isEnabled = INI_APIDebug
-            If Not _isEnabled Then Return
+            SyncLock _lock
+                Dim shouldEnable As Boolean = INI_APIDebug
+                If Not shouldEnable Then Return
 
-            If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then Return
+                _isEnabled = True
+                _sessionDepth += 1
 
-            Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-            _logPath = Path.Combine(desktopPath, StableLogFileName)
+                If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
+                    WriteLine("STEP", $"Nested tooling session started (depth={_sessionDepth})")
+                    Return
+                End If
 
-            Try
-                WriteHeader()
-                _started = True
-            Catch ex As Exception
-                _isEnabled = False
-                _started = False
-                _logPath = Nothing
-            End Try
+                Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                _logPath = Path.Combine(desktopPath, StableLogFileName)
+
+                Try
+                    WriteHeader()
+                    _started = True
+                Catch ex As Exception
+                    _isEnabled = False
+                    _started = False
+                    _logPath = Nothing
+                    _sessionDepth = 0
+                End Try
+            End SyncLock
         End Sub
 
         ''' <summary>
@@ -856,19 +868,38 @@ Partial Public Class ThisAddIn
         ''' <param name="summary">Optional summary string written to the log.</param>
         ''' <param name="ex">Optional exception written to the log.</param>
         Public Shared Sub EndSession(Optional success As Boolean = True, Optional summary As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled Then Return
-            WriteLine("END", $"Success: {success}")
-            If Not String.IsNullOrWhiteSpace(summary) Then
-                WriteLine("END", $"Summary: {summary}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("END", ex)
-            End If
-            WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
+            SyncLock _lock
+                If _sessionDepth > 0 Then
+                    _sessionDepth -= 1
+                End If
 
-            _isEnabled = False
-            _started = False
-            _logPath = Nothing
+                If Not _isEnabled Then Return
+
+                If _sessionDepth > 0 Then
+                    WriteLine("END", $"Nested tooling session finished; remaining depth={_sessionDepth}")
+                    If Not String.IsNullOrWhiteSpace(summary) Then
+                        WriteLine("END", $"Nested summary: {summary}")
+                    End If
+                    If ex IsNot Nothing Then
+                        WriteException("END", ex)
+                    End If
+                    Return
+                End If
+
+                WriteLine("END", $"Success: {success}")
+                If Not String.IsNullOrWhiteSpace(summary) Then
+                    WriteLine("END", $"Summary: {summary}")
+                End If
+                If ex IsNot Nothing Then
+                    WriteException("END", ex)
+                End If
+                WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
+
+                _isEnabled = False
+                _started = False
+                _logPath = Nothing
+                _sessionDepth = 0
+            End SyncLock
         End Sub
 
         ''' <summary>
@@ -1022,6 +1053,12 @@ Partial Public Class ThisAddIn
         ''' <summary>Tools selected for this session.</summary>
         Public Property SelectedTools As List(Of ModelConfig)
 
+        ''' <summary>Allow-listed tools selected by the user, available for on-demand loading.</summary>
+        Public Property AllowedToolRegistry As SharedLibrary.Agents.ToolRegistry
+
+        ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
+        Public Property LazyToolLoadingEnabled As Boolean
+
         ''' <summary>All responses generated during this session (successful and failed).</summary>
         Public Property AllToolResponses As List(Of ToolResponse)
 
@@ -1043,8 +1080,16 @@ Partial Public Class ThisAddIn
         ''' <summary>Optional UI log window instance used for user-visible progress logging.</summary>
         Public Property LogWindowForm As LogWindow
 
+        Public Property LastToolExecutionSignature As String
+        Public Property LastToolExecutionRepeatCount As Integer
+        Public Property DuplicateToolExecutionAbortThreshold As Integer
+
         Public Property FailedToolCallCounts As Dictionary(Of String, Integer)
         Public Property DuplicateFailureAbortThreshold As Integer
+
+        Public Property ConsecutiveFailedToolName As String
+        Public Property ConsecutiveFailedToolCount As Integer
+        Public Property ConsecutiveToolFailureAbortThreshold As Integer
 
         ''' <summary>
         ''' Initializes a new tool execution context with default collections and limits.
@@ -1058,25 +1103,49 @@ Partial Public Class ThisAddIn
             CurrentIteration = 0
             MaxIterations = INI_ToolingMaximumIterations
             IsCancelled = False
+            LastToolExecutionSignature = ""
+            LastToolExecutionRepeatCount = 0
+            DuplicateToolExecutionAbortThreshold = 3
+            ConsecutiveFailedToolName = ""
+            ConsecutiveFailedToolCount = 0
+            ConsecutiveToolFailureAbortThreshold = 3
         End Sub
+
+        Public Property LogPrefix As String
+        Public Property ExternalLogSink As Action(Of String, String)
+
 
         ''' <summary>
         ''' Appends a message to the in-memory log, debugger output, optional UI log window, and the tooling file log.
         ''' </summary>
         ''' <param name="message">Log message.</param>
         ''' <param name="level">Log level passed to the UI log window.</param>
+
         Public Sub Log(message As String, Optional level As String = "step")
-            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {message}"
+            Dim visibleMessage As String = If(
+                String.IsNullOrWhiteSpace(LogPrefix),
+                message,
+                LogPrefix & message)
+
+            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {visibleMessage}"
             LogEntries.Add(entry)
             Debug.WriteLine($"[Tooling] {entry}")
 
-            ToolingFileLogger.LogStep(message)
+            ToolingFileLogger.LogStep(visibleMessage)
 
             If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
                 Try
-                    LogWindowForm.AppendLog(message, level)
+                    LogWindowForm.AppendLog(visibleMessage, level)
                 Catch ex As Exception
                     ToolingFileLogger.LogWarn("Failed to append to LogWindow.", ex:=ex)
+                End Try
+            End If
+
+            If ExternalLogSink IsNot Nothing Then
+                Try
+                    ExternalLogSink.Invoke(visibleMessage, level)
+                Catch ex As Exception
+                    ToolingFileLogger.LogWarn("Failed to forward log entry.", ex:=ex)
                 End Try
             End If
         End Sub
@@ -1161,7 +1230,10 @@ Partial Public Class ThisAddIn
         Optional hideLogWindow As Boolean = False,
         Optional DoChart As Boolean = False,
         Optional cancellationToken As System.Threading.CancellationToken = Nothing,
-        Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
+        Optional binaryOutputDirectory As String = Nothing,
+        Optional subAgentMode As Boolean = False,
+        Optional subAgentAllowedToolNames As IReadOnlyList(Of String) = Nothing,
+        Optional subAgentSpecialModelKey As String = Nothing) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1170,12 +1242,30 @@ Partial Public Class ThisAddIn
 
         ToolingFileLogger.StartSession()
 
+        Dim parentToolingContext = _activeToolingContext
+
+        Dim allowedTools As List(Of ModelConfig) =
+             If(selectedTools, New List(Of ModelConfig)()).
+                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                        ToList()
+
+        selectedTools = allowedTools
+
         Dim context As New ToolExecutionContext() With {
-            .MaxIterations = INI_ToolingMaximumIterations,
-            .SelectedTools = selectedTools
-        }
+                    .MaxIterations = INI_ToolingMaximumIterations
+                }
+
+        context.AllowedToolRegistry = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(allowedTools, "selected")
+        context.LazyToolLoadingEnabled = SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(allowedTools)
+        context.SelectedTools = If(
+                    context.LazyToolLoadingEnabled,
+                    New List(Of ModelConfig) From {
+                        SharedLibrary.Agents.ToolLoaderTool.Build(context.AllowedToolRegistry.ListManifests())
+                    },
+                    allowedTools)
 
         context.ToolingModel = GetCurrentConfig(_context)
+
 
         ' Start-of-run config logging (ONCE)
         ToolingFileLogger.LogModelConfigOnce(context.ToolingModel, "Tooling LLM ModelConfig")
@@ -1192,10 +1282,8 @@ Partial Public Class ThisAddIn
         End If
 
         If INI_ToolingLogWindow AndAlso Not hideLogWindow Then
-            ' Create and show the log window on the UI thread to avoid threading issues
             Dim logForm As LogWindow = Nothing
             Try
-                ' Use Await with SwitchToUi for proper async UI thread marshaling
                 Await SwitchToUi(Sub()
                                      logForm = New LogWindow()
                                      logForm.Show()
@@ -1208,9 +1296,19 @@ Partial Public Class ThisAddIn
             If logForm IsNot Nothing Then
                 AddHandler logForm.CancelRequested, Sub() context.IsCancelled = True
             End If
+
+        ElseIf hideLogWindow AndAlso
+               parentToolingContext IsNot Nothing AndAlso
+               parentToolingContext.LogWindowForm IsNot Nothing AndAlso
+               Not parentToolingContext.LogWindowForm.IsDisposed Then
+
+            context.LogPrefix = "[subagent] "
+            context.ExternalLogSink =
+                Sub(message As String, level As String)
+                    parentToolingContext.LogWindowForm.AppendLog(message, level)
+                End Sub
         End If
 
-        ' Make context available to ApDashboardLog for Chat Agent routing
         _activeToolingContext = context
 
         context.Log("Starting tooling session...")
@@ -1253,9 +1351,34 @@ Partial Public Class ThisAddIn
                 baseSysPrompt &= " " & SP_Add_Chart
             End If
 
-            Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
+            ' Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
+            If Not subAgentMode Then
+                ' Agent layer: prepend Inky.md guidance + skill/agent availability summary, append agent-layer addendum (main loop only).
+                Dim selectedSkillToolNames As New List(Of String)()
+                Dim selectedAgentToolNames As New List(Of String)()
+                If selectedTools IsNot Nothing Then
+                    For Each __t In selectedTools
+                        If __t Is Nothing OrElse String.IsNullOrWhiteSpace(__t.ToolName) Then Continue For
+                        If __t.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then selectedSkillToolNames.Add(__t.ToolName)
+                        If __t.ToolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then selectedAgentToolNames.Add(__t.ToolName)
+                    Next
+                End If
+                Dim inkyHeader As String = SharedLibrary.Agents.InkyPromptBuilder.Build(selectedSkillToolNames, selectedAgentToolNames)
+                Dim agentLayerActive As Boolean =
+                    (selectedSkillToolNames.Count > 0) OrElse
+                    (selectedAgentToolNames.Count > 0) OrElse
+                    (selectedTools IsNot Nothing AndAlso selectedTools.Any(Function(t) t IsNot Nothing AndAlso SharedLibrary.Agents.MemoryTools.IsMemoryTool(t.ToolName)))
+                If Not String.IsNullOrWhiteSpace(inkyHeader) Then
+                    baseSysPrompt = inkyHeader & Environment.NewLine & Environment.NewLine & baseSysPrompt
+                End If
+                If agentLayerActive Then
+                    baseSysPrompt &= Environment.NewLine & Environment.NewLine & Default_SP_Add_AgentLayer
+                End If
+            End If
 
-            Dim toolDefinitions = BuildToolInstructionsForModel(selectedTools, context.ToolingModel)
+            Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(context.SelectedTools)
+
+            Dim toolDefinitions = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
             INI_APICall_ToolInstructions_2 = toolDefinitions
             INI_APICall_ToolResponses_2 = ""
 
@@ -1284,6 +1407,8 @@ Partial Public Class ThisAddIn
             Dim abortToolParamSummary As String = ""
             Dim abortToolRawCallJson As String = ""
             Dim abortFactsPrompt As String = ""
+
+            Dim abortDueToRepeatedToolLoop As Boolean = False
 
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
             While iteration < context.MaxIterations AndAlso Not context.IsCancelled
@@ -1328,6 +1453,9 @@ Partial Public Class ThisAddIn
                         End If
                     End If
                 End If
+
+                enhancedSysPrompt = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(context.SelectedTools)
+                INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
 
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
@@ -1405,8 +1533,16 @@ Partial Public Class ThisAddIn
 
                         context.Log($"Executing tool: {tc.ToolName} (ID: {tc.CallId})")
 
-                        Dim toolConfig = selectedTools.FirstOrDefault(
-                            Function(t) t.ToolName.Equals(tc.ToolName, StringComparison.OrdinalIgnoreCase))
+                        Dim toolConfig = context.SelectedTools.FirstOrDefault(
+                                Function(t)
+                                    Return t IsNot Nothing AndAlso
+                                           Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                           t.ToolName.Equals(tc.ToolName, StringComparison.OrdinalIgnoreCase)
+                                End Function)
+
+                        If toolConfig Is Nothing Then
+                            toolConfig = EnsureVisibleToolLoaded(tc.ToolName, context)
+                        End If
 
                         If toolConfig Is Nothing Then
                             If tc.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
@@ -1470,6 +1606,40 @@ Partial Public Class ThisAddIn
                         toolResponse.OriginalCallJson = tc.RawJson
                         context.AllToolResponses.Add(toolResponse)
 
+                        If RegisterToolFailureLoopState(tc, toolResponse, context) Then
+                            context.LogWarn(
+                                                    $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times. Aborting tool loop to avoid repeated failed calls.")
+
+                            ToolingFileLogger.LogWarn(
+                                                    "Aborting tool loop after repeated consecutive tool failures.",
+                                                    details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}")
+
+                            currentResponse =
+                                                    $"Tool '{tc.ToolName}' failed repeatedly. I cannot continue calling it. " &
+                                                    "Please provide a final answer based on available information, or explain that the tool failed."
+
+                            context.IsCancelled = False
+                            Exit While
+                        End If
+
+                        Dim executedSignature As String = BuildExecutedToolSignature(tc, toolResponse)
+
+                        If String.Equals(context.LastToolExecutionSignature, executedSignature, StringComparison.Ordinal) Then
+                            context.LastToolExecutionRepeatCount += 1
+                        Else
+                            context.LastToolExecutionSignature = executedSignature
+                            context.LastToolExecutionRepeatCount = 1
+                        End If
+
+                        If context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                            context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Aborting loop to avoid recursion.")
+                            ToolingFileLogger.LogWarn(
+                                    "Detected repeated identical tool execution.",
+                                    details:=$"ToolName='{tc.ToolName}'; RepeatCount={context.LastToolExecutionRepeatCount}; Signature='{executedSignature}'")
+                            abortDueToRepeatedToolLoop = True
+                            Exit For
+                        End If
+
                         If Not toolResponse.Success Then
                             context.LogError(
                                 $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
@@ -1509,6 +1679,10 @@ Partial Public Class ThisAddIn
                             context.Log($"Tool completed successfully ({toolResponse.Response?.Length} chars)", "success")
                         End If
                     Next
+
+                    If abortDueToRepeatedToolLoop Then
+                        Exit While
+                    End If
 
                     Dim toolResponses = BuildToolResponsesForModel(context.AllToolResponses, context.ToolingModel)
                     INI_APICall_ToolResponses_2 = toolResponses
@@ -1743,6 +1917,8 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
             Return $"Error during tool execution: {ex.Message}"
         Finally
+
+            _activeToolingContext = parentToolingContext
             INI_APICall_ToolInstructions_2 = ""
             INI_APICall_ToolResponses_2 = ""
 
@@ -1786,6 +1962,108 @@ Partial Public Class ThisAddIn
             _activeToolingContext = Nothing
         End Try
     End Function
+
+
+    Private Function EnsureVisibleToolLoaded(toolName As String, context As ToolExecutionContext) As ModelConfig
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return Nothing
+        End If
+
+        If context.SelectedTools Is Nothing Then
+            context.SelectedTools = New List(Of ModelConfig)()
+        End If
+
+        Dim existing = context.SelectedTools.FirstOrDefault(
+        Function(t)
+            Return t IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                   t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+        End Function)
+
+        If existing IsNot Nothing Then
+            Return existing
+        End If
+
+        If context.AllowedToolRegistry Is Nothing OrElse Not context.AllowedToolRegistry.Contains(toolName) Then
+            Return Nothing
+        End If
+
+        Dim loaded = context.AllowedToolRegistry.Get(toolName)
+        If loaded Is Nothing Then
+            Return Nothing
+        End If
+
+        context.SelectedTools.Add(loaded)
+        Return loaded
+    End Function
+
+    Private Function ExecuteToolLoaderCall(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
+
+        If context Is Nothing OrElse context.AllowedToolRegistry Is Nothing Then
+            response.Success = False
+            response.ErrorMessage = "Tool loader is not initialized."
+            Return response
+        End If
+
+        If context.SelectedTools Is Nothing Then
+            context.SelectedTools = New List(Of ModelConfig)()
+        End If
+
+        Dim requestedNames = SharedLibrary.Agents.ToolLoaderTool.ExtractRequestedToolNames(toolCall.Arguments)
+
+        If requestedNames.Count = 0 Then
+            response.Success = False
+            response.ErrorMessage = "No tool names were provided to tool_loader."
+            Return response
+        End If
+
+        Dim loadedNames As New List(Of String)()
+        Dim alreadyLoadedNames As New List(Of String)()
+        Dim unavailableNames As New List(Of String)()
+
+        For Each requestedName In requestedNames
+            If String.IsNullOrWhiteSpace(requestedName) Then Continue For
+
+            If requestedName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                alreadyLoadedNames.Add(requestedName)
+                Continue For
+            End If
+
+            Dim existing = context.SelectedTools.FirstOrDefault(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(requestedName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+            If existing IsNot Nothing Then
+                alreadyLoadedNames.Add(existing.ToolName)
+                Continue For
+            End If
+
+            Dim loaded = EnsureVisibleToolLoaded(requestedName, context)
+            If loaded IsNot Nothing Then
+                loadedNames.Add(loaded.ToolName)
+            Else
+                unavailableNames.Add(requestedName)
+            End If
+        Next
+
+        Dim payload As New JObject(
+        New JProperty("loaded", New JArray(loadedNames.ToArray())),
+        New JProperty("already_loaded", New JArray(alreadyLoadedNames.ToArray())),
+        New JProperty("not_available", New JArray(unavailableNames.ToArray()))
+    )
+
+        response.Success = True
+        response.Response = payload.ToString(Formatting.None)
+        Return response
+    End Function
+
 #End Region
 
 #Region "Tooling Helper Functions"
@@ -2213,20 +2491,43 @@ Partial Public Class ThisAddIn
             ' Build response content
             Dim responseContent As String = If(resp.Success, If(resp.Response, ""), $"Error: {resp.ErrorMessage}")
 
-            ' Check if response should be escaped (template has quoted placeholder) or raw
+            ' Model-agnostic handling:
+            ' - If the response placeholder is quoted, emit an escaped string.
+            ' - If the template is a Gemini-style functionResponse/function_response payload,
+            '   force the inserted response to be a JSON object (arrays/scalars wrapped).
+            ' - Otherwise preserve raw valid JSON for providers that accept arrays/scalars.
             Dim finalResponseContent As String
-            If responsePartTemplate.Contains("""{response}""") Then
-                ' Template expects escaped string
+            Dim templateRequiresQuotedString As Boolean = responsePartTemplate.Contains("""{response}""")
+            Dim templateLooksLikeGeminiFunctionResponse As Boolean =
+                    responsePartTemplate.IndexOf("functionResponse", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                    responsePartTemplate.IndexOf("function_response", StringComparison.OrdinalIgnoreCase) >= 0
+
+            If templateRequiresQuotedString Then
                 finalResponseContent = EscapeJsonString(responseContent)
-            ElseIf responsePartTemplate.Contains("{response}") AndAlso
-                   Not responsePartTemplate.Contains("""{response}") Then
-                ' Template expects raw content - wrap in object if it's not valid JSON
-                If IsValidJson(responseContent) Then
-                    finalResponseContent = responseContent
-                Else
-                    ' Wrap plain text in a result object with escaped content
-                    finalResponseContent = "{""result"": """ & EscapeJsonString(responseContent) & """}"
-                End If
+            ElseIf responsePartTemplate.Contains("{response}") Then
+                Try
+                    Dim parsed As JToken = JToken.Parse(responseContent)
+
+                    If templateLooksLikeGeminiFunctionResponse Then
+                        If TypeOf parsed Is JObject Then
+                            finalResponseContent = parsed.ToString(Formatting.None)
+                        ElseIf TypeOf parsed Is JArray Then
+                            finalResponseContent = New JObject(
+                                    New JProperty("items", parsed)
+                                ).ToString(Formatting.None)
+                        Else
+                            finalResponseContent = New JObject(
+                                    New JProperty("result", parsed)
+                                ).ToString(Formatting.None)
+                        End If
+                    Else
+                        finalResponseContent = parsed.ToString(Formatting.None)
+                    End If
+                Catch
+                    finalResponseContent = New JObject(
+                            New JProperty("result", responseContent)
+                        ).ToString(Formatting.None)
+                End Try
             Else
                 finalResponseContent = EscapeJsonString(responseContent)
             End If
@@ -2868,6 +3169,127 @@ Partial Public Class ThisAddIn
         SharedLogger.LogAgentToolCall(_context, _context.RDV, surface, toolName)
     End Sub
 
+    Private Function BuildToolArgumentsSignature(arguments As Dictionary(Of String, Object)) As String
+        If arguments Is Nothing OrElse arguments.Count = 0 Then
+            Return "{}"
+        End If
+
+        Try
+            Dim normalized As New JObject()
+
+            For Each key In arguments.Keys.OrderBy(Function(k) k, StringComparer.OrdinalIgnoreCase)
+                Dim value = arguments(key)
+
+                If TypeOf value Is JToken Then
+                    normalized(key) = DirectCast(value, JToken)
+                ElseIf value Is Nothing Then
+                    normalized(key) = JValue.CreateNull()
+                Else
+                    normalized(key) = JToken.FromObject(value)
+                End If
+            Next
+
+            Return normalized.ToString(Formatting.None)
+        Catch
+            Try
+                Return JsonConvert.SerializeObject(arguments)
+            Catch
+                Return "{}"
+            End Try
+        End Try
+    End Function
+
+    Private Function BuildExecutedToolSignature(toolCall As ToolCall, toolResponse As ToolResponse) As String
+        Dim toolName As String = If(toolCall?.ToolName, "")
+        Dim argsSig As String = BuildToolArgumentsSignature(toolCall?.Arguments)
+        Dim successSig As String = If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "ok", "err")
+        Dim responseSig As String = If(toolResponse?.Response, "")
+        Dim errorSig As String = If(toolResponse?.ErrorMessage, "")
+
+        If responseSig.Length > 500 Then
+            responseSig = responseSig.Substring(0, 500)
+        End If
+
+        If errorSig.Length > 300 Then
+            errorSig = errorSig.Substring(0, 300)
+        End If
+
+        Return toolName & "|" & argsSig & "|" & successSig & "|" & responseSig & "|" & errorSig
+    End Function
+
+    Private Function IsEmptyJsRunResult(rawResponse As String) As Boolean
+        Dim raw As String = If(rawResponse, "").Trim()
+
+        If raw = "" OrElse raw = "{}" OrElse raw = "[]" OrElse raw.Equals("null", StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        Try
+            Dim token As JToken = JToken.Parse(raw)
+
+            If TypeOf token Is JObject Then
+                Dim obj = DirectCast(token, JObject)
+
+                If Not obj.Properties().Any() Then
+                    Return True
+                End If
+
+                Dim errorToken = obj("error")
+                If errorToken IsNot Nothing AndAlso errorToken.Type <> JTokenType.Null AndAlso errorToken.ToString().Trim() <> "" Then
+                    Return False
+                End If
+
+                Dim okToken = obj("ok")
+                Dim resultToken = obj("result")
+
+                Dim okValue As Boolean = False
+                If okToken IsNot Nothing Then
+                    If okToken.Type = JTokenType.Boolean Then
+                        okValue = okToken.Value(Of Boolean)()
+                    Else
+                        Boolean.TryParse(okToken.ToString(), okValue)
+                    End If
+                End If
+
+                If okValue Then
+                    If resultToken Is Nothing OrElse resultToken.Type = JTokenType.Null Then
+                        Return True
+                    End If
+
+                    If resultToken.Type = JTokenType.String AndAlso resultToken.ToString().Trim() = "" Then
+                        Return True
+                    End If
+                End If
+            End If
+        Catch
+        End Try
+
+        Return False
+    End Function
+
+    Private Function RegisterToolFailureLoopState(toolCall As ToolCall, toolResponse As ToolResponse, context As ToolExecutionContext) As Boolean
+        If toolCall Is Nothing OrElse toolResponse Is Nothing OrElse context Is Nothing Then
+            Return False
+        End If
+
+        If toolResponse.Success Then
+            context.ConsecutiveFailedToolName = ""
+            context.ConsecutiveFailedToolCount = 0
+            Return False
+        End If
+
+        Dim failedName As String = If(toolCall.ToolName, "").Trim()
+
+        If failedName.Equals(context.ConsecutiveFailedToolName, StringComparison.OrdinalIgnoreCase) Then
+            context.ConsecutiveFailedToolCount += 1
+        Else
+            context.ConsecutiveFailedToolName = failedName
+            context.ConsecutiveFailedToolCount = 1
+        End If
+
+        Return context.ConsecutiveFailedToolCount >= context.ConsecutiveToolFailureAbortThreshold
+    End Function
+
     ''' <summary>
     ''' Executes a single tool call using an internal tool implementation or an external tool configuration.
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
@@ -2919,6 +3341,60 @@ Partial Public Class ThisAddIn
             ' Check cancellation before execution
             cancellationToken.ThrowIfCancellationRequested()
 
+
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = ExecuteToolLoaderCall(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
+            If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
+                Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
+        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken).ConfigureAwait(False)
+
+                response.Response = If(__agentJson, "")
+                response.Success = (__agentJson IsNot Nothing)
+
+                If Not response.Success Then
+                    response.ErrorMessage = "Agent-layer tool returned no result."
+                ElseIf SharedLibrary.Agents.JsRunTool.IsJsTool(toolCall.ToolName) AndAlso IsEmptyJsRunResult(response.Response) Then
+                    response.Success = False
+                    response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
+                    response.Response = "{""ok"":false,""error"":""js_run returned no usable result. Ensure the script explicitly returns the computed value.""}"
+                End If
+
+                ToolingFileLogger.LogRawResponseStub($"Agent-layer tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+                Dim skillArgs As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+
+                skillArgs("name") = toolCall.ToolName.Substring("skill_".Length)
+
+                If toolCall.Arguments IsNot Nothing Then
+                    For Each kvp In toolCall.Arguments
+                        If Not skillArgs.ContainsKey(kvp.Key) Then
+                            skillArgs(kvp.Key) = kvp.Value
+                        End If
+                    Next
+
+                    If Not skillArgs.ContainsKey("input") AndAlso toolCall.Arguments.ContainsKey("instruction") Then
+                        skillArgs("input") = toolCall.Arguments("instruction")
+                    End If
+                End If
+
+                response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+                If Not response.Success Then
+                    response.ErrorMessage = "Skill invocation returned no result."
+                End If
+
+                ToolingFileLogger.LogRawResponseStub($"Agent-layer skill ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalWebTool(toolCall, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
@@ -2949,6 +3425,8 @@ Partial Public Class ThisAddIn
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
+
+__AfterDispatch:
 
             ' Log completion with excerpt
             If response.Success Then
@@ -4514,6 +4992,19 @@ Partial Public Class ThisAddIn
         preselectMany:=If(SelectedToolNames, New List(Of String)()),
         $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
 
+        selector.AddExtraButton("Skills && Agents…",
+            Sub(s, e)
+                Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                    f.ShowDialog(selector)
+                End Using
+            End Sub)
+        selector.AddExtraButton("Memory…",
+            Sub(s, e)
+                Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
+                    f.ShowDialog(selector)
+                End Using
+            End Sub)
+
         If selector.ShowDialog() = DialogResult.OK Then
             Dim selected = selector.SelectedModels
             SelectedToolNames = selected.Select(Function(t) t.ToolName).ToList()
@@ -4558,6 +5049,23 @@ Partial Public Class ThisAddIn
         If (includeInteractiveM365Tools OrElse _chatAgentActive) AndAlso Not _apActive Then
             tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
         End If
+
+        ' Agent layer: session memory, skill loader, and discovered skills/agents (lazy registry-backed).
+        Try
+            SharedLibrary.Agents.AgentResources.Refresh()
+            tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+            tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+            tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
+
+            Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
+            SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)
+            SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(__agentReg, SharedLibrary.Agents.AgentResources.Agents)
+            tools.AddRange(__agentReg.MaterializeAll())
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Agent layer registration failed.", ex:=ex)
+        End Try
 
         Return tools
     End Function

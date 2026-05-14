@@ -423,6 +423,10 @@ Partial Public Class ThisAddIn
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
 
+        SharedLibrary.Agents.WordHostPolicy.Host = Me
+
+
+
         If System.Threading.SynchronizationContext.Current Is Nothing Then
             System.Threading.SynchronizationContext.SetSynchronizationContext(
         New System.Windows.Forms.WindowsFormsSynchronizationContext())
@@ -536,6 +540,23 @@ Partial Public Class ThisAddIn
             StartupHttpListener()
             ' Initialize Knowledge Store background indexing service
             InitializeKnowledgeStoreService()
+
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
+
         Catch ex As System.Exception
             ' Handle exceptions gracefully.
         End Try
@@ -596,7 +617,9 @@ Partial Public Class ThisAddIn
     End Function
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True) As Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution)
-        If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
+        If EnsureUI Then
+            Await EnsureUIThread().ConfigureAwait(False)
+        End If
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))

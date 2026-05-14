@@ -340,6 +340,22 @@ Partial Public Class ThisAddIn
             ' Initialize Knowledge Store background indexing service
             InitializeKnowledgeStoreService()
 
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
+
         Catch ex As System.Exception
             ' Handling errors gracefully
         End Try

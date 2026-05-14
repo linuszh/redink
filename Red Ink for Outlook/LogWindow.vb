@@ -292,6 +292,9 @@ Public Class LogWindow
         If String.IsNullOrEmpty(message) Then Return
         If rtbLog.IsDisposed Then Return
 
+        Dim displayMessage As String = NormalizeLogMessage(message)
+        If displayMessage.Length = 0 Then Return
+
         Dim timestamp = DateTime.Now.ToString("HH:mm:ss.fff")
         Dim textColor As Color = Color.Black
         Select Case (If(level, "info")).ToLowerInvariant()
@@ -309,13 +312,24 @@ Public Class LogWindow
             rtbLog.AppendText($"[{timestamp}] ")
             rtbLog.SelectionStart = rtbLog.TextLength
             rtbLog.SelectionColor = textColor
-            rtbLog.AppendText(message & Environment.NewLine)
+            rtbLog.AppendText(displayMessage & Environment.NewLine)
             rtbLog.SelectionStart = rtbLog.TextLength
             rtbLog.ScrollToCaret()
         Finally
             rtbLog.ResumeLayout()
         End Try
     End Sub
+
+    Private Shared Function NormalizeLogMessage(message As String) As String
+        Dim text As String = If(message, "")
+        text = text.Replace(vbCrLf, " ").Replace(vbCr, " ").Replace(vbLf, " ").Replace(vbTab, " ").Trim()
+
+        Do While text.Contains("  ")
+            text = text.Replace("  ", " ")
+        Loop
+
+        Return text
+    End Function
 
     ''' <summary>
     ''' Handles the Cancel button click and raises <see cref="CancelRequested"/>.

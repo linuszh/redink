@@ -598,6 +598,7 @@ Partial Public Class ThisAddIn
         If Not _chatAgentWorkspace.AllowRead Then _chatAgentWorkspace.AllowRead = True
 
         SaveChatAgentWorkspaceState()
+        SyncWorkspaceToPathPolicy()
         Return True
     End Function
 
@@ -621,6 +622,7 @@ Partial Public Class ThisAddIn
         _chatAgentWorkspace.IncludeHiddenSystem = includeHiddenSystem
 
         SaveChatAgentWorkspaceState()
+        SyncWorkspaceToPathPolicy()
     End Sub
 
     Friend Sub ChatAgentWorkspaceRevoke()
@@ -632,6 +634,7 @@ Partial Public Class ThisAddIn
             If File.Exists(statePath) Then File.Delete(statePath)
         Catch
         End Try
+        SyncWorkspaceToPathPolicy()
     End Sub
 
     Private Function IsChatAgentWorkspaceConnected() As Boolean
@@ -2984,5 +2987,23 @@ Partial Public Class ThisAddIn
         })
     End Function
 
+    ''' <summary>
+    ''' Pushes the current chat-agent workspace root into the SharedLibrary PathPolicy.
+    ''' Called whenever workspace state is mutated.
+    ''' </summary>
+    Private Sub SyncWorkspaceToPathPolicy()
+        Try
+            Dim ws = _chatAgentWorkspace
+            If ws IsNot Nothing AndAlso ws.AllowRead AndAlso
+               Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
+               Directory.Exists(ws.RootPath) Then
+                SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(ws.RootPath)
+            Else
+                SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
+            End If
+        Catch
+            SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
+        End Try
+    End Sub
 
 End Class
