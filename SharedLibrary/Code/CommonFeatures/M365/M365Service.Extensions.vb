@@ -174,10 +174,16 @@ Namespace SharedLibrary
             If String.IsNullOrWhiteSpace(targetFolder) Then
                 Throw New ArgumentException("targetFolder is required", NameOf(targetFolder))
             End If
+
+            Dim normalizedMessageId = ToGraphUrlSafeId(messageId)
+            If String.IsNullOrWhiteSpace(normalizedMessageId) Then
+                Throw New ArgumentException("messageId is required", NameOf(messageId))
+            End If
+
             Directory.CreateDirectory(targetFolder)
 
             Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
-            Return Await ExpandAttachmentsRecursive(context, token, "/me/messages/" & Uri.EscapeDataString(messageId),
+            Return Await ExpandAttachmentsRecursive(context, token, "/me/messages/" & Uri.EscapeDataString(normalizedMessageId),
                                                     targetFolder, options, depth:=0, ct:=ct).ConfigureAwait(False)
         End Function
 

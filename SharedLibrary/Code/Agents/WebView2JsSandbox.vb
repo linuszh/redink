@@ -33,6 +33,8 @@ Imports Microsoft.Web.WebView2.Core
 Imports Microsoft.Web.WebView2.WinForms
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports System.Net
+Imports System.Net.Sockets
 
 Namespace Agents
 
@@ -70,64 +72,379 @@ Namespace Agents
         Public Shared Async Function RunAsync(code As String,
                                               Optional timeoutMs As Integer = 15000,
                                               Optional allowNetwork As Boolean = False,
+                                              Optional navigateUrl As String = "",
+                                              Optional waitAfterLoadMs As Integer = 1500,
+                                              Optional waitForSelector As String = "",
                                               Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
+
+            Dim resultJson As String = ""
+
             If String.IsNullOrWhiteSpace(code) Then
                 Return JsonConvert.SerializeObject(New With {Key .error = "missing_code"})
             End If
+
             If _uiSync Is Nothing Then
                 Return JsonConvert.SerializeObject(New With {
                     Key .error = "sandbox_uninitialized",
                     Key .message = "WebView2JsSandbox.Initialize must be called by the host at startup."})
             End If
+
             If timeoutMs < 500 Then timeoutMs = 500
             If timeoutMs > 120000 Then timeoutMs = 120000
 
+            If waitAfterLoadMs < 0 Then waitAfterLoadMs = 0
+            If waitAfterLoadMs > 30000 Then waitAfterLoadMs = 30000
+
+            navigateUrl = If(navigateUrl, "").Trim()
+            waitForSelector = If(waitForSelector, "").Trim()
+
+            If navigateUrl <> "" Then
+                If Not allowNetwork Then
+                    Return JsonConvert.SerializeObject(New With {
+                        Key .error = "network_required",
+                        Key .message = "navigate_url requires allow_network=true."
+                    })
+                End If
+
+                If Not IsSafeNavigationUrl(navigateUrl) Then
+                    Return JsonConvert.SerializeObject(New With {
+                        Key .error = "unsafe_navigate_url",
+                        Key .message = "The requested navigate_url was blocked by sandbox policy."
+                    })
+                End If
+            End If
+
             Await _gate.WaitAsync(cancellationToken).ConfigureAwait(False)
+
             Try
                 Await EnsureInitialized(allowNetwork).ConfigureAwait(False)
 
-                Dim wrapped = BuildWrappedScript(code)
+                Dim prepareError As String = Await RunOnUiAsync(Of String)(
+                    Function() PrepareDocumentAsync(
+                        navigateUrl,
+                        waitAfterLoadMs,
+                        waitForSelector,
+                        timeoutMs,
+                        cancellationToken)).ConfigureAwait(False)
 
-                ' Important: ExecuteScriptAsync serializes Promise objects as "{}".
-                ' Use DevTools Runtime.evaluate with awaitPromise:=true so async wrapper results are awaited.
-                Dim execTask = RunOnUiAsync(Of String)(Function() ExecuteScriptAwaitPromiseAsync(wrapped))
-                Dim delay = Task.Delay(timeoutMs, cancellationToken)
-                Dim winner = Await Task.WhenAny(execTask, delay).ConfigureAwait(False)
+                If Not String.IsNullOrWhiteSpace(prepareError) Then
+                    resultJson = JsonConvert.SerializeObject(New With {
+                        Key .error = "navigation_failed",
+                        Key .message = prepareError
+                    })
+                Else
+                    Dim wrapped = BuildWrappedScript(code)
 
-                If winner Is delay Then
-                    Dim navTask As Task = Nothing
+                    Dim execTask = RunOnUiAsync(Of String)(Function() ExecuteScriptAwaitPromiseAsync(wrapped))
+                    Dim delay = Task.Delay(timeoutMs, cancellationToken)
+                    Dim winner = Await Task.WhenAny(execTask, delay).ConfigureAwait(False)
+
+                    If winner Is delay Then
+                        resultJson = JsonConvert.SerializeObject(New With {
+                            Key .error = "timeout",
+                            Key .timeout_ms = timeoutMs
+                        })
+                    Else
+                        Dim inner As String = Await execTask.ConfigureAwait(False)
+
+                        If String.IsNullOrWhiteSpace(inner) Then
+                            inner = JsonConvert.SerializeObject(New With {
+                                Key .ok = True,
+                                Key .result = CType(Nothing, Object)
+                            })
+                        End If
+
+                        resultJson = inner
+                    End If
+                End If
+
+            Catch oce As OperationCanceledException
+                resultJson = JsonConvert.SerializeObject(New With {Key .error = "cancelled"})
+            Catch ex As Exception
+                resultJson = JsonConvert.SerializeObject(New With {Key .error = "js_run_failed", Key .message = ex.Message})
+            End Try
+
+            Try
+                Await RunOnUiAsync(Function() ResetDocumentAsync()).ConfigureAwait(False)
+            Catch
+            End Try
+
+            _gate.Release()
+            Return resultJson
+        End Function
+
+        Private Shared Async Function PrepareDocumentAsync(navigateUrl As String,
+                                                           waitAfterLoadMs As Integer,
+                                                           waitForSelector As String,
+                                                           timeoutMs As Integer,
+                                                           cancellationToken As CancellationToken) As Task(Of String)
+            If _wv Is Nothing OrElse _wv.CoreWebView2 Is Nothing Then
+                Return "Sandbox browser is not initialized."
+            End If
+
+            If String.IsNullOrWhiteSpace(navigateUrl) Then
+                Await ResetDocumentAsync().ConfigureAwait(True)
+                Return ""
+            End If
+
+            Return Await NavigateAndWaitAsync(
+                navigateUrl,
+                waitAfterLoadMs,
+                waitForSelector,
+                Math.Min(timeoutMs, 45000),
+                cancellationToken).ConfigureAwait(True)
+        End Function
+
+        Private Shared Async Function ResetDocumentAsync() As Task
+            If _wv Is Nothing OrElse _wv.CoreWebView2 Is Nothing Then
+                Return
+            End If
+
+            Dim tcs As New TaskCompletionSource(Of Boolean)()
+            Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
+
+            handler =
+                Sub(sender, e)
                     Try
-                        navTask = RunOnUiAsync(Sub() _wv.CoreWebView2.NavigateToString("<!doctype html><html></html>"))
+                        RemoveHandler _wv.CoreWebView2.NavigationCompleted, handler
                     Catch
-                        navTask = Nothing
                     End Try
 
-                    If navTask IsNot Nothing Then
-                        Try
-                            Await navTask.ConfigureAwait(False)
-                        Catch
-                        End Try
+                    tcs.TrySetResult(True)
+                End Sub
+
+            AddHandler _wv.CoreWebView2.NavigationCompleted, handler
+            _wv.CoreWebView2.NavigateToString("<!doctype html><html><head><meta charset=""utf-8""></head><body></body></html>")
+
+            Dim completed = Await Task.WhenAny(tcs.Task, Task.Delay(2000)).ConfigureAwait(True)
+
+            If completed IsNot tcs.Task Then
+                Try
+                    RemoveHandler _wv.CoreWebView2.NavigationCompleted, handler
+                Catch
+                End Try
+            End If
+        End Function
+
+        Private Shared Async Function NavigateAndWaitAsync(url As String,
+                                                           waitAfterLoadMs As Integer,
+                                                           waitForSelector As String,
+                                                           timeoutMs As Integer,
+                                                           cancellationToken As CancellationToken) As Task(Of String)
+            Dim tcs As New TaskCompletionSource(Of String)()
+            Dim handler As EventHandler(Of CoreWebView2NavigationCompletedEventArgs) = Nothing
+
+            handler =
+                Sub(sender, e)
+                    Try
+                        RemoveHandler _wv.CoreWebView2.NavigationCompleted, handler
+                    Catch
+                    End Try
+
+                    If e.IsSuccess Then
+                        tcs.TrySetResult("")
+                    Else
+                        tcs.TrySetResult("Navigation failed: " & e.WebErrorStatus.ToString())
                     End If
+                End Sub
 
-                    Return JsonConvert.SerializeObject(New With {Key .error = "timeout", Key .timeout_ms = timeoutMs})
+            AddHandler _wv.CoreWebView2.NavigationCompleted, handler
+            _wv.CoreWebView2.Navigate(url)
+
+            Dim winner = Await Task.WhenAny(
+                tcs.Task,
+                Task.Delay(Math.Max(1000, timeoutMs), cancellationToken)).ConfigureAwait(True)
+
+            If winner IsNot tcs.Task Then
+                Try
+                    RemoveHandler _wv.CoreWebView2.NavigationCompleted, handler
+                Catch
+                End Try
+
+                Return "Navigation timed out."
+            End If
+
+            Dim navError As String = Await tcs.Task.ConfigureAwait(True)
+            If Not String.IsNullOrWhiteSpace(navError) Then
+                Return navError
+            End If
+
+            If waitAfterLoadMs > 0 Then
+                Await Task.Delay(waitAfterLoadMs, cancellationToken).ConfigureAwait(True)
+            End If
+
+            If Not String.IsNullOrWhiteSpace(waitForSelector) Then
+                Dim found As Boolean = Await WaitForSelectorAsync(
+                    waitForSelector,
+                    Math.Min(timeoutMs, 15000),
+                    cancellationToken).ConfigureAwait(True)
+
+                If Not found Then
+                    Return "Selector did not appear before timeout: " & waitForSelector
+                End If
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Async Function WaitForSelectorAsync(selector As String,
+                                                           timeoutMs As Integer,
+                                                           cancellationToken As CancellationToken) As Task(Of Boolean)
+            If String.IsNullOrWhiteSpace(selector) Then
+                Return True
+            End If
+
+            Dim selectorLiteral As String = JsonConvert.SerializeObject(selector)
+
+            Dim script As String = <![CDATA[
+(function() {
+    var selector = __SELECTOR__;
+
+    function rootHasSelector(root) {
+        if (!root) return false;
+
+        try {
+            if (root.querySelector && root.querySelector(selector)) {
+                return true;
+            }
+        } catch (e) {
+            return false;
+        }
+
+        try {
+            var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+            for (var i = 0; i < all.length; i++) {
+                var el = all[i];
+                if (el && el.shadowRoot && rootHasSelector(el.shadowRoot)) {
+                    return true;
+                }
+            }
+        } catch (e) {
+        }
+
+        return false;
+    }
+
+    return rootHasSelector(document);
+})();
+]]>.Value.Replace("__SELECTOR__", selectorLiteral)
+
+            Dim started As DateTime = DateTime.UtcNow
+
+            Do
+                cancellationToken.ThrowIfCancellationRequested()
+
+                Try
+                    Dim raw As String = Await _wv.CoreWebView2.ExecuteScriptAsync(script).ConfigureAwait(True)
+                    If String.Equals(If(raw, "").Trim(), "true", StringComparison.OrdinalIgnoreCase) Then
+                        Return True
+                    End If
+                Catch
+                End Try
+
+                If (DateTime.UtcNow - started).TotalMilliseconds >= timeoutMs Then
+                    Exit Do
                 End If
 
-                Dim inner As String = Await execTask.ConfigureAwait(False)
+                Await Task.Delay(250, cancellationToken).ConfigureAwait(True)
+            Loop
 
-                If String.IsNullOrWhiteSpace(inner) Then
-                    inner = JsonConvert.SerializeObject(New With {Key .ok = True, Key .result = Nothing})
+            Return False
+        End Function
+
+        Private Shared Function IsSafeNavigationUrl(url As String) As Boolean
+            Try
+                Dim uriResult As Uri = Nothing
+                If Not Uri.TryCreate(url, UriKind.Absolute, uriResult) Then
+                    Return False
                 End If
 
-                Return inner
-            Catch oce As OperationCanceledException
-                Return JsonConvert.SerializeObject(New With {Key .error = "cancelled"})
-            Catch ex As Exception
-                Return JsonConvert.SerializeObject(New With {Key .error = "js_run_failed", Key .message = ex.Message})
-            Finally
-                _gate.Release()
+                If uriResult.Scheme <> Uri.UriSchemeHttp AndAlso uriResult.Scheme <> Uri.UriSchemeHttps Then
+                    Return False
+                End If
+
+                If uriResult.IsLoopback Then
+                    Return False
+                End If
+
+                If Not String.IsNullOrWhiteSpace(uriResult.UserInfo) Then
+                    Return False
+                End If
+
+                Dim host As String = If(uriResult.Host, "").Trim().ToLowerInvariant()
+                If host = "" Then
+                    Return False
+                End If
+
+                If host = "localhost" OrElse
+                   host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".internal", StringComparison.OrdinalIgnoreCase) OrElse
+                   host.EndsWith(".home", StringComparison.OrdinalIgnoreCase) Then
+                    Return False
+                End If
+
+                Dim literalIp As IPAddress = Nothing
+                If IPAddress.TryParse(host, literalIp) Then
+                    Return Not IsPrivateIpAddress(literalIp)
+                End If
+
+                Try
+                    For Each resolvedAddress In Dns.GetHostAddresses(uriResult.DnsSafeHost)
+                        If IsPrivateIpAddress(resolvedAddress) Then
+                            Return False
+                        End If
+                    Next
+                Catch
+                    ' If DNS resolution fails here, allow the normal navigation attempt to decide reachability.
+                End Try
+
+                Return True
+            Catch
+                Return False
             End Try
         End Function
 
+        Private Shared Function IsPrivateIpAddress(address As IPAddress) As Boolean
+            If address Is Nothing Then
+                Return True
+            End If
+
+            If IPAddress.IsLoopback(address) Then
+                Return True
+            End If
+
+            Dim bytes = address.GetAddressBytes()
+
+            If address.AddressFamily = AddressFamily.InterNetwork Then
+                If bytes.Length <> 4 Then
+                    Return True
+                End If
+
+                If bytes(0) = 10 Then Return True
+                If bytes(0) = 127 Then Return True
+                If bytes(0) = 169 AndAlso bytes(1) = 254 Then Return True
+                If bytes(0) = 172 AndAlso bytes(1) >= 16 AndAlso bytes(1) <= 31 Then Return True
+                If bytes(0) = 192 AndAlso bytes(1) = 168 Then Return True
+                If bytes(0) = 100 AndAlso bytes(1) >= 64 AndAlso bytes(1) <= 127 Then Return True
+                If bytes(0) = 0 Then Return True
+
+                Return False
+            End If
+
+            If address.AddressFamily = AddressFamily.InterNetworkV6 Then
+                If address.IsIPv6LinkLocal OrElse address.IsIPv6SiteLocal Then
+                    Return True
+                End If
+
+                If bytes.Length = 16 AndAlso (bytes(0) And &HFE) = &HFC Then
+                    Return True
+                End If
+
+                Return False
+            End If
+
+            Return True
+        End Function
 
 
         ' --------------------------------------------------------------- wrapper

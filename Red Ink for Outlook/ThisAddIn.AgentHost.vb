@@ -29,12 +29,12 @@ Partial Public Class ThisAddIn
             ct As CancellationToken) As Task(Of String) _
             Implements SharedLibrary.Agents.ISubAgentHost.RunIsolatedToolingLoopAsync
 
-        ' 1) Snapshot current model config.
         Dim backup As ModelConfig = GetCurrentConfig(_context)
+
         Try
-            ' 2) Resolve and apply the requested special-task-model (fallback agentdefaultmodel).
             Dim modelKey As String = If(String.IsNullOrWhiteSpace(request.SpecialModelKey), "agentdefaultmodel", request.SpecialModelKey)
             Dim swapped As Boolean = False
+
             If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                 swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, modelKey)
                 If Not swapped AndAlso Not modelKey.Equals("agentdefaultmodel", StringComparison.OrdinalIgnoreCase) Then
@@ -42,46 +42,75 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' 3) Build the tool list available to the sub-agent. We base it on the user's currently
-            '    selected tools (so sources stay user-controlled) and always include memory_*.
             Dim allTools As New List(Of ModelConfig)()
-            Try
-                Dim available = GetAvailableTools(includeInteractiveM365Tools:=False)
-                If SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0 Then
-                    For Each mc In available
-                        If mc Is Nothing OrElse String.IsNullOrWhiteSpace(mc.ToolName) Then Continue For
-                        If SelectedToolNames.Contains(mc.ToolName) Then allTools.Add(mc)
-                    Next
-                End If
-            Catch
-            End Try
-            ' Make agent-layer tools always present so a sub-agent can offload to memory.
-            allTools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
 
-            ' Narrow per agent's allowed-tools (if provided).
-            Dim narrowed As List(Of ModelConfig)
-            If request.AllowedToolNames Is Nothing OrElse request.AllowedToolNames.Count = 0 Then
-                narrowed = allTools
+            If _activeToolingContext IsNot Nothing AndAlso
+               _activeToolingContext.AllowedToolRegistry IsNot Nothing Then
+
+                allTools = _activeToolingContext.AllowedToolRegistry.MaterializeAll()
+                ToolingFileLogger.LogStep("[subagent-host] Using parent tooling registry as sub-agent tool universe.")
+            ElseIf Not _apActive Then
+                Try
+                    Dim st = LoadInkyState()
+                    allTools.AddRange(GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True))
+
+                    If st IsNot Nothing AndAlso st.ToolingEnabled AndAlso IsChatAgentWorkspaceConnected() Then
+                        allTools.AddRange(GetChatAgentWorkspaceTools())
+                    End If
+                Catch
+                End Try
+
+                ToolingFileLogger.LogWarn("[subagent-host] Parent tooling registry unavailable; falling back to Local Chat effective tools.")
             Else
-                Dim allow As New HashSet(Of String)(request.AllowedToolNames, StringComparer.OrdinalIgnoreCase)
-                narrowed = allTools.Where(Function(t) t IsNot Nothing AndAlso allow.Contains(t.ToolName)).ToList()
+                Try
+                    Dim available = GetAvailableTools(includeInteractiveM365Tools:=False)
+
+                    If SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0 Then
+                        For Each mc In available
+                            If mc Is Nothing OrElse String.IsNullOrWhiteSpace(mc.ToolName) Then Continue For
+                            If SelectedToolNames.Contains(mc.ToolName) Then allTools.Add(mc)
+                        Next
+                    End If
+
+                    allTools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
+                Catch
+                End Try
+
+                ToolingFileLogger.LogWarn("[subagent-host] Parent tooling registry unavailable; falling back to AutoPilot/local selection.")
             End If
 
-            ' 4) Run ONE isolated tooling loop. fullPromptOverride supplies the user message;
-            '    sysCommand supplies the system prompt; no parent history is passed.
+            allTools =
+                allTools.
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+                    Select(Function(g) g.First()).
+                    ToList()
+
+            ToolingFileLogger.LogStep("[subagent-host] Requested allowed tools: " &
+                                      If(request.AllowedToolNames Is Nothing OrElse request.AllowedToolNames.Count = 0,
+                                         "(none)",
+                                         String.Join(", ", request.AllowedToolNames)))
+
+            ToolingFileLogger.LogStep("[subagent-host] Resolved sub-agent tool universe: " &
+                                      If(allTools.Count = 0,
+                                         "(none)",
+                                         String.Join(", ", allTools.Select(Function(t) t.ToolName))))
+
             Dim result = Await ExecuteToolingLoop(
                 sysCommand:=request.SystemPrompt,
                 userText:="",
-                selectedTools:=narrowed,
+                selectedTools:=allTools,
                 useSecondAPI:=False,
                 fullPromptOverride:=request.UserMessage,
                 hideSplash:=True,
                 hideLogWindow:=True,
                 cancellationToken:=ct,
-                subAgentMode:=True).ConfigureAwait(False)
+                subAgentMode:=True,
+                subAgentAllowedToolNames:=request.AllowedToolNames,
+                subAgentSpecialModelKey:=request.SpecialModelKey).ConfigureAwait(False)
+
             Return If(result, "")
         Finally
-            ' 5) Restore.
             Try : RestoreDefaults(_context, backup) : Catch : End Try
         End Try
     End Function

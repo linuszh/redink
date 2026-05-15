@@ -280,6 +280,15 @@ Namespace SharedLibrary
            toolName.StartsWith("word_doc_", System.StringComparison.OrdinalIgnoreCase)
         End Function
 
+        Private Sub UpdateInstructionLabelLayout()
+            If Me.lblTitle Is Nothing OrElse Me.outer Is Nothing Then
+                Return
+            End If
+
+            Dim width As Integer = Math.Max(320, Me.ClientSize.Width - Me.outer.Padding.Left - Me.outer.Padding.Right - 6)
+            Me.lblTitle.MaximumSize = New System.Drawing.Size(width, 0)
+        End Sub
+
         ''' <summary>
         ''' Creates and configures all UI controls and event handlers for the dialog.
         ''' </summary>
@@ -313,8 +322,10 @@ Namespace SharedLibrary
             Me.lblTitle = New System.Windows.Forms.Label() With {
                 .Text = instruction,
                 .Dock = System.Windows.Forms.DockStyle.Top,
-                .Height = 28,
-                .TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+                .AutoSize = True,
+                .MaximumSize = New System.Drawing.Size(580, 0),
+                .TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
             }
 
             Me.txtFilter = New System.Windows.Forms.TextBox() With {
@@ -381,6 +392,16 @@ Namespace SharedLibrary
             Me.outer.Controls.Add(Me.chkReset, 0, 3)
             Me.outer.Controls.Add(Me.pnlButtons, 0, 4)
             Me.Controls.Add(Me.outer)
+
+            AddHandler Me.Shown,
+                    Sub()
+                        UpdateInstructionLabelLayout()
+                    End Sub
+
+            AddHandler Me.Resize,
+                Sub()
+                    UpdateInstructionLabelLayout()
+                End Sub
 
             Me.AcceptButton = Me.btnOK
             Me.CancelButton = Me.btnCancel

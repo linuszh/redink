@@ -61,7 +61,6 @@ Partial Public Class ThisAddIn
     Private Const CA_Tool_WorkspaceRead As String = "agent_workspace_read"
     Private Const CA_Tool_WorkspaceWrite As String = "agent_workspace_write"
     Private Const CA_Tool_WorkspaceFileOp As String = "agent_workspace_file_op"
-    Private Const CA_Tool_WorkspaceStage As String = "agent_workspace_stage"
     Private Const CA_Tool_WorkspaceSaveSessionFile As String = "agent_workspace_save_session_file"
     Private Const CA_Tool_WorkspaceSearch As String = "agent_workspace_search"
     Private Const CA_Tool_WorkspaceFindFiles As String = "agent_workspace_find_files"
@@ -165,14 +164,19 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function GetAgentFileListForBrowser() As List(Of Object)
         Dim result As New List(Of Object)()
+
         For Each att In _chatAgentFiles
+            Dim hydrated = EnsureSessionAttachmentAvailable(att)
+            If hydrated Is Nothing Then Continue For
+
             result.Add(New With {
-                .name = att.OriginalFileName,
-                .size = att.SizeBytes,
-                .ext = att.Extension,
-                .overLimit = att.IsOverSizeLimit
+                .name = hydrated.OriginalFileName,
+                .size = hydrated.SizeBytes,
+                .ext = hydrated.Extension,
+                .overLimit = hydrated.IsOverSizeLimit
             })
         Next
+
         Return result
     End Function
 
@@ -182,6 +186,61 @@ Partial Public Class ThisAddIn
     Private Sub ChatAgentClearFiles()
         CleanupChatAgentTempDir()
     End Sub
+
+    Private Function EnsureSessionAttachmentAvailable(att As AutoPilotAttachmentInfo) As AutoPilotAttachmentInfo
+        If att Is Nothing Then Return Nothing
+
+        If Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso File.Exists(att.TempFilePath) Then
+            Return att
+        End If
+
+        If String.IsNullOrWhiteSpace(att.SourcePath) OrElse Not File.Exists(att.SourcePath) Then
+            Try
+                _chatAgentFiles.Remove(att)
+            Catch
+            End Try
+
+            If _apCurrentAttachments IsNot Nothing Then
+                Try
+                    _apCurrentAttachments.Remove(att)
+                Catch
+                End Try
+            End If
+
+            Return Nothing
+        End If
+
+        Dim tempDir = EnsureChatAgentTempDir()
+        Dim destName = Path.GetFileName(att.SourcePath)
+        Dim destPath = Path.Combine(tempDir, destName)
+
+        Dim counter = 1
+        While File.Exists(destPath)
+            destPath = Path.Combine(
+                tempDir,
+                Path.GetFileNameWithoutExtension(destName) & $"_{counter}" & Path.GetExtension(destName))
+            counter += 1
+        End While
+
+        File.Copy(att.SourcePath, destPath, overwrite:=False)
+
+        Dim fi As New FileInfo(destPath)
+        att.TempFilePath = destPath
+        att.OriginalFileName = Path.GetFileName(destPath)
+        att.Extension = fi.Extension.ToLowerInvariant()
+        att.SizeBytes = fi.Length
+        att.CreatedTime = fi.CreationTimeUtc
+        att.LastModifiedTime = fi.LastWriteTimeUtc
+        If String.IsNullOrWhiteSpace(att.StatusMessage) Then
+            att.StatusMessage = "Rehydrated from workspace source"
+        End If
+
+        If _apCurrentAttachments IsNot Nothing AndAlso Not _apCurrentAttachments.Contains(att) Then
+            _apCurrentAttachments.Add(att)
+        End If
+
+        Return att
+    End Function
 
     ''' <summary>
     ''' Creates a safe snapshot of the current chat-agent tool-call log before teardown clears it.
@@ -363,18 +422,24 @@ Partial Public Class ThisAddIn
     ''' Returns the combined tool list (internal agent tools + selected external tools).
     ''' </summary>
     Private Function ChatAgentSetupToolContext() As List(Of ModelConfig)
-        ' Ensure per-session temp dir exists (tools may create files even without user uploads)
         If String.IsNullOrWhiteSpace(_chatAgentTempDir) OrElse Not Directory.Exists(_chatAgentTempDir) Then
             _chatAgentTempDir = Path.Combine(Path.GetTempPath(), CA_TempPrefix & Guid.NewGuid().ToString("N"))
             Directory.CreateDirectory(_chatAgentTempDir)
         End If
 
-        ' Set shared fields that tools read
+        Dim hydratedFiles As New List(Of AutoPilotAttachmentInfo)()
+        For Each att In _chatAgentFiles.ToList()
+            Dim hydrated = EnsureSessionAttachmentAvailable(att)
+            If hydrated IsNot Nothing Then
+                hydratedFiles.Add(hydrated)
+            End If
+        Next
+        _chatAgentFiles = hydratedFiles
+
         _apCurrentTempDir = _chatAgentTempDir
         _apCurrentAttachments = _chatAgentFiles
         _apCurrentToolCallLog = New List(Of AutoPilotToolCallEntry)()
 
-        ' Synthesize a minimal mail info (some tools guard on it)
         _apCurrentMailInfo = New AutoPilotMailInfo() With {
             .EntryID = "",
             .Subject = "Chat Agent Session",
@@ -394,24 +459,20 @@ Partial Public Class ThisAddIn
         _chatAgentActive = True
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
-        ' Build tool list: internal tools (excluding summarize_thread) + selected external chat tools
         Dim tools As New List(Of ModelConfig)()
-        Dim internalTools = GetAutoPilotInternalTools()
 
-        ' Exclude e-mail-specific tools
-        For Each t In internalTools
-            If t.ToolName = AP_Tool_SummarizeThread Then Continue For
-            tools.Add(t)
-        Next
-
-        ' Add selected external/web tools from the chat session
         If _selectedToolsForChat IsNot Nothing Then
             tools.AddRange(_selectedToolsForChat)
         End If
 
         tools.AddRange(GetChatAgentWorkspaceTools())
+        tools.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
 
-        Return tools
+        Return tools.
+            Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+            GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+            Select(Function(g) g.First()).
+            ToList()
     End Function
 
     ''' <summary>
@@ -427,9 +488,6 @@ Partial Public Class ThisAddIn
         _apCurrentMailInfo = Nothing
         _apCurrentToolCallLog = Nothing
         _apKnowledgeSourceCopies.Clear()
-        ' Ensure temp dir is cleaned up (covers cancellation / exception paths
-        ' where ChatAgentCollectAndCopyOutputs was never reached)
-        CleanupChatAgentTempDir()
     End Sub
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -448,20 +506,15 @@ Partial Public Class ThisAddIn
             Return copiedFiles
         End If
 
-        ' Collect result files using the same logic as AutoPilot
         Dim resultFiles = CollectResultAttachments(_chatAgentTempDir, _chatAgentFiles)
         If resultFiles Is Nothing OrElse resultFiles.Count = 0 Then
-            ' Even with no outputs, clean up the temp dir
-            CleanupChatAgentTempDir()
             Return copiedFiles
         End If
 
-        ' Create output folder: Desktop\Inky\yymmdd_hh-mm
         Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
         Dim timestamp = DateTime.Now.ToString("yyMMdd_HH-mm")
         Dim outputDir = Path.Combine(desktopPath, "Inky", timestamp)
 
-        ' Handle collision (rapid successive runs)
         Dim counter = 1
         While Directory.Exists(outputDir)
             outputDir = Path.Combine(desktopPath, "Inky", timestamp & $"_{counter}")
@@ -474,7 +527,7 @@ Partial Public Class ThisAddIn
             Try
                 Dim destName = Path.GetFileName(srcPath)
                 Dim destPath = Path.Combine(outputDir, destName)
-                ' Handle name collision in output folder
+
                 Dim fileCounter = 1
                 While File.Exists(destPath)
                     Dim baseName = Path.GetFileNameWithoutExtension(destName)
@@ -482,23 +535,19 @@ Partial Public Class ThisAddIn
                     destPath = Path.Combine(outputDir, baseName & $"_{fileCounter}{ext}")
                     fileCounter += 1
                 End While
+
                 File.Copy(srcPath, destPath, overwrite:=False)
                 copiedFiles.Add(destPath)
             Catch
             End Try
         Next
 
-        ' Open the folder in Explorer
         If copiedFiles.Count > 0 Then
             Try
                 Process.Start("explorer.exe", outputDir)
             Catch
             End Try
         End If
-
-        ' Clean up: delete the entire temp directory and reset tracking.
-        ' The only surviving files are the copies in the Desktop output folder.
-        CleanupChatAgentTempDir()
 
         Return copiedFiles
     End Function
@@ -552,6 +601,8 @@ Partial Public Class ThisAddIn
         Catch
             _chatAgentWorkspace = New ChatAgentWorkspaceState()
         End Try
+
+        SyncWorkspaceToPathPolicy()
     End Sub
 
     Private Sub SaveChatAgentWorkspaceState()
@@ -765,17 +816,32 @@ Partial Public Class ThisAddIn
         Return _chatAgentTempDir
     End Function
 
-    Private Function RegisterSessionFile(filePath As String, statusMessage As String) As AutoPilotAttachmentInfo
+    Private Function RegisterSessionFile(filePath As String,
+                                         statusMessage As String,
+                                         Optional sourcePath As String = Nothing) As AutoPilotAttachmentInfo
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then Return Nothing
 
         Dim fileName = Path.GetFileName(filePath)
-        Dim existing = _chatAgentFiles.FirstOrDefault(Function(a) a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase))
-        If existing IsNot Nothing Then Return existing
+        Dim existing = _chatAgentFiles.FirstOrDefault(
+            Function(a)
+                Return a IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                       a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+        If existing IsNot Nothing Then
+            If String.IsNullOrWhiteSpace(existing.SourcePath) AndAlso Not String.IsNullOrWhiteSpace(sourcePath) Then
+                existing.SourcePath = sourcePath
+            End If
+            existing.StatusMessage = statusMessage
+            Return existing
+        End If
 
         Dim fi As New FileInfo(filePath)
         Dim att As New AutoPilotAttachmentInfo() With {
             .OriginalFileName = fileName,
             .TempFilePath = filePath,
+            .SourcePath = sourcePath,
             .Extension = fi.Extension.ToLowerInvariant(),
             .SizeBytes = fi.Length,
             .IsOverSizeLimit = False,
@@ -789,7 +855,12 @@ Partial Public Class ThisAddIn
         _chatAgentFiles.Add(att)
 
         If _apCurrentAttachments IsNot Nothing AndAlso
-           Not _apCurrentAttachments.Any(Function(a) a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)) Then
+           Not _apCurrentAttachments.Any(
+               Function(a)
+                   Return a IsNot Nothing AndAlso
+                          Not String.IsNullOrWhiteSpace(a.TempFilePath) AndAlso
+                          a.TempFilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)
+               End Function) Then
             _apCurrentAttachments.Add(att)
         End If
 
@@ -801,6 +872,17 @@ Partial Public Class ThisAddIn
 
         Dim sourcePath = ResolveWorkspacePath(relativePath)
         If sourcePath Is Nothing OrElse Not File.Exists(sourcePath) OrElse ShouldSkipHiddenSystem(sourcePath) Then Return Nothing
+
+        Dim existing = _chatAgentFiles.FirstOrDefault(
+            Function(att)
+                Return att IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(att.SourcePath) AndAlso
+                       att.SourcePath.Equals(sourcePath, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+        If existing IsNot Nothing Then
+            Return EnsureSessionAttachmentAvailable(existing)
+        End If
 
         Dim tempDir = EnsureChatAgentTempDir()
         Dim destName = Path.GetFileName(sourcePath)
@@ -815,13 +897,15 @@ Partial Public Class ThisAddIn
         End While
 
         File.Copy(sourcePath, destPath, overwrite:=False)
-        Return RegisterSessionFile(destPath, "Loaded from agent workspace")
+        Return RegisterSessionFile(destPath, "Loaded from agent workspace", sourcePath:=sourcePath)
     End Function
 
     Private Function CopySessionFileToWorkspace(sessionFileName As String, targetRelativePath As String, overwrite As Boolean) As String
         If Not _chatAgentWorkspace.AllowWrite Then Return "Error: Workspace write permission is disabled."
 
         Dim att = FindAttachment(sessionFileName)
+        att = EnsureSessionAttachmentAvailable(att)
+
         If att Is Nothing OrElse String.IsNullOrWhiteSpace(att.TempFilePath) OrElse Not File.Exists(att.TempFilePath) Then
             Dim availableNames = GetAllAvailableFileNames().Distinct(StringComparer.OrdinalIgnoreCase).ToList()
             Dim availableText As String
@@ -882,40 +966,25 @@ Partial Public Class ThisAddIn
         If Not IsChatAgentWorkspaceConnected() Then Return tools
 
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceList,
-            .ModelDescription = "Agent Workspace: List Files (local only)",
-            .ToolPriority = 120,
+            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
+            .ModelDescription = "Agent Workspace: Write File (local only)",
+            .ToolPriority = 123,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceList & ": Lists files and folders inside the user's granted local agent workspace. " &
-                "Use only relative paths. Hidden/system/reparse-point files are excluded unless the user enabled them.",
+                CA_Tool_WorkspaceWrite & ": Creates a plain text/code file inside the workspace. " &
+                "When updating or replacing an existing workspace file, set overwrite=true. " &
+                "NEVER use this tool to create or overwrite PDF, Word, Excel, PowerPoint, image, archive, audio, video, or any other binary/document format. " &
+                "Use agent_workspace_save_session_file only after another tool has produced a real file.",
             .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceList & """," &
-                """description"":""Lists files and folders inside the granted local agent workspace. Use relative paths only.""," &
+                "{""name"":""" & CA_Tool_WorkspaceWrite & """," &
+                """description"":""Creates a UTF-8 text file inside the workspace. To replace an existing file, set overwrite=true. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative workspace folder path. Empty means root.""}," &
-                """recursive"":{""type"":""boolean"",""description"":""Whether to recurse into subfolders. Default false.""}," &
-                """max_items"":{""type"":""integer"",""description"":""Maximum items to return. Default 200, capped.""}" &
-                "}}}"
+                """path"":{""type"":""string"",""description"":""Relative target file path inside the workspace.""}," &
+                """content"":{""type"":""string"",""description"":""File content to write.""}," &
+                """overwrite"":{""type"":""boolean"",""description"":""Set to true only when the user wants to replace an existing file. Default false.""}" &
+                "},""required"":[""path"",""content""]}}"
         })
 
-        tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceStage,
-            .ModelDescription = "Agent Workspace: Load Files for Tools (local only)",
-            .ToolPriority = 121,
-            .ToolErrorHandling = "skip",
-            .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceStage & ": Loads one workspace file or a folder of workspace files into the current agent session. " &
-                "After staging, existing tools such as read_attachment, process_word_document, extract_pdf_text, compare_word_documents, etc. can reference the staged filenames.",
-            .ToolDefinition =
-                "{""name"":""" & CA_Tool_WorkspaceStage & """," &
-                """description"":""Stages workspace files into the current agent session so existing document tools can process them.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """path"":{""type"":""string"",""description"":""Relative workspace file or folder path.""}," &
-                """recursive"":{""type"":""boolean"",""description"":""If path is a folder, stage files recursively. Default false.""}," &
-                """max_files"":{""type"":""integer"",""description"":""Maximum files to stage from a folder. Default 50, capped.""}" &
-                "},""required"":[""path""]}}"
-        })
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
@@ -923,10 +992,12 @@ Partial Public Class ThisAddIn
             .ToolPriority = 122,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceRead & ": Reads/extracts text from one workspace file. For Office/PDF files, it stages the file and uses the same extraction stack as existing attachment tools.",
+                CA_Tool_WorkspaceRead & ": Read or extract text from one workspace file. " &
+                "For one local workspace PDF or Office document, prefer this tool over calling extract_pdf_text directly on a workspace path, because it stages the file and uses the existing attachment extraction stack. " &
+                "For many files, use agent_workspace_stage first and then continue processing the full staged set.",
             .ToolDefinition =
                 "{""name"":""" & CA_Tool_WorkspaceRead & """," &
-                """description"":""Reads or extracts text from a workspace file.""," &
+                """description"":""Reads or extracts text from one workspace file. Prefer this for a single workspace PDF or Office file instead of calling extract_pdf_text directly on a workspace path, because the file is staged and processed through the existing attachment extraction stack.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """path"":{""type"":""string"",""description"":""Relative workspace file path.""}," &
                 """max_chars"":{""type"":""integer"",""description"":""Maximum characters to return. Default 12000, capped.""}" &
@@ -939,14 +1010,16 @@ Partial Public Class ThisAddIn
             .ToolPriority = 123,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
-                CA_Tool_WorkspaceWrite & ": Creates or overwrites a text/code file inside the workspace. Use agent_workspace_save_session_file for Office/PDF/session outputs.",
+                CA_Tool_WorkspaceWrite & ": Creates a text/code file inside the workspace. " &
+                "When updating or replacing an existing workspace file, set overwrite=true. " &
+                "Use agent_workspace_save_session_file for Office/PDF/session outputs.",
             .ToolDefinition =
                 "{""name"":""" & CA_Tool_WorkspaceWrite & """," &
-                """description"":""Creates or overwrites a text file inside the workspace.""," &
+                """description"":""Creates a text file inside the workspace. To replace an existing file, set overwrite=true.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
                 """path"":{""type"":""string"",""description"":""Relative target file path inside the workspace.""}," &
                 """content"":{""type"":""string"",""description"":""File content to write.""}," &
-                """overwrite"":{""type"":""boolean"",""description"":""Overwrite if file exists. Default false.""}" &
+                """overwrite"":{""type"":""boolean"",""description"":""Set to true only when the user wants to replace an existing file. Default false.""}" &
                 "},""required"":[""path"",""content""]}}"
         })
 
@@ -1026,7 +1099,6 @@ Partial Public Class ThisAddIn
                  CA_Tool_WorkspaceRead,
                  CA_Tool_WorkspaceWrite,
                  CA_Tool_WorkspaceFileOp,
-                 CA_Tool_WorkspaceStage,
                  CA_Tool_WorkspaceSaveSessionFile,
                  CA_Tool_WorkspaceSearch,
                  CA_Tool_WorkspaceFindFiles,
@@ -1080,9 +1152,6 @@ Partial Public Class ThisAddIn
                 Select Case toolCall.ToolName
                     Case CA_Tool_WorkspaceList
                         response.Response = ExecuteWorkspaceList(toolCall)
-
-                    Case CA_Tool_WorkspaceStage
-                        response.Response = ExecuteWorkspaceStage(toolCall)
 
                     Case CA_Tool_WorkspaceRead
                         response.Response = Await ExecuteWorkspaceRead(toolCall, context)
@@ -1231,52 +1300,76 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
-    Private Function ExecuteWorkspaceStage(toolCall As ToolCall) As String
-        If Not _chatAgentWorkspace.AllowRead Then Return "Error: Workspace read permission is disabled."
 
-        Dim rel = GetArgString(toolCall.Arguments, "path")
-        Dim recursive = GetArgBool(toolCall.Arguments, "recursive", False)
-        Dim maxFiles = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_files", 50), 1), 500)
-        Dim fullPath = ResolveWorkspacePath(rel)
+    ''' <summary>
+    ''' Unified text extractor for any supported file in the Local Chat workspace.
+    ''' Mirrors Word's GetFileContentEx pipeline using existing SharedMethods readers.
+    ''' Does NOT stage the file into the chat-agent session/temp store.
+    ''' </summary>
+    Private Async Function ChatAgentExtractFileText(filePath As String) As Task(Of String)
+        If String.IsNullOrWhiteSpace(filePath) OrElse Not IO.File.Exists(filePath) Then Return ""
+        Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
 
-        If fullPath Is Nothing Then Return "Error: Invalid workspace path."
+        Try
+            Select Case ext
+                Case ".txt", ".ini", ".csv", ".tsv", ".log", ".json", ".xml", ".html", ".htm",
+                     ".md", ".yaml", ".yml",
+                     ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql"
+                    Return SharedMethods.ReadTextFile(filePath, ReturnErrorInsteadOfEmpty:=False)
 
-        Dim staged As New List(Of String)()
+                Case ".rtf"
+                    Return SharedMethods.ReadRtfAsText(filePath, ReturnErrorInsteadOfEmpty:=False)
 
-        If File.Exists(fullPath) Then
-            Dim att = StageWorkspaceFile(rel)
-            If att IsNot Nothing Then staged.Add(att.OriginalFileName)
-        ElseIf Directory.Exists(fullPath) Then
-            Dim optionValue = If(recursive, System.IO.SearchOption.AllDirectories, System.IO.SearchOption.TopDirectoryOnly)
-            For Each filePath In Directory.GetFiles(fullPath, "*", optionValue)
-                If staged.Count >= maxFiles Then Exit For
-                If ShouldSkipHiddenSystem(filePath) Then Continue For
-                Dim att = StageWorkspaceFile(ToWorkspaceRelativePath(filePath))
-                If att IsNot Nothing Then staged.Add(att.OriginalFileName)
-            Next
-        Else
-            Return "Error: Workspace file or folder not found."
-        End If
+                Case ".doc"
+                    If INI_AllowLegacyDocFiles Then Return SharedMethods.ReadWordDocument(filePath, ReturnErrorInsteadOfEmpty:=False)
+                    Return ""
 
-        Return "Staged " & staged.Count & " file(s): " & String.Join(", ", staged)
+                Case ".docx"
+                    Return SharedMethods.ReadDocxSandboxed(filePath)
+                Case ".xlsx"
+                    Return SharedMethods.ReadXlsxSandboxed(filePath, silent:=True, askWorksheetSelection:=False)
+                Case ".pptx"
+                    Return SharedMethods.ReadPptxSandboxed(filePath)
+                Case ".eml"
+                    Return SharedMethods.ReadEmlSandboxed(filePath)
+                Case ".msg"
+                    Return SharedMethods.ReadMsgSandboxed(filePath)
+
+                Case ".pdf"
+                    Dim r = Await SharedMethods.ReadPdfAsTextEx(filePath, True, DoOCR:=True, AskUser:=False, context:=_context).ConfigureAwait(False)
+                    Return If(r?.Content, "")
+
+                Case Else
+                    If SharedMethods.IsBinaryMediaExtension(ext) Then
+                        Dim taskFlag = SharedMethods.TaskFlagForExtension(ext)
+                        If SharedMethods.IsBinaryMediaSupported(_context, ext, taskFlag) Then
+                            Return Await SharedMethods.ReadBinaryFileViaLLM(filePath, _context, "", askUser:=False, taskFlag:=taskFlag).ConfigureAwait(False)
+                        End If
+                    End If
+                    Return ""
+            End Select
+        Catch ex As Exception
+            Debug.WriteLine("ChatAgentExtractFileText failed for '" & filePath & "': " & ex.Message)
+            Return ""
+        End Try
     End Function
 
     Private Async Function ExecuteWorkspaceRead(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of String)
         If Not _chatAgentWorkspace.AllowRead Then Return "Error: Workspace read permission is disabled."
 
         Dim rel = GetArgString(toolCall.Arguments, "path")
-        Dim maxChars = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_chars", 12000), 1000), 100000)
-        Dim att = StageWorkspaceFile(rel)
+        Dim maxChars = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_chars", 12000), 1000), 500000)
+        Dim fullPath = ResolveWorkspacePath(rel)
+        If String.IsNullOrWhiteSpace(fullPath) OrElse Not File.Exists(fullPath) Then
+            Return "Error: Workspace file not found."
+        End If
 
-        If att Is Nothing Then Return "Error: Workspace file not found or could not be staged."
-
-        Dim text = Await ReadSingleAttachmentText(att, context)
+        Dim text As String = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
         If String.IsNullOrWhiteSpace(text) Then Return $"No readable text extracted from '{rel}'."
 
         If text.Length > maxChars Then
             text = text.Substring(0, maxChars) & vbCrLf & $"[Truncated at {maxChars} characters.]"
         End If
-
         Return text
     End Function
 
@@ -1289,12 +1382,21 @@ Partial Public Class ThisAddIn
         Dim targetPath = ResolveWorkspacePath(rel)
 
         If targetPath Is Nothing Then Return "Error: Invalid workspace target path."
-        If File.Exists(targetPath) AndAlso Not overwrite Then Return "Error: Target file already exists."
+
+        Dim alreadyExists = File.Exists(targetPath)
+        If alreadyExists AndAlso Not overwrite Then
+            Return "Error: Target file already exists. Re-run agent_workspace_write with overwrite=true to replace it."
+        End If
 
         Dim dir = Path.GetDirectoryName(targetPath)
         If Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
 
         File.WriteAllText(targetPath, If(content, ""), Encoding.UTF8)
+
+        If alreadyExists Then
+            Return $"Overwritten workspace file '{ToWorkspaceRelativePath(targetPath)}'."
+        End If
+
         Return $"Written workspace file '{ToWorkspaceRelativePath(targetPath)}'."
     End Function
 
@@ -1540,21 +1642,17 @@ Partial Public Class ThisAddIn
         Dim root = _chatAgentWorkspace.RootPath
 
         sb.AppendLine("[AGENT WORKSPACE]")
-        sb.AppendLine("A local agent workspace is connected and may contain relevant user documents.")
-        sb.AppendLine("IMPORTANT: Workspace files are NOT the same as current session attachments.")
-        sb.AppendLine("IMPORTANT: The tool 'list_attachments' only lists files already loaded/staged into the current session.")
+        sb.AppendLine("A local agent workspace is connected. Workspace files are addressable by their workspace-relative path; you read them in place.")
         sb.AppendLine("Preferred workspace workflow:")
-        sb.AppendLine("  1. Use agent_workspace_find_files before acting on vague file references.")
-        sb.AppendLine("  2. Use agent_workspace_list for simple folder inspection.")
-        sb.AppendLine("  3. Use agent_workspace_stage to load selected workspace files into the current session.")
-        sb.AppendLine("  4. Use document/session tools on the staged files.")
-        sb.AppendLine("  5. Use agent_workspace_save_session_file only after the required session file exists.")
+        sb.AppendLine("  1. Use agent_workspace_find_files or agent_workspace_list to locate files.")
+        sb.AppendLine("  2. Use workspace_extract_text(path) to read ANY supported file (PDF, DOCX, XLSX, PPTX, RTF, DOC, EML, MSG, plain text/markdown/code; images/audio/video when the model supports them). This is the only file-reading tool you should normally need.")
+        sb.AppendLine("  3. Use agent_workspace_write for text/code outputs. Pass overwrite=true to replace existing files.")
+        sb.AppendLine("Do NOT copy workspace files into the chat session. Do NOT use list_attachments to look for them — that lists session attachments only, not workspace contents.")
         sb.AppendLine("Safety rules:")
         sb.AppendLine("  - For bulk rename, prefer dry_run=true first.")
         sb.AppendLine("  - For batch move/copy, use dry_run=true when ambiguity exists.")
         sb.AppendLine("  - Prefer agent_workspace_trash over permanent delete.")
         sb.AppendLine("  - Use agent_workspace_inventory_report when the user asks for an overview, list, register, handover list, or archive inventory.")
-        sb.AppendLine("  - Return and inspect structured mappings before committing bulk mutations.")
         sb.AppendLine("Do NOT repeat the same failing workspace tool call with identical arguments.")
         sb.AppendLine($"Workspace root: {root}")
 
@@ -1615,12 +1713,21 @@ Partial Public Class ThisAddIn
     End Function
 
     Friend Function BuildAgentSessionFilesPromptBlock() As String
+        Dim hydratedFiles As New List(Of AutoPilotAttachmentInfo)()
+        For Each att In _chatAgentFiles.ToList()
+            Dim hydrated = EnsureSessionAttachmentAvailable(att)
+            If hydrated IsNot Nothing Then
+                hydratedFiles.Add(hydrated)
+            End If
+        Next
+        _chatAgentFiles = hydratedFiles
+
         Dim names = GetAllAvailableFileNames().Distinct(StringComparer.OrdinalIgnoreCase).ToList()
         If names.Count = 0 Then Return ""
 
         Dim sb As New StringBuilder()
         sb.AppendLine("[SESSION FILES]")
-        sb.AppendLine("These files currently exist in the active agent session and may be referenced by session tools or agent_workspace_save_session_file.")
+        sb.AppendLine("These files currently exist in the active agent session, persist across follow-up chat turns, and may be referenced by session tools or agent_workspace_save_session_file.")
         For Each name In names
             sb.AppendLine("  - " & name)
         Next
@@ -1676,10 +1783,11 @@ Partial Public Class ThisAddIn
             "Agent Workspace: Find Files (local only)",
             127,
             "skip",
-            CA_Tool_WorkspaceFindFiles & ": Find files inside the granted workspace by filename/path text, extension, size, and modified date. Use this first when the user refers to files vaguely.",
+            CA_Tool_WorkspaceFindFiles & ": Find files inside the granted workspace by filename/path text, extension, size, and modified date. " &
+            "Use this first when the user refers to files vaguely or to a folder of PDFs, but treat it as discovery only: after finding the files, continue with staging/reading/searching and do not stop after listing them.",
             New With {
                 .name = CA_Tool_WorkspaceFindFiles,
-                .description = "Finds files inside the granted local agent workspace by filename, extension, size, and modified date. Hidden/system items are excluded unless enabled.",
+                .description = "Finds files inside the granted local agent workspace by filename, extension, size, and modified date. Use this for discovery only; after locating files, continue with staging or document-processing tools as needed.",
                 .parameters = New With {
                     .type = "object",
                     .properties = New Dictionary(Of String, Object) From {
@@ -2991,18 +3099,41 @@ Partial Public Class ThisAddIn
     ''' Pushes the current chat-agent workspace root into the SharedLibrary PathPolicy.
     ''' Called whenever workspace state is mutated.
     ''' </summary>
+    ''' <summary>
+    ''' Pushes the current chat-agent workspace root into the SharedLibrary path/workspace state.
+    ''' Called whenever workspace state is mutated.
+    ''' </summary>
     Private Sub SyncWorkspaceToPathPolicy()
         Try
             Dim ws = _chatAgentWorkspace
-            If ws IsNot Nothing AndAlso ws.AllowRead AndAlso
+
+            If ws IsNot Nothing AndAlso
                Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
                Directory.Exists(ws.RootPath) Then
-                SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(ws.RootPath)
+
+                If ws.AllowRead Then
+                    SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(ws.RootPath)
+                Else
+                    SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
+                End If
+
+                SharedLibrary.Agents.WorkspaceTools.SetActive(
+                    New SharedLibrary.Agents.WorkspaceState() With {
+                        .RootPath = Path.GetFullPath(ws.RootPath),
+                        .PersistUntilRevoked = ws.PersistUntilRevoked,
+                        .AllowRead = ws.AllowRead,
+                        .AllowWrite = ws.AllowWrite,
+                        .AllowMoveCopyRename = ws.AllowMoveCopyRename,
+                        .AllowDelete = ws.AllowDelete,
+                        .IncludeHiddenSystem = ws.IncludeHiddenSystem
+                    })
             Else
                 SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
+                SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
             End If
         Catch
             SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
+            SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
         End Try
     End Sub
 

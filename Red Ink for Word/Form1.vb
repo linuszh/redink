@@ -253,7 +253,7 @@ Public Class frmAIChat
     ''' <summary>Abbreviated name prefixed to comment replies (e.g., "RI: Reply text").</summary>
     Const AN6 As String = "RI"
 
-    Const ToolTrigger As String = "(s)"
+    Const ToolTrigger As String = "(a)"
 
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
@@ -430,6 +430,17 @@ Public Class frmAIChat
         .Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}",
         .AutoSize = True,
         .Checked = My.Settings.ChatEnableTooling
+    }
+
+    ''' <summary>
+    ''' When checked, the selected advanced tools remain callable.
+    ''' When unchecked, advanced-tool selections stay persisted but are excluded from the effective tool list.
+    ''' Persisted to My.Settings.AdvancedToolsEnabled.
+    ''' </summary>
+    Private WithEvents chkAdvancedTools As New System.Windows.Forms.CheckBox() With {
+        .Text = "Advanced tools",
+        .AutoSize = True,
+        .Checked = My.Settings.AdvancedToolsEnabled
     }
 
     ''' <summary>
@@ -746,6 +757,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
         pnlCheckboxes.Controls.Add(chkEnableTooling)
+        pnlCheckboxes.Controls.Add(chkAdvancedTools)
         pnlCheckboxes.Controls.Add(chkShowToolingLog)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkConvertMarkdown)
@@ -772,6 +784,7 @@ Public Class frmAIChat
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
+        AddHandler chkAdvancedTools.Click, AddressOf chkAdvancedTools_Click
         AddHandler chkShowToolingLog.CheckedChanged, AddressOf chkShowToolingLog_CheckedChanged
         AddHandler btnTools.Click, AddressOf btnTools_Click
 
@@ -1708,6 +1721,17 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
+    ''' Handles chkAdvancedTools click. Persists the advanced-tools gate and clears cached effective tool selection.
+    ''' </summary>
+    Private Sub chkAdvancedTools_Click(sender As Object, e As EventArgs)
+        My.Settings.AdvancedToolsEnabled = chkAdvancedTools.Checked
+        My.Settings.Save()
+
+        _selectedToolsForChat = Nothing
+        UpdateToolingControlsState()
+    End Sub
+
+    ''' <summary>
     ''' Handles chkInkyMemory checkbox click. Persists preference and toggles edit link visibility.
     ''' </summary>
     Private Sub chkInkyMemory_Click(sender As Object, e As EventArgs)
@@ -1799,6 +1823,7 @@ Public Class frmAIChat
         Dim toolingUiAvailable As Boolean = supportsCurrentModelTooling OrElse supportsToolTrigger
 
         chkEnableTooling.Enabled = toolingUiAvailable
+        chkAdvancedTools.Enabled = toolingUiAvailable AndAlso chkEnableTooling.Checked
         btnTools.Enabled = toolingUiAvailable
         chkShowToolingLog.Enabled = toolingUiAvailable
 
@@ -1807,7 +1832,6 @@ Public Class frmAIChat
             _selectedToolsForChat = Nothing
         End If
 
-        ' Only set checkbox from INI on first initialization; preserve user's mid-session toggle afterward
         If Not _toolingControlsInitialized Then
             chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
             _toolingControlsInitialized = True

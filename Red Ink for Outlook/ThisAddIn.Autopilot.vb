@@ -4662,6 +4662,7 @@ Partial Public Class ThisAddIn
     Friend Class AutoPilotAttachmentInfo
         Public Property OriginalFileName As String
         Public Property TempFilePath As String
+        Public Property SourcePath As String
         Public Property Extension As String
         Public Property SizeBytes As Long
         Public Property IsOverSizeLimit As Boolean

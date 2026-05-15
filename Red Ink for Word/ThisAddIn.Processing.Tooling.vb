@@ -61,6 +61,10 @@ Partial Public Class ThisAddIn
 
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
+    Private Const MaxDownloadedWebFileBytes As Long = 50L * 1024L * 1024L
+
+    Private Const InternalKnowledgeToolNamePrefix As String = "knowledge_search_store_"
+
 #Region "Tooling File Logger (Reduced, Single File)"
 
     ''' <summary>
@@ -573,6 +577,12 @@ Partial Public Class ThisAddIn
         Public Property ConsecutiveFailedToolCount As Integer
         Public Property ConsecutiveToolFailureAbortThreshold As Integer
 
+        Public Property PrematureTextRetryCount As Integer = 0
+        Public Property PendingContinuationGuardPrompt As String = ""
+        Public Property PendingRejectedAssistantTurn As String = ""
+
+        Public Const MaxContinuationRetries As Integer = 5
+
         ''' <summary>
         ''' Initializes a new tool execution context with default collections and limits.
         ''' </summary>
@@ -736,25 +746,91 @@ Partial Public Class ThisAddIn
             SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
         End Try
 
-        Dim allowedTools As List(Of ModelConfig) =
-    If(selectedTools, New List(Of ModelConfig)()).
-        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-        ToList()
+        Dim fullAllowedTools As List(Of ModelConfig) =
+            If(selectedTools, New List(Of ModelConfig)()).
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+                Select(Function(g) g.First()).
+                ToList()
 
-        selectedTools = allowedTools
+        selectedTools = fullAllowedTools
 
         Dim context As New ToolExecutionContext() With {
-                    .MaxIterations = INI_ToolingMaximumIterations
-                }
+            .MaxIterations = INI_ToolingMaximumIterations
+        }
 
-        context.AllowedToolRegistry = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(allowedTools, "selected")
-        context.LazyToolLoadingEnabled = SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(allowedTools)
-        context.SelectedTools = If(
-                    context.LazyToolLoadingEnabled,
-                    New List(Of ModelConfig) From {
-                        SharedLibrary.Agents.ToolLoaderTool.Build(context.AllowedToolRegistry.ListManifests())
-                    },
-                    allowedTools)
+        Dim toolSelectionHintText As String = BuildToolSelectionHintText(
+            userText,
+            fullPromptOverride,
+            otherPrompt,
+            insertDocs,
+            slideInsert,
+            bubblesText)
+
+        Try
+            SharedLibrary.Agents.AgentResources.SetPaths(INI_AgentResourcesPath, INI_AgentResourcesPathLocal)
+            SharedLibrary.Agents.AgentResources.Refresh()
+        Catch
+        End Try
+
+        context.AllowedToolRegistry = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(fullAllowedTools, "selected")
+        Try
+            SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(context.AllowedToolRegistry, SharedLibrary.Agents.AgentResources.Skills)
+            SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(context.AllowedToolRegistry, SharedLibrary.Agents.AgentResources.Agents)
+        Catch
+        End Try
+
+        Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
+        If subAgentMode AndAlso subAgentAllowedToolNames IsNot Nothing AndAlso subAgentAllowedToolNames.Count > 0 Then
+            initialSubAgentToolNames = New HashSet(Of String)(subAgentAllowedToolNames, StringComparer.OrdinalIgnoreCase)
+        End If
+
+        If subAgentMode AndAlso initialSubAgentToolNames IsNot Nothing AndAlso initialSubAgentToolNames.Count > 0 Then
+            context.LazyToolLoadingEnabled = True
+            context.SelectedTools = New List(Of ModelConfig)()
+
+            For Each initialToolName In initialSubAgentToolNames
+                EnsureVisibleToolLoaded(initialToolName, context)
+            Next
+
+            Dim missingInitialTools = initialSubAgentToolNames.
+                Where(Function(name)
+                          Return Not context.SelectedTools.Any(Function(t)
+                                                                   Return t IsNot Nothing AndAlso
+                                                                          Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                                                          t.ToolName.Equals(name, StringComparison.OrdinalIgnoreCase)
+                                                               End Function)
+                      End Function).
+                ToList()
+
+            If missingInitialTools.Count > 0 Then
+                context.LogWarn("Sub-agent allowed tools were requested but could not be preloaded.",
+                                details:=String.Join(", ", missingInitialTools))
+            Else
+                context.Log("All requested sub-agent allowed tools were preloaded.")
+            End If
+
+            Dim loaderManifests = BuildSubAgentLoaderManifests(context)
+            Dim loader As ModelConfig = Nothing
+
+            If loaderManifests.Count > 0 Then
+                loader = SharedLibrary.Agents.ToolLoaderTool.Build(loaderManifests)
+            End If
+
+            If loader IsNot Nothing AndAlso
+               Not context.SelectedTools.Any(Function(t)
+                                                 Return t IsNot Nothing AndAlso
+                                                        Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                                        t.ToolName.Equals(loader.ToolName, StringComparison.OrdinalIgnoreCase)
+                                             End Function) Then
+                context.SelectedTools.Add(loader)
+            End If
+        Else
+            context.LazyToolLoadingEnabled = False
+            context.SelectedTools = BuildInitialToolExposure(fullAllowedTools, context.AllowedToolRegistry, toolSelectionHintText)
+        End If
+
+        selectedTools = context.SelectedTools
 
         context.ToolingModel = GetCurrentConfig(_context)
 
@@ -866,7 +942,9 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(context.SelectedTools)
+            Dim enhancedSysPrompt As String =
+                baseSysPrompt & Environment.NewLine & Environment.NewLine &
+                BuildToolInstructionsPromptForSession(context.SelectedTools, subAgentMode)
 
             Dim toolDefinitions = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
             INI_APICall_ToolInstructions_2 = toolDefinitions
@@ -930,16 +1008,48 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
-                enhancedSysPrompt = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(context.SelectedTools)
+                enhancedSysPrompt =
+                    baseSysPrompt & Environment.NewLine & Environment.NewLine &
+                    BuildToolInstructionsPromptForSession(context.SelectedTools, subAgentMode)
                 INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+
+                ' Continuation-guard injection (sysprompt addendum + rejected-turn evidence on the user side).
+                ' We append both to the user prompt so the model sees explicit conversational evidence that its
+                ' previous attempt was rejected. System-prompt-only nudges proved insufficient because the user
+                ' prompt and tool-response state are otherwise identical between iterations.
+                Dim sysPromptForThisCall As String = enhancedSysPrompt
+                Dim userPromptForThisCall As String = fullUserPrompt
+                If Not String.IsNullOrWhiteSpace(context.PendingContinuationGuardPrompt) Then
+                    Dim rejected As String = If(context.PendingRejectedAssistantTurn, "")
+                    Dim guardBlock As New System.Text.StringBuilder()
+                    guardBlock.AppendLine()
+                    guardBlock.AppendLine("[HOST CONTINUATION GUARD]")
+                    guardBlock.AppendLine(context.PendingContinuationGuardPrompt)
+                    guardBlock.AppendLine()
+                    If Not String.IsNullOrWhiteSpace(rejected) Then
+                        guardBlock.AppendLine("Your previous turn (REJECTED — produced no tool call and no valid <TASK_STATUS> footer):")
+                        guardBlock.AppendLine("<<<REJECTED_TURN")
+                        guardBlock.AppendLine(rejected)
+                        guardBlock.AppendLine("REJECTED_TURN>>>")
+                        guardBlock.AppendLine()
+                    End If
+                    guardBlock.AppendLine("Do NOT repeat the rejected turn. In THIS turn you must EITHER invoke the next appropriate tool call now, OR produce the actual final complete result followed by a valid <TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS> footer.")
+                    guardBlock.AppendLine("[/HOST CONTINUATION GUARD]")
+
+                    sysPromptForThisCall = enhancedSysPrompt & Environment.NewLine & Environment.NewLine & context.PendingContinuationGuardPrompt
+                    userPromptForThisCall = fullUserPrompt & Environment.NewLine & guardBlock.ToString()
+
+                    context.PendingContinuationGuardPrompt = ""
+                    context.PendingRejectedAssistantTurn = ""
+                End If
 
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
 
-                Debug.WriteLine($"[WORD-TOOLING] BEFORE LLM subAgentMode={subAgentMode} iteration={iteration} sysLen={If(enhancedSysPrompt, "").Length} userLen={If(fullUserPrompt, "").Length} tools={If(selectedTools?.Count, 0)} gateBusy={SharedLibrary.Agents.AgentGate.IsBusy} thread={Threading.Thread.CurrentThread.ManagedThreadId}")
+                Debug.WriteLine($"[WORD-TOOLING] BEFORE LLM subAgentMode={subAgentMode} iteration={iteration} sysLen={If(sysPromptForThisCall, "").Length} userLen={If(fullUserPrompt, "").Length} tools={If(selectedTools?.Count, 0)} gateBusy={SharedLibrary.Agents.AgentGate.IsBusy} thread={Threading.Thread.CurrentThread.ManagedThreadId}")
 
                 currentResponse = Await LLM(
-                    enhancedSysPrompt,
-                    fullUserPrompt,
+                    sysPromptForThisCall,
+                    userPromptForThisCall,
                     "", "", 0,
                     useSecondAPI,
                     hideSplash,
@@ -994,6 +1104,10 @@ Partial Public Class ThisAddIn
                                 toolConfig = GetInternalWebTool()
                                 ToolingFileLogger.LogStep("Using internal web tool.")
 
+                            ElseIf tc.ToolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) Then
+                                toolConfig = GetInternalDownloadWebFilesTool()
+                                ToolingFileLogger.LogStep("Using internal web download tool.")
+
                             ElseIf tc.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
                                 toolConfig = GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch)
                                 ToolingFileLogger.LogStep("Using internal search tool.")
@@ -1024,6 +1138,15 @@ Partial Public Class ThisAddIn
                         End If
 
                         Dim toolResponse = Await ExecuteToolCall(tc, toolConfig, context)
+
+                        If Not toolResponse.Success AndAlso String.IsNullOrWhiteSpace(toolResponse.ErrorMessage) Then
+                            If Not String.IsNullOrWhiteSpace(toolResponse.Response) Then
+                                toolResponse.ErrorMessage = BuildResultExcerpt(toolResponse.Response, 160)
+                            Else
+                                toolResponse.ErrorMessage = "Tool failed without returning an error message."
+                            End If
+                        End If
+
                         toolResponse.OriginalCallJson = tc.RawJson
                         context.AllToolResponses.Add(toolResponse)
 
@@ -1078,6 +1201,11 @@ Partial Public Class ThisAddIn
                                     context.LogWarn("Skipping tool error (ToolErrorHandling=skip)")
                             End Select
                         Else
+                            ' Real forward progress was made — reset the continuation-guard retry budget
+                            ' so that further "now I will do X" prose-only turns later in the same session
+                            ' (e.g. between file 3 and file 4 of a 14-file batch) still get a full 5 retries.
+                            context.PrematureTextRetryCount = 0
+
                             context.Log($"Tool completed successfully ({toolResponse.Response?.Length} chars)", "success")
                         End If
                     Next
@@ -1091,6 +1219,22 @@ Partial Public Class ThisAddIn
                     context.Log("Tool responses prepared for next iteration")
 
                 Else
+                    If subAgentMode Then
+                        currentResponse = StripTaskStatus(currentResponse)
+                        context.Log("Sub-agent final text response accepted (no tool calls)")
+                        Exit While
+                    End If
+                    If ShouldRetryAfterPrematureTextResponse(context, currentResponse) Then
+                        context.PrematureTextRetryCount += 1
+                        context.PendingContinuationGuardPrompt = BuildPrematureTextContinuationGuardPrompt()
+                        context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                        context.Log($"Premature text-only response detected; injecting continuation guard (retry {context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries})", "warn")
+                        ToolingFileLogger.LogWarn("Premature text-only response; continuation guard injected.",
+                                                  details:=$"retry={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}")
+                        Continue While
+                    End If
+
+                    currentResponse = StripTaskStatus(currentResponse)
                     context.Log("Text response received (no tool calls)")
                     Exit While
                 End If
@@ -1161,6 +1305,7 @@ Partial Public Class ThisAddIn
             context.Log($"Successful: {successCount}", If(failedCount = 0, "success", "step"))
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
 
+            currentResponse = StripTaskStatus(currentResponse)
             currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
 
             ToolingFileLogger.EndSession(True, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
@@ -1224,6 +1369,30 @@ Partial Public Class ThisAddIn
         context.SelectedTools.Add(loaded)
         Return loaded
     End Function
+
+
+    Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As String, context As ToolExecutionContext)
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(skillResponse) Then
+            Return
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(skillResponse)
+            Dim allowedToolsToken As JToken = obj("allowed_tools")
+
+            If allowedToolsToken Is Nothing OrElse allowedToolsToken.Type <> JTokenType.Array Then
+                Return
+            End If
+
+            For Each item As JToken In DirectCast(allowedToolsToken, JArray)
+                Dim toolName As String = item.ToString().Trim()
+                If toolName = "" Then Continue For
+                EnsureVisibleToolLoaded(toolName, context)
+            Next
+        Catch
+        End Try
+    End Sub
+
 
     Private Function ExecuteToolLoaderCall(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
         Dim response As New ToolResponse() With {
@@ -1296,7 +1465,83 @@ Partial Public Class ThisAddIn
 
 #Region "Tooling Helper Functions"
 
-    Private Const InternalKnowledgeToolNamePrefix As String = "knowledge_search_store_"
+
+    Private Shared ReadOnly _taskStatusRx As New System.Text.RegularExpressions.Regex(
+        "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
+        System.Text.RegularExpressions.RegexOptions.Compiled Or System.Text.RegularExpressions.RegexOptions.Singleline)
+
+    Private Enum TaskStatusKind
+        Missing
+        Complete
+        ContinueWork
+        Blocked
+    End Enum
+
+    Private Function ParseTaskStatus(text As String) As TaskStatusKind
+        If String.IsNullOrWhiteSpace(text) Then Return TaskStatusKind.Missing
+        Dim m = _taskStatusRx.Match(text)
+        If Not m.Success Then Return TaskStatusKind.Missing
+        Try
+            Dim obj = Newtonsoft.Json.Linq.JObject.Parse(m.Groups(1).Value)
+            Dim s As String = If(obj("status")?.ToString(), "").Trim().ToLowerInvariant()
+            Select Case s
+                Case "complete", "done", "finished" : Return TaskStatusKind.Complete
+                Case "continue", "incomplete", "more", "in_progress" : Return TaskStatusKind.ContinueWork
+                Case "blocked", "failed", "abort", "impossible" : Return TaskStatusKind.Blocked
+                Case Else : Return TaskStatusKind.Missing
+            End Select
+        Catch
+            Return TaskStatusKind.Missing
+        End Try
+    End Function
+
+    Private Function StripTaskStatus(text As String) As String
+        If String.IsNullOrWhiteSpace(text) Then Return text
+        Return _taskStatusRx.Replace(text, "").TrimEnd()
+    End Function
+
+    Private Const TaskStatusFooterInstruction As String =
+        "TASK STATUS FOOTER (MANDATORY CONTRACT, MACHINE-READ): " &
+        "Whenever you produce a final prose response instead of invoking a tool, you MUST append, " &
+        "as the literal last line of that turn, exactly: " &
+        "<TASK_STATUS>{""status"":""<value>"",""reason"":""<short>""}</TASK_STATUS>  " &
+        "Allowed values for <value>: " &
+        "  'complete' = the user's entire request has been FULLY satisfied in THIS turn (table done, all items processed, file written, etc.). " &
+        "  'continue' = the task is not finished, but no suitable tool call is currently possible. Never use 'continue' after completing only one item of a multi-item task. In that case, immediately invoke the next required tool call instead. " &
+        "  'blocked'  = the task cannot be completed despite reasonable tool attempts. " &
+        "Rules: " &
+        "(1) NEVER include the footer in a turn that contains a tool call. " &
+        "(2) NEVER wrap the footer in code fences or quotes; it must be plain text on its own final line. " &
+        "(3) NEVER claim 'complete' while still announcing future work. " &
+        "(4) If the user asks you to process MULTIPLE items (every file, all PDFs, jede Datei, alle Dokumente, tous les fichiers, etc.), " &
+        "you may only emit 'complete' AFTER you have actually processed all of them via tool calls and produced the full final result. " &
+        "(5) The footer is a host control signal. Plain narration of intent ('I will…', 'Ich werde…', 'Je vais…') without action and without 'complete' will trigger an automatic retry."
+
+    Private Function ShouldRetryAfterPrematureTextResponse(context As ToolExecutionContext, lastResponse As String) As Boolean
+        If context Is Nothing Then Return False
+        If context.PrematureTextRetryCount >= ToolExecutionContext.MaxContinuationRetries Then Return False
+
+        Select Case ParseTaskStatus(lastResponse)
+            Case TaskStatusKind.Complete, TaskStatusKind.Blocked
+                Return False
+            Case Else
+                ' Missing footer OR status="continue" → force another iteration.
+                Return True
+        End Select
+    End Function
+
+    Private Function BuildPrematureTextContinuationGuardPrompt() As String
+        Return "HOST CONTINUATION GUARD: Your previous turn was a text-only response that did NOT end with a valid <TASK_STATUS> footer declaring 'complete' or 'blocked'. " &
+               "Therefore the task is treated as unfinished. In THIS turn you must do ONE of: " &
+               "(a) invoke the next appropriate tool call now (no footer in tool-call turns), OR " &
+               "(b) deliver the actual final, complete result that fully satisfies the user's request and end it with exactly: " &
+               "<TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>  " &
+               "If the task is genuinely impossible despite reasonable tool attempts, end the turn with: " &
+               "<TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>  " &
+               "If the user's request covers multiple items (every PDF, alle Dokumente, tous les fichiers, etc.), you MUST iterate via tool calls until ALL items are processed before declaring 'complete'. " &
+               "If a tool just failed, try a DIFFERENT applicable tool with corrected arguments. To read files inside the connected workspace use workspace_extract_text (any format) or workspace_read (plain text only)."
+    End Function
+
 
     Private Function EncodeToolToken(value As String) As String
         If String.IsNullOrWhiteSpace(value) Then Return ""
@@ -1967,6 +2212,15 @@ Partial Public Class ThisAddIn
         MaxToolIterations = INI_ToolingMaximumIterations
         sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
         sb.AppendLine()
+        sb.AppendLine(TaskStatusFooterInstruction)
+
+        Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
+        If Not String.IsNullOrWhiteSpace(workflowAddendum) Then
+            sb.AppendLine()
+            sb.AppendLine(workflowAddendum)
+        End If
+
+        sb.AppendLine()
         sb.AppendLine("Available tools:")
 
         If selectedTools Is Nothing Then
@@ -1984,6 +2238,201 @@ Partial Public Class ThisAddIn
 
         Return sb.ToString()
     End Function
+
+
+    Private Function BuildToolSelectionHintText(userText As String,
+                                                fullPromptOverride As String,
+                                                otherPrompt As String,
+                                                insertDocs As String,
+                                                slideInsert As String,
+                                                bubblesText As String) As String
+        Dim parts As New List(Of String)()
+
+        If Not String.IsNullOrWhiteSpace(fullPromptOverride) Then parts.Add(fullPromptOverride)
+        If Not String.IsNullOrWhiteSpace(userText) Then parts.Add(userText)
+        If Not String.IsNullOrWhiteSpace(otherPrompt) Then parts.Add(otherPrompt)
+        If Not String.IsNullOrWhiteSpace(insertDocs) Then parts.Add(insertDocs)
+        If Not String.IsNullOrWhiteSpace(slideInsert) Then parts.Add(slideInsert)
+        If Not String.IsNullOrWhiteSpace(bubblesText) Then parts.Add(bubblesText)
+
+        Return String.Join(Environment.NewLine, parts)
+    End Function
+
+    Private Function BuildInitialToolExposure(allowedTools As List(Of ModelConfig),
+                                              allowedRegistry As SharedLibrary.Agents.ToolRegistry,
+                                              promptText As String) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
+
+        If allowedTools Is Nothing OrElse allowedTools.Count = 0 Then
+            Return result
+        End If
+
+        result.AddRange(
+            allowedTools.
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+                Select(Function(g) g.First()))
+
+        Return result
+    End Function
+
+
+    Private Function BuildSubAgentLoaderManifests(context As ToolExecutionContext) As List(Of SharedLibrary.Agents.ToolManifest)
+        Dim result As New List(Of SharedLibrary.Agents.ToolManifest)()
+
+        If context Is Nothing OrElse context.AllowedToolRegistry Is Nothing Then
+            Return result
+        End If
+
+        Dim selectedNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If context.SelectedTools IsNot Nothing Then
+            For Each tool In context.SelectedTools
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                selectedNames.Add(tool.ToolName.Trim())
+            Next
+        End If
+
+        For Each manifest In context.AllowedToolRegistry.ListManifests()
+            If manifest Is Nothing OrElse String.IsNullOrWhiteSpace(manifest.Name) Then Continue For
+
+            Dim toolName As String = manifest.Name.Trim()
+
+            If toolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then Continue For
+            If toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then Continue For
+            If selectedNames.Contains(toolName) Then Continue For
+
+            result.Add(manifest)
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildToolInstructionsPromptForSession(selectedTools As List(Of ModelConfig),
+                                                           subAgentMode As Boolean) As String
+        If Not subAgentMode Then
+            Return BuildToolInstructionsPrompt(selectedTools)
+        End If
+
+        Dim sb As New StringBuilder()
+
+        sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
+        sb.AppendLine()
+        sb.AppendLine("SUB-AGENT MODE:")
+        sb.AppendLine("- Use tools only if they are actually needed.")
+        sb.AppendLine("- Do NOT call any agent_* tool.")
+        sb.AppendLine("- Do NOT append any <TASK_STATUS> footer.")
+        sb.AppendLine("- When the work is finished, return exactly one JSON object with keys ""summary"" and ""result"".")
+        sb.AppendLine()
+        sb.AppendLine("Available tools:")
+
+        If selectedTools IsNot Nothing Then
+            Dim sortedTools = selectedTools.OrderBy(Function(t) t.ToolPriority).ToList()
+
+            For Each tool In sortedTools
+                If Not String.IsNullOrWhiteSpace(tool.ToolInstructionsPrompt) Then
+                    sb.AppendLine()
+                    sb.AppendLine($"- {tool.ToolInstructionsPrompt}")
+                End If
+            Next
+        End If
+
+        Return sb.ToString()
+    End Function
+
+
+    Private Sub AddToolByNameIfPresent(target As List(Of ModelConfig),
+                                       source As IEnumerable(Of ModelConfig),
+                                       toolName As String)
+        If target Is Nothing OrElse source Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return
+        End If
+
+        If target.Any(Function(t)
+                          Return t IsNot Nothing AndAlso
+                                 Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                 t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+                      End Function) Then
+            Return
+        End If
+
+        Dim match = source.FirstOrDefault(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+        If match IsNot Nothing Then
+            target.Add(match)
+        End If
+    End Sub
+
+    Private Sub AddToolNameIfAvailable(target As List(Of String),
+                                       availableTools As IEnumerable(Of ModelConfig),
+                                       toolName As String)
+        If target Is Nothing OrElse availableTools Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return
+        End If
+
+        If target.Any(Function(name) name.Equals(toolName, StringComparison.OrdinalIgnoreCase)) Then
+            Return
+        End If
+
+        If availableTools.Any(Function(t)
+                                  Return t IsNot Nothing AndAlso
+                                         Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                         t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+                              End Function) Then
+            target.Add(toolName)
+        End If
+    End Sub
+
+    Private Function HasToolName(selectedTools As IEnumerable(Of ModelConfig), toolName As String) As Boolean
+        If selectedTools Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        Return selectedTools.Any(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+    End Function
+
+    Private Function BuildToolWorkflowInstructionAddendum(selectedTools As List(Of ModelConfig)) As String
+        Dim sb As New StringBuilder()
+
+        sb.AppendLine("PERSISTENCE CHECKLIST:")
+        sb.AppendLine("- Remain in tool-calling mode until the whole user request is completed. Do not stop after planning, discovering files, staging files, or finishing only the first subtask.")
+        sb.AppendLine("- If one tool fails, returns too little information, or only partially advances the task, and another available tool could still help, call the next suitable tool instead of giving up.")
+        sb.AppendLine("- If the request applies to a folder, directory, workspace path, or a collection of files, discover or stage the collection first and then continue processing the returned items until the collection has actually been searched or analyzed.")
+        sb.AppendLine("- Before giving a final answer, explicitly check whether any requested next step, remaining file, or reasonable fallback tool is still outstanding.")
+
+        If HasToolName(selectedTools, "extract_pdf_text") Then
+            sb.AppendLine("- extract_pdf_text is for a single PDF or staged/session file at a time. Never pass a directory or folder path to extract_pdf_text.")
+        End If
+
+        If HasToolName(selectedTools, "agent_workspace_find_files") OrElse
+           HasToolName(selectedTools, "agent_workspace_stage") OrElse
+           HasToolName(selectedTools, "agent_workspace_read") OrElse
+           HasToolName(selectedTools, "workspace_inventory") OrElse
+           HasToolName(selectedTools, "workspace_read") Then
+            sb.AppendLine("- For local/workspace PDF collections, prefer the workspace workflow: find files, stage them if required, then read/search/extract them. Do not stop after file discovery.")
+        End If
+
+        If HasToolName(selectedTools, "agent_workspace_read") Then
+            sb.AppendLine("- For one workspace-local PDF or Office file, prefer agent_workspace_read over calling extract_pdf_text directly on a workspace path.")
+        End If
+
+        If HasToolName(selectedTools, "search_in_attachments") Then
+            sb.AppendLine("- When many staged PDFs must be searched for a term, prefer search_in_attachments across the staged set before falling back to repeated one-file extraction calls.")
+        End If
+
+        Return sb.ToString().Trim()
+    End Function
+
 
     Private Function BuildKnowledgeToolStoreInventoryLine() As String
         Dim storeLabels As New List(Of String)()
@@ -2229,6 +2678,153 @@ Partial Public Class ThisAddIn
         Return value.ToString().Trim()
     End Function
 
+
+    Private Function GetToolArgumentBoolean(arguments As Dictionary(Of String, Object), key As String, Optional defaultValue As Boolean = False) As Boolean
+        If arguments Is Nothing OrElse Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then
+            Return defaultValue
+        End If
+
+        Dim value = arguments(key)
+
+        Try
+            If TypeOf value Is Boolean Then
+                Return CBool(value)
+            End If
+
+            If TypeOf value Is JValue Then
+                Dim jv = DirectCast(value, JValue)
+
+                If jv.Type = JTokenType.Boolean Then
+                    Return jv.Value(Of Boolean)()
+                End If
+
+                value = jv.ToString()
+            End If
+
+            Dim text As String = value.ToString().Trim()
+            Dim parsed As Boolean
+
+            If Boolean.TryParse(text, parsed) Then
+                Return parsed
+            End If
+
+            Select Case text.ToLowerInvariant()
+                Case "1", "yes", "y", "on"
+                    Return True
+                Case "0", "no", "n", "off"
+                    Return False
+            End Select
+        Catch
+        End Try
+
+        Return defaultValue
+    End Function
+
+    Private Function GetToolArgumentStringList(arguments As Dictionary(Of String, Object), key As String) As List(Of String)
+        Dim result As New List(Of String)()
+
+        If arguments Is Nothing OrElse Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then
+            Return result
+        End If
+
+        Dim value = arguments(key)
+
+        Try
+            If TypeOf value Is JArray Then
+                For Each item In DirectCast(value, JArray)
+                    Dim s As String = If(item, "").ToString().Trim()
+                    If s <> "" Then result.Add(s)
+                Next
+                Return result
+            End If
+
+            If TypeOf value Is IEnumerable(Of Object) AndAlso Not TypeOf value Is String Then
+                For Each item In DirectCast(value, IEnumerable(Of Object))
+                    If item Is Nothing Then Continue For
+                    Dim s As String = item.ToString().Trim()
+                    If s <> "" Then result.Add(s)
+                Next
+                Return result
+            End If
+
+            Dim raw As String = value.ToString().Trim()
+            If raw = "" Then Return result
+
+            If raw.StartsWith("[") AndAlso raw.EndsWith("]") Then
+                Dim arr As JArray = JArray.Parse(raw)
+                For Each item In arr
+                    Dim s As String = If(item, "").ToString().Trim()
+                    If s <> "" Then result.Add(s)
+                Next
+                Return result
+            End If
+
+            For Each part In raw.Split({","c, ";"c}, StringSplitOptions.RemoveEmptyEntries)
+                Dim s As String = part.Trim()
+                If s <> "" Then result.Add(s)
+            Next
+        Catch
+        End Try
+
+        Return result
+    End Function
+
+    Private Function NormalizeLinkExtensions(values As IEnumerable(Of String)) As List(Of String)
+        Dim result As New List(Of String)()
+
+        If values Is Nothing Then
+            Return result
+        End If
+
+        For Each value In values
+            Dim normalized As String = If(value, "").Trim().TrimStart("."c).ToLowerInvariant()
+            If normalized = "" Then Continue For
+
+            If Not result.Any(Function(x) x.Equals(normalized, StringComparison.OrdinalIgnoreCase)) Then
+                result.Add(normalized)
+            End If
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildWebLinkExtractionResult(requestedUrl As String,
+                                                  resolvedUrl As String,
+                                                  linkExtensions As List(Of String),
+                                                  linksJson As String,
+                                                  Optional note As String = "") As String
+
+        Dim linksToken As JToken = New JArray()
+
+        If Not String.IsNullOrWhiteSpace(linksJson) Then
+            Try
+                Dim parsed As JToken = JToken.Parse(linksJson)
+                If parsed.Type = JTokenType.Array Then
+                    linksToken = parsed
+                End If
+            Catch
+            End Try
+        End If
+
+        Dim payload As New JObject(
+            New JProperty("requested_url", requestedUrl),
+            New JProperty("source_url", If(String.IsNullOrWhiteSpace(resolvedUrl), requestedUrl, resolvedUrl)),
+            New JProperty("filters",
+                New JObject(
+                    New JProperty("extensions", New JArray(If(linkExtensions, New List(Of String)()).ToArray()))
+                )
+            ),
+            New JProperty("links", linksToken)
+        )
+
+        If Not String.IsNullOrWhiteSpace(note) Then
+            payload.Add("note", note)
+        End If
+
+        Return payload.ToString(Formatting.None)
+    End Function
+
+
     Private Sub TrySetLateBoundProperty(target As Object, propertyName As String, value As Object)
         If target Is Nothing Then Return
 
@@ -2274,6 +2870,32 @@ Partial Public Class ThisAddIn
 
 
 
+    Private Function BuildWebRetrieverFallbackNote(includeLinks As Boolean,
+                                               linkExtensions As List(Of String),
+                                               linksJson As String) As String
+        If Not includeLinks Then
+            Return ""
+        End If
+
+        Try
+            Dim parsed As JToken = JToken.Parse(If(linksJson, "[]"))
+            If parsed.Type = JTokenType.Array AndAlso DirectCast(parsed, JArray).Count > 0 Then
+                Return ""
+            End If
+        Catch
+        End Try
+
+        Dim extText As String =
+            If(linkExtensions Is Nothing OrElse linkExtensions.Count = 0,
+               "matching links",
+               String.Join(", ", linkExtensions).ToUpperInvariant() & " links")
+
+        Return $"No {extText} were detected in the rendered DOM. " &
+            "If this page computes links client-side, stores them in script state, Or reveals them only after richer interaction, " &
+            "use js_run as a fallback with allow_network=true And navigate_url set to this page. " &
+            "In js_run, return the final result explicitly at top level."
+    End Function
+
 
 
     ''' <summary>
@@ -2290,6 +2912,375 @@ Partial Public Class ThisAddIn
             .ToolPriority = 999,
             .ToolErrorHandling = "skip"
         }
+    End Function
+
+    Public Function GetInternalDownloadWebFilesTool() As ModelConfig
+        Return New ModelConfig() With {
+            .ToolName = InternalDownloadWebFilesToolName,
+            .ToolInstructionsPrompt = InternalDownloadWebFilesToolInstructionsPrompt,
+            .ToolDefinition = InternalDownloadWebFilesToolDefinition,
+            .ModelDescription = "Web File Downloader" & InternalToolSuffix,
+            .Tool = True,
+            .ToolPriority = 996,
+            .ToolErrorHandling = "skip"
+        }
+    End Function
+
+    Private Function GetSafeDownloadRoot() As String
+        Try
+            Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
+
+            If ws IsNot Nothing AndAlso
+               ws.AllowWrite AndAlso
+               Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
+               Directory.Exists(ws.RootPath) Then
+                Return Path.GetFullPath(ws.RootPath)
+            End If
+        Catch
+        End Try
+
+        Try
+            Dim policyRoot = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
+
+            If Not String.IsNullOrWhiteSpace(policyRoot) AndAlso Directory.Exists(policyRoot) Then
+                Return Path.GetFullPath(policyRoot)
+            End If
+        Catch
+        End Try
+
+        Throw New InvalidOperationException(
+            "No writable workspace is available for download_web_files. " &
+            "Connect a writable workspace first, or provide an explicit absolute target_directory.")
+    End Function
+
+    Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
+        If String.IsNullOrWhiteSpace(requestedDirectory) Then
+            Dim workspaceRoot = GetSafeDownloadRoot()
+            If Not Directory.Exists(workspaceRoot) Then Directory.CreateDirectory(workspaceRoot)
+            Return workspaceRoot
+        End If
+
+        If Path.IsPathRooted(requestedDirectory) Then
+            Dim absoluteTarget = Path.GetFullPath(requestedDirectory)
+            Dim absoluteDir = Path.GetDirectoryName(absoluteTarget)
+
+            If String.IsNullOrWhiteSpace(absoluteDir) Then
+                Throw New UnauthorizedAccessException("The absolute target_directory is invalid.")
+            End If
+
+            If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
+            Return absoluteTarget
+        End If
+
+        Dim root As String = GetSafeDownloadRoot()
+        Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
+
+        If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
+           Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
+            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace root.")
+        End If
+
+        If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)
+        Return fullPath
+    End Function
+
+    Private Function SanitizeDownloadFileName(name As String) As String
+        Dim candidate As String = If(name, "").Trim().Trim(""""c)
+        If candidate = "" Then candidate = "download.bin"
+
+        For Each invalidChar In Path.GetInvalidFileNameChars()
+            candidate = candidate.Replace(invalidChar, "_"c)
+        Next
+
+        If candidate = "" Then candidate = "download.bin"
+        Return candidate
+    End Function
+
+    Private Function GetExtensionFromContentType(contentType As String) As String
+        Dim mediaType As String = If(contentType, "").Trim().ToLowerInvariant()
+
+        Select Case mediaType
+            Case "application/pdf" : Return ".pdf"
+            Case "application/zip" : Return ".zip"
+            Case "application/json" : Return ".json"
+            Case "text/plain" : Return ".txt"
+            Case "text/html" : Return ".html"
+            Case "application/xml", "text/xml" : Return ".xml"
+            Case "image/png" : Return ".png"
+            Case "image/jpeg" : Return ".jpg"
+            Case "image/gif" : Return ".gif"
+            Case Else : Return ""
+        End Select
+    End Function
+
+    Private Function BuildDownloadFileName(url As String,
+                                           response As System.Net.Http.HttpResponseMessage) As String
+        Dim candidate As String = ""
+
+        Try
+            Dim cd = response.Content.Headers.ContentDisposition
+            If cd IsNot Nothing Then
+                If Not String.IsNullOrWhiteSpace(cd.FileNameStar) Then
+                    candidate = cd.FileNameStar
+                ElseIf Not String.IsNullOrWhiteSpace(cd.FileName) Then
+                    candidate = cd.FileName
+                End If
+            End If
+        Catch
+        End Try
+
+        If String.IsNullOrWhiteSpace(candidate) Then
+            Try
+                candidate = Path.GetFileName(New Uri(url).LocalPath)
+            Catch
+            End Try
+        End If
+
+        candidate = SanitizeDownloadFileName(candidate)
+
+        If Path.GetExtension(candidate) = "" Then
+            Dim ext = GetExtensionFromContentType(If(response.Content.Headers.ContentType?.MediaType, ""))
+            If ext <> "" Then candidate &= ext
+        End If
+
+        Return candidate
+    End Function
+
+    Private Function GetUniqueDownloadPath(path As String) As String
+        If Not File.Exists(path) Then Return path
+
+        Dim dir = System.IO.Path.GetDirectoryName(path)
+        Dim name = System.IO.Path.GetFileNameWithoutExtension(path)
+        Dim ext = System.IO.Path.GetExtension(path)
+
+        For i As Integer = 2 To 1000
+            Dim candidate = System.IO.Path.Combine(dir, $"{name} ({i}){ext}")
+            If Not File.Exists(candidate) Then Return candidate
+        Next
+
+        Return System.IO.Path.Combine(dir, $"{name}_{Guid.NewGuid():N}{ext}")
+    End Function
+
+    Private Async Function ReadResponseBytesLimitedAsync(content As System.Net.Http.HttpContent,
+                                                         maxBytes As Long,
+                                                         cancellationToken As System.Threading.CancellationToken) As Task(Of Byte())
+        Using sourceStream = Await content.ReadAsStreamAsync().ConfigureAwait(False)
+            Using ms As New MemoryStream()
+                Dim buffer(8191) As Byte
+
+                Do
+                    cancellationToken.ThrowIfCancellationRequested()
+                    Dim read = Await sourceStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(False)
+                    If read <= 0 Then Exit Do
+
+                    ms.Write(buffer, 0, read)
+
+                    If ms.Length > maxBytes Then
+                        Throw New InvalidOperationException($"Remote file exceeds the maximum allowed size of {maxBytes} bytes.")
+                    End If
+                Loop
+
+                Return ms.ToArray()
+            End Using
+        End Using
+    End Function
+
+    Private Function LooksLikeHtml(bytes As Byte()) As Boolean
+        If bytes Is Nothing OrElse bytes.Length = 0 Then Return False
+
+        Dim sampleLength = Math.Min(bytes.Length, 1024)
+        Dim sample = System.Text.Encoding.UTF8.GetString(bytes, 0, sampleLength).ToLowerInvariant()
+
+        Return sample.Contains("<html") OrElse
+               sample.Contains("<!doctype html") OrElse
+               sample.Contains("<body") OrElse
+               sample.Contains("<head")
+    End Function
+
+    Private Function LooksLikePdf(bytes As Byte()) As Boolean
+        If bytes Is Nothing OrElse bytes.Length < 5 Then Return False
+        Return bytes(0) = AscW("%"c) AndAlso
+               bytes(1) = AscW("P"c) AndAlso
+               bytes(2) = AscW("D"c) AndAlso
+               bytes(3) = AscW("F"c) AndAlso
+               bytes(4) = AscW("-"c)
+    End Function
+
+    Private Async Function ExecuteInternalDownloadWebFilesTool(toolCall As ToolCall,
+                                                               context As ToolExecutionContext,
+                                                               Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+        Dim response As New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName
+        }
+
+        Try
+            cancellationToken.ThrowIfCancellationRequested()
+
+            Dim urls As New List(Of String)()
+
+            If toolCall.Arguments.ContainsKey("urls") Then
+                Dim urlsArg = toolCall.Arguments("urls")
+                If TypeOf urlsArg Is JArray Then
+                    For Each item In DirectCast(urlsArg, JArray)
+                        urls.Add(item.ToString())
+                    Next
+                ElseIf TypeOf urlsArg Is IEnumerable(Of Object) Then
+                    For Each item In DirectCast(urlsArg, IEnumerable(Of Object))
+                        urls.Add(item.ToString())
+                    Next
+                ElseIf TypeOf urlsArg Is String Then
+                    urls.Add(urlsArg.ToString())
+                End If
+            ElseIf toolCall.Arguments.ContainsKey("url") Then
+                urls.Add(toolCall.Arguments("url").ToString())
+            End If
+
+            If urls.Count = 0 Then
+                response.Success = False
+                response.ErrorMessage = "No URLs provided."
+                Return response
+            End If
+
+            Dim blockedPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
+            For Each url In urls
+                Dim lowerUrl = url.ToLowerInvariant()
+                If blockedPatterns.Any(Function(pattern) lowerUrl.Contains(pattern)) Then
+                    response.Success = False
+                    response.ErrorMessage = "Authenticated SharePoint/OneDrive/Teams URLs are not supported by download_web_files."
+                    Return response
+                End If
+
+                If Not IsSafeWebUrl(url) Then
+                    response.Success = False
+                    response.ErrorMessage = $"Blocked unsafe URL: {url}"
+                    Return response
+                End If
+            Next
+
+            Dim overwrite As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "overwrite", False)
+            Dim targetDirectory As String = GetToolArgumentString(toolCall.Arguments, "target_directory")
+            Dim resolvedTargetDirectory As String = ResolveDownloadTargetDirectory(targetDirectory)
+            context.Log($"Resolved download target directory: {resolvedTargetDirectory}")
+
+            context.Log($"Downloading {urls.Count} remote file(s) to: {resolvedTargetDirectory}")
+
+            Dim results As New JArray()
+
+            Using handler As New System.Net.Http.HttpClientHandler() With {.AllowAutoRedirect = True}
+                Using client As New System.Net.Http.HttpClient(handler)
+                    client.Timeout = TimeSpan.FromSeconds(90)
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+                    For Each url In urls
+                        cancellationToken.ThrowIfCancellationRequested()
+
+                        Dim item As New JObject(New JProperty("url", url))
+
+                        Try
+                            context.Log($"  Downloading: {url}")
+
+                            Using request As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url)
+                                Using httpResponse = Await client.SendAsync(
+                                    request,
+                                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
+                                    cancellationToken).ConfigureAwait(False)
+
+                                    If Not httpResponse.IsSuccessStatusCode Then
+                                        item("ok") = False
+                                        item("status") = CInt(httpResponse.StatusCode)
+                                        item("error") = $"HTTP {(CInt(httpResponse.StatusCode)).ToString()} {httpResponse.ReasonPhrase}"
+                                        results.Add(item)
+                                        Continue For
+                                    End If
+
+                                    Dim contentType As String = If(httpResponse.Content.Headers.ContentType?.MediaType, "")
+                                    item("content_type") = contentType
+
+                                    If contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase) OrElse
+                                       contentType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                                       contentType.IndexOf("xml", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                                       contentType.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+                                        item("ok") = False
+                                        item("error") = "Remote response is textual/HTML, not a downloadable binary file."
+                                        results.Add(item)
+                                        Continue For
+                                    End If
+
+                                    Dim bytes = Await ReadResponseBytesLimitedAsync(
+                                        httpResponse.Content,
+                                        MaxDownloadedWebFileBytes,
+                                        cancellationToken).ConfigureAwait(False)
+
+                                    If bytes Is Nothing OrElse bytes.Length = 0 Then
+                                        item("ok") = False
+                                        item("error") = "Empty response body."
+                                        results.Add(item)
+                                        Continue For
+                                    End If
+
+                                    If LooksLikeHtml(bytes) Then
+                                        item("ok") = False
+                                        item("error") = "Remote response appears to be HTML, not the original binary file."
+                                        results.Add(item)
+                                        Continue For
+                                    End If
+
+                                    Dim fileName As String = BuildDownloadFileName(url, httpResponse)
+                                    Dim targetPath As String = Path.Combine(resolvedTargetDirectory, fileName)
+
+                                    If Not overwrite Then
+                                        targetPath = GetUniqueDownloadPath(targetPath)
+                                    End If
+
+                                    Dim ext = Path.GetExtension(targetPath).ToLowerInvariant()
+                                    If ext = ".pdf" OrElse String.Equals(contentType, "application/pdf", StringComparison.OrdinalIgnoreCase) Then
+                                        If Not LooksLikePdf(bytes) Then
+                                            item("ok") = False
+                                            item("error") = "Downloaded content does not have a valid PDF signature."
+                                            results.Add(item)
+                                            Continue For
+                                        End If
+                                    End If
+
+                                    File.WriteAllBytes(targetPath, bytes)
+
+                                    item("ok") = True
+                                    item("path") = targetPath
+                                    item("file_name") = Path.GetFileName(targetPath)
+                                    item("size_bytes") = bytes.Length
+                                    results.Add(item)
+                                End Using
+                            End Using
+
+                        Catch ex As OperationCanceledException
+                            Throw
+                        Catch ex As Exception
+                            item("ok") = False
+                            item("error") = ex.Message
+                            results.Add(item)
+                        End Try
+                    Next
+                End Using
+            End Using
+
+            response.Success = True
+            response.Response = New JObject(
+                        New JProperty("target_directory", resolvedTargetDirectory),
+                        New JProperty("results", results)
+                    ).ToString(Formatting.None)
+            Return response
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled"
+            Return response
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            Return response
+        End Try
     End Function
 
     ''' <summary>
@@ -2490,6 +3481,168 @@ Partial Public Class ThisAddIn
 
         Try
 
+            ' ── workspace_extract_text: read any supported file via GetFileContent (unified extractor) ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
+                Dim relPath As String = GetToolArgumentString(toolCall.Arguments, "path")
+                Dim maxChars As Integer = 100000
+                Try
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars") Then
+                        Integer.TryParse(toolCall.Arguments("max_chars").ToString(), maxChars)
+                    End If
+                Catch
+                End Try
+                maxChars = Math.Min(Math.Max(maxChars, 1000), 500000)
+
+                Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
+                If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
+                    GoTo __AfterDispatch
+                End If
+
+                Dim fullPath As String = ""
+                Try
+                    fullPath = SharedLibrary.Agents.PathPolicy.Resolve(relPath, SharedLibrary.Agents.PathAccess.Read)
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = "Invalid workspace path: " & ex.Message
+                    GoTo __AfterDispatch
+                End Try
+
+                If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "Workspace file not found: " & If(relPath, "")
+                    GoTo __AfterDispatch
+                End If
+
+                Dim extracted As String = ""
+                Try
+                    extracted = Await GetFileContent(fullPath, Silent:=True, DoOCR:=True, AskUser:=False)
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = "Extraction failed: " & ex.Message
+                    GoTo __AfterDispatch
+                End Try
+
+                If String.IsNullOrWhiteSpace(extracted) Then
+                    response.Success = True
+                    response.Response = "(No readable text extracted from '" & relPath & "'.)"
+                Else
+                    If extracted.Length > maxChars Then
+                        extracted = extracted.Substring(0, maxChars) & Environment.NewLine & "[Truncated at " & maxChars & " characters.]"
+                    End If
+                    response.Success = True
+                    response.Response = extracted
+                End If
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            ' ── workspace_read_many: shared UTF-8 text reader for multiple files ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolReadMany, StringComparison.OrdinalIgnoreCase) Then
+                Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
+                If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
+                    GoTo __AfterDispatch
+                End If
+
+                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+                response.Success = True
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            ' ── workspace_extract_text_many: extract text from multiple files via GetFileContent ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
+                Dim manyMaxFiles As Integer = 20
+                Dim manyMaxCharsPerFile As Integer = 100000
+                Try
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_files") Then
+                        Integer.TryParse(toolCall.Arguments("max_files").ToString(), manyMaxFiles)
+                    End If
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars_per_file") Then
+                        Integer.TryParse(toolCall.Arguments("max_chars_per_file").ToString(), manyMaxCharsPerFile)
+                    End If
+                Catch
+                End Try
+                manyMaxFiles = Math.Min(Math.Max(manyMaxFiles, 1), 100)
+                manyMaxCharsPerFile = Math.Min(Math.Max(manyMaxCharsPerFile, 1000), 500000)
+
+                Dim manyWs = SharedLibrary.Agents.WorkspaceTools.Active
+                If manyWs Is Nothing OrElse Not manyWs.AllowRead OrElse String.IsNullOrWhiteSpace(manyWs.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
+                    GoTo __AfterDispatch
+                End If
+
+                Dim manyPaths As List(Of String) = GetToolArgumentStringList(toolCall.Arguments, "paths")
+                Dim manyRequestedCount As Integer = manyPaths.Count
+                Dim manySelected As List(Of String) = manyPaths.Take(manyMaxFiles).ToList()
+                Dim manyItems As New List(Of Object)()
+
+                For Each manyRelPath In manySelected
+                    Dim manyFullPath As String = ""
+                    Try
+                        manyFullPath = SharedLibrary.Agents.PathPolicy.Resolve(manyRelPath, SharedLibrary.Agents.PathAccess.Read)
+                    Catch ex As Exception
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "invalid_path", Key .message = ex.Message})
+                        Continue For
+                    End Try
+
+                    If String.IsNullOrWhiteSpace(manyFullPath) OrElse Not IO.File.Exists(manyFullPath) Then
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "not_found", Key .message = "File not found."})
+                        Continue For
+                    End If
+
+                    Try
+                        Dim manyExtracted As String = Await GetFileContent(manyFullPath, Silent:=True, DoOCR:=True, AskUser:=False)
+                        Dim manyTruncated As Boolean = False
+                        If Not String.IsNullOrWhiteSpace(manyExtracted) AndAlso manyExtracted.Length > manyMaxCharsPerFile Then
+                            manyExtracted = manyExtracted.Substring(0, manyMaxCharsPerFile) & Environment.NewLine & "[Truncated at " & manyMaxCharsPerFile & " characters.]"
+                            manyTruncated = True
+                        End If
+                        manyItems.Add(New With {
+                            Key .path = manyFullPath,
+                            Key .truncated = manyTruncated,
+                            Key .text = If(manyExtracted, "")
+                        })
+                    Catch ex As Exception
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
+                    End Try
+                Next
+
+                response.Success = True
+                response.Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                    Key .requested_count = manyRequestedCount,
+                    Key .processed_count = manySelected.Count,
+                    Key .items = manyItems
+                })
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            If SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+                response.Success = True
+
+                Try
+                    Dim wsToken As JToken = JToken.Parse(response.Response)
+                    If wsToken.Type = JTokenType.Object Then
+                        Dim wsObj = DirectCast(wsToken, JObject)
+                        Dim errToken = wsObj("error")
+                        If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null AndAlso errToken.ToString().Trim() <> "" Then
+                            response.Success = False
+                            response.ErrorMessage = If(wsObj("message")?.ToString(), errToken.ToString())
+                        End If
+                    End If
+                Catch
+                End Try
+
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
             If toolCall.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = ExecuteToolLoaderCall(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
@@ -2534,6 +3687,10 @@ Partial Public Class ThisAddIn
                 response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
                 response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
+                If response.Success Then
+                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                End If
+
                 If Not response.Success Then
                     response.ErrorMessage = "Skill invocation returned no result."
                 End If
@@ -2546,6 +3703,11 @@ Partial Public Class ThisAddIn
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalWebTool(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
+            ElseIf toolCall.ToolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = Await ExecuteInternalDownloadWebFilesTool(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
 
             ElseIf toolCall.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalSearchTool(toolCall, context)
@@ -2684,10 +3846,13 @@ __AfterDispatch:
                 Return response
             End If
 
-            ' ── SharePoint / OneDrive / Teams detection ──
-            ' These authenticated cloud storage URLs require login and will not return useful content.
+            Dim includeLinks As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "include_links", False)
+            Dim expandInteractiveSections As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "expand_interactive_sections", False)
+            Dim linkExtensions As List(Of String) = NormalizeLinkExtensions(GetToolArgumentStringList(toolCall.Arguments, "link_extensions"))
+
             Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
             Dim blockedUrls As New List(Of String)()
+
             For Each url In urls
                 Dim lowerUrl = url.ToLowerInvariant()
                 For Each pattern In sharepointPatterns
@@ -2716,29 +3881,64 @@ __AfterDispatch:
 
             If UseWebView2 Then
                 For i = 0 To urls.Count - 1
-                    Dim url = urls(i)
+                    Dim requestedUrl = urls(i)
+
                     Try
-                        context.Log($"  Fetching: {url}")
-                        ' RetrieveWebsiteContent_WebView2 handles its own threading (runs on STA thread internally)
-                        Dim content = Await RetrieveWebsiteContent_WebView2(url, 0)
+                        context.Log($"  Fetching: {requestedUrl}")
+
+                        Dim pageResult = Await RetrieveWebsiteContent_WebView2Detailed(
+                            requestedUrl,
+                            0,
+                            expandCollapsed:=expandInteractiveSections,
+                            includeLinks:=includeLinks,
+                            linkExtensions:=linkExtensions)
+
+                        Dim resolvedUrl As String = If(pageResult?.FinalUrl, requestedUrl)
+                        Dim content As String = If(pageResult?.TextContent, "")
+                        Dim linksJson As String = If(pageResult?.LinksJson, "[]")
+
+                        results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
 
                         If Not String.IsNullOrWhiteSpace(content) Then
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
                             results.AppendLine($"<CONTENT_{i + 1}>")
                             results.AppendLine(content)
                             results.AppendLine($"</CONTENT_{i + 1}>")
-                            results.AppendLine()
                         Else
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
                             results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                            results.AppendLine()
-                            ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={url}")
+                            ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                         End If
-                    Catch ex As Exception
-                        results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                        results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
+                        If includeLinks Then
+                            results.AppendLine($"<LINKS_{i + 1}>")
+                            results.AppendLine(
+                                BuildWebLinkExtractionResult(
+                                    requestedUrl,
+                                    resolvedUrl,
+                                    linkExtensions,
+                                    linksJson,
+                                    BuildWebRetrieverFallbackNote(includeLinks, linkExtensions, linksJson)))
+                            results.AppendLine($"</LINKS_{i + 1}>")
+                        End If
+
                         results.AppendLine()
-                        ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
+
+                    Catch ex As Exception
+                        results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
+                        results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
+
+                        If includeLinks Then
+                            results.AppendLine($"<LINKS_{i + 1}>")
+                            results.AppendLine(
+                                BuildWebLinkExtractionResult(
+                                    requestedUrl,
+                                    requestedUrl,
+                                    linkExtensions,
+                                    "[]",
+                                    "Link extraction failed because page retrieval failed."))
+                            results.AppendLine($"</LINKS_{i + 1}>")
+                        End If
+
+                        results.AppendLine()
+                        ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={requestedUrl}", ex:=ex)
                     End Try
                 Next
             Else
@@ -2747,28 +3947,55 @@ __AfterDispatch:
                     httpClient.Timeout = TimeSpan.FromSeconds(30)
 
                     For i = 0 To urls.Count - 1
-                        Dim url = urls(i)
+                        Dim requestedUrl = urls(i)
+
                         Try
-                            context.Log($"  Fetching: {url}")
-                            Dim content = Await RetrieveWebsiteContent(url, INI_ISearch_MaxDepth, httpClient)
+                            context.Log($"  Fetching: {requestedUrl}")
+                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient)
+
+                            results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
 
                             If Not String.IsNullOrWhiteSpace(content) Then
-                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
                                 results.AppendLine($"<CONTENT_{i + 1}>")
                                 results.AppendLine(content)
                                 results.AppendLine($"</CONTENT_{i + 1}>")
-                                results.AppendLine()
                             Else
-                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
                                 results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                                results.AppendLine()
-                                ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={url}")
+                                ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
                             End If
-                        Catch ex As Exception
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                            results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
+
+                            If includeLinks Then
+                                results.AppendLine($"<LINKS_{i + 1}>")
+                                results.AppendLine(
+                                    BuildWebLinkExtractionResult(
+                                        requestedUrl,
+                                        requestedUrl,
+                                        linkExtensions,
+                                        "[]",
+                                        "Structured link extraction is unavailable in the HTTP fallback path."))
+                                results.AppendLine($"</LINKS_{i + 1}>")
+                            End If
+
                             results.AppendLine()
-                            ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
+
+                        Catch ex As Exception
+                            results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
+                            results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
+
+                            If includeLinks Then
+                                results.AppendLine($"<LINKS_{i + 1}>")
+                                results.AppendLine(
+                                    BuildWebLinkExtractionResult(
+                                        requestedUrl,
+                                        requestedUrl,
+                                        linkExtensions,
+                                        "[]",
+                                        "Link extraction failed because page retrieval failed."))
+                                results.AppendLine($"</LINKS_{i + 1}>")
+                            End If
+
+                            results.AppendLine()
+                            ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={requestedUrl}", ex:=ex)
                         End Try
                     Next
                 End Using
@@ -3827,55 +5054,27 @@ __AfterDispatch:
     ''' <param name="preselectAll">Unused parameter in this method body (caller passes a value).</param>
     ''' <returns>Selected tools when the dialog result is OK; otherwise Nothing.</returns>
     Public Function ShowToolSelectionDialog(availableTools As List(Of ModelConfig), Optional preselectAll As Boolean = True, Optional FriendlyName As String = "Tools") As List(Of ModelConfig)
-        If availableTools Is Nothing OrElse availableTools.Count = 0 Then
-            Return New List(Of ModelConfig)()
-        End If
+        Dim selectedMainToolNames = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
+        Dim selectedAdvancedToolNames = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+        Dim updatedAdvancedToolNames As List(Of String) = Nothing
 
-        ' Note: Do NOT add ToolingSuffix here. ToolingSuffix is for models that CAN USE tools/sources,
-        ' not for the tools/sources themselves. The tools in this list ARE the sources.
-        ' InternalToolSuffix is already applied to the internal web tool in GetInternalWebTool().
+        Dim updatedMainToolNames = ShowDiscussInkyToolSelectionDialog(
+            selectedMainToolNames,
+            selectedAdvancedToolNames,
+            updatedAdvancedToolNames)
 
-        Dim selector As New MultiModelSelectorForm(
-        availableTools,
-        "",
-        $"{AN} - Select {FriendlyName}",
-        resetChecked:=False,
-        preselectMany:=If(SelectedToolNames, New List(Of String)()),
-        $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
-
-        selector.AddExtraButton("Skills && Agents…",
-            Sub(s, e)
-                Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
-                    f.ShowDialog(selector)
-                End Using
-            End Sub)
-        selector.AddExtraButton("Memory…",
-            Sub(s, e)
-                Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
-                    f.ShowDialog(selector)
-                End Using
-            End Sub)
-
-        selector.AddExtraButton("Workspace…",
-            Sub(s, e)
-                Using f As New WordWorkspaceForm()
-                    f.ShowDialog(selector)
-                End Using
-            End Sub)
-
-        If selector.ShowDialog() = DialogResult.OK Then
-            Dim selected = selector.SelectedModels
-            SelectedToolNames = selected.Select(Function(t) t.ToolName).ToList()
-            Try
-                My.Settings.SelectedToolNames = String.Join("|", SelectedToolNames)
-                My.Settings.Save()
-            Catch ex As Exception
-                ToolingFileLogger.LogWarn("Failed to persist SelectedToolNames.", ex:=ex)
-            End Try
-            Return selected
-        Else
+        If updatedMainToolNames Is Nothing Then
             Return Nothing
         End If
+
+        PersistDiscussInkyToolSelection(
+            updatedMainToolNames,
+            If(updatedAdvancedToolNames, selectedAdvancedToolNames),
+            GetDiscussInkyAdvancedToolsEnabled())
+
+        Dim selected = GetDiscussInkyEffectiveTools(includeImplicitWorkspaceTools:=True)
+        SelectedToolNames = selected.Select(Function(t) t.ToolName).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+        Return selected
     End Function
 
     ''' <summary>
@@ -3895,6 +5094,7 @@ __AfterDispatch:
         End If
 
         tools.Add(GetInternalWebTool())
+        tools.Add(GetInternalDownloadWebFilesTool())
 
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
             tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
@@ -3932,10 +5132,10 @@ __AfterDispatch:
     ''' </summary>
     Public Sub LoadPersistedToolSelection()
         Try
-            Dim saved = My.Settings.SelectedToolNames
-            If Not String.IsNullOrWhiteSpace(saved) Then
-                SelectedToolNames = saved.Split("|"c).ToList()
-            End If
+            SelectedToolNames = GetDiscussInkyEffectiveTools(includeImplicitWorkspaceTools:=True).
+                Select(Function(t) t.ToolName).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
         Catch ex As Exception
             SelectedToolNames = New List(Of String)()
             ToolingFileLogger.LogWarn("Failed to load persisted tool selection.", ex:=ex)
@@ -3948,31 +5148,354 @@ __AfterDispatch:
     ''' <param name="forceDialog">If True, always shows the selection dialog.</param>
     ''' <returns>Selected tool configurations, or Nothing when the dialog is canceled or no tools are available.</returns>
     Public Function SelectToolsForSession(Optional forceDialog As Boolean = False, Optional FriendlyName As String = ToolFriendlyName) As List(Of ModelConfig)
-        Dim availableTools = GetAvailableTools()
+        Dim selected = GetDiscussInkyEffectiveTools(includeImplicitWorkspaceTools:=True)
 
-        If availableTools.Count = 0 Then
-            ShowCustomMessageBox($"No {FriendlyName.ToLower} are available. Configure 'Tooling' in the Special Services configuration file.")
-            Return Nothing
+        If Not forceDialog AndAlso (selected.Count > 0 OrElse IsDiscussInkyWorkspaceConnected()) Then
+            Return selected
         End If
 
-        LoadPersistedToolSelection()
+        Return ShowToolSelectionDialog(GetAvailableTools(), preselectAll:=selected.Count = 0, FriendlyName:=FriendlyName)
+    End Function
 
-        If Not forceDialog AndAlso SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0 Then
-            Dim selectedNameSet As New HashSet(Of String)(SelectedToolNames, StringComparer.OrdinalIgnoreCase)
+    Private Const SelectedMainToolNamesSettingName As String = "SelectedMainToolNames"
+    Private Const SelectedAdvancedToolNamesSettingName As String = "SelectedAdvancedToolNames"
+    Private Const AdvancedToolsEnabledSettingName As String = "AdvancedToolsEnabled"
 
-            Dim selected = availableTools.
-            Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
+    Private Shared Function GetWordSettingString(name As String) As String
+        Try
+            Dim value = My.Settings(name)
+            Return If(value, "").ToString()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Shared Function GetWordSettingBoolean(name As String, defaultValue As Boolean) As Boolean
+        Try
+            Dim value = My.Settings(name)
+            If value Is Nothing Then Return defaultValue
+            Return CBool(value)
+        Catch
+            Return defaultValue
+        End Try
+    End Function
+
+    Private Shared Sub SetWordSettingValue(name As String, value As Object)
+        Try
+            My.Settings(name) = value
+        Catch
+        End Try
+    End Sub
+
+    Friend Shared Function SplitPersistedToolNames(raw As String) As List(Of String)
+        If String.IsNullOrWhiteSpace(raw) Then
+            Return New List(Of String)()
+        End If
+
+        Return raw.Split("|"c).
+            Select(Function(s) s.Trim()).
+            Where(Function(s) s.Length > 0).
+            Distinct(StringComparer.OrdinalIgnoreCase).
             ToList()
+    End Function
 
-            If selected.Count > 0 Then
-                Return selected
+    Private Shared Function JoinPersistedToolNames(names As IEnumerable(Of String)) As String
+        If names Is Nothing Then Return ""
+        Return String.Join("|", names.Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+                                      Select(Function(s) s.Trim()).
+                                      Distinct(StringComparer.OrdinalIgnoreCase))
+    End Function
+
+    Public Function GetPersistedSelectedMainToolNames() As List(Of String)
+        Return SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
+    End Function
+
+    Public Function GetPersistedSelectedAdvancedToolNames() As List(Of String)
+        Return SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+    End Function
+
+    Public Function GetPersistedAdvancedToolsEnabled() As Boolean
+        Return GetWordSettingBoolean(AdvancedToolsEnabledSettingName, False)
+    End Function
+
+    Private Shared Function DeduplicateToolsByName(tools As IEnumerable(Of ModelConfig)) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If tools Is Nothing Then Return result
+
+        For Each tool In tools
+            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+            If seen.Add(tool.ToolName.Trim()) Then
+                result.Add(tool)
+            End If
+        Next
+
+        Return result
+    End Function
+
+    Private Shared Function BuildToolNameSet(names As IEnumerable(Of String)) As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If names Is Nothing Then Return result
+
+        For Each name In names
+            If String.IsNullOrWhiteSpace(name) Then Continue For
+            result.Add(name.Trim())
+        Next
+
+        Return result
+    End Function
+
+    Private Function IsDiscussInkyWorkspaceConnected() As Boolean
+        Try
+            Dim ws = SharedLibrary.Agents.WorkspaceStore.Load("word")
+            Return ws IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
+                   Directory.Exists(ws.RootPath)
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function IsDiscussInkyAdvancedToolName(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        If toolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        If toolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           IsInternalKnowledgeToolName(toolName) OrElse
+           SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolName) Then
+            Return False
+        End If
+
+        If SharedLibrary.Agents.MemoryTools.IsMemoryTool(toolName) OrElse
+           SharedLibrary.Agents.TextTools.IsTextTool(toolName) OrElse
+           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
+           SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
+           SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        Return False
+    End Function
+
+    Public Function GetDiscussInkyMainSelectableTools() As List(Of ModelConfig)
+        Return DeduplicateToolsByName(
+            GetAvailableTools().
+                Where(Function(t) t IsNot Nothing AndAlso
+                                  Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                  Not IsDiscussInkyAdvancedToolName(t.ToolName) AndAlso
+                                  Not SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(t.ToolName)))
+    End Function
+
+    Public Function GetDiscussInkyAdvancedSelectableTools() As List(Of ModelConfig)
+        Return DeduplicateToolsByName(
+            GetAvailableTools().
+                Where(Function(t) t IsNot Nothing AndAlso
+                                  Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                  IsDiscussInkyAdvancedToolName(t.ToolName) AndAlso
+                                  Not SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(t.ToolName)))
+    End Function
+
+    Public Function GetDiscussInkyAdvancedToolsEnabled() As Boolean
+        Return GetWordSettingBoolean(AdvancedToolsEnabledSettingName, False)
+    End Function
+
+    Public Function GetDiscussInkyEffectiveTools(Optional includeImplicitWorkspaceTools As Boolean = True) As List(Of ModelConfig)
+        Dim mainNames = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
+        Dim advancedNames = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+        Dim advancedEnabled = GetDiscussInkyAdvancedToolsEnabled()
+
+        If mainNames.Count = 0 AndAlso advancedNames.Count = 0 Then
+            Dim legacy = SplitPersistedToolNames(My.Settings.SelectedToolNames)
+            If legacy.Count > 0 Then
+                Dim legacySet As New HashSet(Of String)(legacy, StringComparer.OrdinalIgnoreCase)
+
+                mainNames =
+                    GetDiscussInkyMainSelectableTools().
+                        Where(Function(t) legacySet.Contains(t.ToolName)).
+                        Select(Function(t) t.ToolName).
+                        Distinct(StringComparer.OrdinalIgnoreCase).
+                        ToList()
+
+                advancedNames =
+                    GetDiscussInkyAdvancedSelectableTools().
+                        Where(Function(t) legacySet.Contains(t.ToolName)).
+                        Select(Function(t) t.ToolName).
+                        Distinct(StringComparer.OrdinalIgnoreCase).
+                        ToList()
             End If
         End If
 
-        Dim hasPersistedSelection As Boolean = (SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0)
+        Dim result As New List(Of ModelConfig)()
+        Dim mainSet = BuildToolNameSet(mainNames)
+        Dim advancedSet = BuildToolNameSet(advancedNames)
 
-        ' Only preselect all on first use (no persisted selection yet).
-        Return ShowToolSelectionDialog(availableTools, preselectAll:=Not hasPersistedSelection, FriendlyName)
+        For Each tool In GetDiscussInkyMainSelectableTools()
+            If mainSet.Contains(tool.ToolName) Then
+                result.Add(tool)
+            End If
+        Next
+
+        If advancedEnabled Then
+            For Each tool In GetDiscussInkyAdvancedSelectableTools()
+                If advancedSet.Contains(tool.ToolName) Then
+                    result.Add(tool)
+                End If
+            Next
+        End If
+
+        If includeImplicitWorkspaceTools AndAlso IsDiscussInkyWorkspaceConnected() Then
+            result.AddRange(SharedLibrary.Agents.WorkspaceTools.BuildAll())
+        End If
+
+        result = DeduplicateToolsByName(result)
+
+        SelectedToolNames = result.Select(Function(t) t.ToolName).ToList()
+        Return result
+    End Function
+
+    Public Sub PersistDiscussInkyToolSelection(selectedMainToolNames As IEnumerable(Of String),
+                                               selectedAdvancedToolNames As IEnumerable(Of String),
+                                               advancedToolsEnabled As Boolean)
+        Dim mainNames = If(selectedMainToolNames, Enumerable.Empty(Of String)()).
+            Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+            Select(Function(s) s.Trim()).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        Dim advancedNames = If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+            Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+            Select(Function(s) s.Trim()).
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+
+        SetWordSettingValue(SelectedMainToolNamesSettingName, JoinPersistedToolNames(mainNames))
+        SetWordSettingValue(SelectedAdvancedToolNamesSettingName, JoinPersistedToolNames(advancedNames))
+        SetWordSettingValue(AdvancedToolsEnabledSettingName, advancedToolsEnabled)
+
+        Dim effective = GetDiscussInkyEffectiveTools(includeImplicitWorkspaceTools:=False)
+        My.Settings.SelectedToolNames = String.Join("|", effective.Select(Function(t) t.ToolName).Distinct(StringComparer.OrdinalIgnoreCase))
+        My.Settings.Save()
+    End Sub
+
+    Private Function ShowDiscussInkyAdvancedToolSelectionDialog(selectedAdvancedToolNames As IEnumerable(Of String)) As List(Of String)
+        Dim availableTools = GetDiscussInkyAdvancedSelectableTools()
+
+        Using selector As New MultiModelSelectorForm(
+            availableTools,
+            "",
+            $"{AN} - Select Advanced Tools",
+            resetChecked:=False,
+            preselectMany:=If(selectedAdvancedToolNames, New List(Of String)()),
+            instruction:="Select the advanced tools that may be callable. " &
+                         "If skills or agents depend on advanced tools and they are not selected here or 'Advanced tools' is turned off, those skills or agents will fail gracefully.")
+
+            If selector.ShowDialog() = DialogResult.OK Then
+                Return selector.SelectedModels.
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+            End If
+        End Using
+
+        Return Nothing
+    End Function
+
+    Public Function ShowDiscussInkyToolSelectionDialog(selectedMainToolNames As IEnumerable(Of String),
+                                                       selectedAdvancedToolNames As IEnumerable(Of String),
+                                                       ByRef updatedAdvancedToolNames As List(Of String)) As List(Of String)
+
+        Dim availableTools = GetDiscussInkyMainSelectableTools()
+        Dim workingAdvanced As New List(Of String)(
+            If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+                Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                Select(Function(n) n.Trim()))
+
+        Using selector As New MultiModelSelectorForm(
+            availableTools,
+            "",
+            $"{AN} - Select {ToolFriendlyName}",
+            resetChecked:=False,
+            preselectMany:=If(selectedMainToolNames, New List(Of String)()),
+            instruction:="Select the agents, sources, skills, and connector-oriented tools you want to make available to the model. " &
+                         "Advanced tools are managed separately through the 'Advanced tools…' button.")
+
+            selector.AddExtraButton("Advanced tools…",
+                Sub(s, e)
+                    Dim advanced = ShowDiscussInkyAdvancedToolSelectionDialog(workingAdvanced)
+                    If advanced IsNot Nothing Then
+                        workingAdvanced = advanced
+                    End If
+                End Sub)
+
+            selector.AddExtraButton("Skills && Agents…",
+                Sub(s, e)
+                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                        f.ShowDialog(selector)
+                    End Using
+                End Sub)
+
+            selector.AddExtraButton("Memory…",
+                Sub(s, e)
+                    Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
+                        f.ShowDialog(selector)
+                    End Using
+                End Sub)
+
+            selector.AddExtraButton("Workspace…",
+                Sub(s, e)
+                    Using f As New WordWorkspaceForm()
+                        f.ShowDialog(selector)
+                    End Using
+                End Sub)
+
+            If selector.ShowDialog() = DialogResult.OK Then
+                updatedAdvancedToolNames = workingAdvanced.
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+                Dim selectedMain = selector.SelectedModels.
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+                Return selectedMain
+            End If
+        End Using
+
+        Return Nothing
+    End Function
+
+    Public Function SelectDiscussInkyToolsForSession(Optional forceDialog As Boolean = False) As List(Of ModelConfig)
+        Dim selectedMain = SplitPersistedToolNames(GetWordSettingString(SelectedMainToolNamesSettingName))
+        Dim selectedAdvanced = SplitPersistedToolNames(GetWordSettingString(SelectedAdvancedToolNamesSettingName))
+
+        If Not forceDialog Then
+            Dim effective = GetDiscussInkyEffectiveTools()
+            If effective.Count > 0 OrElse IsDiscussInkyWorkspaceConnected() Then
+                Return effective
+            End If
+        End If
+
+        Dim updatedAdvanced As List(Of String) = Nothing
+        Dim updatedMain = ShowDiscussInkyToolSelectionDialog(selectedMain, selectedAdvanced, updatedAdvanced)
+
+        If updatedMain Is Nothing Then
+            Return Nothing
+        End If
+
+        PersistDiscussInkyToolSelection(updatedMain, If(updatedAdvanced, selectedAdvanced), GetDiscussInkyAdvancedToolsEnabled())
+        Return GetDiscussInkyEffectiveTools()
     End Function
 
     Private Class ToolSourceLink

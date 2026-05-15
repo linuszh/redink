@@ -888,6 +888,9 @@ Namespace SharedLibrary
                                               messageId As String,
                                               Optional fields As M365MessageFields = M365MessageFields.Body Or M365MessageFields.Recipients,
                                               Optional ct As CancellationToken = Nothing) As Task(Of M365Message)
+            Dim normalizedMessageId = ToGraphUrlSafeId(messageId)
+            If String.IsNullOrWhiteSpace(normalizedMessageId) Then Return Nothing
+
             Dim token = Await GetAccessTokenAsync(context, ct).ConfigureAwait(False)
             Dim selectFields = New List(Of String) From {
                 "id", "subject", "from", "receivedDateTime", "sentDateTime", "importance",
@@ -900,7 +903,7 @@ Namespace SharedLibrary
             If (fields And M365MessageFields.Categories) <> 0 Then selectFields.Add("categories")
             If (fields And M365MessageFields.InternetHeaders) <> 0 Then selectFields.Add("internetMessageHeaders")
 
-            Dim url = $"{GraphV1}/me/messages/{Uri.EscapeDataString(messageId)}?$select={String.Join(",", selectFields)}"
+            Dim url = $"{GraphV1}/me/messages/{Uri.EscapeDataString(normalizedMessageId)}?$select={String.Join(",", selectFields)}"
             If (fields And M365MessageFields.AttachmentsList) <> 0 Then url &= "&$expand=attachments($select=id,name,contentType,size,isInline)"
 
             Dim j = Await GraphGetAsync(token, url, ct).ConfigureAwait(False)
@@ -964,7 +967,12 @@ Namespace SharedLibrary
                                                     messageIds As IEnumerable(Of String),
                                                     Optional fields As M365MessageFields = M365MessageFields.Body Or M365MessageFields.Recipients,
                                                     Optional ct As CancellationToken = Nothing) As Task(Of List(Of M365Message))
-            Dim ids = messageIds?.Where(Function(s) Not String.IsNullOrWhiteSpace(s)).Distinct().ToList()
+            Dim ids = messageIds?.
+                Select(Function(s) ToGraphUrlSafeId(s)).
+                Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+
             Dim out As New List(Of M365Message)()
             If ids Is Nothing OrElse ids.Count = 0 Then Return out
 
@@ -1455,6 +1463,26 @@ Namespace SharedLibrary
             Return New M365GraphException(msg, CInt(status))
         End Function
 
+        ''' <summary>
+        ''' Converts a Graph mail message id to the URL-safe form accepted in
+        ''' /me/messages/{id}. Accepts raw Base64-style ids, already URL-safe ids,
+        ''' and defensively unescapes once when a percent-encoded id is supplied.
+        ''' </summary>
+        Friend Function ToGraphUrlSafeId(value As String) As String
+            Dim s As String = If(value, "").Trim()
+            If String.IsNullOrWhiteSpace(s) Then Return ""
+
+            Try
+                If s.IndexOf("%"c) >= 0 Then
+                    s = Uri.UnescapeDataString(s)
+                End If
+            Catch
+            End Try
+
+            s = s.Replace(" ", "")
+            Return s.Replace("+"c, "-"c).Replace("/"c, "_"c)
+        End Function
+
         ' ═══════════════════════════════════════════════════════════════════════
         '  STRING / JSON UTILITIES
         ' ═══════════════════════════════════════════════════════════════════════
@@ -1585,5 +1613,7 @@ Namespace SharedLibrary
         End Sub
 
     End Module
+
+
 
 End Namespace

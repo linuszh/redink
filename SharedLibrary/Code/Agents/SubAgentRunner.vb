@@ -98,6 +98,15 @@ Namespace Agents
                 Dim finalText As String
                 Try
                     finalText = Await host.RunIsolatedToolingLoopAsync(req, cancellationToken).ConfigureAwait(False)
+                    If String.IsNullOrWhiteSpace(finalText) Then
+                        Return JsonConvert.SerializeObject(New With {
+                            Key .error = "agent_empty_result",
+                            Key .agent = ag.Name,
+                            Key .model = req.SpecialModelKey,
+                            Key .allowed_tools = If(req.AllowedToolNames, Array.Empty(Of String)()),
+                            Key .message = "The sub-agent tooling loop returned an empty final result."
+                        })
+                    End If
                 Catch oce As OperationCanceledException
                     Throw
                 Catch ex As Exception

@@ -18,6 +18,10 @@
 '   workspace_rename     — rename a file/folder inside the workspace
 '   workspace_delete     — delete to Recycle Bin (or permanent on request)
 '   workspace_make_dir   — create a folder inside the workspace
+'   workspace_read             — read one UTF-8 text file inside the workspace
+'   workspace_read_many        — read many UTF-8 text files inside the workspace
+'   workspace_extract_text     — extract readable text from one supported file
+'   workspace_extract_text_many — extract readable text from many supported files
 ' =============================================================================
 
 Option Strict On
@@ -30,10 +34,25 @@ Imports Microsoft.VisualBasic.FileIO
 Imports Newtonsoft.Json
 Imports SharedLibrary.SharedLibrary
 Imports IO = System.IO
+Imports Newtonsoft.Json.Linq
 
 Namespace Agents
 
     Public NotInheritable Class WorkspaceTools
+
+        Private Shared ReadOnly BinaryWorkspaceExtensions As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+            ".zip", ".rar", ".7z",
+            ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp",
+            ".mp3", ".wav", ".m4a", ".mp4", ".mov", ".avi", ".mkv",
+            ".exe", ".dll", ".bin"
+        }
+
+        Private Shared Function IsBinaryWorkspaceExtension(path As String) As Boolean
+            Dim ext As String = If(System.IO.Path.GetExtension(If(path, "")), "").Trim()
+            If ext = "" Then Return False
+            Return BinaryWorkspaceExtensions.Contains(ext)
+        End Function
 
         Private Sub New()
         End Sub
@@ -60,6 +79,7 @@ Namespace Agents
         Public Const ToolGet As String = "workspace_get"
         Public Const ToolInventory As String = "workspace_inventory"
         Public Const ToolRead As String = "workspace_read"
+        Public Const ToolReadMany As String = "workspace_read_many"
         Public Const ToolWrite As String = "workspace_write"
         Public Const ToolSearch As String = "workspace_search"
         Public Const ToolCopy As String = "workspace_copy"
@@ -67,12 +87,15 @@ Namespace Agents
         Public Const ToolRename As String = "workspace_rename"
         Public Const ToolDelete As String = "workspace_delete"
         Public Const ToolMakeDir As String = "workspace_make_dir"
+        Public Const ToolExtractText As String = "workspace_extract_text"
+        Public Const ToolExtractTextMany As String = "workspace_extract_text_many"
 
         Public Shared Function IsWorkspaceTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
-                Case ToolGet, ToolInventory, ToolRead, ToolWrite, ToolSearch,
-                     ToolCopy, ToolMove, ToolRename, ToolDelete, ToolMakeDir
+                Case ToolGet, ToolInventory, ToolRead, ToolReadMany, ToolWrite, ToolSearch,
+                     ToolCopy, ToolMove, ToolRename, ToolDelete, ToolMakeDir,
+                     ToolExtractText, ToolExtractTextMany
                     Return True
                 Case Else
                     Return False
@@ -81,10 +104,12 @@ Namespace Agents
 
         Public Shared Function BuildAll() As List(Of ModelConfig)
             Return New List(Of ModelConfig) From {
-                BuildGet(), BuildInventory(), BuildRead(), BuildWrite(), BuildSearch(),
-                BuildCopy(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir()
+                BuildGet(), BuildInventory(), BuildRead(), BuildReadMany(), BuildWrite(), BuildSearch(),
+                BuildCopy(), BuildMove(), BuildRename(), BuildDelete(), BuildMakeDir(),
+                BuildExtractText(), BuildExtractTextMany()
             }
         End Function
+
 
         ' --------------------------------------------------------------- dispatch
 
@@ -94,6 +119,7 @@ Namespace Agents
                     Case ToolGet : Return ExecuteGet()
                     Case ToolInventory : Return ExecuteInventory(arguments)
                     Case ToolRead : Return ExecuteRead(arguments)
+                    Case ToolReadMany : Return ExecuteReadMany(arguments)
                     Case ToolWrite : Return ExecuteWrite(arguments)
                     Case ToolSearch : Return ExecuteSearch(arguments)
                     Case ToolCopy : Return ExecuteCopyOrMove(arguments, isMove:=False)
@@ -101,6 +127,8 @@ Namespace Agents
                     Case ToolRename : Return ExecuteRename(arguments)
                     Case ToolDelete : Return ExecuteDelete(arguments)
                     Case ToolMakeDir : Return ExecuteMakeDir(arguments)
+                    Case ToolExtractText, ToolExtractTextMany
+                        Return Err_("host_only_tool", toolName & " must be executed by the host (Word/Outlook), not via the shared dispatcher.")
                     Case Else : Return Err_("unknown_workspace_tool", "Unknown tool '" & toolName & "'.")
                 End Select
             Catch uae As UnauthorizedAccessException
@@ -114,7 +142,7 @@ Namespace Agents
 
         Private Shared Function RequireConnected() As String
             If _active Is Nothing OrElse String.IsNullOrWhiteSpace(_active.RootPath) OrElse Not Directory.Exists(_active.RootPath) Then
-                Return Err_("no_workspace", "No workspace is configured. Files will be written to the Desktop instead.")
+                Return Err_("no_workspace", "No workspace is configured.")
             End If
             Return Nothing
         End Function
@@ -229,6 +257,78 @@ Namespace Agents
             })
         End Function
 
+        Private Shared Function ExecuteReadMany(args As IDictionary(Of String, Object)) As String
+            Dim err = RequireConnected() : If err IsNot Nothing Then Return err
+            If Not _active.AllowRead Then Return Err_("not_permitted", "Workspace read is disabled.")
+
+            Dim paths = GetStringList(args, "paths")
+            If paths.Count = 0 Then Return Err_("missing_paths", "paths is required.")
+
+            Dim maxFiles = Math.Min(Math.Max(GetInt(args, "max_files", 20), 1), 100)
+            Dim maxChars = GetInt(args, "max_chars_per_file", 0)
+
+            Dim requestedCount = paths.Count
+            Dim selected = paths.Take(maxFiles).ToList()
+            Dim items As New List(Of Object)
+
+            For Each relPath In selected
+                Try
+                    Dim p = ResolveInsideWorkspace(relPath)
+                    If Not File.Exists(p) Then
+                        items.Add(New With {
+                            Key .path = relPath,
+                            Key .error = "not_found",
+                            Key .message = "File not found."
+                        })
+                        Continue For
+                    End If
+
+                    Dim fi As New FileInfo(p)
+                    If fi.Length > PathPolicy.MaxFileSizeBytes Then
+                        items.Add(New With {
+                            Key .path = p,
+                            Key .error = "file_too_large",
+                            Key .size = fi.Length,
+                            Key .message = "File exceeds " & PathPolicy.MaxFileSizeBytes & " bytes."
+                        })
+                        Continue For
+                    End If
+
+                    Dim text = File.ReadAllText(p, Encoding.UTF8)
+                    Dim truncated = False
+                    If maxChars > 0 AndAlso text.Length > maxChars Then
+                        text = text.Substring(0, maxChars)
+                        truncated = True
+                    End If
+
+                    items.Add(New With {
+                        Key .path = p,
+                        Key .size = fi.Length,
+                        Key .truncated = truncated,
+                        Key .text = text
+                    })
+                Catch uae As UnauthorizedAccessException
+                    items.Add(New With {
+                        Key .path = relPath,
+                        Key .error = "access_denied",
+                        Key .message = uae.Message
+                    })
+                Catch ex As Exception
+                    items.Add(New With {
+                        Key .path = relPath,
+                        Key .error = "read_failed",
+                        Key .message = ex.Message
+                    })
+                End Try
+            Next
+
+            Return JsonConvert.SerializeObject(New With {
+                Key .requested_count = requestedCount,
+                Key .processed_count = selected.Count,
+                Key .items = items
+            })
+        End Function
+
         Private Shared Function ExecuteWrite(args As IDictionary(Of String, Object)) As String
             Dim err = RequireConnected() : If err IsNot Nothing Then Return err
             If Not _active.AllowWrite Then Return Err_("not_permitted", "Workspace write is disabled.")
@@ -244,6 +344,14 @@ Namespace Agents
                 target = UniquePath(Path.Combine(_active.RootPath, SanitizeName(suggested)))
             Else
                 target = ResolveInsideWorkspace(relPath)
+            End If
+
+            If IsBinaryWorkspaceExtension(target) Then
+                Return Err_(
+                    "binary_extension_not_supported",
+                    "workspace_write only creates UTF-8 text/code files. " &
+                    "Do not use it for .pdf, .docx, .xlsx, .pptx, image, archive, audio, video, or other binary/document formats. " &
+                    "Use a dedicated binary-producing tool and then copy the real output file into the workspace.")
             End If
 
             Dim dir = Path.GetDirectoryName(target)
@@ -434,6 +542,34 @@ Namespace Agents
             Return System.Convert.ToString(v)
         End Function
 
+        Private Shared Function GetStringList(args As IDictionary(Of String, Object), name As String) As List(Of String)
+            Dim list As New List(Of String)
+            If args Is Nothing Then Return list
+
+            Dim v As Object = Nothing
+            If Not args.TryGetValue(name, v) OrElse v Is Nothing Then Return list
+
+            If TypeOf v Is JArray Then
+                For Each tk In CType(v, JArray)
+                    Dim s = tk.ToString()
+                    If Not String.IsNullOrWhiteSpace(s) Then list.Add(s)
+                Next
+                Return list
+            End If
+
+            If TypeOf v Is IEnumerable(Of Object) Then
+                For Each o In CType(v, IEnumerable(Of Object))
+                    Dim s = System.Convert.ToString(o)
+                    If Not String.IsNullOrWhiteSpace(s) Then list.Add(s)
+                Next
+                Return list
+            End If
+
+            Dim single_ = System.Convert.ToString(v)
+            If Not String.IsNullOrWhiteSpace(single_) Then list.Add(single_)
+            Return list
+        End Function
+
         Private Shared Function GetInt(args As IDictionary(Of String, Object), name As String, defaultValue As Integer) As Integer
             If args Is Nothing Then Return defaultValue
             Dim v As Object = Nothing
@@ -479,11 +615,88 @@ Namespace Agents
         End Function
 
         Private Shared Function BuildRead() As ModelConfig
+            Dim def =
+                "{""name"":""" & ToolRead & """," &
+                """description"":""Read one UTF-8 text file (not other formats!) inside the workspace. This tool is for a single file only and is not OK for many files. Use workspace_read_many when you need to read multiple text files. Use workspace_extract_text for non-plain-text formats.""," &
+                """parameters"":{""type"":""object""," &
+                """properties"":{" &
+                """path"":{""type"":""string"",""description"":""Workspace-relative path.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length (0 = no cap).""}}," &
+                """required"":[""path""]}}"
+
             Return New ModelConfig() With {
-                .ToolName = ToolRead, .Tool = True, .ToolPriority = 912, .ToolErrorHandling = "skip",
+                .ToolName = ToolRead,
+                .Tool = True,
+                .ToolPriority = 912,
+                .ToolErrorHandling = "skip",
                 .ModelDescription = "Workspace (read)",
-                .ToolDefinition = "{""name"":""" & ToolRead & """,""description"":""Read a UTF-8 text file inside the workspace."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative path.""},""max_chars"":{""type"":""integer"",""description"":""Optional cap on returned text length (0 = no cap).""}},""required"":[""path""]}}",
-                .ToolInstructionsPrompt = ToolRead & ": Read a text file from inside the workspace."
+                .ToolDefinition = def,
+                .ToolInstructionsPrompt = ToolRead & ": Read one text file from inside the workspace. Do not use this for many files; use " & ToolReadMany & " instead. For non-plain-text files, use " & ToolExtractText & "."
+            }
+        End Function
+
+        Private Shared Function BuildReadMany() As ModelConfig
+            Dim def =
+                "{""name"":""" & ToolReadMany & """," &
+                """description"":""Read multiple UTF-8 text files (not other formats!) inside the workspace in one call. Use this when you need many files instead of calling workspace_read repeatedly.""," &
+                """parameters"":{""type"":""object""," &
+                """properties"":{" &
+                """paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Workspace-relative paths to read.""}," &
+                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional cap on returned text length for each file (0 = no cap).""}," &
+                """max_files"":{""type"":""integer"",""description"":""Maximum files to process from 'paths' (default 20, capped 100).""}}," &
+                """required"":[""paths""]}}"
+
+            Return New ModelConfig() With {
+                .ToolName = ToolReadMany,
+                .Tool = True,
+                .ToolPriority = 912,
+                .ToolErrorHandling = "skip",
+                .ModelDescription = "Workspace (read many)",
+                .ToolDefinition = def,
+                .ToolInstructionsPrompt = ToolReadMany & ": Read many text files from inside the workspace in one call."
+            }
+        End Function
+
+        Private Shared Function BuildExtractText() As ModelConfig
+            Dim def =
+                "{""name"":""" & ToolExtractText & """," &
+                """description"":""Extract readable text from one workspace file of any supported format (PDF with OCR fallback, DOCX, DOC, RTF, XLSX, XLS, PPTX, PPT, EML, MSG, TXT/CSV/JSON/XML/HTML/Markdown, and images/audio/video via the configured model). This tool is for a single file only and is not OK for many files. Use workspace_extract_text_many when you need to extract multiple files.""," &
+                """parameters"":{""type"":""object""," &
+                """properties"":{" &
+                """path"":{""type"":""string"",""description"":""Workspace-relative path of the file to extract.""}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned characters (default 100000, max 500000).""}}," &
+                """required"":[""path""]}}"
+
+            Return New ModelConfig() With {
+                .ToolName = ToolExtractText,
+                .ToolDefinition = def,
+                .ToolInstructionsPrompt = ToolExtractText & ": Extract text from one supported workspace file. Do not use this for many files; use " & ToolExtractTextMany & " instead.",
+                .ModelDescription = "Workspace file text extractor",
+                .Tool = True,
+                .ToolPriority = 905,
+                .ToolErrorHandling = "skip"
+            }
+        End Function
+
+        Private Shared Function BuildExtractTextMany() As ModelConfig
+            Dim def =
+                "{""name"":""" & ToolExtractTextMany & """," &
+                """description"":""Extract readable text from multiple workspace files of supported formats in one call. Use this instead of repeated workspace_extract_text calls when you need many files.""," &
+                """parameters"":{""type"":""object""," &
+                """properties"":{" &
+                """paths"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Workspace-relative paths of the files to extract.""}," &
+                """max_chars_per_file"":{""type"":""integer"",""description"":""Optional cap on returned characters for each file (default 100000, max 500000).""}," &
+                """max_files"":{""type"":""integer"",""description"":""Maximum files to process from 'paths' (default 20, capped 100).""}}," &
+                """required"":[""paths""]}}"
+
+            Return New ModelConfig() With {
+                .ToolName = ToolExtractTextMany,
+                .ToolDefinition = def,
+                .ToolInstructionsPrompt = ToolExtractTextMany & ": Extract text from many supported workspace files in one call.",
+                .ModelDescription = "Workspace file text extractor (many)",
+                .Tool = True,
+                .ToolPriority = 905,
+                .ToolErrorHandling = "skip"
             }
         End Function
 
@@ -491,8 +704,8 @@ Namespace Agents
             Return New ModelConfig() With {
                 .ToolName = ToolWrite, .Tool = True, .ToolPriority = 913, .ToolErrorHandling = "skip",
                 .ModelDescription = "Workspace (write)",
-                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the workspace. Omit 'path' to auto-name based on 'filename' in the workspace root."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative path. Omit to auto-name.""},""filename"":{""type"":""string"",""description"":""Suggested name when 'path' is omitted.""},""text"":{""type"":""string"",""description"":""Content to write.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Default 'overwrite'.""}},""required"":[""text""]}}",
-                .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the workspace."
+                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the workspace. Omit 'path' to auto-name based on 'filename' in the workspace root. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative path. Omit to auto-name.""},""filename"":{""type"":""string"",""description"":""Suggested name when 'path' is omitted.""},""text"":{""type"":""string"",""description"":""Content to write.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Default 'overwrite'.""}},""required"":[""text""]}}",
+                .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the workspace. Never use this tool to create or overwrite PDF, Office, image, archive, audio, video, or other binary files."
             }
         End Function
 

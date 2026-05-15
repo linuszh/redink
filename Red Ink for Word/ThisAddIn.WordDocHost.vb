@@ -3,8 +3,8 @@
 
 ' =============================================================================
 ' File: WordDocHost.vb
-' PURPOSE
-'   Services for agents to interact with Word documents: list, read, search, insert, format, comment.
+' Purpose: Services for agents to interact with Word documents: list, read, search, 
+'       insert, format, comment.
 '
 ' =============================================================================
 
