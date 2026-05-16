@@ -43,11 +43,12 @@ Namespace Agents
             "Your previous response was empty or unusable. Return one usable final answer in the requested format. If you cannot complete the task, return a structured error object."
 
         Public Shared Async Function InvokeAsync(host As ISubAgentHost,
-                                                 agentName As String,
-                                                 task As String,
-                                                 Optional contextBlob As String = Nothing,
-                                                 Optional storeResultInMemory As Boolean = True,
-                                                 Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
+                                         agentName As String,
+                                         task As String,
+                                         Optional contextBlob As String = Nothing,
+                                         Optional storeResultInMemory As Boolean = True,
+                                         Optional workflowId As String = Nothing,
+                                         Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
 
             If host Is Nothing Then
                 Return BuildInfrastructureErrorPayload(agentName, "no_host", "invoke", "No sub-agent host is available.")
@@ -58,15 +59,26 @@ Namespace Agents
                 Return BuildInfrastructureErrorPayload(agentName, "agent_not_found", "invoke", "The requested sub-agent was not found.")
             End If
 
-            Return Await InvokeResolvedAsync(host, ag, task, contextBlob, storeResultInMemory, cancellationToken).ConfigureAwait(False)
+            Dim effectiveWorkflowId As String =
+        If(String.IsNullOrWhiteSpace(workflowId), WorkflowContinuity.CurrentWorkflowId, workflowId)
+
+            Return Await InvokeResolvedAsync(
+        host,
+        ag,
+        task,
+        contextBlob,
+        storeResultInMemory,
+        effectiveWorkflowId,
+        cancellationToken).ConfigureAwait(False)
         End Function
 
         Friend Shared Async Function InvokeResolvedAsync(host As ISubAgentHost,
-                                                         ag As AgentDescriptor,
-                                                         task As String,
-                                                         Optional contextBlob As String = Nothing,
-                                                         Optional storeResultInMemory As Boolean = True,
-                                                         Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
+                                                 ag As AgentDescriptor,
+                                                 task As String,
+                                                 Optional contextBlob As String = Nothing,
+                                                 Optional storeResultInMemory As Boolean = True,
+                                                 Optional workflowId As String = Nothing,
+                                                 Optional cancellationToken As CancellationToken = Nothing) As Task(Of String)
 
             If host Is Nothing Then
                 Return BuildInfrastructureErrorPayload(If(ag?.Name, ""), "no_host", "invoke", "No sub-agent host is available.")
@@ -74,6 +86,24 @@ Namespace Agents
 
             If ag Is Nothing OrElse String.IsNullOrWhiteSpace(ag.Name) Then
                 Return BuildInfrastructureErrorPayload(If(ag?.Name, ""), "agent_not_found", "invoke", "The requested sub-agent was not found.")
+            End If
+
+            Dim effectiveWorkflowId As String =
+        If(String.IsNullOrWhiteSpace(workflowId), WorkflowContinuity.CurrentWorkflowId, workflowId)
+
+            If Not String.IsNullOrWhiteSpace(effectiveWorkflowId) Then
+                Dim checkpointWritten =
+            WorkflowContinuity.NoteSubAgentInvoked(
+                effectiveWorkflowId,
+                WorkflowContinuity.CurrentHostPipeline,
+                ag.Name)
+
+                Debug.WriteLine(
+            WorkflowContinuity.BuildWorkflowLogLabel(
+                effectiveWorkflowId,
+                "sub_agent_invoked",
+                agentName:=ag.Name) &
+            " checkpoint_written=" & If(checkpointWritten, "true", "false"))
             End If
 
             Dim sys As New StringBuilder()
@@ -97,9 +127,9 @@ Namespace Agents
             End If
 
             Dim allowedTools As IReadOnlyList(Of String) =
-                If(ag.AllowedTools Is Nothing,
-                   CType(Array.Empty(Of String)(), IReadOnlyList(Of String)),
-                   ag.AllowedTools.AsReadOnly())
+        If(ag.AllowedTools Is Nothing,
+           CType(Array.Empty(Of String)(), IReadOnlyList(Of String)),
+           ag.AllowedTools.AsReadOnly())
 
             Dim retryCount As Integer = 0
             Dim userMessageForRun As String = baseUserMessage.ToString()
@@ -110,17 +140,23 @@ Namespace Agents
             Try
                 Do
                     Dim req As New SubAgentRunRequest With {
-                        .AgentName = ag.Name,
-                        .SystemPrompt = sys.ToString(),
-                        .UserMessage = userMessageForRun,
-                        .SpecialModelKey = If(String.IsNullOrWhiteSpace(ag.Model), "agentdefaultmodel", ag.Model),
-                        .AllowedToolNames = allowedTools,
-                        .MaxIterations = 0,
-                        .TimeoutSeconds = ag.TimeoutSeconds
-                    }
+                .AgentName = ag.Name,
+                .SystemPrompt = sys.ToString(),
+                .UserMessage = userMessageForRun,
+                .SpecialModelKey = If(String.IsNullOrWhiteSpace(ag.Model), "agentdefaultmodel", ag.Model),
+                .AllowedToolNames = allowedTools,
+                .MaxIterations = 0,
+                .TimeoutSeconds = ag.TimeoutSeconds,
+                .WorkflowId = effectiveWorkflowId
+            }
 
                     Debug.WriteLine(
-                        $"[SubAgentRunner] agent='{ag.Name}' allowed_tools={FormatAllowedTools(req.AllowedToolNames)} retry={retryCount}")
+                WorkflowContinuity.BuildWorkflowLogLabel(
+                    effectiveWorkflowId,
+                    "sub_agent_invoked",
+                    agentName:=ag.Name) &
+                " allowed_tools=" & FormatAllowedTools(req.AllowedToolNames) &
+                " retry=" & retryCount)
 
                     Dim finalText As String = Nothing
 
@@ -143,11 +179,23 @@ Namespace Agents
                             Try
                                 Dim key As String = "agent_" & ag.Name & "_" & DateTime.UtcNow.ToString("yyyyMMddHHmmssfff")
                                 Dim storedResult As JToken = If(normalized.Result Is Nothing, JValue.CreateNull(), normalized.Result.DeepClone())
+
+                                Dim metadata As New SessionMemoryMetadata With {
+                            .WorkflowId = effectiveWorkflowId,
+                            .Source = "agent",
+                            .ContentKind = "tool_result",
+                            .RelatedAgent = ag.Name,
+                            .CreatedAt = DateTime.UtcNow,
+                            .TrustedForRuntime = False,
+                            .TrustLevel = "advisory"
+                        }
+
                                 Dim entry = SessionMemory.Put(
-                                    key,
-                                    If(normalized.Summary, "Result of sub-agent '" & ag.Name & "'."),
-                                    storedResult,
-                                    tags:={"agent", ag.Name})
+                            key,
+                            If(normalized.Summary, "Result of sub-agent '" & ag.Name & "'."),
+                            storedResult,
+                            tags:={"agent", ag.Name},
+                            metadata:=metadata)
 
                                 resp("memory_key") = entry.Key
                                 resp("stub") = SessionMemory.BuildStub(entry)
@@ -155,30 +203,56 @@ Namespace Agents
                             End Try
                         End If
 
+                        If Not String.IsNullOrWhiteSpace(effectiveWorkflowId) Then
+                            Dim checkpointWritten =
+                        WorkflowContinuity.NoteSubAgentReturned(
+                            effectiveWorkflowId,
+                            WorkflowContinuity.CurrentHostPipeline,
+                            ag.Name,
+                            succeeded:=True)
+
+                            Debug.WriteLine(
+                        WorkflowContinuity.BuildWorkflowLogLabel(
+                            effectiveWorkflowId,
+                            "sub_agent_returned",
+                            agentName:=ag.Name) &
+                        " success=true checkpoint_written=" & If(checkpointWritten, "true", "false"))
+                        End If
+
                         Return resp.ToString(Formatting.None)
                     End If
 
                     Dim retryableErrorCodes As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-    SubAgentRuntimeHardening.EmptyResultCode,
-    SubAgentRuntimeHardening.ModelEmptyResponseCode
-}
+                SubAgentRuntimeHardening.EmptyResultCode,
+                SubAgentRuntimeHardening.ModelEmptyResponseCode
+            }
 
                     If retryCount = 0 AndAlso retryableErrorCodes.Contains(normalized.GetErrorCode()) Then
                         retryCount += 1
-
-                        Debug.WriteLine(
-        $"[SubAgentRunner] agent='{ag.Name}' retrying unusable output. retry={retryCount} errorCode={normalized.GetErrorCode()}")
-
-                        userMessageForRun = BuildRetryUserMessage(
-    baseUserMessage.ToString(),
-    normalized,
-    allowedTools)
+                        userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString(), normalized, allowedTools)
                         Continue Do
                     End If
 
                     Dim errResp As JObject = normalized.ToJObject()
                     errResp("agent") = ag.Name
                     errResp("retryCount") = retryCount
+
+                    If Not String.IsNullOrWhiteSpace(effectiveWorkflowId) Then
+                        Dim checkpointWritten =
+                    WorkflowContinuity.NoteSubAgentReturned(
+                        effectiveWorkflowId,
+                        WorkflowContinuity.CurrentHostPipeline,
+                        ag.Name,
+                        succeeded:=False)
+
+                        Debug.WriteLine(
+                    WorkflowContinuity.BuildWorkflowLogLabel(
+                        effectiveWorkflowId,
+                        "sub_agent_returned",
+                        agentName:=ag.Name) &
+                    " success=false checkpoint_written=" & If(checkpointWritten, "true", "false"))
+                    End If
+
                     Return errResp.ToString(Formatting.None)
                 Loop
             Finally

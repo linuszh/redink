@@ -614,6 +614,9 @@ Partial Public Class ThisAddIn
 
         Public Property AuthoritativeToolRegistrySnapshot As SharedLibrary.Agents.ToolRegistry
 
+        Public Property WorkflowId As String
+        Public Property RuntimeState As SharedLibrary.Agents.WorkflowRuntimeState
+
         ''' <summary>
         ''' Initializes a new tool execution context with default collections and limits.
         ''' </summary>
@@ -654,10 +657,23 @@ Partial Public Class ThisAddIn
         ''' <param name="level">Log level passed to the UI log window.</param>
 
         Public Sub Log(message As String, Optional level As String = "step")
-            Dim visibleMessage As String = If(
-                String.IsNullOrWhiteSpace(LogPrefix),
-                message,
-                LogPrefix & message)
+            Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
+            Dim leadingMarker As String = ""
+            Dim humanMessage As String = If(message, "").Trim()
+
+            If normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase) Then
+                leadingMarker = "[subagent]"
+            ElseIf normalizedPrefix <> "" Then
+                humanMessage = (normalizedPrefix & " " & humanMessage).Trim()
+            End If
+
+            Dim visibleMessage As String =
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    humanMessage,
+                    WorkflowId,
+                    If(RuntimeState?.CurrentPhase, ""),
+                    hostName:=HostKind,
+                    leadingMarker:=leadingMarker)
 
             Dim entry = $"[{DateTime.Now:HH:mm:ss}] {visibleMessage}"
             LogEntries.Add(entry)
@@ -763,6 +779,172 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
+    Private Function BuildMemoryGroundingClassifierInput(userText As String,
+                                                         otherPrompt As String,
+                                                         fullPromptOverride As String) As String
+        Dim sourceText As String = ""
+
+        If Not String.IsNullOrWhiteSpace(otherPrompt) Then
+            sourceText = otherPrompt
+        ElseIf Not String.IsNullOrWhiteSpace(fullPromptOverride) Then
+            sourceText = fullPromptOverride
+        Else
+            sourceText = userText
+        End If
+
+        sourceText = If(sourceText, "").Trim()
+
+        If sourceText.Length > 4000 Then
+            sourceText = sourceText.Substring(0, 4000)
+        End If
+
+        Return sourceText
+    End Function
+
+    Private Function HasMemoryGroundingClassifierInputsAvailable(context As ToolExecutionContext) As Boolean
+        If context Is Nothing Then
+            Return False
+        End If
+
+        Dim memoryToolsAvailable As Boolean = False
+
+        If context.AuthoritativeToolRegistrySnapshot IsNot Nothing Then
+            memoryToolsAvailable =
+                context.AuthoritativeToolRegistrySnapshot.Contains(SharedLibrary.Agents.MemoryTools.ToolList) OrElse
+                context.AuthoritativeToolRegistrySnapshot.Contains(SharedLibrary.Agents.MemoryTools.ToolGet)
+        End If
+
+        If Not memoryToolsAvailable AndAlso context.SelectedTools IsNot Nothing Then
+            memoryToolsAvailable =
+                context.SelectedTools.Any(
+                    Function(tool)
+                        Return tool IsNot Nothing AndAlso
+                               SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
+                    End Function)
+        End If
+
+        Dim workflowMemoryAvailable As Boolean = False
+
+        Try
+            workflowMemoryAvailable =
+                SharedLibrary.Agents.SessionMemory.ListMostRecentWorkflowEntries(maxItems:=1).Count > 0
+        Catch
+            workflowMemoryAvailable = False
+        End Try
+
+        Return memoryToolsAvailable OrElse workflowMemoryAvailable
+    End Function
+
+    Private Async Function ResolveMemoryGroundingModeAsync(context As ToolExecutionContext,
+                                                           userText As String,
+                                                           otherPrompt As String,
+                                                           fullPromptOverride As String,
+                                                           useSecondAPI As Boolean,
+                                                           hideSplash As Boolean,
+                                                           explicitMemoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode,
+                                                           memoryGroundingModeIsExplicit As Boolean,
+                                                           subAgentMode As Boolean) As Task
+        If context Is Nothing OrElse context.SequencingState Is Nothing Then
+            Return
+        End If
+
+        If subAgentMode Then
+            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+            context.SequencingState.ShouldExposeRecentMemoryStubs = False
+            context.Log("Memory grounding classifier skipped for sub-agent mode.")
+            Return
+        End If
+
+        If memoryGroundingModeIsExplicit Then
+            context.SequencingState.MemoryGroundingMode = explicitMemoryGroundingMode
+            context.SequencingState.ShouldExposeRecentMemoryStubs =
+                explicitMemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+
+            context.Log("Memory grounding mode applied from explicit override: " &
+                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+            Return
+        End If
+
+        If Not HasMemoryGroundingClassifierInputsAvailable(context) Then
+            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+            context.SequencingState.ShouldExposeRecentMemoryStubs = False
+            context.Log("Memory grounding classifier skipped: no memory tools and no workflow memory available.")
+            Return
+        End If
+
+        Dim classifierInput As String =
+            BuildMemoryGroundingClassifierInput(userText, otherPrompt, fullPromptOverride)
+
+        If String.IsNullOrWhiteSpace(classifierInput) Then
+            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
+            context.SequencingState.ShouldExposeRecentMemoryStubs = False
+            context.Log("Memory grounding classifier skipped: no classifier input was available.")
+            Return
+        End If
+
+        context.Log("Memory grounding classifier invoked.")
+
+        Dim raw As String = ""
+
+        Try
+            raw = Await LLM(
+                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingIntentClassifierSystemPrompt(),
+                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingIntentClassifierUserPrompt(classifierInput),
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                True)
+        Catch ex As Exception
+            context.LogWarn("Memory grounding classifier failed; defaulting to none.",
+                            details:=$"host={context.HostKind}; error={ex.Message}")
+        End Try
+
+        context.Log("classifierRawOutput=" & If(raw, ""))
+
+        Dim classifierNormalizedOutput As String = ""
+        Dim classifierParseError As String = ""
+        Dim decision =
+            SharedLibrary.Agents.ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                raw,
+                classifierNormalizedOutput,
+                classifierParseError)
+
+        Dim normalizedOutputForLog As String = If(classifierNormalizedOutput, "")
+        If normalizedOutputForLog.Length > 600 Then
+            normalizedOutputForLog = normalizedOutputForLog.Substring(0, 600) & "..."
+        End If
+
+        context.Log("classifierNormalizedOutput=" & normalizedOutputForLog)
+        context.Log("classifierParseSuccess=" & If(decision.IsValid, "true", "false"))
+
+        If Not decision.IsValid Then
+            context.Log("classifierParseError=" & If(classifierParseError, "invalid_classifier_output"))
+            context.LogWarn(
+                "classifierParseFailure",
+                details:=$"host={context.HostKind}; classifierParseError={If(classifierParseError, "invalid_classifier_output")}")
+        End If
+
+        context.SequencingState.MemoryGroundingMode = decision.MemoryGroundingMode
+        context.SequencingState.ShouldExposeRecentMemoryStubs = decision.ShouldExposeRecentMemoryStubs
+
+        context.Log(
+            "parsedMemoryGroundingMode=" &
+            SharedLibrary.Agents.ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode) &
+            "; shouldExposeRecentMemoryStubs=" &
+            If(decision.ShouldExposeRecentMemoryStubs, "true", "false") &
+            "; reason=" & If(decision.Reason, ""))
+
+        context.Log(
+            "appliedMemoryGroundingMode=" &
+            SharedLibrary.Agents.ToolCallSequencing.FormatMemoryGroundingMode(context.SequencingState.MemoryGroundingMode))
+
+        context.Log("Memory grounding mode applied: " &
+            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+    End Function
+
 #Region "Execute Tooling"
 
     ''' <summary>
@@ -821,12 +1003,17 @@ Partial Public Class ThisAddIn
         Optional subAgentInvocationIndex As Integer = 0,
         Optional subAgentAgentInvocationCount As Integer = 0,
         Optional subAgentName As String = Nothing,
-        Optional userLanguage As String = "") As Task(Of String)
+        Optional userLanguage As String = "",
+        Optional workflowId As String = "",
+        Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+        Optional memoryGroundingModeIsExplicit As Boolean = False) As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
 
         Dim parentToolingContext = _activeToolingContext
+        Dim workflowScope As IDisposable = Nothing
+        Dim acceptedFinalStatus As String = ""
 
         ' Initialize the Word agent workspace (persisted; falls back to active doc folder, then Desktop).
         Try
@@ -914,6 +1101,28 @@ Partial Public Class ThisAddIn
         context.SequencingState.ActiveToolingSession = True
         context.SequencingState.HasOpenToolWorkflow = True
         context.SequencingState.ToolRequiredModeUsed = False
+        context.SequencingState.MemoryGroundingMode = memoryGroundingMode
+        context.SequencingState.UserLanguage = If(userLanguage, "").Trim()
+        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
+        context.WorkflowId = ResolveToolingWorkflowId(workflowId, subAgentMode, parentToolingContext)
+        context.RuntimeState =
+    If(subAgentMode,
+       SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind),
+       SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind))
+
+        workflowScope = SharedLibrary.Agents.WorkflowContinuity.BeginWorkflowScope(context.WorkflowId, context.HostKind)
+
+        ToolingFileLogger.LogStep(
+            SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                "Tooling workflow initialized.",
+                context.WorkflowId,
+                If(context.RuntimeState?.CurrentPhase, ""),
+                hostName:=context.HostKind) &
+            " [subAgentMode: " & If(subAgentMode, "true", "false") & "]")
+
+        context.Log("Workflow continuity initialized.")
+        context.Log("Memory grounding state initialized: " &
+            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
 
         Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
 
@@ -932,13 +1141,26 @@ Partial Public Class ThisAddIn
            context.AuthoritativeToolRegistrySnapshot)
         End If
 
-        ToolingFileLogger.LogStep($"[tooling] host={context.HostKind}")
+        ToolingFileLogger.LogStep(
+            SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                "Tooling host context attached.",
+                context.WorkflowId,
+                If(context.RuntimeState?.CurrentPhase, ""),
+                hostName:=context.HostKind))
 
         If subAgentMode Then
-            ToolingFileLogger.LogStep("[subagent-host] allowed_tools=" &
-                              If(context.AllowedToolNames.Count = 0,
-                                 "(none)",
-                                 String.Join(", ", context.AllowedToolNames.OrderBy(Function(n) n))))
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Allowed tool scope initialized.",
+                    context.WorkflowId,
+                    If(context.RuntimeState?.CurrentPhase, ""),
+                    hostName:=context.HostKind,
+                    leadingMarker:="[subagent]") &
+                " [allowedTools: " &
+                If(context.AllowedToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", context.AllowedToolNames.OrderBy(Function(n) n))) &
+                "]")
         End If
 
         If subAgentMode Then
@@ -1084,6 +1306,17 @@ Partial Public Class ThisAddIn
         End If
 
         Try
+            Await ResolveMemoryGroundingModeAsync(
+                context,
+                userText,
+                otherPrompt,
+                fullPromptOverride,
+                useSecondAPI,
+                hideSplash,
+                memoryGroundingMode,
+                memoryGroundingModeIsExplicit,
+                subAgentMode)
+
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             ' Base system command
             Dim baseSysPrompt As String = sysCommand
@@ -1228,6 +1461,13 @@ Partial Public Class ThisAddIn
                 ' prompt and tool-response state are otherwise identical between iterations.
                 Dim sysPromptForThisCall As String = enhancedSysPrompt
                 Dim userPromptForThisCall As String = fullUserPrompt
+
+                If Not subAgentMode Then
+                    Dim runtimeContextBlock As String = BuildRuntimeContextPromptBlock(context)
+                    If Not String.IsNullOrWhiteSpace(runtimeContextBlock) Then
+                        sysPromptForThisCall &= Environment.NewLine & Environment.NewLine & runtimeContextBlock
+                    End If
+                End If
 
                 If Not String.IsNullOrWhiteSpace(context.PendingContinuationGuardPrompt) Then
                     sysPromptForThisCall &= Environment.NewLine & Environment.NewLine & context.PendingContinuationGuardPrompt
@@ -1478,6 +1718,17 @@ Partial Public Class ThisAddIn
                             End If
                         End If
 
+                        UpdateWorkflowContinuityAfterToolExecution(context, tc, toolResponse)
+
+                        SharedLibrary.Agents.ToolCallSequencing.NoteMemoryGroundingToolResult(
+                            context.SequencingState,
+                            tc.ToolName,
+                            toolResponse.Response,
+                            toolResponse.Success)
+
+                        context.Log("Memory grounding state updated: " &
+                            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
                             context.LogWarn(
                                     $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times. Aborting tool loop to avoid repeated failed calls.")
@@ -1571,9 +1822,17 @@ Partial Public Class ThisAddIn
                         End If
 
                         If plannedCall.IsBarrier Then
-                            context.Log("Sequencing barrier reached; remaining tool calls from the same model response were deferred.")
-                            If sequencingPlan.DeferredCount > 0 Then
-                                ToolingFileLogger.LogStep($"Deferred {sequencingPlan.DeferredCount} later tool call(s) after barrier. host={context.HostKind}")
+                            If sequencingPlan IsNot Nothing AndAlso sequencingPlan.DeferredCount > 0 Then
+                                context.Log("Sequencing barrier reached; later tool calls from the same model response were deferred.")
+                                ToolingFileLogger.LogStep(
+                                    SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                                        "Later tool calls were deferred after the sequencing barrier.",
+                                        context.WorkflowId,
+                                        If(context.RuntimeState?.CurrentPhase, ""),
+                                        hostName:=context.HostKind) &
+                                    " [deferred: " & sequencingPlan.DeferredCount & "]")
+                            Else
+                                context.Log("Sequencing barrier reached; the current batch ended at the barrier.")
                             End If
                             Exit For
                         End If
@@ -1597,29 +1856,81 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
+                    End If
+
                     Dim turnValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
                         currentResponse,
                         hasToolCalls:=False,
-                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure)
+                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
+                        runState:=context.SequencingState)
 
                     If context.SequencingState IsNot Nothing Then
                         context.SequencingState.LastDetectedTurnType = turnValidation.TurnKind.ToString()
                         context.SequencingState.LastInvalidTurnReason = If(turnValidation.InvalidReason, "")
+                        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess =
+                            String.Equals(
+                                turnValidation.InvalidReason,
+                                SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                StringComparison.OrdinalIgnoreCase)
                     End If
 
                     context.Log(
-                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; host={context.HostKind}")
+                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
 
                     Select Case turnValidation.TurnKind
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                            If Not SharedLibrary.Agents.ToolCallSequencing.IsRequiredMemoryGroundingSatisfied(
+                                context.SequencingState,
+                                turnValidation.TurnKind) Then
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = True
+                                End If
+
+                                If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PrematureTextRetryCount += 1
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt()
+                                    context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                    context.PendingGuardTitle = "HOST REQUIRED MEMORY GROUNDING REPAIR"
+                                    context.PendingRejectedTurnExplanation =
+                                        "Your previous turn was rejected because the current run explicitly required Memory access before finalization."
+
+                                    context.LogWarn(
+                                        $"Final complete turn rejected for missing required memory access. {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}")
+
+                                    Continue While
+                                End If
+
+                                context.FinalizationBlocked = True
+                                context.FinalizationBlockedReason = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
+                                currentResponse = BuildBlockedToolingResult(
+                                    context,
+                                    SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                    "The tooling run required Memory access before finalization, but Memory was not accessed successfully.")
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
+
+                                context.LogWarn(
+                                    $"Active-tooling final complete turn blocked for missing required memory access. {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+
+                                Exit While
+                            End If
+
                             context.PrematureTextRetryCount = 0
 
                             If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
                                 context.SequencingState.HasOpenToolWorkflow = False
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                             End If
 
                             currentResponse = StripTaskStatus(currentResponse)
+                            acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
                             Exit While
 
@@ -1636,20 +1947,38 @@ Partial Public Class ThisAddIn
                             End If
 
                             currentResponse = StripTaskStatus(currentResponse)
+                            acceptedFinalStatus = "blocked"
                             context.Log("Final blocked response accepted.")
                             Exit While
 
                         Case Else
+                            Dim missingRequiredMemoryAccess As Boolean =
+                                String.Equals(
+                                    turnValidation.InvalidReason,
+                                    SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                    StringComparison.OrdinalIgnoreCase)
+
                             If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
                                 context.PrematureTextRetryCount += 1
-                                context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(context.SequencingState)
+                                context.PendingContinuationGuardPrompt =
+                                    If(
+                                        missingRequiredMemoryAccess,
+                                        SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(),
+                                        SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(context.SequencingState))
                                 context.PendingRejectedAssistantTurn = If(currentResponse, "")
-                                context.PendingGuardTitle = "HOST ACTIVE TOOLING CONTRACT REPAIR"
+                                context.PendingGuardTitle =
+                                    If(
+                                        missingRequiredMemoryAccess,
+                                        "HOST REQUIRED MEMORY GROUNDING REPAIR",
+                                        "HOST ACTIVE TOOLING CONTRACT REPAIR")
                                 context.PendingRejectedTurnExplanation =
-                                    "Your previous turn was rejected because it violated the active-tooling response contract."
+                                    If(
+                                        missingRequiredMemoryAccess,
+                                        "Your previous turn was rejected because the current run required Memory access before finalization.",
+                                        "Your previous turn was rejected because it violated the active-tooling response contract.")
 
                                 context.LogWarn(
-                                    $"Invalid active-tooling turn rejected; invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                    $"Invalid active-tooling turn rejected; invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                                 Continue While
                             End If
@@ -1658,8 +1987,14 @@ Partial Public Class ThisAddIn
                             context.FinalizationBlockedReason = If(turnValidation.InvalidReason, "invalid_turn")
                             currentResponse = BuildBlockedToolingResult(
                                 context,
-                                SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
-                                "The tooling run ended because the model did not return a valid next tool call or a valid final status.")
+                                If(
+                                    missingRequiredMemoryAccess,
+                                    SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                    SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode),
+                                If(
+                                    missingRequiredMemoryAccess,
+                                    "The tooling run required Memory access before finalization, but Memory was not accessed successfully.",
+                                    "The tooling run ended because the model did not return a valid next tool call or a valid final status."))
 
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.FinalResponseOrigin = "host_generated"
@@ -1667,7 +2002,7 @@ Partial Public Class ThisAddIn
                             End If
 
                             context.LogWarn(
-                                $"Active-tooling repair exhausted; returning host-generated blocked message. invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
                             Exit While
                     End Select
@@ -1780,6 +2115,22 @@ Partial Public Class ThisAddIn
             currentResponse = StripTaskStatus(currentResponse)
             currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
 
+            If Not subAgentMode Then
+                Dim isBlockedFinal As Boolean =
+                    context.FinalizationBlocked OrElse
+                    context.EmptyMainModelResponse OrElse
+                    String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase)
+
+                Dim finalCheckpointWritten As Boolean =
+                    SharedLibrary.Agents.WorkflowContinuity.NoteFinalStatus(
+                        context.WorkflowId,
+                        context.HostKind,
+                        isBlockedFinal)
+
+                context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
+                context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}")
+            End If
+
             Dim sessionSucceeded As Boolean = (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
             ToolingFileLogger.EndSession(sessionSucceeded, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
 
@@ -1791,6 +2142,11 @@ Partial Public Class ThisAddIn
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
             Return ""
         Finally
+            If workflowScope IsNot Nothing Then
+                workflowScope.Dispose()
+                workflowScope = Nothing
+            End If
+
             _activeToolingContext = parentToolingContext
             INI_APICall_ToolInstructions_2 = ""
             INI_APICall_ToolResponses_2 = ""
@@ -1824,6 +2180,101 @@ Partial Public Class ThisAddIn
             End If
         End Try
     End Function
+
+
+    Private Function ResolveToolingWorkflowId(requestedWorkflowId As String,
+                                              subAgentMode As Boolean,
+                                              parentContext As ToolExecutionContext) As String
+        If Not String.IsNullOrWhiteSpace(requestedWorkflowId) Then
+            Return requestedWorkflowId.Trim()
+        End If
+
+        If subAgentMode AndAlso parentContext IsNot Nothing AndAlso
+           Not String.IsNullOrWhiteSpace(parentContext.WorkflowId) Then
+            Return parentContext.WorkflowId
+        End If
+
+        If Not String.IsNullOrWhiteSpace(SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId) Then
+            Return SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId
+        End If
+
+        Return SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId()
+    End Function
+
+    Private Function BuildRuntimeContextPromptBlock(context As ToolExecutionContext) As String
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(context.WorkflowId) Then
+            Return ""
+        End If
+
+        Return SharedLibrary.Agents.WorkflowContinuity.BuildPromptContextBlock(
+            context.WorkflowId,
+            includeRecentWorkflowMemoryStubs:=context.SequencingState IsNot Nothing AndAlso
+                                              context.SequencingState.ShouldExposeRecentMemoryStubs)
+    End Function
+
+    Private Function ExtractWorkflowSkillName(toolCall As ToolCall,
+                                              toolResponse As ToolResponse) As String
+        If toolCall Is Nothing OrElse toolResponse Is Nothing OrElse Not toolResponse.Success Then
+            Return ""
+        End If
+
+        If Not String.IsNullOrWhiteSpace(toolCall.ToolName) AndAlso
+           toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+            Return toolCall.ToolName.Substring("skill_".Length)
+        End If
+
+        If Not String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return ""
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(If(toolResponse.Response, ""))
+            Return If(obj.Value(Of String)("name"), "").Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Sub UpdateWorkflowContinuityAfterToolExecution(context As ToolExecutionContext,
+                                                           toolCall As ToolCall,
+                                                           toolResponse As ToolResponse)
+        If context Is Nothing OrElse toolCall Is Nothing OrElse String.IsNullOrWhiteSpace(context.WorkflowId) Then
+            Return
+        End If
+
+        Dim rawResponse As String = If(toolResponse?.Response, "")
+        Dim resultRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractStructuredResultReference(rawResponse)
+        Dim outputRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractOutputReference(rawResponse)
+        Dim sourceRefs As List(Of String) = SharedLibrary.Agents.WorkflowContinuity.ExtractSourceReferences(rawResponse)
+
+        Dim checkpointWritten As Boolean =
+            SharedLibrary.Agents.WorkflowContinuity.NoteToolCallResult(
+                context.WorkflowId,
+                context.HostKind,
+                toolCall.ToolName,
+                toolResponse IsNot Nothing AndAlso toolResponse.Success,
+                resultRef,
+                outputRef,
+                sourceRefs,
+                Math.Max(context.PrematureTextRetryCount, context.SubAgentEmptyResponseRetryCount))
+
+        Dim skillName As String = ExtractWorkflowSkillName(toolCall, toolResponse)
+        Dim skillCheckpointWritten As Boolean = False
+
+        If Not String.IsNullOrWhiteSpace(skillName) Then
+            skillCheckpointWritten =
+                SharedLibrary.Agents.WorkflowContinuity.NoteSkillLoaded(
+                    context.WorkflowId,
+                    context.HostKind,
+                    skillName)
+        End If
+
+        context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
+
+        context.Log(
+            $"Runtime state updated: tool={toolCall.ToolName}; success={If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "true", "false")}; checkpointWritten={If(checkpointWritten OrElse skillCheckpointWritten, "true", "false")}; memoryRefWritten={If(Not String.IsNullOrWhiteSpace(resultRef), "true", "false")}; sourceRefWritten={If(sourceRefs IsNot Nothing AndAlso sourceRefs.Count > 0, "true", "false")}")
+    End Sub
+
 
     Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
         If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then Return False
@@ -1904,6 +2355,24 @@ Partial Public Class ThisAddIn
     End Function
 
 
+
+    Private Function ResolveBlockedFallbackUserLanguage(context As ToolExecutionContext) As String
+        Dim explicitLanguage As String = If(context?.SequencingState?.UserLanguage, "").Trim()
+        If explicitLanguage <> "" Then
+            Return explicitLanguage
+        End If
+
+        Try
+            Dim uiCulture = Globalization.CultureInfo.CurrentUICulture
+            If uiCulture IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(uiCulture.Name) Then
+                Return uiCulture.Name.Trim()
+            End If
+        Catch
+        End Try
+
+        Return ""
+    End Function
+
     Private Function BuildBlockedToolingResult(context As ToolExecutionContext,
                                                errorCode As String,
                                                message As String) As String
@@ -1943,7 +2412,7 @@ Partial Public Class ThisAddIn
             message,
             successCount,
             failedCount,
-            userLanguage:=If(context?.SequencingState?.UserLanguage, ""),
+            userLanguage:=ResolveBlockedFallbackUserLanguage(context),
             appendTaskStatusFooter:=True)
     End Function
 
@@ -2120,7 +2589,7 @@ Partial Public Class ThisAddIn
                              plan As SharedLibrary.Agents.ToolCallSequencing.ToolBatchPlan)
         If context Is Nothing OrElse plan Is Nothing Then Return
 
-        context.Log($"Tool-call batch analysis: total={plan.TotalCallCount}; safeBatch={plan.IsFullyBatchSafe}; executed={plan.ExecutedCount}; deferred={plan.DeferredCount}; host={context.HostKind}")
+        context.Log($"Tool-call batch analysis: total={plan.TotalCallCount}; safeBatch={plan.IsFullyBatchSafe}; executed={plan.ExecutedCount}; deferred={plan.DeferredCount}")
 
         For Each planned In plan.Calls
             context.Log($"Tool-call classification: index={planned.Index + 1}; tool={planned.ToolName}; class={planned.Classification.ToString().ToLowerInvariant()}; barrier={planned.IsBarrier}; action={If(planned.WillExecute, "execute", "defer")}")
@@ -2301,16 +2770,15 @@ Partial Public Class ThisAddIn
         "as the literal last line of that turn, exactly: " &
         "<TASK_STATUS>{""status"":""<value>"",""reason"":""<short>""}</TASK_STATUS>  " &
         "Allowed values for <value>: " &
-        "  'complete' = the user's entire request has been FULLY satisfied in THIS turn (table done, all items processed, file written, etc.). " &
-        "  'continue' = the task is not finished, but no suitable tool call is currently possible. Never use 'continue' after completing only one item of a multi-item task. In that case, immediately invoke the next required tool call instead. " &
+        "  'complete' = the user's entire request has been FULLY satisfied in THIS turn. " &
         "  'blocked'  = the task cannot be completed despite reasonable tool attempts. " &
         "Rules: " &
         "(1) NEVER include the footer in a turn that contains a tool call. " &
         "(2) NEVER wrap the footer in code fences or quotes; it must be plain text on its own final line. " &
         "(3) NEVER claim 'complete' while still announcing future work. " &
-        "(4) If the user asks you to process MULTIPLE items (every file, all PDFs, jede Datei, alle Dokumente, tous les fichiers, etc.), " &
-        "you may only emit 'complete' AFTER you have actually processed all of them via tool calls and produced the full final result. " &
-        "(5) The footer is a host control signal. Plain narration of intent ('I will…', 'Ich werde…', 'Je vais…') without action and without 'complete' will trigger an automatic retry."
+        "(4) During active tooling, final prose MUST end with exactly one valid TASK_STATUS footer whose status is either 'complete' or 'blocked'. " &
+        "(5) If the user's request covers multiple items, you may emit 'complete' only after all required items have actually been processed via tool calls and the full final result is ready. " &
+        "(6) If the task is not yet complete and more tool work is required or possible, emit the next required tool call instead of final prose."
 
     Private Function ShouldRetryAfterPrematureTextResponse(context As ToolExecutionContext, lastResponse As String) As Boolean
         If context Is Nothing Then Return False

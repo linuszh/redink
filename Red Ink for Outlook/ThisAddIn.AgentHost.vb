@@ -57,10 +57,48 @@ Partial Public Class ThisAddIn
                     $"Sub-agent model '{modelKey}' could not be resolved via GetSpecialTaskModel.")
             End If
 
-            ToolingFileLogger.LogStep($"[subagent-host] Sub-agent model resolved via GetSpecialTaskModel('{modelKey}').")
-            ToolingFileLogger.LogStep("[subagent-host] Forcing useSecondAPI:=True for sub-agent execution.")
-            ToolingFileLogger.LogStep($"[subagent-host] host=Outlook; agent='{request.AgentName}'; allowed_tools={If(request.AllowedToolNames Is Nothing, "(default-host-scope)", If(request.AllowedToolNames.Count = 0, "(none)", String.Join(", ", request.AllowedToolNames)))}")
-            ToolingFileLogger.LogStep("[subagent-host] sequencing=shared_tool_call_sequencing")
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Sub-agent model resolved via GetSpecialTaskModel('" & modelKey & "').",
+                    If(request.WorkflowId, ""),
+                    "sub_agent_host_ready",
+                    agentName:=If(request.AgentName, ""),
+                    hostName:="Outlook",
+                    leadingMarker:="[subagent]"))
+
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Secondary API enforced for isolated sub-agent execution.",
+                    If(request.WorkflowId, ""),
+                    "sub_agent_host_ready",
+                    agentName:=If(request.AgentName, ""),
+                    hostName:="Outlook",
+                    leadingMarker:="[subagent]"))
+
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Sub-agent host initialized.",
+                    If(request.WorkflowId, ""),
+                    "sub_agent_host_ready",
+                    agentName:=If(request.AgentName, ""),
+                    hostName:="Outlook",
+                    leadingMarker:="[subagent]") &
+                " [allowedTools: " &
+                If(request.AllowedToolNames Is Nothing,
+                   "(default-host-scope)",
+                   If(request.AllowedToolNames.Count = 0,
+                      "(none)",
+                      String.Join(", ", request.AllowedToolNames))) &
+                "]")
+
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Shared tool-call sequencing is active.",
+                    If(request.WorkflowId, ""),
+                    "sub_agent_host_ready",
+                    agentName:=If(request.AgentName, ""),
+                    hostName:="Outlook",
+                    leadingMarker:="[subagent]"))
 
             Dim registrySource As String = "parent_registry_snapshot"
             Dim parentRunId As String = "(no_parent_run)"
@@ -132,17 +170,22 @@ Partial Public Class ThisAddIn
     If(sameAgentInvocationCount > 1, "later", "first")
 
             ToolingFileLogger.LogStep(
-    "[subagent-host] tool_scope_init: " &
-    $"parent_run_id={parentRunId}; " &
-    $"invocation_index={invocationIndex}; " &
-    $"agent='{If(request.AgentName, "")}'; " &
-    $"parent_registry_snapshot_exists={authoritativeSnapshotAvailable}; " &
-    $"snapshot_tool_count={snapshotToolCount}; " &
-    $"requested_allowed_tools={requestedNamesText}; " &
-    $"resolved_tools={resolvedNamesText}; " &
-    $"missing_tools={missingNamesText}; " &
-    $"final_selected_tools={finalSelectedNamesText}; " &
-    $"same_agent_invocation={repeatedInvocationLabel}")
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Sub-agent tool scope initialized.",
+                    If(request.WorkflowId, ""),
+                    "sub_agent_scope_init",
+                    agentName:=If(request.AgentName, ""),
+                    hostName:="Outlook",
+                    leadingMarker:="[subagent]") &
+                " [parentRunId: " & parentRunId & "]" &
+                " [invocationIndex: " & invocationIndex & "]" &
+                " [parentRegistrySnapshotExists: " & authoritativeSnapshotAvailable & "]" &
+                " [snapshotToolCount: " & snapshotToolCount & "]" &
+                " [requestedAllowedTools: " & requestedNamesText & "]" &
+                " [resolvedTools: " & resolvedNamesText & "]" &
+                " [missingTools: " & missingNamesText & "]" &
+                " [finalSelectedTools: " & finalSelectedNamesText & "]" &
+                " [sameAgentInvocation: " & repeatedInvocationLabel & "]")
 
             If Not authoritativeSnapshotAvailable Then
                 Dim payload = SharedLibrary.Agents.SubAgentRuntimeHardening.BuildParentRegistryMissingPayload(
@@ -199,7 +242,8 @@ Partial Public Class ThisAddIn
                 subAgentParentRunId:=parentRunId,
                 subAgentInvocationIndex:=invocationIndex,
                 subAgentAgentInvocationCount:=sameAgentInvocationCount,
-                subAgentName:=request.AgentName).ConfigureAwait(False)
+                subAgentName:=request.AgentName,
+                workflowId:=request.WorkflowId).ConfigureAwait(False)
 
             Return If(result, "")
         Finally

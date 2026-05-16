@@ -36,6 +36,23 @@ Namespace Agents
             RunNamedTest(NameOf(TestActiveToolingRejectsRawInternalJson), AddressOf TestActiveToolingRejectsRawInternalJson)
             RunNamedTest(NameOf(TestActiveToolingRejectsCompleteWithUnresolvedToolFailure), AddressOf TestActiveToolingRejectsCompleteWithUnresolvedToolFailure)
             RunNamedTest(NameOf(TestActiveToolingRepairPromptIsStrict), AddressOf TestActiveToolingRepairPromptIsStrict)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierParsesRequiredDecision), AddressOf TestMemoryGroundingClassifierParsesRequiredDecision)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInJsonFence), AddressOf TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInJsonFence)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInPlainFence), AddressOf TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInPlainFence)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierRejectsProsePlusJson), AddressOf TestMemoryGroundingClassifierRejectsProsePlusJson)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierInvalidJsonDefaultsSafely), AddressOf TestMemoryGroundingClassifierInvalidJsonDefaultsSafely)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierParsesOptionalDecision), AddressOf TestMemoryGroundingClassifierParsesOptionalDecision)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierParsesNoneDecision), AddressOf TestMemoryGroundingClassifierParsesNoneDecision)
+            RunNamedTest(NameOf(TestMemoryGroundingClassifierPromptRemainsGeneric), AddressOf TestMemoryGroundingClassifierPromptRemainsGeneric)
+            RunNamedTest(NameOf(TestRequiredMemoryGroundingRejectsFinalCompleteWithoutMemoryAccess), AddressOf TestRequiredMemoryGroundingRejectsFinalCompleteWithoutMemoryAccess)
+            RunNamedTest(NameOf(TestRequiredMemoryGroundingAcceptsFinalCompleteAfterMemoryGet), AddressOf TestRequiredMemoryGroundingAcceptsFinalCompleteAfterMemoryGet)
+            RunNamedTest(NameOf(TestRequiredMemoryGroundingAcceptsFinalCompleteAfterEmptyMemoryList), AddressOf TestRequiredMemoryGroundingAcceptsFinalCompleteAfterEmptyMemoryList)
+            RunNamedTest(NameOf(TestOptionalMemoryGroundingDoesNotRejectFinalCompleteWithoutMemoryAccess), AddressOf TestOptionalMemoryGroundingDoesNotRejectFinalCompleteWithoutMemoryAccess)
+            RunNamedTest(NameOf(TestMemoryGroundingModeNoneAllowsFinalCompleteWithoutMemoryTools), AddressOf TestMemoryGroundingModeNoneAllowsFinalCompleteWithoutMemoryTools)
+            RunNamedTest(NameOf(TestMemoryStubsAloneDoNotSatisfyRequiredGrounding), AddressOf TestMemoryStubsAloneDoNotSatisfyRequiredGrounding)
+            RunNamedTest(NameOf(TestRequiredMemoryGroundingRepairPromptIsStrict), AddressOf TestRequiredMemoryGroundingRepairPromptIsStrict)
+            RunNamedTest(NameOf(TestPromptInstructsMemoryGetForExplicitMemoryGrounding), AddressOf TestPromptInstructsMemoryGetForExplicitMemoryGrounding)
+            RunNamedTest(NameOf(TestPromptInstructsUserFacingProseToFollowLatestUserRequestLanguage), AddressOf TestPromptInstructsUserFacingProseToFollowLatestUserRequestLanguage)
             RunNamedTest(NameOf(TestInvalidNarrationAfterStructuredResultIsRejected), AddressOf TestInvalidNarrationAfterStructuredResultIsRejected)
             RunNamedTest(NameOf(TestStructuredResultRemainsAvailableDuringRepair), AddressOf TestStructuredResultRemainsAvailableDuringRepair)
             RunNamedTest(NameOf(TestRetryExhaustionProducesHostGeneratedBlockedMessage), AddressOf TestRetryExhaustionProducesHostGeneratedBlockedMessage)
@@ -61,6 +78,7 @@ Namespace Agents
             RunNamedTest(NameOf(TestWorkspaceToolSchemasMatchDeclaredContracts), AddressOf TestWorkspaceToolSchemasMatchDeclaredContracts)
             RunNamedTest(NameOf(TestSkippedFailureDoesNotShrinkRegistrySnapshot), AddressOf TestSkippedFailureDoesNotShrinkRegistrySnapshot)
             RunNamedTest(NameOf(TestPreviousSubAgentCallDoesNotMutateParentRegistrySnapshot), AddressOf TestPreviousSubAgentCallDoesNotMutateParentRegistrySnapshot)
+            WorkflowContinuitySelfTests.RunAll()
             Debug.WriteLine("[ToolCallSequencingSelfTests] PASS")
         End Sub
 
@@ -615,7 +633,7 @@ Namespace Agents
             Dim prompt As String = ToolCallSequencing.BuildActiveToolingRepairPrompt()
 
             AssertTrue(prompt.Contains("the next required tool call"), "Repair prompt must require the next tool call.")
-            AssertTrue(prompt.Contains("TASK_STATUS continue is not a user-facing final answer"), "Repair prompt must reject continue status.")
+            AssertTrue(prompt.Contains("TASK_STATUS continue is invalid during active tooling"), "Repair prompt must reject continue status.")
             AssertTrue(prompt.Contains("Raw internal JSON is invalid"), "Repair prompt must reject raw JSON.")
         End Sub
 
@@ -635,9 +653,9 @@ Namespace Agents
                 failedCount:=0,
                 appendTaskStatusFooter:=True)
 
-            AssertTrue(message.Contains("Last successful step: fake_read."), "Blocked message must include the last successful tool.")
-            AssertTrue(message.Contains("Partial state may exist at: state/output.json."), "Blocked message must mention partial state when known.")
-            AssertTrue(message.Contains("Tool calls completed successfully: 3; failed: 0."), "Blocked message must include tool counts.")
+            AssertTrue(message.Contains("Last successful tool call: fake_read."), "Blocked message must include the last successful tool.")
+            AssertTrue(message.Contains("Partial output or state reference: state/output.json."), "Blocked message must mention partial state when known.")
+            AssertTrue(message.Contains("Successful tool-call count: 3. Failed tool-call count: 0."), "Blocked message must include tool counts.")
             AssertTrue(message.Contains("<TASK_STATUS>{""status"":""blocked"""), "Blocked message must include a blocked TASK_STATUS footer.")
         End Sub
 
@@ -656,7 +674,7 @@ Namespace Agents
                 appendTaskStatusFooter:=True)
 
             AssertFalse(message.TrimStart().StartsWith("{", StringComparison.Ordinal), "User-facing blocked message must not be raw JSON.")
-            AssertTrue(message.Contains("No tool failure occurred before the response-contract enforcement stopped the run."), "unresolvedToolFailure=false must not be misreported as a tool failure.")
+            AssertTrue(message.Contains("No unresolved tool failure was recorded before response-contract enforcement stopped the run."), "unresolvedToolFailure=false must not be misreported as a tool failure.")
         End Sub
 
         Private Shared Sub TestActiveToolingWordOutlookParity()
@@ -672,6 +690,263 @@ Namespace Agents
 
             AssertEqual(wordResult.TurnKind, outlookResult.TurnKind, "Word/Outlook parity turn-kind mismatch.")
             AssertEqual(wordResult.TaskStatusSummary, outlookResult.TaskStatusSummary, "Word/Outlook parity TASK_STATUS mismatch.")
+        End Sub
+
+
+        Private Shared Sub TestMemoryGroundingClassifierParsesRequiredDecision()
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "{""memoryGroundingMode"":""required"",""reason"":""explicit memory grounding requested"",""shouldExposeRecentMemoryStubs"":true}")
+
+            AssertTrue(decision.IsValid, "Required classifier decision should parse.")
+            AssertEqual("required",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "Required classifier mode mismatch.")
+            AssertTrue(decision.ShouldExposeRecentMemoryStubs, "Required classifier decision should expose recent memory stubs.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInJsonFence()
+            Dim normalizedOutput As String = ""
+            Dim parseError As String = ""
+
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "```json" & vbCrLf &
+                    "{""memoryGroundingMode"":""required"",""reason"":""explicit memory grounding requested"",""shouldExposeRecentMemoryStubs"":true}" & vbCrLf &
+                    "```",
+                    normalizedOutput,
+                    parseError)
+
+            AssertTrue(decision.IsValid, "JSON fenced classifier output should parse.")
+            AssertEqual("required",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "JSON fenced classifier mode mismatch.")
+            AssertTrue(normalizedOutput.StartsWith("{"), "Normalized fenced output should start with a JSON object.")
+            AssertEqual("", parseError, "JSON fenced classifier output should not produce a parse error.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierParsesRequiredDecisionWrappedInPlainFence()
+            Dim normalizedOutput As String = ""
+            Dim parseError As String = ""
+
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "```" & vbCrLf &
+                    "{""memoryGroundingMode"":""required"",""reason"":""explicit memory grounding requested"",""shouldExposeRecentMemoryStubs"":true}" & vbCrLf &
+                    "```",
+                    normalizedOutput,
+                    parseError)
+
+            AssertTrue(decision.IsValid, "Plain fenced classifier output should parse.")
+            AssertEqual("required",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "Plain fenced classifier mode mismatch.")
+            AssertTrue(normalizedOutput.StartsWith("{"), "Normalized plain-fenced output should start with a JSON object.")
+            AssertEqual("", parseError, "Plain fenced classifier output should not produce a parse error.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierRejectsProsePlusJson()
+            Dim normalizedOutput As String = ""
+            Dim parseError As String = ""
+
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "Here is the result:" & vbCrLf &
+                    "{""memoryGroundingMode"":""required"",""reason"":""explicit memory grounding requested"",""shouldExposeRecentMemoryStubs"":true}",
+                    normalizedOutput,
+                    parseError)
+
+            AssertFalse(decision.IsValid, "Prose plus JSON must not be accepted.")
+            AssertTrue(parseError <> "", "Rejected prose plus JSON should produce a parse error.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierInvalidJsonDefaultsSafely()
+            Dim normalizedOutput As String = ""
+            Dim parseError As String = ""
+
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "{""memoryGroundingMode"":""required"",""reason"":""x"",""shouldExposeRecentMemoryStubs"":tru}",
+                    normalizedOutput,
+                    parseError)
+
+            AssertFalse(decision.IsValid, "Invalid JSON must not parse.")
+            AssertEqual("none",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "Invalid JSON must default safely to none.")
+            AssertTrue(parseError <> "", "Invalid JSON should report a parse error.")
+        End Sub
+
+
+        Private Shared Sub TestMemoryGroundingClassifierParsesOptionalDecision()
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "{""memoryGroundingMode"":""optional"",""reason"":""stored context may help"",""shouldExposeRecentMemoryStubs"":true}")
+
+            AssertTrue(decision.IsValid, "Optional classifier decision should parse.")
+            AssertEqual("optional",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "Optional classifier mode mismatch.")
+            AssertTrue(decision.ShouldExposeRecentMemoryStubs, "Optional classifier decision should expose recent memory stubs.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierParsesNoneDecision()
+            Dim decision =
+                ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
+                    "{""memoryGroundingMode"":""none"",""reason"":""unrelated new task"",""shouldExposeRecentMemoryStubs"":false}")
+
+            AssertTrue(decision.IsValid, "None classifier decision should parse.")
+            AssertEqual("none",
+                        ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode),
+                        "None classifier mode mismatch.")
+            AssertFalse(decision.ShouldExposeRecentMemoryStubs, "None classifier decision should not expose recent memory stubs.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingClassifierPromptRemainsGeneric()
+            Dim prompt As String = ToolCallSequencing.BuildMemoryGroundingIntentClassifierSystemPrompt()
+
+            AssertTrue(prompt.Contains("Return EXACTLY one raw JSON object and nothing else."), "Classifier prompt must require raw JSON only.")
+            AssertTrue(prompt.Contains("Do NOT use Markdown. Do NOT use code fences."), "Classifier prompt must forbid Markdown fences.")
+            AssertTrue(prompt.Contains("Base the decision on semantic meaning"), "Classifier prompt should be semantic, not keyword-based.")
+            AssertFalse(prompt.Contains("German"), "Classifier prompt should not hardcode language heuristics.")
+            AssertFalse(prompt.Contains("English"), "Classifier prompt should not hardcode language heuristics.")
+        End Sub
+
+        Private Shared Sub TestRequiredMemoryGroundingRejectsFinalCompleteWithoutMemoryAccess()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.Required
+            }
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Required memory grounding must reject final complete without memory access.")
+            AssertEqual(ToolCallSequencing.MissingRequiredMemoryAccessCode, result.InvalidReason, "Missing memory access reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestRequiredMemoryGroundingAcceptsFinalCompleteAfterMemoryGet()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.Required
+            }
+
+            ToolCallSequencing.NoteMemoryGroundingToolResult(
+                state,
+                Agents.MemoryTools.ToolGet,
+                "{""key"":""mem_1"",""summary"":""stub"",""value"":{""note"":""body""}}",
+                succeeded:=True)
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn, result.TurnKind, "Required memory grounding must accept final complete after memory_get.")
+        End Sub
+
+        Private Shared Sub TestRequiredMemoryGroundingAcceptsFinalCompleteAfterEmptyMemoryList()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.Required
+            }
+
+            ToolCallSequencing.NoteMemoryGroundingToolResult(
+                state,
+                Agents.MemoryTools.ToolList,
+                "[]",
+                succeeded:=True)
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn, result.TurnKind, "Required memory grounding must accept final complete after an empty memory_list result.")
+        End Sub
+
+        Private Shared Sub TestOptionalMemoryGroundingDoesNotRejectFinalCompleteWithoutMemoryAccess()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.OptionalMode
+            }
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn, result.TurnKind, "Optional memory grounding must not reject final complete solely for missing memory access.")
+        End Sub
+
+        Private Shared Sub TestMemoryGroundingModeNoneAllowsFinalCompleteWithoutMemoryTools()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.None
+            }
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn, result.TurnKind, "Memory grounding mode none must allow final complete without memory tools.")
+        End Sub
+
+        Private Shared Sub TestMemoryStubsAloneDoNotSatisfyRequiredGrounding()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .MemoryGroundingMode = ToolCallSequencing.MemoryGroundingMode.Required,
+                .LastStructuredToolResult = "[memory:mem_stub_only] stub only"
+            }
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False,
+                runState:=state)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Memory stubs alone must not satisfy required memory grounding.")
+            AssertEqual(ToolCallSequencing.MissingRequiredMemoryAccessCode, result.InvalidReason, "Memory stub grounding rejection reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestRequiredMemoryGroundingRepairPromptIsStrict()
+            Dim prompt As String = ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt()
+
+            AssertTrue(prompt.Contains("The user requested an answer based on Memory."), "Repair prompt must state the missing memory grounding requirement.")
+            AssertTrue(prompt.Contains("Call memory_list or memory_get before finalizing"), "Repair prompt must require memory_list or memory_get.")
+            AssertTrue(prompt.Contains("return a valid blocked response"), "Repair prompt must allow a blocked response when memory cannot be accessed.")
+            AssertTrue(prompt.Contains("memory_list may be used to discover entries"), "Repair prompt must explain discovery via memory_list.")
+            AssertTrue(prompt.Contains("call memory_get for the relevant entries before finalizing"), "Repair prompt must explain when memory_get is needed.")
+        End Sub
+
+        Private Shared Sub TestPromptInstructsMemoryGetForExplicitMemoryGrounding()
+            Dim combinedPrompt As String =
+                SharedLibrary.SharedMethods.Default_SP_Add_Tooling & " " &
+                SharedLibrary.SharedMethods.Default_SP_Add_AgentLayer
+
+            AssertTrue(
+                combinedPrompt.Contains("If the user or runtime explicitly requires a memory-grounded answer, you must call memory_list or memory_get before finalizing unless the full relevant memory content has already been retrieved in this turn."),
+                "Prompt must require memory_list or memory_get for explicit memory grounding.")
+
+            AssertTrue(
+                combinedPrompt.Contains("Do not claim that an answer is based on Memory from chat context alone."),
+                "Prompt must reject claiming Memory grounding from chat context alone.")
+        End Sub
+
+        Private Shared Sub TestPromptInstructsUserFacingProseToFollowLatestUserRequestLanguage()
+            Dim combinedPrompt As String =
+                SharedLibrary.SharedMethods.Default_SP_Add_Tooling & " " &
+                SharedLibrary.SharedMethods.Default_SP_Add_AgentLayer
+
+            AssertTrue(
+                combinedPrompt.Contains("Use the language of the latest user request for user-facing prose unless an explicit output language is provided."),
+                "Prompt must instruct user-facing prose to follow the latest user request language.")
+
+            AssertTrue(
+                combinedPrompt.Contains("Do not switch to English merely because tools, logs, memory keys, or internal instructions are in English."),
+                "Prompt must prevent English drift from internal artifacts.")
         End Sub
 
 

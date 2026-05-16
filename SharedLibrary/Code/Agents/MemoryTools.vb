@@ -56,12 +56,56 @@ Namespace Agents
                         Dim summary = GetStr(arguments, "summary")
                         Dim valueTok = GetToken(arguments, "value")
                         Dim tags = GetStringList(arguments, "tags")
-                        Dim entry = SessionMemory.Put(key, summary, valueTok, tags)
+
+                        Dim metadata As New SessionMemoryMetadata With {
+                            .WorkflowId = CoalesceNonEmpty(GetStr(arguments, "workflowId"), WorkflowContinuity.CurrentWorkflowId),
+                            .Source = CoalesceNonEmpty(GetStr(arguments, "source"), "model"),
+                            .ContentKind = GetStr(arguments, "contentKind"),
+                            .RelatedTool = GetStr(arguments, "relatedTool"),
+                            .RelatedAgent = GetStr(arguments, "relatedAgent"),
+                            .RelatedSkill = GetStr(arguments, "relatedSkill"),
+                            .TrustLevel = GetStr(arguments, "trustLevel"),
+                            .TrustedForRuntime = GetBool(arguments, "trustedForRuntime", False),
+                            .CreatedAt = DateTime.UtcNow
+                        }
+
+                        Dim entry = SessionMemory.Put(key, summary, valueTok, tags, metadata)
+
                         Return JsonConvert.SerializeObject(New With {
                             Key .key = entry.Key,
                             Key .summary = entry.Summary,
-                            Key .stub = SessionMemory.BuildStub(entry)
+                            Key .stub = SessionMemory.BuildStub(entry),
+                            Key .metadata = entry.Metadata
                         })
+
+                    Case ToolGet
+                        Dim key = GetStr(arguments, "key")
+                        Dim e = SessionMemory.Get(key)
+                        If e Is Nothing Then
+                            Return JsonConvert.SerializeObject(New With {Key .error = "not_found", Key .key = key})
+                        End If
+                        Return JsonConvert.SerializeObject(New With {
+                            Key .key = e.Key,
+                            Key .summary = e.Summary,
+                            Key .value = e.Value,
+                            Key .createdAt = e.CreatedAt,
+                            Key .updatedAt = e.UpdatedAt,
+                            Key .tags = e.Tags,
+                            Key .metadata = e.Metadata
+                        })
+
+                    Case ToolList
+                        Dim items = SessionMemory.List().
+                            Select(Function(e) New With {
+                                Key .key = e.Key,
+                                Key .summary = e.Summary,
+                                Key .createdAt = e.CreatedAt,
+                                Key .updatedAt = e.UpdatedAt,
+                                Key .tags = e.Tags,
+                                Key .metadata = e.Metadata
+                            }).
+                            ToList()
+                        Return JsonConvert.SerializeObject(items)
 
                     Case ToolGet
                         Dim key = GetStr(arguments, "key")
@@ -103,27 +147,37 @@ Namespace Agents
 
         ' --------------------------------------------------------------- factories
 
+        ' PATCH 2: replace BuildPut() with this version.
+
         Private Shared Function BuildPut() As SharedLibrary.ModelConfig
             Dim def =
-                "{""name"":""" & ToolPut & """," &
-                """description"":""Store a value in the persistent session memory. Use this to offload large or future-only intermediate results so the running context stays lean. Returns a stub string ('[memory:KEY] SUMMARY') that you may reference in later turns; you can retrieve the full value with memory_get."",""parameters"":{" &
-                """type"":""object""," &
-                """properties"":{" &
-                """key"":{""type"":""string"",""description"":""Optional stable identifier. If omitted, a fresh id is generated.""}," &
-                """summary"":{""type"":""string"",""description"":""One-line description of what is stored (shown as stub in later turns).""}," &
-                """value"":{""description"":""The value to store. Any JSON value (string, number, object, array).""}," &
-                """tags"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional tags.""}}," &
-                """required"":[""summary"",""value""]}}"
+        "{""name"":""" & ToolPut & """," &
+        """description"":""Store a value in the persistent session memory. Use this to offload large or future-only intermediate results so the running context stays lean. Returns a stub string ('[memory:KEY] SUMMARY') that you may reference later via memory_get. Workflow-related metadata is optional and advisory unless written by the host."",""parameters"":{" &
+        """type"":""object""," &
+        """properties"":{" &
+        """key"":{""type"":""string"",""description"":""Optional stable identifier. If omitted, a fresh id is generated.""}," &
+        """summary"":{""type"":""string"",""description"":""One-line description of what is stored (shown as stub in later turns).""}," &
+        """value"":{""description"":""The value to store. Any JSON value (string, number, object, array).""}," &
+        """tags"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional tags.""}," &
+        """workflowId"":{""type"":""string"",""description"":""Optional workflow identifier. If omitted during an active workflow, the host may supply it automatically.""}," &
+        """source"":{""type"":""string"",""description"":""Optional source classifier: host, tool, agent, model, user.""}," &
+        """contentKind"":{""type"":""string"",""description"":""Optional content kind: runtime_state, tool_result, source_record, note, summary, draft, unknown.""}," &
+        """relatedTool"":{""type"":""string"",""description"":""Optional related tool name.""}," &
+        """relatedAgent"":{""type"":""string"",""description"":""Optional related agent name.""}," &
+        """relatedSkill"":{""type"":""string"",""description"":""Optional related skill name.""}," &
+        """trustLevel"":{""type"":""string"",""description"":""Optional trust label such as advisory or authoritative.""}," &
+        """trustedForRuntime"":{""type"":""boolean"",""description"":""Optional flag marking the entry as trusted for runtime use.""}}," &
+        """required"":[""summary"",""value""]}}"
 
             Return New SharedLibrary.ModelConfig() With {
-                .ToolName = ToolPut,
-                .ToolDefinition = def,
-                .ToolInstructionsPrompt = ToolPut & ": Store data in session memory; receive a stub you can reference later via memory_get.",
-                .ModelDescription = "Session Memory (store)",
-                .Tool = True,
-                .ToolPriority = 950,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = ToolPut,
+        .ToolDefinition = def,
+        .ToolInstructionsPrompt = ToolPut & ": Store data in session memory; receive a stub you can reference later via memory_get.",
+        .ModelDescription = "Session Memory (store)",
+        .Tool = True,
+        .ToolPriority = 950,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Private Shared Function BuildGet() As SharedLibrary.ModelConfig
@@ -178,6 +232,43 @@ Namespace Agents
         End Function
 
         ' --------------------------------------------------------------- argument helpers
+
+        Private Shared Function GetBool(args As IDictionary(Of String, Object), name As String, defaultValue As Boolean) As Boolean
+            If args Is Nothing Then Return defaultValue
+
+            Dim v As Object = Nothing
+            If Not args.TryGetValue(name, v) OrElse v Is Nothing Then
+                Return defaultValue
+            End If
+
+            Try
+                Return Convert.ToBoolean(v)
+            Catch
+                Dim s As String = Convert.ToString(v).Trim()
+
+                Select Case s.ToLowerInvariant()
+                    Case "true", "1", "yes", "y", "on"
+                        Return True
+                    Case "false", "0", "no", "n", "off"
+                        Return False
+                    Case Else
+                        Return defaultValue
+                End Select
+            End Try
+        End Function
+
+        Private Shared Function CoalesceNonEmpty(ParamArray values() As String) As String
+            If values Is Nothing Then Return ""
+
+            For Each value In values
+                If Not String.IsNullOrWhiteSpace(value) Then
+                    Return value.Trim()
+                End If
+            Next
+
+            Return ""
+        End Function
+
 
         Private Shared Function GetStr(args As IDictionary(Of String, Object), name As String) As String
             If args Is Nothing Then Return ""

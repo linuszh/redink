@@ -36,7 +36,9 @@ Namespace Agents
         Public Property Summary As String
         Public Property Value As JToken
         Public Property CreatedAt As DateTime
+        Public Property UpdatedAt As DateTime
         Public Property Tags As List(Of String)
+        Public Property Metadata As SessionMemoryMetadata
     End Class
 
     Public NotInheritable Class SessionMemory
@@ -102,24 +104,87 @@ Namespace Agents
         ' ------------------------------------------------------------------ API
 
         Public Shared Function Put(key As String,
-                                   summary As String,
-                                   value As JToken,
-                                   Optional tags As IEnumerable(Of String) = Nothing) As SessionMemoryEntry
+                           summary As String,
+                           value As JToken,
+                           Optional tags As IEnumerable(Of String) = Nothing,
+                           Optional metadata As SessionMemoryMetadata = Nothing) As SessionMemoryEntry
             EnsureLoaded()
+
             SyncLock _sync
-                If String.IsNullOrWhiteSpace(key) Then key = "mem_" & Guid.NewGuid().ToString("N").Substring(0, 12)
-                Dim e As New SessionMemoryEntry With {
-                    .Key = key,
-                    .Summary = If(summary, ""),
-                    .Value = If(value, JValue.CreateNull()),
-                    .CreatedAt = DateTime.UtcNow,
-                    .Tags = If(tags Is Nothing, New List(Of String)(), tags.Where(Function(t) Not String.IsNullOrWhiteSpace(t)).ToList())
-                }
-                _entries(key) = e
+                If String.IsNullOrWhiteSpace(key) Then
+                    key = "mem_" & Guid.NewGuid().ToString("N").Substring(0, 12)
+                End If
+
+                Dim normalizedMetadata As SessionMemoryMetadata =
+            WorkflowContinuity.EnsureMetadataDefaults(metadata)
+
+                Dim nowUtc As DateTime = DateTime.UtcNow
+                Dim tagList As New List(Of String)()
+
+                If tags IsNot Nothing Then
+                    tagList.AddRange(tags.Where(Function(t) Not String.IsNullOrWhiteSpace(t)).Select(Function(t) t.Trim()))
+                End If
+
+                If Not String.IsNullOrWhiteSpace(normalizedMetadata.WorkflowId) Then
+                    Dim workflowTag As String = "workflow:" & normalizedMetadata.WorkflowId.Trim()
+                    If Not tagList.Any(Function(t) t.Equals(workflowTag, StringComparison.OrdinalIgnoreCase)) Then
+                        tagList.Add(workflowTag)
+                    End If
+                End If
+
+                Dim existing As SessionMemoryEntry = Nothing
+                _entries.TryGetValue(key, existing)
+
+                Dim createdAt As DateTime =
+            If(existing IsNot Nothing AndAlso existing.CreatedAt <> DateTime.MinValue,
+               existing.CreatedAt,
+               nowUtc)
+
+                Dim entry As New SessionMemoryEntry With {
+            .Key = key,
+            .Summary = If(summary, ""),
+            .Value = If(value, JValue.CreateNull()),
+            .CreatedAt = createdAt,
+            .UpdatedAt = nowUtc,
+            .Tags = tagList.Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+            .Metadata = normalizedMetadata
+        }
+
+                _entries(key) = entry
                 SaveUnlocked()
-                Return e
+
+                Dim sourceRecord As WorkflowSourceRecord = Nothing
+                If normalizedMetadata IsNot Nothing AndAlso
+           String.Equals(normalizedMetadata.ContentKind, "source_record", StringComparison.OrdinalIgnoreCase) Then
+                    WorkflowContinuity.TryParseSourceRecord(entry, sourceRecord)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(normalizedMetadata.WorkflowId) Then
+                    Dim checkpointWritten As Boolean =
+                WorkflowContinuity.NoteMemoryReferenceCreated(
+                    normalizedMetadata.WorkflowId,
+                    WorkflowContinuity.CurrentHostPipeline,
+                    entry.Key,
+                    normalizedMetadata,
+                    sourceRecord)
+
+                    Debug.WriteLine(
+                WorkflowContinuity.BuildWorkflowLogLabel(
+                    normalizedMetadata.WorkflowId,
+                    If(
+                        String.Equals(normalizedMetadata.ContentKind, "source_record", StringComparison.OrdinalIgnoreCase),
+                        "source_reference_created",
+                        "memory_reference_created")) &
+                " memory_key=" & entry.Key &
+                " source=" & normalizedMetadata.Source &
+                " kind=" & normalizedMetadata.ContentKind &
+                " checkpoint_written=" & If(checkpointWritten, "true", "false"))
+                End If
+
+                Return entry
             End SyncLock
         End Function
+
 
         Public Shared Function [Get](key As String) As SessionMemoryEntry
             EnsureLoaded()
@@ -189,6 +254,98 @@ Namespace Agents
             Catch
             End Try
             Return Nothing
+        End Function
+
+        Public Shared Function ListByWorkflowId(workflowId As String,
+                                        Optional maxItems As Integer = 20) As List(Of SessionMemoryEntry)
+            EnsureLoaded()
+
+            If String.IsNullOrWhiteSpace(workflowId) Then
+                Return New List(Of SessionMemoryEntry)()
+            End If
+
+            Dim workflowTag As String = "workflow:" & workflowId.Trim()
+
+            SyncLock _sync
+                Return _entries.Values.
+                    Where(
+                        Function(entry)
+                            If entry Is Nothing Then Return False
+
+                            Dim metadataWorkflowId As String = If(entry.Metadata?.WorkflowId, "").Trim()
+
+                            If metadataWorkflowId.Equals(workflowId.Trim(), StringComparison.OrdinalIgnoreCase) Then
+                                Return True
+                            End If
+
+                            If entry.Tags Is Nothing Then Return False
+
+                            Return entry.Tags.Any(
+                                Function(tag)
+                                    Return Not String.IsNullOrWhiteSpace(tag) AndAlso
+                                           tag.Trim().Equals(workflowTag, StringComparison.OrdinalIgnoreCase)
+                                End Function)
+                        End Function).
+                    OrderByDescending(
+                        Function(entry)
+                            If entry Is Nothing Then Return DateTime.MinValue
+                            If entry.UpdatedAt <> DateTime.MinValue Then Return entry.UpdatedAt
+                            Return entry.CreatedAt
+                        End Function).
+                    Take(Math.Max(1, maxItems)).
+                    ToList()
+            End SyncLock
+        End Function
+
+        Public Shared Function ListMostRecentWorkflowEntries(Optional excludedWorkflowId As String = "",
+                                                             Optional maxItems As Integer = 20) As List(Of SessionMemoryEntry)
+            EnsureLoaded()
+
+            Dim normalizedExcludedWorkflowId As String = If(excludedWorkflowId, "").Trim()
+
+            SyncLock _sync
+                Dim latestWorkflowId As String =
+                    _entries.Values.
+                        Where(
+                            Function(entry)
+                                If entry Is Nothing Then Return False
+
+                                Dim metadataWorkflowId As String = If(entry.Metadata?.WorkflowId, "").Trim()
+                                If metadataWorkflowId = "" Then Return False
+
+                                Return Not metadataWorkflowId.Equals(normalizedExcludedWorkflowId, StringComparison.OrdinalIgnoreCase)
+                            End Function).
+                        OrderByDescending(
+                            Function(entry)
+                                If entry Is Nothing Then Return DateTime.MinValue
+                                If entry.UpdatedAt <> DateTime.MinValue Then Return entry.UpdatedAt
+                                Return entry.CreatedAt
+                            End Function).
+                        Select(Function(entry) If(entry.Metadata?.WorkflowId, "").Trim()).
+                        FirstOrDefault()
+
+                If String.IsNullOrWhiteSpace(latestWorkflowId) Then
+                    Return New List(Of SessionMemoryEntry)()
+                End If
+
+                Return _entries.Values.
+                    Where(
+                        Function(entry)
+                            If entry Is Nothing Then Return False
+                            Return String.Equals(
+                                If(entry.Metadata?.WorkflowId, "").Trim(),
+                                latestWorkflowId,
+                                StringComparison.OrdinalIgnoreCase)
+                        End Function).
+                    OrderByDescending(
+                        Function(entry)
+                            If entry Is Nothing Then Return DateTime.MinValue
+                            If entry.UpdatedAt <> DateTime.MinValue Then Return entry.UpdatedAt
+                            Return entry.CreatedAt
+                        End Function).
+                    Take(Math.Max(1, maxItems)).
+                    ToList()
+            End SyncLock
         End Function
 
     End Class

@@ -33,31 +33,17 @@ Imports System.Threading.Tasks
 Namespace Agents
 
     Public Class SubAgentRunRequest
-        ''' <summary>Logical agent name (for logs/diagnostics).</summary>
         Public Property AgentName As String
-        ''' <summary>Full system prompt to use (already composed by SubAgentRunner).</summary>
         Public Property SystemPrompt As String
-        ''' <summary>Single user message representing the task (and any caller-supplied context).</summary>
         Public Property UserMessage As String
-        ''' <summary>Special-task-model key (e.g. "researchmodel"); empty => agentdefaultmodel.</summary>
         Public Property SpecialModelKey As String
-        ''' <summary>
-        ''' Narrowing filter; if non-empty, only these tool names may be offered to the model.
-        ''' Nothing or empty means "no narrowing" (the host's full active tool set applies).
-        ''' </summary>
         Public Property AllowedToolNames As IReadOnlyList(Of String)
-        ''' <summary>Optional max iterations override; 0 = use host default.</summary>
         Public Property MaxIterations As Integer
-        ''' <summary>Optional timeout override in seconds; 0 = use host default.</summary>
         Public Property TimeoutSeconds As Integer
+        Public Property WorkflowId As String
     End Class
 
     Public Interface ISubAgentHost
-        ''' <summary>
-        ''' Runs one isolated tooling-loop pass as described by <paramref name="request"/>
-        ''' and returns the final assistant text. Implementations MUST NOT carry any state
-        ''' from the parent run.
-        ''' </summary>
         Function RunIsolatedToolingLoopAsync(request As SubAgentRunRequest,
                                              cancellationToken As CancellationToken) As Task(Of String)
     End Interface

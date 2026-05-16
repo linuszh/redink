@@ -389,6 +389,8 @@
     <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
     <Compile Include="Code\Agents\WordDocTools.vb" />
     <Compile Include="Code\Agents\WordTools.vb" />
+    <Compile Include="Code\Agents\WorkflowContinuity.vb" />
+    <Compile Include="Code\Agents\WorkflowContinuitySelfTests.vb" />
     <Compile Include="Code\Agents\WorkspaceState.vb" />
     <Compile Include="Code\Agents\WorkspaceTools.vb" />
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
