@@ -611,13 +611,12 @@ Namespace SharedLibrary
         ''' </param>
         ''' <returns><c>True</c> if an ImageGeneration model is available; otherwise <c>False</c>.</returns>
         Public Shared Function IsImageGenerationAvailable(context As SharedContext.ISharedContext,
-                                                           Optional ByRef hasObjectCall As Boolean = False) As Boolean
+                                                          Optional ByRef hasObjectCall As Boolean = False) As Boolean
             hasObjectCall = False
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
@@ -626,17 +625,13 @@ Namespace SharedLibrary
                     hasObjectCall = Not String.IsNullOrWhiteSpace(context.INI_APICall_Object_2)
                 End If
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function
+
 
         ''' <summary>
         ''' Checks whether a WebGrounding special task model is configured and available.
@@ -648,21 +643,15 @@ Namespace SharedLibrary
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
                 available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "WebGrounding")
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function
@@ -677,21 +666,15 @@ Namespace SharedLibrary
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
                 available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "DeepResearch")
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function

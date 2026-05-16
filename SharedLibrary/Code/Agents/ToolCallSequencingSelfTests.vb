@@ -1,0 +1,1209 @@
+﻿#If DEBUG Then
+
+Option Strict On
+Option Explicit On
+
+Imports System.IO
+Imports Newtonsoft.Json.Linq
+
+Namespace Agents
+
+    Public NotInheritable Class ToolCallSequencingSelfTests
+
+        Private Sub New()
+        End Sub
+
+        Public Shared Sub RunAll()
+            Debug.WriteLine("[ToolCallSequencingSelfTests] START")
+
+            RunNamedTest(NameOf(TestIndependentReadOnlyCallsBatchTogether), AddressOf TestIndependentReadOnlyCallsBatchTogether)
+            RunNamedTest(NameOf(TestMutatingCallStopsBatch), AddressOf TestMutatingCallStopsBatch)
+            RunNamedTest(NameOf(TestReadOnlyThenAgentStopsAfterAgent), AddressOf TestReadOnlyThenAgentStopsAfterAgent)
+            RunNamedTest(NameOf(TestAgentThenOtherStopsAtAgent), AddressOf TestAgentThenOtherStopsAtAgent)
+            RunNamedTest(NameOf(TestSkillThenOtherStopsAtSkill), AddressOf TestSkillThenOtherStopsAtSkill)
+            RunNamedTest(NameOf(TestUnknownToolActsAsBarrier), AddressOf TestUnknownToolActsAsBarrier)
+            RunNamedTest(NameOf(TestFailedToolSetsUnresolvedToolFailure), AddressOf TestFailedToolSetsUnresolvedToolFailure)
+            RunNamedTest(NameOf(TestContinuationGuardRetryExhaustionWithUnresolvedFailureReturnsBlocked), AddressOf TestContinuationGuardRetryExhaustionWithUnresolvedFailureReturnsBlocked)
+            RunNamedTest(NameOf(TestSharedBehaviorParity), AddressOf TestSharedBehaviorParity)
+            RunNamedTest(NameOf(TestSubAgentEmptyModelResponseRetriesOnceAndBatchContinues), AddressOf TestSubAgentEmptyModelResponseRetriesOnceAndBatchContinues)
+            RunNamedTest(NameOf(TestStructuredSubAgentFailureReturnsToParentAndLaterWorkCanContinue), AddressOf TestStructuredSubAgentFailureReturnsToParentAndLaterWorkCanContinue)
+            RunNamedTest(NameOf(TestRepeatedSubAgentInvocationRetainsAllowedTools), AddressOf TestRepeatedSubAgentInvocationRetainsAllowedTools)
+            RunNamedTest(NameOf(TestFailedSubAgentInitializationDoesNotPoisonLaterInvocation), AddressOf TestFailedSubAgentInitializationDoesNotPoisonLaterInvocation)
+            RunNamedTest(NameOf(TestSequencingBarrierDoesNotClearSubAgentAllowedRegistry), AddressOf TestSequencingBarrierDoesNotClearSubAgentAllowedRegistry)
+            RunNamedTest(NameOf(TestOutlookAndWordRepeatedInvocationParity), AddressOf TestOutlookAndWordRepeatedInvocationParity)
+            RunNamedTest(NameOf(TestAuthoritativeRegistryUnavailableFailsBeforeModelCall), AddressOf TestAuthoritativeRegistryUnavailableFailsBeforeModelCall)
+            RunNamedTest(NameOf(TestWorkspaceWriteWithCanonicalTextWritesFullContent), AddressOf TestWorkspaceWriteWithCanonicalTextWritesFullContent)
+            RunNamedTest(NameOf(TestWorkspaceWriteWithLegacyContentAliasWritesFullContent), AddressOf TestWorkspaceWriteWithLegacyContentAliasWritesFullContent)
+            RunNamedTest(NameOf(TestWorkspaceWriteOverwriteAliasMapsToOverwriteMode), AddressOf TestWorkspaceWriteOverwriteAliasMapsToOverwriteMode)
+            RunNamedTest(NameOf(TestWorkspaceWriteMissingTextFailsValidation), AddressOf TestWorkspaceWriteMissingTextFailsValidation)
+            RunNamedTest(NameOf(TestWorkspaceWriteUnknownContentFieldDoesNotSilentlyCreateTinyFile), AddressOf TestWorkspaceWriteUnknownContentFieldDoesNotSilentlyCreateTinyFile)
+            RunNamedTest(NameOf(TestWorkspaceToolSchemasMatchDeclaredContracts), AddressOf TestWorkspaceToolSchemasMatchDeclaredContracts)
+            RunNamedTest(NameOf(TestSkippedFailureDoesNotShrinkRegistrySnapshot), AddressOf TestSkippedFailureDoesNotShrinkRegistrySnapshot)
+            RunNamedTest(NameOf(TestPreviousSubAgentCallDoesNotMutateParentRegistrySnapshot), AddressOf TestPreviousSubAgentCallDoesNotMutateParentRegistrySnapshot)
+            Debug.WriteLine("[ToolCallSequencingSelfTests] PASS")
+        End Sub
+
+        Public Shared Function RunAllAndReturnStatus() As String
+            Try
+                RunAll()
+                Return "ToolCallSequencing self-tests passed."
+            Catch ex As Exception
+                Debug.WriteLine("[ToolCallSequencingSelfTests] FAILED :: " & ex.ToString())
+                Throw
+            End Try
+        End Function
+
+        Private Shared Sub TestIndependentReadOnlyCallsBatchTogether()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_read", "workspace_search"})
+
+            AssertEqual(2, plan.ExecutedCount, "Read-only batch should execute together.")
+            AssertEqual(0, plan.DeferredCount, "Read-only batch should not defer calls.")
+            AssertTrue(plan.IsFullyBatchSafe, "Read-only batch should be fully safe.")
+        End Sub
+
+        Private Shared Sub TestMutatingCallStopsBatch()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_write", "workspace_read"})
+
+            AssertTrue(plan.Calls(0).WillExecute, "First mutating call should execute.")
+            AssertFalse(plan.Calls(1).WillExecute, "Later call after mutating barrier should defer.")
+            AssertEqual(ToolCallSequencing.ToolCallClassification.Mutating, plan.Calls(0).Classification, "Mutating classification mismatch.")
+        End Sub
+
+        Private Shared Sub TestReadOnlyThenAgentStopsAfterAgent()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_read", "agent_fake", "workspace_search"})
+
+            AssertTrue(plan.Calls(0).WillExecute, "Leading read-only call should execute.")
+            AssertTrue(plan.Calls(1).WillExecute, "First barrier call should execute.")
+            AssertFalse(plan.Calls(2).WillExecute, "Call after agent barrier should defer.")
+            AssertEqual(ToolCallSequencing.ToolCallClassification.Agent, plan.Calls(1).Classification, "Agent classification mismatch.")
+        End Sub
+
+        Private Shared Sub TestAgentThenOtherStopsAtAgent()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"agent_fake", "workspace_read"})
+
+            AssertTrue(plan.Calls(0).WillExecute, "Agent call should execute.")
+            AssertFalse(plan.Calls(1).WillExecute, "Call after agent should defer.")
+        End Sub
+
+        Private Shared Sub TestSkillThenOtherStopsAtSkill()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"skill_fake", "workspace_read"})
+
+            AssertTrue(plan.Calls(0).WillExecute, "Skill call should execute.")
+            AssertFalse(plan.Calls(1).WillExecute, "Call after skill should defer.")
+        End Sub
+
+        Private Shared Sub TestUnknownToolActsAsBarrier()
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"custom_unknown_tool", "workspace_read"})
+
+            AssertEqual(ToolCallSequencing.ToolCallClassification.Unknown, plan.Calls(0).Classification, "Unknown classification mismatch.")
+            AssertTrue(plan.Calls(0).WillExecute, "Unknown first call should execute.")
+            AssertFalse(plan.Calls(1).WillExecute, "Call after unknown barrier should defer.")
+        End Sub
+
+        Private Shared Sub TestFailedToolSetsUnresolvedToolFailure()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+
+            state.NoteToolFailure("fake_tool", "fake_error", "Failure")
+
+            AssertTrue(state.HasUnresolvedToolFailure, "Failed tool should set unresolved failure.")
+            AssertEqual("fake_tool", state.LastToolName, "Last tool name mismatch.")
+            AssertEqual("fake_error", state.LastErrorCode, "Last error code mismatch.")
+        End Sub
+
+        Private Shared Sub TestContinuationGuardRetryExhaustionWithUnresolvedFailureReturnsBlocked()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            state.NoteToolFailure("fake_tool", "fake_error", "Failure")
+
+            Dim shouldBlock = ToolCallSequencing.ShouldBlockTextOnlyFinalization(
+                state,
+                retryCount:=5,
+                maxRetryCount:=5,
+                hasValidFinalAnswer:=False)
+
+            AssertTrue(shouldBlock, "Retry exhaustion with unresolved failure should block finalization.")
+
+            Dim payload = ToolCallSequencing.BuildBlockedResultPayload(
+                ToolCallSequencing.UnresolvedToolFailureCode,
+                "finalization",
+                "The tooling run ended with an unresolved tool failure.",
+                state.LastToolName,
+                state.LastErrorCode,
+                state.LastErrorMessage)
+
+            Dim obj = JObject.Parse(payload)
+
+            AssertEqual("blocked", obj.Value(Of String)("status"), "Blocked payload status mismatch.")
+            AssertEqual(ToolCallSequencing.UnresolvedToolFailureCode, obj("error")?.Value(Of String)("code"), "Blocked payload code mismatch.")
+        End Sub
+
+        Private Shared Sub TestSharedBehaviorParity()
+            Dim left = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_read", "agent_fake", "workspace_search"})
+
+            Dim right = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_read", "agent_fake", "workspace_search"})
+
+            AssertEqual(left.ExecutedCount, right.ExecutedCount, "Executed count parity mismatch.")
+            AssertEqual(left.DeferredCount, right.DeferredCount, "Deferred count parity mismatch.")
+            AssertEqual(left.Calls(1).Classification, right.Calls(1).Classification, "Classification parity mismatch.")
+        End Sub
+
+        Private Shared Sub RunNamedTest(name As String, test As Action)
+            Debug.WriteLine("[ToolCallSequencingSelfTests] RUN  " & name)
+
+            Try
+                Dim testTask = System.Threading.Tasks.Task.Run(
+                    Sub()
+                        test.Invoke()
+                    End Sub)
+
+                If Not testTask.Wait(TimeSpan.FromSeconds(20)) Then
+                    Debug.WriteLine("[ToolCallSequencingSelfTests] TIMEOUT " & name)
+                    Throw New TimeoutException("Timed out after 20 seconds.")
+                End If
+
+                If testTask.IsFaulted Then
+                    Throw testTask.Exception.GetBaseException()
+                End If
+
+                Debug.WriteLine("[ToolCallSequencingSelfTests] PASS " & name)
+            Catch ex As Exception
+                Debug.WriteLine("[ToolCallSequencingSelfTests] FAIL " & name & " :: " & ex.ToString())
+                Throw
+            End Try
+        End Sub
+
+
+        Private Shared Sub AssertTrue(condition As Boolean, message As String)
+            If Not condition Then
+                Throw New InvalidOperationException(message)
+            End If
+        End Sub
+
+        Private Shared Sub TestSubAgentEmptyModelResponseRetriesOnceAndBatchContinues()
+            Dim ag As New AgentDescriptor() With {
+                .Name = "mock_subagent"
+            }
+
+            Dim host As New MockSubAgentHost()
+            host.AddResponse("item-1", BuildMockSuccessPayload("done:item-1"))
+            host.AddResponse("item-2", SubAgentRuntimeHardening.BuildModelEmptyResponsePayload())
+            host.AddResponse("item-2", BuildMockSuccessPayload("done:item-2"))
+            host.AddResponse("item-3", BuildMockSuccessPayload("done:item-3"))
+
+            Dim results = RunMockBatchSkill(host, ag, New String() {"item-1", "item-2", "item-3"})
+
+            AssertEqual(3, results.Count, "Batch skill should complete all items.")
+            AssertEqual("done:item-2", results(1), "Second item should succeed after one retry.")
+            AssertEqual(4, host.CallCount, "Second item should require exactly one extra sub-agent call.")
+        End Sub
+
+        Private Shared Sub TestStructuredSubAgentFailureReturnsToParentAndLaterWorkCanContinue()
+            Dim ag As New AgentDescriptor() With {
+                .Name = "mock_subagent"
+            }
+
+            Dim host As New MockSubAgentHost()
+            host.AddResponse("item-1", BuildMockSuccessPayload("done:item-1"))
+            host.AddResponse("item-2", SubAgentRuntimeHardening.BuildModelEmptyResponsePayload())
+            host.AddResponse("item-2", SubAgentRuntimeHardening.BuildModelEmptyResponsePayload())
+            host.AddResponse("item-3", BuildMockSuccessPayload("done:item-3"))
+
+            Dim results = RunMockBatchSkillAllowErrors(host, ag, New String() {"item-1", "item-2", "item-3"})
+
+            AssertEqual(3, results.Count, "Parent batch should continue after structured sub-agent error.")
+            AssertEqual("done:item-1", results(0), "First item mismatch.")
+            AssertEqual("ERR:model_empty_response", results(1), "Second item should return structured error to parent.")
+            AssertEqual("done:item-3", results(2), "Later work should continue after the failed sub-agent item.")
+
+            Dim runState As New ToolCallSequencing.ToolingRunState()
+            runState.NoteToolFailure("agent_mock", SubAgentRuntimeHardening.ModelEmptyResponseCode, "empty", skippedByPolicy:=True, returnedToParent:=True)
+            AssertTrue(runState.RequiresParentRecovery, "Skipped structured agent failure should require parent recovery.")
+
+            runState.NoteRecoveryByLaterToolCall("mock_parent_fallback")
+            AssertFalse(runState.HasUnresolvedToolFailure, "Later parent tool call should recover skipped failure.")
+
+            Dim unrecovered As New ToolCallSequencing.ToolingRunState()
+            unrecovered.NoteToolFailure("agent_mock", SubAgentRuntimeHardening.ModelEmptyResponseCode, "empty", skippedByPolicy:=True, returnedToParent:=True)
+
+            Dim shouldBlock = ToolCallSequencing.ShouldBlockTextOnlyFinalization(
+                unrecovered,
+                retryCount:=5,
+                maxRetryCount:=5,
+                hasValidFinalAnswer:=False)
+
+            AssertTrue(shouldBlock, "Skipped failure should become fatal only after guard exhaustion.")
+        End Sub
+
+        Private Shared Sub TestRepeatedSubAgentInvocationRetainsAllowedTools()
+            Dim host As New MockRepeatedToolScopeHost(
+                "Word",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta"}))
+
+            Dim ag As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            ag.AllowedTools.Add("fake_tool_alpha")
+            ag.AllowedTools.Add("fake_tool_beta")
+
+            For i As Integer = 1 To 3
+                Dim payload = SubAgentRunner.InvokeResolvedAsync(
+                    host,
+                    ag,
+                    "repeat-" & i.ToString(),
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                Dim obj = JObject.Parse(payload)
+                AssertTrue(obj("error") Is Nothing, $"Invocation {i} should succeed.")
+            Next
+
+            AssertEqual(3, host.Invocations.Count, "Expected three recorded invocations.")
+
+            Dim first = host.Invocations(0)
+            Dim second = host.Invocations(1)
+            Dim third = host.Invocations(2)
+
+            AssertToolNameSequenceEqual(New String() {"fake_tool_alpha", "fake_tool_beta"}, first.ResolvedTools, "First invocation resolved tools mismatch.")
+            AssertToolNameSequenceEqual(first.ResolvedTools, second.ResolvedTools, "Second invocation should resolve the same tools as the first.")
+            AssertToolNameSequenceEqual(first.ResolvedTools, third.ResolvedTools, "Third invocation should resolve the same tools as the first.")
+
+            AssertToolNameSequenceEqual(first.FinalCallableTools, second.FinalCallableTools, "Second invocation callable scope mismatch.")
+            AssertToolNameSequenceEqual(first.FinalCallableTools, third.FinalCallableTools, "Third invocation callable scope mismatch.")
+
+            AssertEqual(1, first.InvocationIndex, "First invocation index mismatch.")
+            AssertEqual(2, second.InvocationIndex, "Second invocation index mismatch.")
+            AssertEqual(3, third.InvocationIndex, "Third invocation index mismatch.")
+
+            AssertEqual(1, first.AgentInvocationCount, "First same-agent invocation count mismatch.")
+            AssertEqual(2, second.AgentInvocationCount, "Second same-agent invocation count mismatch.")
+            AssertEqual(3, third.AgentInvocationCount, "Third same-agent invocation count mismatch.")
+
+            AssertTrue(first.SnapshotExists, "First invocation should have a parent registry snapshot.")
+            AssertTrue(second.SnapshotExists, "Second invocation should have a parent registry snapshot.")
+            AssertTrue(third.SnapshotExists, "Third invocation should have a parent registry snapshot.")
+
+            AssertEqual(first.SnapshotToolCount, second.SnapshotToolCount, "Second invocation snapshot count mismatch.")
+            AssertEqual(first.SnapshotToolCount, third.SnapshotToolCount, "Third invocation snapshot count mismatch.")
+
+        End Sub
+
+        Private Shared Sub TestFailedSubAgentInitializationDoesNotPoisonLaterInvocation()
+            Dim host As New MockRepeatedToolScopeHost(
+                "Word",
+                BuildFakeToolRegistry({"fake_tool_alpha"}))
+
+            Dim failingAgent As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            failingAgent.AllowedTools.Add("missing_tool")
+
+            Dim failingPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                failingAgent,
+                "fail-once",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            Dim failingObj = JObject.Parse(failingPayload)
+            AssertEqual(Agents.SubAgentRuntimeHardening.RequiredToolMissingCode,
+                        failingObj("error")?.Value(Of String)("code"),
+                        "Initialization failure should return the structured tool-scope error.")
+
+            Dim succeedingAgent As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            succeedingAgent.AllowedTools.Add("fake_tool_alpha")
+
+            Dim succeedingPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                succeedingAgent,
+                "succeed-next",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            Dim succeedingObj = JObject.Parse(succeedingPayload)
+            AssertTrue(succeedingObj("error") Is Nothing, "Later invocation should still succeed after an initialization failure.")
+
+            Dim lastInvocation = host.Invocations(host.Invocations.Count - 1)
+            AssertToolNameSequenceEqual(New String() {"fake_tool_alpha"}, lastInvocation.ResolvedTools, "Successful invocation should resolve the expected tool.")
+        End Sub
+
+        Private Shared Sub TestSequencingBarrierDoesNotClearSubAgentAllowedRegistry()
+            Dim host As New MockRepeatedToolScopeHost(
+                "Word",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta"}))
+
+            Dim ag As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            ag.AllowedTools.Add("fake_tool_alpha")
+            ag.AllowedTools.Add("fake_tool_beta")
+
+            Dim firstPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                ag,
+                "before-barrier",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            Dim firstObj = JObject.Parse(firstPayload)
+            AssertTrue(firstObj("error") Is Nothing, "First invocation should succeed.")
+
+            Dim plan = ToolCallSequencing.BuildExecutionPlan(
+                New String() {"workspace_read", "agent_neutral_fake", "workspace_search"})
+
+            AssertTrue(plan.Calls(1).WillExecute, "Barrier call should execute.")
+            AssertFalse(plan.Calls(2).WillExecute, "Later call should defer after the barrier.")
+
+            Dim secondPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                ag,
+                "after-barrier",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            Dim secondObj = JObject.Parse(secondPayload)
+            AssertTrue(secondObj("error") Is Nothing, "Second invocation should still succeed after the sequencing barrier.")
+
+            AssertToolNameSequenceEqual(
+                host.Invocations(0).ResolvedTools,
+                host.Invocations(1).ResolvedTools,
+                "Sequencing barriers must not clear the allowed-tool registry.")
+        End Sub
+
+        Private Shared Sub TestOutlookAndWordRepeatedInvocationParity()
+            Dim wordHost As New MockRepeatedToolScopeHost(
+                "Word",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta"}))
+
+            Dim outlookHost As New MockRepeatedToolScopeHost(
+                "Outlook",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta"}))
+
+            Dim ag As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            ag.AllowedTools.Add("fake_tool_alpha")
+            ag.AllowedTools.Add("fake_tool_beta")
+
+            For i As Integer = 1 To 2
+                Dim wordPayload = SubAgentRunner.InvokeResolvedAsync(
+                    wordHost,
+                    ag,
+                    "word-" & i.ToString(),
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                Dim outlookPayload = SubAgentRunner.InvokeResolvedAsync(
+                    outlookHost,
+                    ag,
+                    "outlook-" & i.ToString(),
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                AssertTrue(JObject.Parse(wordPayload)("error") Is Nothing, "Word parity invocation should succeed.")
+                AssertTrue(JObject.Parse(outlookPayload)("error") Is Nothing, "Outlook parity invocation should succeed.")
+            Next
+
+            AssertEqual(wordHost.Invocations.Count, outlookHost.Invocations.Count, "Parity host invocation count mismatch.")
+
+            For i As Integer = 0 To wordHost.Invocations.Count - 1
+                AssertToolNameSequenceEqual(wordHost.Invocations(i).ResolvedTools, outlookHost.Invocations(i).ResolvedTools, $"Resolved-tools parity mismatch at invocation {i}.")
+                AssertToolNameSequenceEqual(wordHost.Invocations(i).MissingTools, outlookHost.Invocations(i).MissingTools, $"Missing-tools parity mismatch at invocation {i}.")
+                AssertToolNameSequenceEqual(wordHost.Invocations(i).FinalSelectedTools, outlookHost.Invocations(i).FinalSelectedTools, $"Final-selected-tools parity mismatch at invocation {i}.")
+                AssertToolNameSequenceEqual(wordHost.Invocations(i).FinalCallableTools, outlookHost.Invocations(i).FinalCallableTools, $"Final-callable-tools parity mismatch at invocation {i}.")
+                AssertEqual(wordHost.Invocations(i).AgentInvocationCount, outlookHost.Invocations(i).AgentInvocationCount, $"Same-agent invocation count parity mismatch at invocation {i}.")
+            Next
+        End Sub
+
+        Private Shared Sub TestAuthoritativeRegistryUnavailableFailsBeforeModelCall()
+            Dim host As New MockRepeatedToolScopeHost(
+        "Word",
+        authoritativeRegistry:=Nothing,
+        authoritativeRegistryAvailable:=False)
+
+            Dim ag As New AgentDescriptor() With {
+        .Name = "neutral_fake"
+    }
+            ag.AllowedTools.Add("workspace_extract_text")
+            ag.AllowedTools.Add("workspace_read")
+            ag.AllowedTools.Add("js_run")
+
+            Dim payload = SubAgentRunner.InvokeResolvedAsync(
+        host,
+        ag,
+        "fail-before-model",
+        contextBlob:=Nothing,
+        storeResultInMemory:=False,
+        cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            Dim obj = JObject.Parse(payload)
+
+            AssertEqual(
+        Agents.SubAgentRuntimeHardening.ParentRegistryMissingCode,
+        obj("error")?.Value(Of String)("code"),
+        "Initialization failure should return the parent-registry-missing error.")
+
+            AssertEqual(
+        Agents.SubAgentRuntimeHardening.ParentRegistryMissingPhase,
+        obj("error")?.Value(Of String)("phase"),
+        "Initialization failure phase mismatch.")
+        End Sub
+
+
+
+        Private Shared Function BuildFakeToolRegistry(toolNames As IEnumerable(Of String)) As Agents.ToolRegistry
+            Dim tools As New List(Of SharedLibrary.ModelConfig)()
+
+            For Each toolName In toolNames
+                Dim normalizedName As String = If(toolName, "").Trim()
+                If normalizedName = "" Then Continue For
+
+                tools.Add(New SharedLibrary.ModelConfig() With {
+                    .Tool = True,
+                    .ToolName = normalizedName,
+                    .ToolInstructionsPrompt = normalizedName & ": test tool",
+                    .ToolDefinition =
+                        "{""name"":""" & normalizedName & """," &
+                        """description"":""Test tool.""," &
+                        """parameters"":{""type"":""object"",""properties"":{},""additionalProperties"":false}}",
+                    .ToolPriority = 0,
+                    .ToolErrorHandling = "skip"
+                })
+            Next
+
+            Return Agents.ToolRegistryBuilder.FromModelConfigs(tools, "test")
+        End Function
+
+        Private Shared Sub AssertToolNameSequenceEqual(expected As IEnumerable(Of String),
+                                                       actual As IEnumerable(Of String),
+                                                       message As String)
+            Dim expectedText As String = String.Join("|", If(expected, Array.Empty(Of String)()))
+            Dim actualText As String = String.Join("|", If(actual, Array.Empty(Of String)()))
+            AssertEqual(expectedText, actualText, message)
+        End Sub
+
+
+        Private NotInheritable Class MockRepeatedToolScopeHost
+            Implements ISubAgentHost
+
+            Private ReadOnly _hostKind As String
+            Private ReadOnly _parentToolRegistrySnapshot As Agents.ToolRegistry
+            Private ReadOnly _authoritativeRegistryAvailable As Boolean
+            Private ReadOnly _parentRunId As String = Guid.NewGuid().ToString("N")
+            Private ReadOnly _agentInvocationCounts As New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
+            Private _invocationIndex As Integer
+
+            Public ReadOnly Invocations As New List(Of MockToolScopeInvocationRecord)()
+
+            Public Sub New(hostKind As String,
+                   authoritativeRegistry As Agents.ToolRegistry,
+                   Optional authoritativeRegistryAvailable As Boolean = True)
+                _hostKind = hostKind
+                _authoritativeRegistryAvailable = authoritativeRegistryAvailable
+
+                If authoritativeRegistryAvailable AndAlso authoritativeRegistry IsNot Nothing Then
+                    _parentToolRegistrySnapshot = authoritativeRegistry.Snapshot()
+                Else
+                    _parentToolRegistrySnapshot = Nothing
+                End If
+            End Sub
+
+            Public Function RunIsolatedToolingLoopAsync(request As SubAgentRunRequest,
+                                                cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String) _
+        Implements ISubAgentHost.RunIsolatedToolingLoopAsync
+
+                _invocationIndex += 1
+
+                Dim sameAgentInvocationCount As Integer = 1
+
+                If _agentInvocationCounts.TryGetValue(request.AgentName, sameAgentInvocationCount) Then
+                    sameAgentInvocationCount += 1
+                    _agentInvocationCounts(request.AgentName) = sameAgentInvocationCount
+                Else
+                    sameAgentInvocationCount = 1
+                    _agentInvocationCounts(request.AgentName) = 1
+                End If
+
+                Dim authoritativeSnapshot As Agents.ToolRegistry =
+            If(_parentToolRegistrySnapshot Is Nothing,
+               Nothing,
+               _parentToolRegistrySnapshot.Snapshot())
+
+                Dim snapshotExists As Boolean = (authoritativeSnapshot IsNot Nothing)
+                Dim snapshotToolCount As Integer =
+            If(authoritativeSnapshot Is Nothing,
+               0,
+               authoritativeSnapshot.ListNames().Count)
+
+                Dim scopeInit = Agents.SubAgentToolScopeInitializer.Initialize(
+            authoritativeSnapshot,
+            request.AllowedToolNames)
+
+                Invocations.Add(New MockToolScopeInvocationRecord() With {
+            .HostKind = _hostKind,
+            .ParentRunId = _parentRunId,
+            .InvocationIndex = _invocationIndex,
+            .AgentName = request.AgentName,
+            .AgentInvocationCount = sameAgentInvocationCount,
+            .SnapshotExists = snapshotExists,
+            .SnapshotToolCount = snapshotToolCount,
+            .RequestedTools = New List(Of String)(If(scopeInit.RequestedToolNames, New List(Of String)())),
+            .ResolvedTools = New List(Of String)(scopeInit.ResolvedToolNames),
+            .MissingTools = New List(Of String)(scopeInit.MissingToolNames),
+            .FinalSelectedTools = New List(Of String)(scopeInit.FinalSelectedToolNames),
+            .FinalCallableTools = New List(Of String)(scopeInit.FinalCallableToolNames)
+        })
+
+                If Not snapshotExists Then
+                    Return System.Threading.Tasks.Task.FromResult(
+                Agents.SubAgentRuntimeHardening.BuildParentRegistryMissingPayload(
+                    requestedToolNames:=scopeInit.RequestedToolNames))
+                End If
+
+                If scopeInit.HasRequestedTools AndAlso
+           (scopeInit.HasMissingRequestedTools OrElse scopeInit.HasMissingFinalToolNames) Then
+
+                    Dim missingRequiredToolNames As List(Of String) = scopeInit.MissingFinalToolNames
+                    If missingRequiredToolNames.Count = 0 Then
+                        missingRequiredToolNames = New List(Of String)(scopeInit.MissingToolNames)
+                    End If
+
+                    Return System.Threading.Tasks.Task.FromResult(
+                Agents.SubAgentRuntimeHardening.BuildRequiredToolMissingPayload(
+                    missingRequiredToolNames,
+                    requestedToolNames:=scopeInit.RequestedToolNames,
+                    resolvedToolNames:=scopeInit.ResolvedToolNames))
+                End If
+
+                Dim payload As New JObject(
+            New JProperty("summary", String.Join(", ", scopeInit.FinalCallableToolNames)),
+            New JProperty("result", New JObject(
+                New JProperty("hostKind", _hostKind),
+                New JProperty("parentRunId", _parentRunId),
+                New JProperty("invocationIndex", _invocationIndex),
+                New JProperty("agentInvocationCount", sameAgentInvocationCount),
+                New JProperty("snapshotExists", snapshotExists),
+                New JProperty("snapshotToolCount", snapshotToolCount),
+                New JProperty("requestedTools", New JArray(If(scopeInit.RequestedToolNames, New List(Of String)()).ToArray())),
+                New JProperty("resolvedTools", New JArray(scopeInit.ResolvedToolNames.ToArray())),
+                New JProperty("missingTools", New JArray(scopeInit.MissingToolNames.ToArray())),
+                New JProperty("finalSelectedTools", New JArray(scopeInit.FinalSelectedToolNames.ToArray())),
+                New JProperty("finalCallableTools", New JArray(scopeInit.FinalCallableToolNames.ToArray()))
+            ))
+        )
+
+                Return System.Threading.Tasks.Task.FromResult(payload.ToString())
+            End Function
+        End Class
+
+
+        Private NotInheritable Class MockToolScopeInvocationRecord
+            Public Property HostKind As String
+            Public Property ParentRunId As String
+            Public Property InvocationIndex As Integer
+            Public Property AgentName As String
+            Public Property AgentInvocationCount As Integer
+            Public Property RequestedTools As List(Of String)
+            Public Property ResolvedTools As List(Of String)
+            Public Property MissingTools As List(Of String)
+            Public Property FinalSelectedTools As List(Of String)
+            Public Property FinalCallableTools As List(Of String)
+
+            Public Property SnapshotExists As Boolean
+            Public Property SnapshotToolCount As Integer
+        End Class
+
+        Private Shared Function RunMockBatchSkill(host As ISubAgentHost,
+                                                  ag As AgentDescriptor,
+                                                  items As IEnumerable(Of String)) As System.Collections.Generic.List(Of String)
+            Dim results As New System.Collections.Generic.List(Of String)()
+
+            For Each item In items
+                Dim payload = SubAgentRunner.InvokeResolvedAsync(
+                    host,
+                    ag,
+                    item,
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                Dim obj = JObject.Parse(payload)
+                If obj("error") IsNot Nothing Then
+                    Throw New InvalidOperationException("Mock batch skill expected success.")
+                End If
+
+                results.Add(If(obj.Value(Of String)("summary"), ""))
+            Next
+
+            Return results
+        End Function
+
+        Private Shared Function RunMockBatchSkillAllowErrors(host As ISubAgentHost,
+                                                             ag As AgentDescriptor,
+                                                             items As IEnumerable(Of String)) As System.Collections.Generic.List(Of String)
+            Dim results As New System.Collections.Generic.List(Of String)()
+
+            For Each item In items
+                Dim payload = SubAgentRunner.InvokeResolvedAsync(
+                    host,
+                    ag,
+                    item,
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                Dim obj = JObject.Parse(payload)
+                Dim errObj As JObject = TryCast(obj("error"), JObject)
+
+                If errObj IsNot Nothing Then
+                    results.Add("ERR:" & If(errObj.Value(Of String)("code"), ""))
+                Else
+                    results.Add(If(obj.Value(Of String)("summary"), ""))
+                End If
+            Next
+
+            Return results
+        End Function
+
+        Private Shared Function BuildMockSuccessPayload(summary As String) As String
+            Return New JObject(
+                New JProperty("summary", summary),
+                New JProperty("result", summary)
+            ).ToString()
+        End Function
+
+        Private NotInheritable Class MockSubAgentHost
+            Implements ISubAgentHost
+
+            Private ReadOnly _responses As New System.Collections.Generic.Dictionary(Of String, System.Collections.Generic.Queue(Of String))(StringComparer.Ordinal)
+            Public Property CallCount As Integer
+
+            Public Sub AddResponse(task As String, response As String)
+                Dim q As System.Collections.Generic.Queue(Of String) = Nothing
+
+                If Not _responses.TryGetValue(task, q) Then
+                    q = New System.Collections.Generic.Queue(Of String)()
+                    _responses(task) = q
+                End If
+
+                q.Enqueue(response)
+            End Sub
+
+            Public Function RunIsolatedToolingLoopAsync(request As SubAgentRunRequest,
+                                                        cancellationToken As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of String) _
+                Implements ISubAgentHost.RunIsolatedToolingLoopAsync
+
+                CallCount += 1
+
+                Dim taskKey As String = ExtractTaskKey(request.UserMessage)
+                Dim q As System.Collections.Generic.Queue(Of String) = Nothing
+
+                If _responses.TryGetValue(taskKey, q) AndAlso q.Count > 0 Then
+                    Return System.Threading.Tasks.Task.FromResult(q.Dequeue())
+                End If
+
+                Return System.Threading.Tasks.Task.FromResult(SubAgentRuntimeHardening.BuildModelEmptyResponsePayload())
+            End Function
+
+            Private Shared Function ExtractTaskKey(userMessage As String) As String
+                Dim text As String = If(userMessage, "").Replace(vbCrLf, vbLf)
+                Dim lines = text.Split({vbLf}, StringSplitOptions.None)
+                Dim foundTask As Boolean = False
+                Dim sb As New System.Text.StringBuilder()
+
+                For Each line In lines
+                    If Not foundTask Then
+                        If line.Trim().Equals("Task:", StringComparison.OrdinalIgnoreCase) Then
+                            foundTask = True
+                        End If
+                        Continue For
+                    End If
+
+                    If line.Trim() = "" Then Exit For
+
+                    If sb.Length > 0 Then sb.AppendLine()
+                    sb.Append(line)
+                Next
+
+                Return sb.ToString().Trim()
+            End Function
+        End Class
+
+        Private Shared Sub AssertFalse(condition As Boolean, message As String)
+            If condition Then
+                Throw New InvalidOperationException(message)
+            End If
+        End Sub
+
+        Private Shared Sub AssertEqual(expected As Integer, actual As Integer, message As String)
+            If expected <> actual Then
+                Throw New InvalidOperationException($"{message} Expected='{expected}', Actual='{actual}'.")
+            End If
+        End Sub
+
+        Private Shared Sub AssertEqual(expected As String, actual As String, message As String)
+            If Not String.Equals(expected, actual, StringComparison.Ordinal) Then
+                Throw New InvalidOperationException($"{message} Expected='{expected}', Actual='{actual}'.")
+            End If
+        End Sub
+
+        Private Shared Sub AssertEqual(expected As ToolCallSequencing.ToolCallClassification,
+                                       actual As ToolCallSequencing.ToolCallClassification,
+                                       message As String)
+            If expected <> actual Then
+                Throw New InvalidOperationException($"{message} Expected='{expected}', Actual='{actual}'.")
+            End If
+        End Sub
+
+        Private NotInheritable Class WorkspaceToolSchemaContract
+            Public Property Properties As List(Of String)
+            Public Property Required As List(Of String)
+        End Class
+
+        Private Shared Sub TestWorkspaceWriteWithCanonicalTextWritesFullContent()
+            WithTemporaryWorkspace(
+                Sub(root)
+                    Dim result = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolWrite,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "canonical.txt"},
+                                {"text", "alpha"},
+                                {"mode", "overwrite"}
+                            }))
+
+                    AssertTrue(result("error") Is Nothing, "Canonical workspace_write should succeed.")
+                    AssertEqual("overwrite", result.Value(Of String)("mode"), "Canonical mode mismatch.")
+                    AssertEqual(5, result.Value(Of Integer)("charsWritten"), "Canonical charsWritten mismatch.")
+
+                    Dim readBack = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolRead,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "canonical.txt"}
+                            }))
+
+                    AssertEqual("alpha", readBack.Value(Of String)("text"), "Canonical write read-back mismatch.")
+                End Sub)
+        End Sub
+
+        Private Shared Sub TestWorkspaceWriteWithLegacyContentAliasWritesFullContent()
+            WithTemporaryWorkspace(
+                Sub(root)
+                    Dim result = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolWrite,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "legacy.txt"},
+                                {"content", "bravo"},
+                                {"mode", "overwrite"}
+                            }))
+
+                    AssertTrue(result("error") Is Nothing, "Legacy content alias should succeed.")
+                    AssertTrue(result.Value(Of Boolean)("usedAliases"), "Legacy content alias should be reported.")
+                    AssertTrue(JsonArrayContains(result("aliasesUsed"), "content->text"), "content alias mapping was not reported.")
+
+                    Dim readBack = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolRead,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "legacy.txt"}
+                            }))
+
+                    AssertEqual("bravo", readBack.Value(Of String)("text"), "Legacy content alias read-back mismatch.")
+                End Sub)
+        End Sub
+
+        Private Shared Sub TestWorkspaceWriteOverwriteAliasMapsToOverwriteMode()
+            WithTemporaryWorkspace(
+                Sub(root)
+                    Dim firstWrite = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolWrite,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "mode-map.txt"},
+                                {"text", "old"},
+                                {"mode", "overwrite"}
+                            }))
+
+                    AssertTrue(firstWrite("error") Is Nothing, "Initial write should succeed.")
+
+                    Dim secondWrite = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolWrite,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "mode-map.txt"},
+                                {"content", "new"},
+                                {"overwrite", True}
+                            }))
+
+                    AssertTrue(secondWrite("error") Is Nothing, "overwrite alias write should succeed.")
+                    AssertEqual("overwrite", secondWrite.Value(Of String)("mode"), "overwrite alias should normalize to overwrite mode.")
+                    AssertTrue(JsonArrayContains(secondWrite("aliasesUsed"), "overwrite->mode"), "overwrite alias mapping was not reported.")
+
+                    Dim readBack = JObject.Parse(
+                        WorkspaceTools.Execute(
+                            WorkspaceTools.ToolRead,
+                            New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                                {"path", "mode-map.txt"}
+                            }))
+
+                    AssertEqual("new", readBack.Value(Of String)("text"), "overwrite alias did not replace content.")
+                End Sub)
+        End Sub
+
+        Private Shared Sub TestWorkspaceWriteMissingTextFailsValidation()
+            WithTemporaryWorkspace(
+        Sub(root)
+            Dim result = JObject.Parse(
+                WorkspaceTools.Execute(
+                    WorkspaceTools.ToolWrite,
+                    New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                        {"path", "missing.txt"}
+                    }))
+
+            AssertFalse(result.Value(Of Boolean)("ok"), "Missing text should fail validation.")
+            AssertEqual("missing_required_tool_argument",
+                        result("error")?.Value(Of String)("code"),
+                        "Missing text error code mismatch.")
+            AssertTrue(JsonArrayContains(result("error")?("missing"), "text"), "Missing text field was not reported.")
+            AssertFalse(File.Exists(Path.Combine(root, "missing.txt")), "Missing text must not create a file.")
+        End Sub)
+        End Sub
+
+        Private Shared Sub TestWorkspaceWriteUnknownContentFieldDoesNotSilentlyCreateTinyFile()
+            WithTemporaryWorkspace(
+        Sub(root)
+            Dim targetPath = Path.Combine(root, "unknown.txt")
+
+            Dim result = JObject.Parse(
+                WorkspaceTools.Execute(
+                    WorkspaceTools.ToolWrite,
+                    New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase) From {
+                        {"path", "unknown.txt"},
+                        {"body", "payload that must not be discarded"}
+                    }))
+
+            AssertFalse(result.Value(Of Boolean)("ok"), "Unknown content field should fail validation.")
+            AssertEqual("unknown_tool_argument",
+                        result("error")?.Value(Of String)("code"),
+                        "Unknown content field error code mismatch.")
+            AssertTrue(JsonArrayContains(result("error")?("unknown"), "body"), "Unknown field was not reported.")
+            AssertFalse(File.Exists(targetPath), "Unknown content field must not create an empty or tiny file.")
+        End Sub)
+        End Sub
+
+        Private Shared Sub TestWorkspaceToolSchemasMatchDeclaredContracts()
+            Dim expected = GetExpectedWorkspaceToolContracts()
+            Dim actual = WorkspaceTools.BuildAll()
+
+            AssertEqual(expected.Count, actual.Count, "Workspace tool count mismatch.")
+
+            For Each tool In actual
+                Dim def = JObject.Parse(tool.ToolDefinition)
+                Dim name = def.Value(Of String)("name")
+
+                AssertTrue(expected.ContainsKey(name), "Unexpected workspace tool definition: " & name)
+
+                Dim contract = expected(name)
+                Dim actualProperties = GetJsonPropertyNames(def("parameters")?("properties"))
+                Dim actualRequired = GetJsonStringArray(def("parameters")?("required"))
+
+                AssertStringSetEqual(contract.Properties, actualProperties, "Schema property mismatch for " & name & ".")
+                AssertStringSetEqual(contract.Required, actualRequired, "Schema required mismatch for " & name & ".")
+            Next
+        End Sub
+
+        Private Shared Function GetExpectedWorkspaceToolContracts() As Dictionary(Of String, WorkspaceToolSchemaContract)
+            Return New Dictionary(Of String, WorkspaceToolSchemaContract)(StringComparer.OrdinalIgnoreCase) From {
+                {
+                    WorkspaceTools.ToolGet,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String)(),
+                        .Required = New List(Of String)()
+                    }
+                },
+                {
+                    WorkspaceTools.ToolInventory,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "glob", "recursive", "max_items"},
+                        .Required = New List(Of String)()
+                    }
+                },
+                {
+                    WorkspaceTools.ToolRead,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "max_chars"},
+                        .Required = New List(Of String) From {"path"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolReadMany,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"paths", "max_chars_per_file", "max_files"},
+                        .Required = New List(Of String) From {"paths"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolWrite,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "text", "mode"},
+                        .Required = New List(Of String) From {"path", "text"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolSearch,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"query", "glob", "recursive", "regex", "ignore_case", "max_files", "max_hits_per_file"},
+                        .Required = New List(Of String) From {"query"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolCopy,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"source", "destination", "overwrite"},
+                        .Required = New List(Of String) From {"source", "destination"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolMove,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"source", "destination"},
+                        .Required = New List(Of String) From {"source", "destination"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolRename,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "new_name"},
+                        .Required = New List(Of String) From {"path", "new_name"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolDelete,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "to_trash"},
+                        .Required = New List(Of String) From {"path"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolMakeDir,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path"},
+                        .Required = New List(Of String) From {"path"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolExtractText,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"path", "max_chars"},
+                        .Required = New List(Of String) From {"path"}
+                    }
+                },
+                {
+                    WorkspaceTools.ToolExtractTextMany,
+                    New WorkspaceToolSchemaContract() With {
+                        .Properties = New List(Of String) From {"paths", "max_chars_per_file", "max_files"},
+                        .Required = New List(Of String) From {"paths"}
+                    }
+                }
+            }
+        End Function
+
+        Private Shared Sub WithTemporaryWorkspace(test As Action(Of String))
+            Dim previous = WorkspaceTools.Active
+            Dim root = Path.Combine(Path.GetTempPath(), "RedInkWorkspaceToolsTests_" & Guid.NewGuid().ToString("N"))
+
+            Directory.CreateDirectory(root)
+
+            Try
+                WorkspaceTools.SetActive(New WorkspaceState() With {
+                    .RootPath = root,
+                    .AllowRead = True,
+                    .AllowWrite = True,
+                    .AllowMoveCopyRename = True,
+                    .AllowDelete = True,
+                    .IncludeHiddenSystem = False
+                })
+
+                test.Invoke(root)
+            Finally
+                WorkspaceTools.SetActive(previous)
+
+                Try
+                    If Directory.Exists(root) Then
+                        Directory.Delete(root, recursive:=True)
+                    End If
+                Catch
+                End Try
+            End Try
+        End Sub
+
+        Private Shared Function JsonArrayContains(token As JToken, expected As String) As Boolean
+            Dim arr = TryCast(token, JArray)
+            If arr Is Nothing Then Return False
+
+            For Each item As JToken In arr
+                If String.Equals(item.ToString(), expected, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+
+            Return False
+        End Function
+
+        Private Shared Function GetJsonPropertyNames(token As JToken) As List(Of String)
+            Dim result As New List(Of String)()
+            Dim obj = TryCast(token, JObject)
+            If obj Is Nothing Then Return result
+
+            For Each prop In obj.Properties()
+                result.Add(prop.Name)
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Function GetJsonStringArray(token As JToken) As List(Of String)
+            Dim result As New List(Of String)()
+            Dim arr = TryCast(token, JArray)
+            If arr Is Nothing Then Return result
+
+            For Each item As JToken In arr
+                result.Add(item.ToString())
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Sub AssertStringSetEqual(expected As IEnumerable(Of String),
+                                                actual As IEnumerable(Of String),
+                                                message As String)
+            Dim expectedSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            Dim actualSet As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            If expected IsNot Nothing Then
+                For Each item In expected
+                    expectedSet.Add(item)
+                Next
+            End If
+
+            If actual IsNot Nothing Then
+                For Each item In actual
+                    actualSet.Add(item)
+                Next
+            End If
+
+            If expectedSet.Count <> actualSet.Count Then
+                Throw New InvalidOperationException(message &
+                                                    " Expected={" & String.Join(", ", expectedSet) & "}" &
+                                                    " Actual={" & String.Join(", ", actualSet) & "}")
+            End If
+
+            For Each item In expectedSet
+                If Not actualSet.Contains(item) Then
+                    Throw New InvalidOperationException(message &
+                                                        " Expected={" & String.Join(", ", expectedSet) & "}" &
+                                                        " Actual={" & String.Join(", ", actualSet) & "}")
+                End If
+            Next
+        End Sub
+
+
+        Private Shared Sub TestSkippedFailureDoesNotShrinkRegistrySnapshot()
+            Dim host As New MockRepeatedToolScopeHost(
+                "Word",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta", "fake_tool_gamma"}))
+
+            Dim ag As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            ag.AllowedTools.Add("fake_tool_alpha")
+            ag.AllowedTools.Add("fake_tool_beta")
+            ag.AllowedTools.Add("fake_tool_gamma")
+
+            Dim firstPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                ag,
+                "before-skipped-failure",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            AssertTrue(JObject.Parse(firstPayload)("error") Is Nothing, "First invocation should succeed.")
+
+            Dim runState As New ToolCallSequencing.ToolingRunState()
+            runState.NoteToolFailure("agent_mock",
+                                     SubAgentRuntimeHardening.ModelEmptyResponseCode,
+                                     "empty",
+                                     skippedByPolicy:=True,
+                                     returnedToParent:=True)
+            AssertTrue(runState.RequiresParentRecovery, "Skipped failure should require parent recovery.")
+            runState.NoteRecoveryByLaterToolCall("fake_tool_alpha")
+            AssertFalse(runState.HasUnresolvedToolFailure, "Later tool call should recover skipped failure.")
+
+            Dim secondPayload = SubAgentRunner.InvokeResolvedAsync(
+                host,
+                ag,
+                "after-skipped-failure",
+                contextBlob:=Nothing,
+                storeResultInMemory:=False,
+                cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+            AssertTrue(JObject.Parse(secondPayload)("error") Is Nothing, "Second invocation should still succeed.")
+
+            AssertToolNameSequenceEqual(host.Invocations(0).ResolvedTools, host.Invocations(1).ResolvedTools, "Skipped failure must not shrink resolved tools.")
+            AssertEqual(host.Invocations(0).SnapshotToolCount, host.Invocations(1).SnapshotToolCount, "Skipped failure must not shrink snapshot tool count.")
+        End Sub
+
+        Private Shared Sub TestPreviousSubAgentCallDoesNotMutateParentRegistrySnapshot()
+            Dim host As New MockRepeatedToolScopeHost(
+                "Outlook",
+                BuildFakeToolRegistry({"fake_tool_alpha", "fake_tool_beta", "fake_tool_gamma"}))
+
+            Dim ag As New AgentDescriptor() With {
+                .Name = "neutral_fake"
+            }
+            ag.AllowedTools.Add("fake_tool_alpha")
+            ag.AllowedTools.Add("fake_tool_beta")
+            ag.AllowedTools.Add("fake_tool_gamma")
+
+            For i As Integer = 1 To 3
+                Dim payload = SubAgentRunner.InvokeResolvedAsync(
+                    host,
+                    ag,
+                    "snapshot-" & i.ToString(),
+                    contextBlob:=Nothing,
+                    storeResultInMemory:=False,
+                    cancellationToken:=System.Threading.CancellationToken.None).GetAwaiter().GetResult()
+
+                AssertTrue(JObject.Parse(payload)("error") Is Nothing, $"Invocation {i} should succeed.")
+            Next
+
+            AssertToolNameSequenceEqual(host.Invocations(0).ResolvedTools, host.Invocations(1).ResolvedTools, "Second invocation should not mutate the parent snapshot.")
+            AssertToolNameSequenceEqual(host.Invocations(0).ResolvedTools, host.Invocations(2).ResolvedTools, "Third invocation should not mutate the parent snapshot.")
+            AssertEqual(host.Invocations(0).SnapshotToolCount, host.Invocations(1).SnapshotToolCount, "Second invocation snapshot count mismatch.")
+            AssertEqual(host.Invocations(0).SnapshotToolCount, host.Invocations(2).SnapshotToolCount, "Third invocation snapshot count mismatch.")
+        End Sub
+
+
+    End Class
+
+End Namespace
+
+#End If

@@ -63,6 +63,19 @@ Namespace Agents
             End SyncLock
         End Sub
 
+
+        Public Function Snapshot() As ToolRegistry
+            Dim copy As New ToolRegistry()
+
+            SyncLock _sync
+                For Each kv In _entries
+                    copy._entries(kv.Key) = kv.Value
+                Next
+            End SyncLock
+
+            Return copy
+        End Function
+
         ''' <summary>Registers a tool by manifest; the factory is invoked once on first <see cref="Get"/>.</summary>
         Public Sub RegisterLazy(manifest As ToolManifest, factory As Func(Of SharedLibrary.ModelConfig))
             If manifest Is Nothing OrElse String.IsNullOrWhiteSpace(manifest.Name) Then Return
@@ -176,17 +189,24 @@ Namespace Agents
         ''' </summary>
         Public Function Narrow(allowed As IEnumerable(Of String)) As ToolRegistry
             Dim child As New ToolRegistry()
+            Dim hasAllowList As Boolean = (allowed IsNot Nothing)
             Dim allowSet As HashSet(Of String) = Nothing
-            If allowed IsNot Nothing Then
-                allowSet = New HashSet(Of String)(allowed.Where(Function(s) Not String.IsNullOrWhiteSpace(s)),
-                                                  StringComparer.OrdinalIgnoreCase)
+
+            If hasAllowList Then
+                allowSet = New HashSet(Of String)(
+            allowed.
+                Where(Function(s) Not String.IsNullOrWhiteSpace(s)).
+                Select(Function(s) s.Trim()),
+            StringComparer.OrdinalIgnoreCase)
             End If
+
             SyncLock _sync
                 For Each kv In _entries
-                    If allowSet IsNot Nothing AndAlso allowSet.Count > 0 AndAlso Not allowSet.Contains(kv.Key) Then Continue For
+                    If hasAllowList AndAlso Not allowSet.Contains(kv.Key) Then Continue For
                     child._entries(kv.Key) = kv.Value
                 Next
             End SyncLock
+
             Return child
         End Function
 

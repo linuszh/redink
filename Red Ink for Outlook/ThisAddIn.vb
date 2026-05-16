@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 15.5.2026
+' 16.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -37,6 +37,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Runtime.InteropServices
 Imports System.Threading
@@ -59,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.150526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.160526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -231,7 +232,35 @@ Partial Public Class ThisAddIn
         Catch
             activeChatId = 1
         End Try
+
+#If DEBUG Then
+        RunToolCallSequencingSelfTestsAtStartup()
+#End If
+
     End Sub
+
+
+#If DEBUG Then
+    Private Shared _toolCallSequencingSelfTestsRan As Boolean = False
+
+    Private Sub RunToolCallSequencingSelfTestsAtStartup()
+        If _toolCallSequencingSelfTestsRan Then Return
+        _toolCallSequencingSelfTestsRan = True
+
+        Debug.WriteLine("[Startup] Queueing ToolCallSequencing self-tests...")
+
+        System.Threading.Tasks.Task.Run(
+            Sub()
+                Try
+                    Debug.WriteLine("[Startup] Running ToolCallSequencing self-tests...")
+                    Dim status = SharedLibrary.Agents.ToolCallSequencingSelfTests.RunAllAndReturnStatus()
+                    Debug.WriteLine("[Startup] " & status)
+                Catch ex As System.Exception
+                    Debug.WriteLine("[Startup] ToolCallSequencing self-tests failed: " & ex.ToString())
+                End Try
+            End Sub)
+    End Sub
+#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.

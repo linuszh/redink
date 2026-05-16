@@ -90,6 +90,15 @@ Namespace Agents
         Public Const ToolExtractText As String = "workspace_extract_text"
         Public Const ToolExtractTextMany As String = "workspace_extract_text_many"
 
+        Private Const MetaAliasesUsedKey As String = "__meta_aliases_used"
+        Private Const MetaContentProvidedKey As String = "__meta_content_provided"
+        Private Const MetaContentWasEmptyKey As String = "__meta_content_was_empty"
+
+        Private NotInheritable Class ToolArgumentNormalizationResult
+            Public Property Arguments As Dictionary(Of String, Object)
+            Public Property ValidationErrorJson As String
+        End Class
+
         Public Shared Function IsWorkspaceTool(name As String) As Boolean
             If String.IsNullOrWhiteSpace(name) Then Return False
             Select Case name
@@ -112,9 +121,17 @@ Namespace Agents
 
 
         ' --------------------------------------------------------------- dispatch
-
         Public Shared Function Execute(toolName As String, arguments As IDictionary(Of String, Object)) As String
             Try
+                Dim normalized = NormalizeArguments(toolName, arguments)
+                If normalized IsNot Nothing Then
+                    If Not String.IsNullOrWhiteSpace(normalized.ValidationErrorJson) Then
+                        Return normalized.ValidationErrorJson
+                    End If
+
+                    arguments = normalized.Arguments
+                End If
+
                 Select Case toolName
                     Case ToolGet : Return ExecuteGet()
                     Case ToolInventory : Return ExecuteInventory(arguments)
@@ -137,6 +154,269 @@ Namespace Agents
                 Return Err_("workspace_tool_failed", ex.Message)
             End Try
         End Function
+
+
+
+        Private Shared Function NormalizeArguments(toolName As String,
+                                           arguments As IDictionary(Of String, Object)) As ToolArgumentNormalizationResult
+            Dim normalized = ToCaseInsensitiveDictionary(arguments)
+
+            Select Case If(toolName, "").Trim().ToLowerInvariant()
+                Case ToolWrite
+                    Return NormalizeWorkspaceWriteArguments(normalized)
+
+                Case Else
+                    Return New ToolArgumentNormalizationResult() With {
+                .Arguments = normalized
+            }
+            End Select
+        End Function
+
+        Private Shared Function NormalizeWorkspaceWriteArguments(arguments As Dictionary(Of String, Object)) As ToolArgumentNormalizationResult
+            Dim aliasesUsed As New List(Of String)()
+
+            Dim textValue As Object = Nothing
+            Dim contentValue As Object = Nothing
+            Dim hasText = TryGetArgumentValue(arguments, "text", textValue)
+            Dim hasContent = TryGetArgumentValue(arguments, "content", contentValue)
+
+            If hasText AndAlso hasContent Then
+                Dim canonicalText = If(textValue, "").ToString()
+                Dim aliasText = If(contentValue, "").ToString()
+
+                If Not String.Equals(canonicalText, aliasText, StringComparison.Ordinal) Then
+                    Return New ToolArgumentNormalizationResult() With {
+                .Arguments = arguments,
+                .ValidationErrorJson = BuildToolArgumentValidationError(
+                    ToolWrite,
+                    "conflicting_tool_arguments",
+                    "workspace_write received conflicting values for text/content.",
+                    unknown:=New String() {"text", "content"})
+            }
+                End If
+            ElseIf hasContent Then
+                arguments("text") = If(contentValue, "")
+                aliasesUsed.Add("content->text")
+            End If
+
+            Dim pathValue As Object = Nothing
+            Dim filenameValue As Object = Nothing
+            Dim hasPath = TryGetArgumentValue(arguments, "path", pathValue)
+            Dim hasFilename = TryGetArgumentValue(arguments, "filename", filenameValue)
+
+            If Not hasPath AndAlso hasFilename Then
+                Dim filenameAlias = If(filenameValue, "").ToString().Trim()
+                Dim sanitized = SanitizeName(Path.GetFileName(filenameAlias))
+                arguments("path") = sanitized
+                aliasesUsed.Add("filename->path")
+                hasPath = True
+                pathValue = sanitized
+            End If
+
+            Dim modeValue As Object = Nothing
+            Dim overwriteValue As Object = Nothing
+            Dim hasMode = TryGetArgumentValue(arguments, "mode", modeValue)
+            Dim hasOverwrite = TryGetArgumentValue(arguments, "overwrite", overwriteValue)
+
+            Dim normalizedMode As String = ""
+
+            If hasMode Then
+                normalizedMode = NormalizeWorkspaceWriteMode(If(modeValue, "").ToString())
+                If String.IsNullOrWhiteSpace(normalizedMode) Then
+                    Return New ToolArgumentNormalizationResult() With {
+                .Arguments = arguments,
+                .ValidationErrorJson = BuildToolArgumentValidationError(
+                    ToolWrite,
+                    "invalid_tool_argument",
+                    "workspace_write mode must be one of overwrite, append, or create.",
+                    unknown:=New String() {"mode"})
+            }
+                End If
+            End If
+
+            If hasOverwrite Then
+                Dim overwriteMode = If(GetBool(arguments, "overwrite", False), "overwrite", "create")
+
+                If String.IsNullOrWhiteSpace(normalizedMode) Then
+                    normalizedMode = overwriteMode
+                    aliasesUsed.Add("overwrite->mode")
+                ElseIf Not String.Equals(normalizedMode, overwriteMode, StringComparison.OrdinalIgnoreCase) Then
+                    Return New ToolArgumentNormalizationResult() With {
+                .Arguments = arguments,
+                .ValidationErrorJson = BuildToolArgumentValidationError(
+                    ToolWrite,
+                    "conflicting_tool_arguments",
+                    "workspace_write received conflicting values for mode/overwrite.",
+                    unknown:=New String() {"mode", "overwrite"})
+            }
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(normalizedMode) Then
+                normalizedMode = "overwrite"
+            End If
+            arguments("mode") = normalizedMode
+
+            If Not hasPath OrElse String.IsNullOrWhiteSpace(If(pathValue, "").ToString()) Then
+                Return New ToolArgumentNormalizationResult() With {
+            .Arguments = arguments,
+            .ValidationErrorJson = BuildToolArgumentValidationError(
+                ToolWrite,
+                "missing_required_tool_argument",
+                "workspace_write requires path and text/content.",
+                missing:=New String() {"path"})
+        }
+            End If
+
+            Dim normalizedTextValue As Object = Nothing
+            Dim hasNormalizedText = TryGetArgumentValue(arguments, "text", normalizedTextValue)
+
+            If Not hasNormalizedText Then
+                Dim unexpected = GetUnexpectedWriteArguments(arguments)
+                If unexpected.Count > 0 Then
+                    Return New ToolArgumentNormalizationResult() With {
+                .Arguments = arguments,
+                .ValidationErrorJson = BuildToolArgumentValidationError(
+                    ToolWrite,
+                    "unknown_tool_argument",
+                    "workspace_write did not receive usable text/content and ignored unexpected fields.",
+                    missing:=New String() {"text"},
+                    unknown:=unexpected,
+                    aliasesUsed:=aliasesUsed)
+            }
+                End If
+
+                Return New ToolArgumentNormalizationResult() With {
+            .Arguments = arguments,
+            .ValidationErrorJson = BuildToolArgumentValidationError(
+                ToolWrite,
+                "missing_required_tool_argument",
+                "workspace_write requires text/content.",
+                missing:=New String() {"text"},
+                aliasesUsed:=aliasesUsed)
+        }
+            End If
+
+            Dim normalizedText = If(normalizedTextValue, "").ToString()
+            arguments("text") = normalizedText
+            arguments(MetaAliasesUsedKey) = ToJArray(aliasesUsed)
+            arguments(MetaContentProvidedKey) = True
+            arguments(MetaContentWasEmptyKey) = (normalizedText.Length = 0)
+
+            Return New ToolArgumentNormalizationResult() With {
+        .Arguments = arguments
+    }
+        End Function
+
+        Private Shared Function NormalizeWorkspaceWriteMode(value As String) As String
+            Select Case If(value, "").Trim().ToLowerInvariant()
+                Case "", "overwrite"
+                    Return "overwrite"
+                Case "append"
+                    Return "append"
+                Case "create", "create_new"
+                    Return "create"
+                Case Else
+                    Return ""
+            End Select
+        End Function
+
+        Private Shared Function ToCaseInsensitiveDictionary(arguments As IDictionary(Of String, Object)) As Dictionary(Of String, Object)
+            Dim normalized As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+
+            If arguments Is Nothing Then
+                Return normalized
+            End If
+
+            For Each kvp In arguments
+                If String.IsNullOrWhiteSpace(kvp.Key) Then Continue For
+                normalized(kvp.Key) = kvp.Value
+            Next
+
+            Return normalized
+        End Function
+
+        Private Shared Function TryGetArgumentValue(arguments As IDictionary(Of String, Object),
+                                            name As String,
+                                            ByRef value As Object) As Boolean
+            value = Nothing
+            If arguments Is Nothing OrElse String.IsNullOrWhiteSpace(name) Then
+                Return False
+            End If
+
+            Return arguments.TryGetValue(name, value)
+        End Function
+
+        Private Shared Function GetUnexpectedWriteArguments(arguments As IDictionary(Of String, Object)) As List(Of String)
+            Dim unexpected As New List(Of String)()
+
+            If arguments Is Nothing Then
+                Return unexpected
+            End If
+
+            For Each key In arguments.Keys
+                If String.IsNullOrWhiteSpace(key) Then Continue For
+                If key.StartsWith("__", StringComparison.Ordinal) Then Continue For
+
+                Select Case key.ToLowerInvariant()
+                    Case "path", "text", "mode", "content", "overwrite", "filename"
+                        Continue For
+                    Case Else
+                        unexpected.Add(key)
+                End Select
+            Next
+
+            Return unexpected
+        End Function
+
+        Private Shared Function BuildToolArgumentValidationError(toolName As String,
+                                                         errorCode As String,
+                                                         message As String,
+                                                         Optional missing As IEnumerable(Of String) = Nothing,
+                                                         Optional unknown As IEnumerable(Of String) = Nothing,
+                                                         Optional aliasesUsed As IEnumerable(Of String) = Nothing) As String
+            Dim errorObj As New JObject(
+        New JProperty("ok", False),
+        New JProperty("error", New JObject(
+            New JProperty("code", errorCode),
+            New JProperty("tool", toolName),
+            New JProperty("message", message))))
+
+            Dim inner = DirectCast(errorObj("error"), JObject)
+
+            Dim missingArray = ToJArray(missing)
+            If missingArray.Count > 0 Then
+                inner("missing") = missingArray
+            End If
+
+            Dim unknownArray = ToJArray(unknown)
+            If unknownArray.Count > 0 Then
+                inner("unknown") = unknownArray
+            End If
+
+            Dim aliasArray = ToJArray(aliasesUsed)
+            If aliasArray.Count > 0 Then
+                inner("aliasesUsed") = aliasArray
+            End If
+
+            Return errorObj.ToString(Formatting.None)
+        End Function
+
+        Private Shared Function ToJArray(values As IEnumerable(Of String)) As JArray
+            Dim arr As New JArray()
+
+            If values Is Nothing Then
+                Return arr
+            End If
+
+            For Each value In values
+                If value Is Nothing Then Continue For
+                arr.Add(value)
+            Next
+
+            Return arr
+        End Function
+
 
         ' --------------------------------------------------------------- guards
 
@@ -334,43 +614,53 @@ Namespace Agents
             If Not _active.AllowWrite Then Return Err_("not_permitted", "Workspace write is disabled.")
 
             Dim relPath = GetStr(args, "path")
-            Dim mode = GetStr(args, "mode").ToLowerInvariant()
+            Dim mode = GetStr(args, "mode").Trim().ToLowerInvariant()
             Dim text = GetStr(args, "text")
-            If text Is Nothing Then text = ""
+            Dim aliasesUsed = GetStringList(args, MetaAliasesUsedKey)
+            Dim contentProvided = GetBool(args, MetaContentProvidedKey, False)
+            Dim contentWasEmptyIntentionally = GetBool(args, MetaContentWasEmptyKey, False)
 
-            Dim target As String
-            If String.IsNullOrWhiteSpace(relPath) Then
-                Dim suggested = If(GetStr(args, "filename"), "agent_output.txt")
-                target = UniquePath(Path.Combine(_active.RootPath, SanitizeName(suggested)))
-            Else
-                target = ResolveInsideWorkspace(relPath)
-            End If
+            Dim target = ResolveInsideWorkspace(relPath)
 
             If IsBinaryWorkspaceExtension(target) Then
                 Return Err_(
-                    "binary_extension_not_supported",
-                    "workspace_write only creates UTF-8 text/code files. " &
-                    "Do not use it for .pdf, .docx, .xlsx, .pptx, image, archive, audio, video, or other binary/document formats. " &
-                    "Use a dedicated binary-producing tool and then copy the real output file into the workspace.")
+            "binary_extension_not_supported",
+            "workspace_write only creates UTF-8 text/code files. " &
+            "Do not use it for .pdf, .docx, .xlsx, .pptx, image, archive, audio, video, or other binary/document formats. " &
+            "Use a dedicated binary-producing tool and then copy the real output file into the workspace.")
             End If
 
             Dim dir = Path.GetDirectoryName(target)
-            If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then Directory.CreateDirectory(dir)
+            If Not String.IsNullOrWhiteSpace(dir) AndAlso Not Directory.Exists(dir) Then
+                Directory.CreateDirectory(dir)
+            End If
 
             Select Case mode
-                Case "append" : File.AppendAllText(target, text, Encoding.UTF8)
-                Case "create_new"
-                    If File.Exists(target) Then Return Err_("exists", "File already exists.")
+                Case "append"
+                    File.AppendAllText(target, text, Encoding.UTF8)
+
+                Case "create"
+                    If File.Exists(target) Then
+                        Return Err_("exists", "File already exists.")
+                    End If
                     File.WriteAllText(target, text, Encoding.UTF8)
+
                 Case Else
                     File.WriteAllText(target, text, Encoding.UTF8)
             End Select
 
             Dim fi As New FileInfo(target)
+
             Return JsonConvert.SerializeObject(New With {
-                Key .path = target, Key .size = fi.Length,
-                Key .mode = If(String.IsNullOrWhiteSpace(mode), "overwrite", mode)
-            })
+        Key .path = target,
+        Key .charsWritten = text.Length,
+        Key .bytesWritten = Encoding.UTF8.GetByteCount(text),
+        Key .fileSizeBytes = fi.Length,
+        Key .mode = mode,
+        Key .usedAliases = aliasesUsed.Count > 0,
+        Key .aliasesUsed = aliasesUsed,
+        Key .contentWasEmptyIntentionally = contentProvided AndAlso contentWasEmptyIntentionally
+    })
         End Function
 
         Private Shared Function ExecuteSearch(args As IDictionary(Of String, Object)) As String
@@ -700,14 +990,19 @@ Namespace Agents
             }
         End Function
 
+
         Private Shared Function BuildWrite() As ModelConfig
             Return New ModelConfig() With {
-                .ToolName = ToolWrite, .Tool = True, .ToolPriority = 913, .ToolErrorHandling = "skip",
-                .ModelDescription = "Workspace (write)",
-                .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the workspace. Omit 'path' to auto-name based on 'filename' in the workspace root. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative path. Omit to auto-name.""},""filename"":{""type"":""string"",""description"":""Suggested name when 'path' is omitted.""},""text"":{""type"":""string"",""description"":""Content to write.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create_new""],""description"":""Default 'overwrite'.""}},""required"":[""text""]}}",
-                .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the workspace. Never use this tool to create or overwrite PDF, Office, image, archive, audio, video, or other binary files."
-            }
+        .ToolName = ToolWrite,
+        .Tool = True,
+        .ToolPriority = 913,
+        .ToolErrorHandling = "skip",
+        .ModelDescription = "Workspace (write)",
+        .ToolDefinition = "{""name"":""" & ToolWrite & """,""description"":""Write a UTF-8 text file inside the workspace. Never use this tool for binary/document formats such as PDF, DOCX, XLSX, PPTX, ZIP, images, audio, or video."",""parameters"":{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""Workspace-relative target path.""},""text"":{""type"":""string"",""description"":""Content to write. May be intentionally empty.""},""mode"":{""type"":""string"",""enum"":[""overwrite"",""append"",""create""],""description"":""Write mode. Default 'overwrite'.""}}, ""required"":[""path"",""text""]}}",
+        .ToolInstructionsPrompt = ToolWrite & ": Write a text file inside the workspace. Never use this tool to create or overwrite PDF, Office, image, archive, audio, video, or other binary files."
+    }
         End Function
+
 
         Private Shared Function BuildSearch() As ModelConfig
             Return New ModelConfig() With {

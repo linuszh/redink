@@ -3705,6 +3705,8 @@ Partial Public Class ThisAddIn
         End If
 
         MigrateLocalChatToolSelections(st, includeInteractiveM365Tools)
+        st.SelectedAdvancedToolNames =
+            NormalizeLocalChatAdvancedToolNames(st.SelectedAdvancedToolNames, includeInteractiveM365Tools)
 
         Dim effective =
             GetLocalChatEffectiveTools(

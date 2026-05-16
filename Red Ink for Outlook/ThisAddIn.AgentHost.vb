@@ -25,93 +25,185 @@ Partial Public Class ThisAddIn
     ''' ExecuteToolingLoop with a clean message history, then restores the model.
     ''' </summary>
     Public Async Function RunIsolatedToolingLoopAsync(
-            request As SharedLibrary.Agents.SubAgentRunRequest,
-            ct As CancellationToken) As Task(Of String) _
-            Implements SharedLibrary.Agents.ISubAgentHost.RunIsolatedToolingLoopAsync
+        request As SharedLibrary.Agents.SubAgentRunRequest,
+        ct As CancellationToken) As Task(Of String) _
+        Implements SharedLibrary.Agents.ISubAgentHost.RunIsolatedToolingLoopAsync
 
-        Dim backup As ModelConfig = GetCurrentConfig(_context)
+        Dim scope = CaptureModelConfigScope(_context)
+        Dim modelKey As String = If(String.IsNullOrWhiteSpace(request.SpecialModelKey), "agentdefaultmodel", request.SpecialModelKey)
+        Dim swapped As Boolean = False
 
         Try
-            Dim modelKey As String = If(String.IsNullOrWhiteSpace(request.SpecialModelKey), "agentdefaultmodel", request.SpecialModelKey)
-            Dim swapped As Boolean = False
+            If String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+                Throw New InvalidOperationException(
+                    $"Sub-agent model '{modelKey}' could not be resolved because INI_AlternateModelPath is empty.")
+            End If
 
-            If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
+            Try
                 swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, modelKey)
+
                 If Not swapped AndAlso Not modelKey.Equals("agentdefaultmodel", StringComparison.OrdinalIgnoreCase) Then
+                    ToolingFileLogger.LogWarn(
+                        $"[subagent-host] Model '{modelKey}' was not found. Falling back to 'agentdefaultmodel'.")
                     swapped = GetSpecialTaskModel(_context, INI_AlternateModelPath, "agentdefaultmodel")
+                End If
+            Catch ex As Exception
+                Throw New InvalidOperationException(
+                    $"Sub-agent model '{modelKey}' could not be resolved via GetSpecialTaskModel: {ex.Message}", ex)
+            End Try
+
+            If Not swapped Then
+                Throw New InvalidOperationException(
+                    $"Sub-agent model '{modelKey}' could not be resolved via GetSpecialTaskModel.")
+            End If
+
+            ToolingFileLogger.LogStep($"[subagent-host] Sub-agent model resolved via GetSpecialTaskModel('{modelKey}').")
+            ToolingFileLogger.LogStep("[subagent-host] Forcing useSecondAPI:=True for sub-agent execution.")
+            ToolingFileLogger.LogStep($"[subagent-host] host=Outlook; agent='{request.AgentName}'; allowed_tools={If(request.AllowedToolNames Is Nothing, "(default-host-scope)", If(request.AllowedToolNames.Count = 0, "(none)", String.Join(", ", request.AllowedToolNames)))}")
+            ToolingFileLogger.LogStep("[subagent-host] sequencing=shared_tool_call_sequencing")
+
+            Dim registrySource As String = "parent_registry_snapshot"
+            Dim parentRunId As String = "(no_parent_run)"
+            Dim invocationIndex As Integer = 1
+            Dim sameAgentInvocationCount As Integer = 1
+
+            If _activeToolingContext IsNot Nothing Then
+                parentRunId = If(_activeToolingContext.RunId, "(no_parent_run)")
+                _activeToolingContext.SubAgentInvocationCount += 1
+                invocationIndex = _activeToolingContext.SubAgentInvocationCount
+
+                Dim existingAgentInvocationCount As Integer = 0
+
+                If _activeToolingContext.SubAgentInvocationCountsByAgent.TryGetValue(request.AgentName, existingAgentInvocationCount) Then
+                    sameAgentInvocationCount = existingAgentInvocationCount + 1
+                    _activeToolingContext.SubAgentInvocationCountsByAgent(request.AgentName) = sameAgentInvocationCount
+                Else
+                    sameAgentInvocationCount = 1
+                    _activeToolingContext.SubAgentInvocationCountsByAgent(request.AgentName) = 1
                 End If
             End If
 
-            Dim allTools As New List(Of ModelConfig)()
+            Dim parentRegistrySnapshot As SharedLibrary.Agents.ToolRegistry = Nothing
 
-            If _activeToolingContext IsNot Nothing AndAlso
-               _activeToolingContext.AllowedToolRegistry IsNot Nothing Then
-
-                allTools = _activeToolingContext.AllowedToolRegistry.MaterializeAll()
-                ToolingFileLogger.LogStep("[subagent-host] Using parent tooling registry as sub-agent tool universe.")
-            ElseIf Not _apActive Then
-                Try
-                    Dim st = LoadInkyState()
-                    allTools.AddRange(GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True))
-
-                    If st IsNot Nothing AndAlso st.ToolingEnabled AndAlso IsChatAgentWorkspaceConnected() Then
-                        allTools.AddRange(GetChatAgentWorkspaceTools())
-                    End If
-                Catch
-                End Try
-
-                ToolingFileLogger.LogWarn("[subagent-host] Parent tooling registry unavailable; falling back to Local Chat effective tools.")
-            Else
-                Try
-                    Dim available = GetAvailableTools(includeInteractiveM365Tools:=False)
-
-                    If SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0 Then
-                        For Each mc In available
-                            If mc Is Nothing OrElse String.IsNullOrWhiteSpace(mc.ToolName) Then Continue For
-                            If SelectedToolNames.Contains(mc.ToolName) Then allTools.Add(mc)
-                        Next
-                    End If
-
-                    allTools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
-                Catch
-                End Try
-
-                ToolingFileLogger.LogWarn("[subagent-host] Parent tooling registry unavailable; falling back to AutoPilot/local selection.")
+            If _activeToolingContext IsNot Nothing Then
+                parentRegistrySnapshot = _activeToolingContext.AuthoritativeToolRegistrySnapshot
             End If
 
-            allTools =
-                allTools.
-                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
-                    GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
-                    Select(Function(g) g.First()).
-                    ToList()
+            Dim authoritativeSnapshotAvailable As Boolean = (parentRegistrySnapshot IsNot Nothing)
+            Dim authoritativeSnapshot As SharedLibrary.Agents.ToolRegistry =
+    If(authoritativeSnapshotAvailable,
+       parentRegistrySnapshot.Snapshot(),
+       Nothing)
 
-            ToolingFileLogger.LogStep("[subagent-host] Requested allowed tools: " &
-                                      If(request.AllowedToolNames Is Nothing OrElse request.AllowedToolNames.Count = 0,
-                                         "(none)",
-                                         String.Join(", ", request.AllowedToolNames)))
+            If Not authoritativeSnapshotAvailable Then
+                registrySource = "parent_registry_snapshot_missing"
+            End If
+
+            Dim snapshotToolCount As Integer =
+    If(authoritativeSnapshot Is Nothing,
+       0,
+       authoritativeSnapshot.ListNames().Count)
+
+            Dim preflight = SharedLibrary.Agents.SubAgentToolScopeInitializer.Initialize(
+    authoritativeSnapshot,
+    request.AllowedToolNames)
+
+            Dim requestedNamesText As String =
+    If(preflight.RequestedToolNames Is Nothing OrElse preflight.RequestedToolNames.Count = 0,
+       "(none)",
+       String.Join(", ", preflight.RequestedToolNames))
+
+            Dim resolvedNamesText As String =
+    If(preflight.ResolvedToolNames.Count = 0,
+       "(none)",
+       String.Join(", ", preflight.ResolvedToolNames))
+
+            Dim missingNamesText As String =
+    If(preflight.MissingToolNames.Count = 0,
+       "(none)",
+       String.Join(", ", preflight.MissingToolNames))
+
+            Dim finalSelectedNamesText As String =
+    If(preflight.FinalSelectedToolNames.Count = 0,
+       "(none)",
+       String.Join(", ", preflight.FinalSelectedToolNames))
+
+            Dim repeatedInvocationLabel As String =
+    If(sameAgentInvocationCount > 1, "later", "first")
+
+            ToolingFileLogger.LogStep(
+    "[subagent-host] tool_scope_init: " &
+    $"parent_run_id={parentRunId}; " &
+    $"invocation_index={invocationIndex}; " &
+    $"agent='{If(request.AgentName, "")}'; " &
+    $"parent_registry_snapshot_exists={authoritativeSnapshotAvailable}; " &
+    $"snapshot_tool_count={snapshotToolCount}; " &
+    $"requested_allowed_tools={requestedNamesText}; " &
+    $"resolved_tools={resolvedNamesText}; " &
+    $"missing_tools={missingNamesText}; " &
+    $"final_selected_tools={finalSelectedNamesText}; " &
+    $"same_agent_invocation={repeatedInvocationLabel}")
+
+            If Not authoritativeSnapshotAvailable Then
+                Dim payload = SharedLibrary.Agents.SubAgentRuntimeHardening.BuildParentRegistryMissingPayload(
+        requestedToolNames:=preflight.RequestedToolNames)
+
+                ToolingFileLogger.LogError(
+        "[subagent-host] Parent tool registry snapshot missing before sub-agent model call.",
+        details:=$"parentRunId={parentRunId}; invocationIndex={invocationIndex}; agent={If(request.AgentName, "")}; requested={requestedNamesText}")
+
+                Return payload
+            End If
+
+            If preflight.HasRequestedTools AndAlso
+   (preflight.HasMissingRequestedTools OrElse preflight.HasMissingFinalToolNames) Then
+
+                Dim missingRequiredToolNames As List(Of String) = preflight.MissingFinalToolNames
+                If missingRequiredToolNames.Count = 0 Then
+                    missingRequiredToolNames = New List(Of String)(preflight.MissingToolNames)
+                End If
+
+                Dim payload = SharedLibrary.Agents.SubAgentRuntimeHardening.BuildRequiredToolMissingPayload(
+        missingRequiredToolNames,
+        requestedToolNames:=preflight.RequestedToolNames,
+        resolvedToolNames:=preflight.ResolvedToolNames)
+
+                ToolingFileLogger.LogError(
+        "[subagent-host] Sub-agent required tools could not be resolved before model call.",
+        details:=$"parentRunId={parentRunId}; invocationIndex={invocationIndex}; agent={If(request.AgentName, "")}; requested={requestedNamesText}; resolved={resolvedNamesText}; missing={missingNamesText}; finalSelected={finalSelectedNamesText}")
+
+                Return payload
+            End If
+
+            Dim allTools As List(Of ModelConfig) = authoritativeSnapshot.MaterializeAll()
 
             ToolingFileLogger.LogStep("[subagent-host] Resolved sub-agent tool universe: " &
-                                      If(allTools.Count = 0,
-                                         "(none)",
-                                         String.Join(", ", allTools.Select(Function(t) t.ToolName))))
+                          If(allTools.Count = 0,
+                             "(none)",
+                             String.Join(", ", allTools.Select(Function(t) t.ToolName))))
 
             Dim result = Await ExecuteToolingLoop(
                 sysCommand:=request.SystemPrompt,
                 userText:="",
                 selectedTools:=allTools,
-                useSecondAPI:=False,
+                useSecondAPI:=True,
                 fullPromptOverride:=request.UserMessage,
                 hideSplash:=True,
                 hideLogWindow:=True,
                 cancellationToken:=ct,
                 subAgentMode:=True,
                 subAgentAllowedToolNames:=request.AllowedToolNames,
-                subAgentSpecialModelKey:=request.SpecialModelKey).ConfigureAwait(False)
+                subAgentSpecialModelKey:=request.SpecialModelKey,
+                subAgentAuthoritativeRegistry:=authoritativeSnapshot,
+                subAgentRegistrySource:=registrySource,
+                subAgentParentRunId:=parentRunId,
+                subAgentInvocationIndex:=invocationIndex,
+                subAgentAgentInvocationCount:=sameAgentInvocationCount,
+                subAgentName:=request.AgentName).ConfigureAwait(False)
 
             Return If(result, "")
         Finally
-            Try : RestoreDefaults(_context, backup) : Catch : End Try
+            RestoreModelConfigScope(_context, scope)
         End Try
     End Function
 

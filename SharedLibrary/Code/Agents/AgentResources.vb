@@ -39,11 +39,18 @@ Namespace Agents
         Private _bodyCache As String
         Public Function LoadBody() As String
             If _bodyCache IsNot Nothing Then Return _bodyCache
+
+            If String.IsNullOrWhiteSpace(FilePath) OrElse Not File.Exists(FilePath) Then
+                _bodyCache = String.Empty
+                Return _bodyCache
+            End If
+
             Try
                 _bodyCache = AgentResources.ReadBody(FilePath)
             Catch
                 _bodyCache = String.Empty
             End Try
+
             Return _bodyCache
         End Function
     End Class

@@ -176,27 +176,25 @@ Namespace SharedLibrary
                                                       extension As String,
                                                       Optional taskFlag As String = Nothing) As Boolean
             If context Is Nothing Then Return False
+
             Dim mimePrefix As String = MimePrefixForExtension(extension)
             If String.IsNullOrWhiteSpace(mimePrefix) Then Return False
 
-            ' First check: alternate model with specific task flag
-            If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                Dim savedConfig As ModelConfig = GetCurrentConfig(context)
-                Dim savedConfigLoaded As Boolean = originalConfigLoaded
+            If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso
+               Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
+
+                Dim scope = CaptureModelConfigScope(context)
+
                 Try
                     If GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
-                        RestoreDefaults(context, savedConfig)
-                        originalConfigLoaded = savedConfigLoaded
                         Return True
                     End If
                 Catch
                 Finally
-                    RestoreDefaults(context, savedConfig)
-                    originalConfigLoaded = savedConfigLoaded
+                    RestoreModelConfigScope(context, scope)
                 End Try
             End If
 
-            ' Second check: primary model's APICall_Object supports the MIME prefix
             Return IsApiCallObjectMimeCapable(context.INI_APICall_Object, mimePrefix)
         End Function
 
@@ -218,6 +216,8 @@ Namespace SharedLibrary
                                                           Optional systemPrompt As String = "",
                                                           Optional askUser As Boolean = True,
                                                           Optional taskFlag As String = Nothing) As Task(Of String)
+            Dim scope = CaptureModelConfigScope(context)
+
             Try
                 If String.IsNullOrWhiteSpace(filePath) OrElse Not IO.File.Exists(filePath) Then
                     Return ""
@@ -231,36 +231,30 @@ Namespace SharedLibrary
                     Return ""
                 End If
 
-                Dim UseSecondAPI As Boolean = False
-                Dim TimeOut = context.INI_Timeout
+                Dim useSecondAPI As Boolean = False
+                Dim timeOut = context.INI_Timeout
 
-                If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                    If Not GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
-                        originalConfigLoaded = False
-                        UseSecondAPI = False
-                    Else
-                        UseSecondAPI = True
-                        TimeOut = context.INI_Timeout_2
-                    End If
+                If Not String.IsNullOrWhiteSpace(taskFlag) AndAlso
+                   Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
+                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, taskFlag) Then
+
+                    useSecondAPI = True
+                    timeOut = context.INI_Timeout_2
                 End If
 
-                Dim sysPrompt As String = If(String.IsNullOrWhiteSpace(systemPrompt),
-                    context.SP_InsertClipboard,
-                    systemPrompt)
+                Dim sysPrompt As String =
+                    If(String.IsNullOrWhiteSpace(systemPrompt), context.SP_InsertClipboard, systemPrompt)
 
-                Dim result As String = Await LLM(context, sysPrompt, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", filePath)
-
-                ' Restore model if temporarily switched
-                If UseSecondAPI AndAlso originalConfigLoaded Then
-                    RestoreDefaults(context, originalConfig)
-                    originalConfigLoaded = False
-                End If
+                Dim result As String =
+                    Await LLM(context, sysPrompt, "", "", "", timeOut * 2, useSecondAPI, Not askUser, "", filePath)
 
                 Return If(result, "")
 
             Catch ex As System.Exception
                 Debug.WriteLine("ReadBinaryFileViaLLM failed: " & ex.Message)
                 Return ""
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
         End Function
 
@@ -737,46 +731,42 @@ Namespace SharedLibrary
         ''' <param name="additionalInstruction">Additional instructions to include in the system prompt for OCR processing.</param>
         ''' <returns>OCR result text, or an empty string if OCR is not available or fails.</returns>
         Private Shared Async Function PerformOCR(ByVal pdfPath As String,
-                                              context As ISharedContext,
-                                              Optional askUser As Boolean = True,
-                                              Optional additionalInstruction As String = Nothing) As Task(Of String)
-
-            ' Use the comprehensive OCR availability check
+                                                 context As ISharedContext,
+                                                 Optional askUser As Boolean = True,
+                                                 Optional additionalInstruction As String = Nothing) As Task(Of String)
             If Not IsOcrAvailable(context) Then
                 If askUser Then
-                    ShowCustomMessageBox($"OCR is not available with your current model configuration.")
+                    ShowCustomMessageBox("OCR is not available with your current model configuration.")
                 End If
                 Return ""
             End If
 
-            Dim UseSecondAPI As Boolean = False
-            Dim TimeOut = context.INI_Timeout
+            Dim scope = CaptureModelConfigScope(context)
 
-            If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                If Not GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
-                    originalConfigLoaded = False
-                    UseSecondAPI = False
-                Else
-                    UseSecondAPI = True
-                    TimeOut = context.INI_Timeout_2
+            Try
+                Dim useSecondAPI As Boolean = False
+                Dim timeOut = context.INI_Timeout
+
+                If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) AndAlso
+                   GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
+
+                    useSecondAPI = True
+                    timeOut = context.INI_Timeout_2
                 End If
-            End If
 
-            Dim systemPrompt As String = context.SP_InsertClipboard
-            If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
-                systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
-            End If
+                Dim systemPrompt As String = context.SP_InsertClipboard
+                If Not String.IsNullOrWhiteSpace(additionalInstruction) Then
+                    systemPrompt &= Environment.NewLine & Environment.NewLine & additionalInstruction.Trim()
+                End If
 
-            Dim result As System.String = Await LLM(context, systemPrompt, "", "", "", TimeOut * 2, UseSecondAPI, Not askUser, "", pdfPath)
+                Dim result As String =
+                    Await LLM(context, systemPrompt, "", "", "", timeOut * 2, useSecondAPI, Not askUser, "", pdfPath)
 
-            ' Restore model if temporarily switched
-            If UseSecondAPI AndAlso originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-                originalConfigLoaded = False
-            End If
+                Return If(result, "")
 
-            Return result
-
+            Finally
+                RestoreModelConfigScope(context, scope)
+            End Try
         End Function
 
         ''' <summary>
@@ -787,29 +777,19 @@ Namespace SharedLibrary
         Public Shared Function IsOcrAvailable(context As ISharedContext) As Boolean
             If context Is Nothing Then Return False
 
-            ' First check: If alternate model path is configured, check for OCR-capable secondary model
             If Not String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then
-                ' Save original config before GetSpecialTaskModel potentially changes it
-                Dim savedConfig As ModelConfig = GetCurrentConfig(context)
-                Dim savedConfigLoaded As Boolean = originalConfigLoaded
+                Dim scope = CaptureModelConfigScope(context)
 
                 Try
                     If GetSpecialTaskModel(context, context.INI_AlternateModelPath, "OCR") Then
-                        ' OCR model found - restore config and return True
-                        RestoreDefaults(context, savedConfig)
-                        originalConfigLoaded = savedConfigLoaded
                         Return True
                     End If
                 Catch
-                    ' If GetSpecialTaskModel fails, continue to check primary API
                 Finally
-                    ' Ensure config is restored even if exception occurred
-                    RestoreDefaults(context, savedConfig)
-                    originalConfigLoaded = savedConfigLoaded
+                    RestoreModelConfigScope(context, scope)
                 End Try
             End If
 
-            ' Second check: Evaluate the INI_APICall_Object configuration
             Return IsApiCallObjectOcrCapable(context.INI_APICall_Object)
         End Function
 

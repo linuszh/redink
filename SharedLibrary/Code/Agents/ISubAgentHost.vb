@@ -19,6 +19,9 @@
 '     special-task-model and using it for this run only (restoring the previous
 '     model afterwards), falling back to "agentdefaultmodel".
 '   - Return the final assistant text (the runner will try to parse it as JSON).
+'   - Restrict tool availability to SubAgentRunRequest.AllowedToolNames.
+'     If AllowedToolNames is Nothing, the host may use its default active tool set.
+'     If AllowedToolNames is an empty list, the sub-agent gets no callable tools.
 ' =============================================================================
 
 Option Strict On
