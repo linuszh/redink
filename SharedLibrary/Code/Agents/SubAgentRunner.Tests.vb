@@ -23,6 +23,7 @@ Namespace Agents
             Await TestEmptyJsonObjectReturnsAgentEmptyResultAsync().ConfigureAwait(False)
             Await TestEmptyEnvelopeReturnsAgentEmptyResultAsync().ConfigureAwait(False)
             Await TestRetryOccursExactlyOnceForAgentEmptyResultAsync().ConfigureAwait(False)
+            Await TestModelEmptyResponseRetryCarriesCompactSummaryAsync().ConfigureAwait(False)
         End Function
 
         Private Shared Sub TestEnvelopeJsonResultStillWorks()
@@ -138,6 +139,41 @@ Namespace Agents
             AssertTrue(host.UserMessages(1).IndexOf("empty or unusable", StringComparison.OrdinalIgnoreCase) >= 0, "Retry prompt reminder mismatch.")
             AssertEqual("done", obj("result")("status")?.ToString(), "Retry result mismatch.")
         End Function
+
+
+        Private Shared Async Function TestModelEmptyResponseRetryCarriesCompactSummaryAsync() As Task
+            Dim host As New SequenceHost(
+        SubAgentRuntimeHardening.BuildModelEmptyResponsePayload(
+            lastToolName:="workspace_extract_text",
+            lastToolResultSummary:="workspace_extract_text succeeded with a compact excerpt; more text is available via next_offset.",
+            compactedToolResponse:=True,
+            retryHint:="Return final JSON or request a smaller chunk."),
+        "{""summary"":""ok"",""result"":{""status"":""done""}}")
+
+            Dim agent As New AgentDescriptor() With {
+        .Name = "retry_after_model_empty"
+    }
+            agent.AllowedTools.Add("workspace_extract_text")
+            agent.AllowedTools.Add("workspace_read")
+            agent.AllowedTools.Add("js_run")
+            agent.AllowedTools.Add("tool_loader")
+
+            Dim raw = Await SubAgentRunner.InvokeResolvedAsync(
+        host,
+        agent,
+        "retry task",
+        contextBlob:="ctx",
+        storeResultInMemory:=False).ConfigureAwait(False)
+
+            Dim obj = JObject.Parse(raw)
+            AssertTrue(obj("error") Is Nothing, "Retry success should not return an error payload.")
+            AssertEqual(2, host.CallCount, "model_empty_response should retry exactly once.")
+            AssertTrue(host.UserMessages(1).IndexOf("workspace_extract_text", StringComparison.OrdinalIgnoreCase) >= 0, "Retry prompt should include last tool name.")
+            AssertTrue(host.UserMessages(1).IndexOf("smaller chunk", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               host.UserMessages(1).IndexOf("start_char", StringComparison.OrdinalIgnoreCase) >= 0, "Retry prompt should instruct chunked follow-up.")
+            AssertTrue(host.UserMessages(1).Length < 4000, "Retry prompt should stay compact.")
+        End Function
+
 
         Private Shared Sub AssertTrue(condition As Boolean, message As String)
             If Not condition Then

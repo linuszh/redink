@@ -950,11 +950,15 @@ Namespace Agents
         Private Shared Function BuildExtractText() As ModelConfig
             Dim def =
                 "{""name"":""" & ToolExtractText & """," &
-                """description"":""Extract readable text from one workspace file of any supported format (PDF with OCR fallback, DOCX, DOC, RTF, XLSX, XLS, PPTX, PPT, EML, MSG, TXT/CSV/JSON/XML/HTML/Markdown, and images/audio/video via the configured model). This tool is for a single file only and is not OK for many files. Use workspace_extract_text_many when you need to extract multiple files.""," &
+                """description"":""Extract readable text from one workspace file of any supported format (PDF with OCR fallback, DOCX, DOC, RTF, XLSX, XLS, PPTX, PPT, EML, MSG, TXT/CSV/JSON/XML/HTML/Markdown, and images/audio/video via the configured model). Supports incremental retrieval by character window and optional page-range hints when available. This tool is for a single file only and is not OK for many files. Use workspace_extract_text_many when you need to extract multiple files.""," &
                 """parameters"":{""type"":""object""," &
                 """properties"":{" &
                 """path"":{""type"":""string"",""description"":""Workspace-relative path of the file to extract.""}," &
-                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned characters (default 100000, max 500000).""}}," &
+                """max_chars"":{""type"":""integer"",""description"":""Optional cap on returned characters (default 12000, max 500000).""}," &
+                """start_char"":{""type"":""integer"",""description"":""Optional zero-based character offset for incremental extraction.""}," &
+                """offset"":{""type"":""integer"",""description"":""Alias of start_char for incremental extraction.""}," &
+                """start_page"":{""type"":""integer"",""description"":""Optional one-based start page hint when the extractor supports page ranges.""}," &
+                """end_page"":{""type"":""integer"",""description"":""Optional one-based end page hint when the extractor supports page ranges.""}}," &
                 """required"":[""path""]}}"
 
             Return New ModelConfig() With {

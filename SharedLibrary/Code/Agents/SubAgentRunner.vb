@@ -169,7 +169,10 @@ Namespace Agents
                         Debug.WriteLine(
         $"[SubAgentRunner] agent='{ag.Name}' retrying unusable output. retry={retryCount} errorCode={normalized.GetErrorCode()}")
 
-                        userMessageForRun = BuildRetryUserMessage(baseUserMessage.ToString())
+                        userMessageForRun = BuildRetryUserMessage(
+    baseUserMessage.ToString(),
+    normalized,
+    allowedTools)
                         Continue Do
                     End If
 
@@ -184,7 +187,9 @@ Namespace Agents
             End Try
         End Function
 
-        Private Shared Function BuildRetryUserMessage(baseUserMessage As String) As String
+        Private Shared Function BuildRetryUserMessage(baseUserMessage As String,
+                                              normalized As SubAgentRuntimeHardening.NormalizedEnvelope,
+                                              allowedTools As IReadOnlyList(Of String)) As String
             Dim sb As New StringBuilder(If(baseUserMessage, "").TrimEnd())
 
             If sb.Length > 0 Then
@@ -192,8 +197,48 @@ Namespace Agents
                 sb.AppendLine()
             End If
 
-            sb.Append(RetryReminderText)
-            Return sb.ToString()
+            sb.AppendLine(RetryReminderText)
+
+            Dim errObj As JObject = Nothing
+            If normalized IsNot Nothing Then
+                errObj = normalized.Error
+            End If
+
+            Dim lastToolName As String = If(errObj?.Value(Of String)("lastToolName"), "")
+            Dim lastToolResultSummary As String = If(errObj?.Value(Of String)("lastToolResultSummary"), "")
+            Dim retryHint As String = If(errObj?.Value(Of String)("retryHint"), "")
+            Dim compactedToolResponse As Boolean = False
+
+            If errObj IsNot Nothing AndAlso errObj("compactedToolResponse") IsNot Nothing Then
+                compactedToolResponse = errObj.Value(Of Boolean)("compactedToolResponse")
+            End If
+
+            sb.AppendLine("Recovery requirements:")
+            sb.AppendLine("- Return the required final JSON object now, or call one smaller follow-up tool.")
+            sb.AppendLine("- Do not return empty content.")
+            sb.AppendLine("- Do not restate or paste a large raw tool response.")
+
+            If Not String.IsNullOrWhiteSpace(lastToolName) Then
+                sb.AppendLine("- Last successful tool: " & lastToolName)
+            End If
+
+            If Not String.IsNullOrWhiteSpace(lastToolResultSummary) Then
+                sb.AppendLine("- Last tool result summary: " & lastToolResultSummary)
+            End If
+
+            If compactedToolResponse Then
+                sb.AppendLine("- The prior tool result was compacted. If you need more source text, request a smaller chunk using max_chars and start_char/offset.")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(retryHint) Then
+                sb.AppendLine("- Retry hint: " & retryHint)
+            End If
+
+            If allowedTools IsNot Nothing AndAlso allowedTools.Count > 0 Then
+                sb.AppendLine("- Available tools: " & String.Join(", ", allowedTools))
+            End If
+
+            Return sb.ToString().TrimEnd()
         End Function
 
         Private Shared Function BuildInfrastructureErrorPayload(agentName As String,

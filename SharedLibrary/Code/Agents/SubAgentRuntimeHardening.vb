@@ -155,15 +155,39 @@ Namespace Agents
             }
         End Function
 
-        Public Shared Function BuildModelEmptyResponsePayload() As String
-            Return JsonConvert.SerializeObject(New With {
-                Key .status = ModelEmptyResponseStatus,
-                Key .error = New With {
-                    Key .code = ModelEmptyResponseCode,
-                    Key .phase = ModelEmptyResponsePhase,
-                    Key .message = ModelEmptyResponseMessage
-                }
-            })
+        Public Shared Function BuildModelEmptyResponsePayload(Optional lastToolName As String = "",
+                                                      Optional lastToolResultSummary As String = "",
+                                                      Optional compactedToolResponse As Boolean = False,
+                                                      Optional retryHint As String = "") As String
+            Dim err As New JObject(
+        New JProperty("code", ModelEmptyResponseCode),
+        New JProperty("phase", ModelEmptyResponsePhase),
+        New JProperty("message", ModelEmptyResponseMessage))
+
+            If Not String.IsNullOrWhiteSpace(lastToolName) Then
+                err("lastToolName") = lastToolName
+            End If
+
+            If Not String.IsNullOrWhiteSpace(lastToolResultSummary) Then
+                err("lastToolResultSummary") = lastToolResultSummary
+            End If
+
+            If compactedToolResponse Then
+                err("compactedToolResponse") = True
+            End If
+
+            If Not String.IsNullOrWhiteSpace(retryHint) Then
+                err("retryHint") = retryHint
+            End If
+
+            Dim obj As New JObject(
+        New JProperty("status", ModelEmptyResponseStatus),
+        New JProperty("summary", EmptyResultSummary),
+        New JProperty("result", JValue.CreateNull()),
+        New JProperty("resultKind", "error"),
+        New JProperty("error", err))
+
+            Return obj.ToString(Formatting.None)
         End Function
 
 

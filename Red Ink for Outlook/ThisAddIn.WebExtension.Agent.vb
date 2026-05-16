@@ -1359,18 +1359,55 @@ Partial Public Class ThisAddIn
 
         Dim rel = GetArgString(toolCall.Arguments, "path")
         Dim maxChars = Math.Min(Math.Max(GetArgInt(toolCall.Arguments, "max_chars", 12000), 1000), 500000)
+
+        Dim startChar As Integer = GetArgInt(toolCall.Arguments, "start_char", -1)
+        If startChar < 0 Then
+            startChar = GetArgInt(toolCall.Arguments, "offset", 0)
+        End If
+        startChar = Math.Max(startChar, 0)
+
+        Dim startPage As Integer = GetArgInt(toolCall.Arguments, "start_page", 0)
+        Dim endPage As Integer = GetArgInt(toolCall.Arguments, "end_page", 0)
+
         Dim fullPath = ResolveWorkspacePath(rel)
         If String.IsNullOrWhiteSpace(fullPath) OrElse Not File.Exists(fullPath) Then
             Return "Error: Workspace file not found."
         End If
 
-        Dim text As String = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
-        If String.IsNullOrWhiteSpace(text) Then Return $"No readable text extracted from '{rel}'."
+        Dim fullText As String = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
+        fullText = If(fullText, "")
 
-        If text.Length > maxChars Then
-            text = text.Substring(0, maxChars) & vbCrLf & $"[Truncated at {maxChars} characters.]"
+        Dim totalChars As Integer = fullText.Length
+        Dim safeStart As Integer = Math.Min(startChar, totalChars)
+        Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
+        Dim takeChars As Integer = Math.Min(maxChars, remaining)
+        Dim chunk As String = If(takeChars > 0, fullText.Substring(safeStart, takeChars), "")
+        Dim truncated As Boolean = (safeStart + takeChars) < totalChars
+        Dim nextOffset As Integer = safeStart + takeChars
+
+        Dim payload As New JObject(
+        New JProperty("path", If(rel, "")),
+        New JProperty("text", chunk),
+        New JProperty("excerpt", BuildResultExcerpt(chunk, 800)),
+        New JProperty("total_chars", totalChars),
+        New JProperty("start_char", safeStart),
+        New JProperty("returned_chars", takeChars),
+        New JProperty("truncated", truncated),
+        New JProperty("continuation", "If more content is needed, call the same tool again with start_char=next_offset and a suitable max_chars value."))
+
+        If truncated Then
+            payload("next_offset") = nextOffset
         End If
-        Return text
+
+        If startPage > 0 Then
+            payload("start_page") = startPage
+        End If
+
+        If endPage > 0 Then
+            payload("end_page") = endPage
+        End If
+
+        Return payload.ToString(Formatting.None)
     End Function
 
     Private Function ExecuteWorkspaceWrite(toolCall As ToolCall) As String

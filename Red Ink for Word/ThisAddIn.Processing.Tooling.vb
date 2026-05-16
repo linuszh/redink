@@ -63,6 +63,9 @@ Partial Public Class ThisAddIn
 
     Private Const MaxDownloadedWebFileBytes As Long = 50L * 1024L * 1024L
 
+    Private Const SubAgentLargeToolResponseThresholdChars As Integer = 30000
+    Private Const SubAgentLargeToolResponseExcerptChars As Integer = 8000
+
     Private Const InternalKnowledgeToolNamePrefix As String = "knowledge_search_store_"
 
 #Region "Tooling File Logger (Reduced, Single File)"
@@ -528,6 +531,10 @@ Partial Public Class ThisAddIn
         Public Property ResultKind As String
         Public Property ErrorCode As String
 
+        Public Property ModelReplayContent As String
+        Public Property ModelReplaySummary As String
+        Public Property WasCompactedForModelReplay As Boolean
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
@@ -594,6 +601,9 @@ Partial Public Class ThisAddIn
         Public Property AllowedToolNames As HashSet(Of String)
         Public Property EnforceAllowedToolScope As Boolean
         Public Property EmptyMainModelResponse As Boolean
+
+        Public Property SubAgentEmptyResponseRetryCount As Integer
+
         Public Property SequencingState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState
         Public Property FinalizationBlocked As Boolean
         Public Property FinalizationBlockedReason As String
@@ -631,6 +641,7 @@ Partial Public Class ThisAddIn
             SubAgentInvocationCountsByAgent = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
             AuthoritativeToolRegistry = Nothing
             AuthoritativeToolRegistrySnapshot = Nothing
+            SubAgentEmptyResponseRetryCount = 0
         End Sub
 
         Public Property LogPrefix As String
@@ -697,6 +708,61 @@ Partial Public Class ThisAddIn
 
 #End Region
 
+    Private Async Function ResolveToolingUserLanguageAsync(userText As String,
+                                                           otherPrompt As String,
+                                                           fullPromptOverride As String,
+                                                           useSecondAPI As Boolean,
+                                                           hideSplash As Boolean) As Task(Of String)
+        Dim sourceText As String = ""
+
+        If Not String.IsNullOrWhiteSpace(otherPrompt) Then
+            sourceText = otherPrompt
+        ElseIf Not String.IsNullOrWhiteSpace(userText) Then
+            sourceText = userText
+        Else
+            sourceText = fullPromptOverride
+        End If
+
+        sourceText = If(sourceText, "").Trim()
+        If sourceText = "" Then Return ""
+
+        If sourceText.Length > 4000 Then
+            sourceText = sourceText.Substring(0, 4000)
+        End If
+
+        Dim detectionSystemPrompt As String =
+            "Determine the language in which the assistant must answer the user's latest request. " &
+            "Return ONLY valid JSON in the form {""language"":""...""}. " &
+            "Use a concrete runtime language value suitable for later localization, preferably a BCP-47 tag when clear. " &
+            "Do not add explanations."
+
+        Dim detectionUserPrompt As String =
+            "<USER_ENTRY>" & sourceText & "</USER_ENTRY>"
+
+        Try
+            Dim raw As String = Await LLM(
+                detectionSystemPrompt,
+                detectionUserPrompt,
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                True)
+
+            If String.IsNullOrWhiteSpace(raw) Then Return ""
+
+            Try
+                Dim obj As JObject = JObject.Parse(raw)
+                Return If(obj.Value(Of String)("language"), "").Trim()
+            Catch
+                Return raw.Trim().Trim(""""c)
+            End Try
+        Catch
+            Return ""
+        End Try
+    End Function
+
 #Region "Execute Tooling"
 
     ''' <summary>
@@ -754,7 +820,8 @@ Partial Public Class ThisAddIn
         Optional subAgentParentRunId As String = Nothing,
         Optional subAgentInvocationIndex As Integer = 0,
         Optional subAgentAgentInvocationCount As Integer = 0,
-        Optional subAgentName As String = Nothing) As Task(Of String)
+        Optional subAgentName As String = Nothing,
+        Optional userLanguage As String = "") As Task(Of String)
 
 
         ToolingFileLogger.StartSession()
@@ -796,6 +863,15 @@ Partial Public Class ThisAddIn
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations
         }
+        context.SequencingState.UserLanguage =
+            If(Not String.IsNullOrWhiteSpace(userLanguage),
+               userLanguage.Trim(),
+               Await ResolveToolingUserLanguageAsync(
+                   userText,
+                   otherPrompt,
+                   fullPromptOverride,
+                   useSecondAPI,
+                   hideSplash))
 
         Dim toolSelectionHintText As String = BuildToolSelectionHintText(
             userText,
@@ -835,6 +911,9 @@ Partial Public Class ThisAddIn
         context.AuthoritativeToolRegistrySnapshot = authoritativeRegistrySnapshot
         context.HostKind = "Word"
         context.EnforceAllowedToolScope = subAgentMode
+        context.SequencingState.ActiveToolingSession = True
+        context.SequencingState.HasOpenToolWorkflow = True
+        context.SequencingState.ToolRequiredModeUsed = False
 
         Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
 
@@ -1172,10 +1251,34 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub("Main LLM()", currentResponse)
 
                 If String.IsNullOrWhiteSpace(currentResponse) Then
+                    Dim lastSuccess = GetLastSuccessfulToolResponse(context)
+
+                    If subAgentMode AndAlso
+       lastSuccess IsNot Nothing AndAlso
+       context.SubAgentEmptyResponseRetryCount < 1 Then
+
+                        context.SubAgentEmptyResponseRetryCount += 1
+                        context.PendingContinuationGuardPrompt = BuildSubAgentEmptyResponseRecoveryPrompt(context)
+                        context.PendingGuardTitle = "SUB-AGENT EMPTY-RESPONSE RECOVERY"
+                        context.PendingRejectedTurnExplanation =
+            "Your previous turn was empty after a successful tool call."
+                        context.PendingRejectedAssistantTurn = ""
+                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+            context.AllToolResponses,
+            context.ToolingModel,
+            compactForSubAgent:=True)
+
+                        context.LogWarn(
+            $"Empty sub-agent model response after successful tool result; retrying with compact context ({context.SubAgentEmptyResponseRetryCount}/1).",
+            details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                        Continue While
+                    End If
+
                     context.EmptyMainModelResponse = True
                     context.LogWarn("Empty response from LLM", details:="LLM() returned null/empty/whitespace.")
                     ToolingFileLogger.LogWarn("Empty main-model response.",
-                              details:=$"host={context.HostKind}; iteration={iteration}; subAgentMode={subAgentMode}")
+              details:=$"host={context.HostKind}; iteration={iteration}; subAgentMode={subAgentMode}")
                     Exit While
                 End If
 
@@ -1318,6 +1421,19 @@ Partial Public Class ThisAddIn
 
                         toolResponse.OriginalCallJson = tc.RawJson
                         context.AllToolResponses.Add(toolResponse)
+                        SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
+                            context.SequencingState,
+                            tc.ToolName,
+                            tc.Arguments,
+                            toolResponse.Success)
+
+                        If toolResponse.Success Then
+                            SharedLibrary.Agents.ToolCallSequencing.NoteToolResultForRepair(
+                                context.SequencingState,
+                                tc.ToolName,
+                                toolResponse.Response,
+                                toolResponse.ResultKind)
+                        End If
 
                         If Not toolResponse.Success Then
                             If context.SequencingState IsNot Nothing Then
@@ -1438,7 +1554,10 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    Dim toolResponses = BuildToolResponsesForModel(context.AllToolResponses, context.ToolingModel)
+                    Dim toolResponses = BuildToolResponsesForModel(
+    context.AllToolResponses,
+    context.ToolingModel,
+    compactForSubAgent:=subAgentMode)
                     INI_APICall_ToolResponses_2 = toolResponses
                     context.Log("Tool responses prepared for next iteration")
 
@@ -1449,92 +1568,80 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    If Not subAgentMode AndAlso
-                       context.SequencingState IsNot Nothing AndAlso
-                       context.SequencingState.RequiresParentRecovery Then
+                    Dim turnValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
+                        currentResponse,
+                        hasToolCalls:=False,
+                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure)
 
-                        If ParseTaskStatus(currentResponse) = TaskStatusKind.Blocked Then
-                            context.SequencingState.NoteBlockedFinalHandled()
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.LastDetectedTurnType = turnValidation.TurnKind.ToString()
+                        context.SequencingState.LastInvalidTurnReason = If(turnValidation.InvalidReason, "")
+                    End If
+
+                    context.Log(
+                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; host={context.HostKind}")
+
+                    Select Case turnValidation.TurnKind
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
                             context.PrematureTextRetryCount = 0
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.HasOpenToolWorkflow = False
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                            End If
+
                             currentResponse = StripTaskStatus(currentResponse)
-
-                            context.Log("Blocked final response accepted after prior skipped tool failure.")
-                            ToolingFileLogger.LogStep(
-                                $"Skipped agent failure handled by blocked final response. host={context.HostKind}")
-
+                            context.Log("Final complete response accepted.")
                             Exit While
-                        End If
 
-                        If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
-                            context.PrematureTextRetryCount += 1
-                            context.PendingContinuationGuardPrompt = BuildSkippedToolFailureRecoveryGuardPrompt()
-                            context.PendingGuardTitle = "HOST TOOL FAILURE GUARD"
-                            context.PendingRejectedTurnExplanation =
-                                "Your previous turn was rejected because the prior skipped tool failure is still unresolved."
-                            context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                            context.PrematureTextRetryCount = 0
+
+                            If context.SequencingState IsNot Nothing Then
+                                If context.SequencingState.RequiresParentRecovery Then
+                                    context.SequencingState.NoteBlockedFinalHandled()
+                                End If
+
+                                context.SequencingState.HasOpenToolWorkflow = False
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                            End If
+
+                            currentResponse = StripTaskStatus(currentResponse)
+                            context.Log("Final blocked response accepted.")
+                            Exit While
+
+                        Case Else
+                            If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                context.PrematureTextRetryCount += 1
+                                context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(context.SequencingState)
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PendingGuardTitle = "HOST ACTIVE TOOLING CONTRACT REPAIR"
+                                context.PendingRejectedTurnExplanation =
+                                    "Your previous turn was rejected because it violated the active-tooling response contract."
+
+                                context.LogWarn(
+                                    $"Invalid active-tooling turn rejected; invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+
+                                Continue While
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = If(turnValidation.InvalidReason, "invalid_turn")
+                            currentResponse = BuildBlockedToolingResult(
+                                context,
+                                SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                                "The tooling run ended because the model did not return a valid next tool call or a valid final status.")
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
 
                             context.LogWarn(
-                                $"Unresolved skipped tool failure requires recovery; injecting tool-failure guard (retry {context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries})")
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
 
-                            ToolingFileLogger.LogWarn(
-                                "Unresolved skipped tool failure; recovery guard injected.",
-                                details:=$"host={context.HostKind}; retry={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; failedTool={context.SequencingState.LastToolName}; errorCode={context.SequencingState.LastErrorCode}")
-
-                            Continue While
-                        End If
-
-                        context.FinalizationBlocked = True
-                        context.FinalizationBlockedReason = "unresolved_tool_failure"
-                        context.SequencingState.NoteFailureFatal()
-                        currentResponse = BuildBlockedToolingResult(
-                            context,
-                            SharedLibrary.Agents.ToolCallSequencing.UnresolvedToolFailureCode,
-                            "The tooling run ended with an unresolved tool failure.")
-
-                        context.LogWarn(
-                            "Skipped agent failure became fatal after recovery guard exhaustion.",
-                            details:=$"host={context.HostKind}; tool={context.SequencingState.LastToolName}; errorCode={context.SequencingState.LastErrorCode}")
-
-                        ToolingFileLogger.LogWarn(
-                            "Skipped agent failure ultimately fatal.",
-                            details:=$"host={context.HostKind}; tool={context.SequencingState.LastToolName}; errorCode={context.SequencingState.LastErrorCode}")
-
-                        Exit While
-                    End If
-
-                    If ShouldRetryAfterPrematureTextResponse(context, currentResponse) Then
-                        context.PrematureTextRetryCount += 1
-                        context.PendingContinuationGuardPrompt = BuildPrematureTextContinuationGuardPrompt()
-                        context.PendingRejectedAssistantTurn = If(currentResponse, "")
-                        context.PendingGuardTitle = "HOST CONTINUATION GUARD"
-                        context.PendingRejectedTurnExplanation =
-        "Your previous turn was rejected because it produced no tool call and no valid <TASK_STATUS> footer."
-                        context.Log($"Premature text-only response detected; injecting continuation guard (retry {context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries})", "warn")
-                        ToolingFileLogger.LogWarn("Premature text-only response; continuation guard injected.",
-          details:=$"retry={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}")
-                        Continue While
-                    End If
-
-                    If SharedLibrary.Agents.ToolCallSequencing.ShouldBlockTextOnlyFinalization(
-        context.SequencingState,
-        context.PrematureTextRetryCount,
-        ToolExecutionContext.MaxContinuationRetries,
-        HasValidTerminalTaskStatus(currentResponse)) Then
-
-                        context.FinalizationBlocked = True
-                        context.FinalizationBlockedReason = "text_only_retry_exhausted"
-                        currentResponse = BuildBlockedToolingResult(
-        context,
-        SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
-        "The tooling run ended with text-only output but no valid final answer.")
-                        context.LogWarn("Finalization blocked after continuation-guard retry exhaustion.",
-                    details:=$"host={context.HostKind}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}")
-                        Exit While
-                    End If
-
-                    currentResponse = StripTaskStatus(currentResponse)
-                    context.Log("Text response received (no tool calls)")
-                    Exit While
+                            Exit While
+                    End Select
                 End If
 
             End While
@@ -1599,8 +1706,19 @@ Partial Public Class ThisAddIn
             End If
 
             If context.EmptyMainModelResponse AndAlso String.IsNullOrWhiteSpace(currentResponse) Then
-                currentResponse = SharedLibrary.Agents.SubAgentRuntimeHardening.BuildModelEmptyResponsePayload()
-                context.LogWarn("Empty main-model response classified as blocked.",
+                context.FinalizationBlocked = True
+                context.FinalizationBlockedReason = SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode
+                currentResponse = BuildBlockedToolingResult(
+                    context,
+                    SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode,
+                    "The tooling run ended because the model returned no valid content.")
+
+                If context.SequencingState IsNot Nothing Then
+                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                    context.SequencingState.HasOpenToolWorkflow = False
+                End If
+
+                context.LogWarn("Empty main-model response converted to a user-safe blocked message.",
                     details:=$"host={context.HostKind}")
             End If
 
@@ -1620,6 +1738,9 @@ Partial Public Class ThisAddIn
             End If
 
             context.Log("=== Session Summary ===")
+            context.Log($"Last successful tool: {If(context.SequencingState?.LastSuccessfulToolCall, "(none)")}")
+            context.Log($"Unresolved tool failure: {If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}")
+            context.Log($"Final response origin: {If(context.SequencingState IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin), context.SequencingState.FinalResponseOrigin, "model_provided")}")
             context.Log($"Total iterations: {iteration}")
             context.Log($"Total tool calls: {context.AllToolResponses.Count}")
             Dim successCount As Integer = context.AllToolResponses.Where(Function(r) r.Success).Count()
@@ -1740,8 +1861,8 @@ Partial Public Class ThisAddIn
 
 
     Private Function BuildBlockedToolingResult(context As ToolExecutionContext,
-                                           errorCode As String,
-                                           message As String) As String
+                                               errorCode As String,
+                                               message As String) As String
         Dim lastToolName As String = ""
         Dim lastErrorCode As String = ""
         Dim lastErrorMessage As String = ""
@@ -1752,13 +1873,34 @@ Partial Public Class ThisAddIn
             lastErrorMessage = If(context.SequencingState.LastErrorMessage, "")
         End If
 
-        Return SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
-        errorCode,
-        "finalization",
-        message,
-        lastToolName,
-        lastErrorCode,
-        lastErrorMessage)
+        Dim structuredPayload As String = SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+            errorCode,
+            "finalization",
+            message,
+            lastToolName,
+            lastErrorCode,
+            lastErrorMessage)
+
+        ToolingFileLogger.LogWarn(
+            "Structured blocked payload recorded for logs only; user-safe prose will be returned instead.",
+            details:=$"host={If(context?.HostKind, "")}; payload={structuredPayload}")
+
+        Dim successCount As Integer = 0
+        Dim failedCount As Integer = 0
+
+        If context IsNot Nothing AndAlso context.AllToolResponses IsNot Nothing Then
+            successCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count()
+            failedCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count()
+        End If
+
+        Return SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+            context.SequencingState,
+            errorCode,
+            message,
+            successCount,
+            failedCount,
+            userLanguage:=If(context?.SequencingState?.UserLanguage, ""),
+            appendTaskStatusFooter:=True)
     End Function
 
 
@@ -1794,9 +1936,12 @@ Partial Public Class ThisAddIn
 
     Private Function BuildSkippedToolFailureRecoveryGuardPrompt() As String
         Return "HOST TOOL FAILURE GUARD: The previous tool call failed and that structured error is already available in the tool-response history. " &
-           "In THIS turn you must EITHER call the next appropriate tool now, OR produce a valid final blocked response ending with exactly: " &
-           "<TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>. " &
-           "Do NOT output ordinary progress prose."
+           "In THIS turn you must take exactly one actionable recovery step: " &
+           "(a) write or update failure state for the current item using an available write/state tool; OR " &
+           "(b) retry the failed agent/tool with smaller or chunked input; OR " &
+           "(c) continue with the next item using the appropriate tool; OR " &
+           "(d) produce a valid final blocked response only if all required work is complete or no further tool action is possible. " &
+           "Do NOT apologize. Do NOT output ordinary progress prose. Do NOT merely restate the failure."
     End Function
 
     Private Function BuildToolResponseContentForModel(resp As ToolResponse) As String
@@ -1811,6 +1956,119 @@ Partial Public Class ThisAddIn
         End If
 
         Return $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
+    End Function
+
+
+    Private Function BuildToolResponseContentForModel(resp As ToolResponse,
+                                                  Optional compactForSubAgent As Boolean = False) As String
+        If resp Is Nothing Then Return ""
+
+        Dim rawContent As String
+
+        If resp.Success Then
+            rawContent = If(resp.Response, "")
+        ElseIf IsStructuredErrorToolResponse(resp) Then
+            rawContent = If(resp.Response, "")
+        Else
+            rawContent = $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
+        End If
+
+        If Not compactForSubAgent Then
+            Return rawContent
+        End If
+
+        Return CompactToolResponseContentForSubAgent(resp, rawContent)
+    End Function
+
+    Private Function CompactToolResponseContentForSubAgent(resp As ToolResponse, rawContent As String) As String
+        If resp Is Nothing Then Return If(rawContent, "")
+
+        Dim raw As String = If(rawContent, "")
+        If raw.Length <= SubAgentLargeToolResponseThresholdChars Then
+            resp.ModelReplayContent = raw
+            resp.ModelReplaySummary = BuildToolReplaySummary(resp)
+            resp.WasCompactedForModelReplay = False
+            Return raw
+        End If
+
+        Dim excerptLength As Integer = Math.Min(SubAgentLargeToolResponseExcerptChars, raw.Length)
+        Dim excerpt As String = raw.Substring(0, excerptLength)
+        Dim summary As String = BuildToolReplaySummary(resp)
+
+        Dim compactObj As New JObject(
+        New JProperty("ok", resp.Success),
+        New JProperty("tool", If(resp.ToolName, "")),
+        New JProperty("summary", summary),
+        New JProperty("content_excerpt", excerpt),
+        New JProperty("total_chars", raw.Length),
+        New JProperty("returned_chars", excerptLength),
+        New JProperty("truncated", True),
+        New JProperty("next_offset", excerptLength),
+        New JProperty("continuation", "If more content is needed, call the same tool again with a smaller window using max_chars and start_char/offset."))
+
+        resp.ModelReplayContent = compactObj.ToString(Formatting.None)
+        resp.ModelReplaySummary = summary
+        resp.WasCompactedForModelReplay = True
+        Return resp.ModelReplayContent
+    End Function
+
+    Private Function BuildToolReplaySummary(resp As ToolResponse) As String
+        If resp Is Nothing Then Return ""
+
+        If Not String.IsNullOrWhiteSpace(resp.ModelReplaySummary) Then
+            Return resp.ModelReplaySummary
+        End If
+
+        Dim summary As String = ""
+
+        If Not String.IsNullOrWhiteSpace(resp.Response) Then
+            Try
+                Dim tok As JToken = JToken.Parse(resp.Response)
+                If TypeOf tok Is JObject Then
+                    summary = DirectCast(tok, JObject).Value(Of String)("summary")
+                End If
+            Catch
+            End Try
+        End If
+
+        If String.IsNullOrWhiteSpace(summary) Then
+            summary = $"{If(resp.ToolName, "tool")} succeeded. {BuildResultExcerpt(If(resp.Response, ""), 280)}"
+        End If
+
+        resp.ModelReplaySummary = summary
+        Return summary
+    End Function
+
+    Private Function GetLastSuccessfulToolResponse(context As ToolExecutionContext) As ToolResponse
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then Return Nothing
+
+        For i As Integer = context.AllToolResponses.Count - 1 To 0 Step -1
+            Dim resp = context.AllToolResponses(i)
+            If resp IsNot Nothing AndAlso resp.Success Then
+                Return resp
+            End If
+        Next
+
+        Return Nothing
+    End Function
+
+    Private Function BuildSubAgentEmptyResponseRecoveryPrompt(context As ToolExecutionContext) As String
+        Dim lastSuccess = GetLastSuccessfulToolResponse(context)
+        Dim summary As String = BuildToolReplaySummary(lastSuccess)
+
+        Dim sb As New System.Text.StringBuilder()
+        sb.Append("SUB-AGENT EMPTY-RESPONSE RECOVERY: The previous model turn was empty after a successful tool call. ")
+        sb.Append("Do not repeat a large raw tool response. ")
+        sb.Append("In THIS turn you must either return the required final JSON object, or call one smaller follow-up tool. ")
+        sb.Append("If more source text is needed, request a smaller window using max_chars and start_char/offset.")
+
+        If Not String.IsNullOrWhiteSpace(summary) Then
+            sb.AppendLine()
+            sb.Append("Last successful tool result: ")
+            sb.Append(summary)
+        End If
+
+        Return sb.ToString()
     End Function
 
 
@@ -2353,7 +2611,9 @@ Partial Public Class ThisAddIn
     ''' <param name="responses">Tool execution outcomes to serialize.</param>
     ''' <param name="toolingModel">Tooling model that defines response templates and container structure.</param>
     ''' <returns>Serialized tool response payload.</returns>
-    Public Function BuildToolResponsesForModel(responses As List(Of ToolResponse), toolingModel As ModelConfig) As String
+    Public Function BuildToolResponsesForModel(responses As List(Of ToolResponse),
+                                           toolingModel As ModelConfig,
+                                           Optional compactForSubAgent As Boolean = False) As String
         If toolingModel Is Nothing Then
             ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
             Return ""
@@ -2417,7 +2677,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Build response content
-            Dim responseContent As String = BuildToolResponseContentForModel(resp)
+            Dim responseContent As String = BuildToolResponseContentForModel(resp, compactForSubAgent)
 
             ' Model-agnostic handling:
             ' - If the response placeholder is quoted, emit an escaped string.
@@ -3983,14 +4243,34 @@ Partial Public Class ThisAddIn
             ' ── workspace_extract_text: read any supported file via GetFileContent (unified extractor) ──
             If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
                 Dim relPath As String = GetToolArgumentString(toolCall.Arguments, "path")
-                Dim maxChars As Integer = 100000
+                Dim maxChars As Integer = 12000
+                Dim startChar As Integer = 0
+                Dim startPage As Integer = 0
+                Dim endPage As Integer = 0
+
                 Try
                     If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars") Then
                         Integer.TryParse(toolCall.Arguments("max_chars").ToString(), maxChars)
                     End If
+
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_char") Then
+                        Integer.TryParse(toolCall.Arguments("start_char").ToString(), startChar)
+                    ElseIf toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("offset") Then
+                        Integer.TryParse(toolCall.Arguments("offset").ToString(), startChar)
+                    End If
+
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_page") Then
+                        Integer.TryParse(toolCall.Arguments("start_page").ToString(), startPage)
+                    End If
+
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("end_page") Then
+                        Integer.TryParse(toolCall.Arguments("end_page").ToString(), endPage)
+                    End If
                 Catch
                 End Try
+
                 maxChars = Math.Min(Math.Max(maxChars, 1000), 500000)
+                startChar = Math.Max(startChar, 0)
 
                 Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
                 If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
@@ -4023,16 +4303,39 @@ Partial Public Class ThisAddIn
                     GoTo __AfterDispatch
                 End Try
 
-                If String.IsNullOrWhiteSpace(extracted) Then
-                    response.Success = True
-                    response.Response = "(No readable text extracted from '" & relPath & "'.)"
-                Else
-                    If extracted.Length > maxChars Then
-                        extracted = extracted.Substring(0, maxChars) & Environment.NewLine & "[Truncated at " & maxChars & " characters.]"
-                    End If
-                    response.Success = True
-                    response.Response = extracted
+                Dim fullText As String = If(extracted, "")
+                Dim totalChars As Integer = fullText.Length
+                Dim safeStart As Integer = Math.Min(startChar, totalChars)
+                Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
+                Dim takeChars As Integer = Math.Min(maxChars, remaining)
+                Dim chunk As String = If(takeChars > 0, fullText.Substring(safeStart, takeChars), "")
+                Dim truncated As Boolean = (safeStart + takeChars) < totalChars
+                Dim nextOffset As Integer = safeStart + takeChars
+
+                Dim payload As New JObject(
+        New JProperty("path", If(relPath, "")),
+        New JProperty("text", chunk),
+        New JProperty("excerpt", BuildResultExcerpt(chunk, 800)),
+        New JProperty("total_chars", totalChars),
+        New JProperty("start_char", safeStart),
+        New JProperty("returned_chars", takeChars),
+        New JProperty("truncated", truncated),
+        New JProperty("continuation", "If more content is needed, call workspace_extract_text again with start_char=next_offset and a suitable max_chars value."))
+
+                If truncated Then
+                    payload("next_offset") = nextOffset
                 End If
+
+                If startPage > 0 Then
+                    payload("start_page") = startPage
+                End If
+
+                If endPage > 0 Then
+                    payload("end_page") = endPage
+                End If
+
+                response.Success = True
+                response.Response = payload.ToString(Formatting.None)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If

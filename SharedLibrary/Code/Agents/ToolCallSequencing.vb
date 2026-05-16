@@ -1,6 +1,11 @@
 ﻿Option Strict On
 Option Explicit On
 
+
+Imports System.Collections
+Imports System.Text
+Imports System.Text.RegularExpressions
+Imports System.Threading.Tasks
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
 
@@ -24,6 +29,52 @@ Namespace Agents
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
+
+        Public Enum TaskStatusKind
+            None
+            Complete
+            Blocked
+            ContinueTurn
+        End Enum
+
+        Public Enum ActiveToolingTurnKind
+            InvalidTurn
+            ToolCallTurn
+            FinalCompleteTurn
+            FinalBlockedTurn
+        End Enum
+
+        Public NotInheritable Class TaskStatusParseResult
+            Public Property IsPresent As Boolean
+            Public Property IsValid As Boolean
+            Public Property Status As TaskStatusKind
+            Public Property Reason As String
+            Public Property FooterCount As Integer
+            Public Property FailureReason As String
+            Public Property FooterJson As String
+            Public Property TextBeforeFooter As String
+
+            Public ReadOnly Property Summary As String
+                Get
+                    If Not IsPresent Then Return "missing"
+                    If Not IsValid Then Return "invalid:" & If(FailureReason, "")
+                    Return Status.ToString().ToLowerInvariant()
+                End Get
+            End Property
+        End Class
+
+        Public NotInheritable Class ActiveToolingTurnValidationResult
+            Public Property TurnKind As ActiveToolingTurnKind
+            Public Property InvalidReason As String
+            Public Property TaskStatus As TaskStatusParseResult
+
+            Public ReadOnly Property TaskStatusSummary As String
+                Get
+                    If TaskStatus Is Nothing Then Return "missing"
+                    Return TaskStatus.Summary
+                End Get
+            End Property
+        End Class
 
         Public Enum ToolCallClassification
             ReadOnlyIndependent
@@ -112,6 +163,27 @@ Namespace Agents
             Public Property LastFailureHandledByBlockedFinal As Boolean
             Public Property LastFailureUltimatelyFatal As Boolean
             Public Property RecoveryToolName As String
+
+            Public Property ActiveToolingSession As Boolean
+            Public Property HasOpenToolWorkflow As Boolean
+            Public Property LastStateFilePath As String
+            Public Property LastOutputPath As String
+            Public Property LastCollectionSize As Integer?
+            Public Property LastProcessedItemCount As Integer?
+            Public Property LastSuccessfulToolCall As String
+            Public Property LastMutationToolCall As String
+            Public Property LastAgentToolCall As String
+            Public Property LastReadOnlyStateToolCall As String
+            Public Property LastDetectedTurnType As String
+            Public Property LastInvalidTurnReason As String
+            Public Property FinalResponseOrigin As String
+            Public Property ToolRequiredModeUsed As Boolean
+
+            Public Property UserLanguage As String
+            Public Property LastStructuredToolResult As String
+            Public Property LastStructuredToolResultKind As String
+            Public Property LastStructuredToolName As String
+            Public Property LastKnownOutputReference As String
 
             Public ReadOnly Property RequiresParentRecovery As Boolean
                 Get
@@ -322,6 +394,612 @@ Namespace Agents
             End If
 
             Return obj.ToString(Formatting.None)
+        End Function
+
+        Public Shared Function ParseStrictTaskStatus(text As String) As TaskStatusParseResult
+            Dim result As New TaskStatusParseResult() With {
+                .Status = TaskStatusKind.None
+            }
+
+            Dim trimmedText As String = If(text, "")
+            Dim trimmedEnd As String = trimmedText.TrimEnd()
+
+            If trimmedEnd = "" Then
+                result.FailureReason = "empty_response"
+                Return result
+            End If
+
+            Dim matches As MatchCollection =
+                Regex.Matches(
+                    trimmedEnd,
+                    "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
+                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+
+            result.FooterCount = matches.Count
+
+            If matches.Count = 0 Then
+                result.FailureReason = "missing_task_status"
+                Return result
+            End If
+
+            result.IsPresent = True
+
+            If matches.Count <> 1 Then
+                result.FailureReason = "multiple_task_status"
+                Return result
+            End If
+
+            Dim match As Match = matches(0)
+
+            If match.Index + match.Length <> trimmedEnd.Length Then
+                result.FailureReason = "task_status_not_at_end"
+                Return result
+            End If
+
+            Dim jsonText As String = match.Groups(1).Value.Trim()
+            result.FooterJson = jsonText
+            result.TextBeforeFooter = trimmedEnd.Substring(0, match.Index).TrimEnd()
+
+            Try
+                Dim obj As JObject = JObject.Parse(jsonText)
+                Dim statusText As String = If(obj.Value(Of String)("status"), "").Trim().ToLowerInvariant()
+                Dim reasonText As String = If(obj.Value(Of String)("reason"), "").Trim()
+
+                If reasonText = "" Then
+                    result.FailureReason = "task_status_missing_reason"
+                    Return result
+                End If
+
+                If reasonText.Length > 160 Then
+                    result.FailureReason = "task_status_reason_too_long"
+                    Return result
+                End If
+
+                Select Case statusText
+                    Case "complete"
+                        result.Status = TaskStatusKind.Complete
+                    Case "blocked"
+                        result.Status = TaskStatusKind.Blocked
+                    Case "continue"
+                        result.Status = TaskStatusKind.ContinueTurn
+                    Case Else
+                        result.FailureReason = "task_status_invalid_status"
+                        Return result
+                End Select
+
+                result.Reason = reasonText
+                result.IsValid = True
+                Return result
+            Catch
+                result.FailureReason = "malformed_task_status"
+                Return result
+            End Try
+        End Function
+
+        Public Shared Function ValidateActiveToolingTurn(responseText As String,
+                                                         hasToolCalls As Boolean,
+                                                         hasUnresolvedToolFailure As Boolean) As ActiveToolingTurnValidationResult
+            Dim result As New ActiveToolingTurnValidationResult() With {
+                .TurnKind = ActiveToolingTurnKind.InvalidTurn,
+                .InvalidReason = "",
+                .TaskStatus = Nothing
+            }
+
+            If hasToolCalls Then
+                result.TurnKind = ActiveToolingTurnKind.ToolCallTurn
+                Return result
+            End If
+
+            If String.IsNullOrWhiteSpace(responseText) Then
+                result.InvalidReason = "empty_response"
+                Return result
+            End If
+
+            If IsRawInternalJsonResponse(responseText) Then
+                result.InvalidReason = "raw_internal_json"
+                Return result
+            End If
+
+            Dim parsed As TaskStatusParseResult = ParseStrictTaskStatus(responseText)
+            result.TaskStatus = parsed
+
+            If Not parsed.IsPresent Then
+                result.InvalidReason = parsed.FailureReason
+                Return result
+            End If
+
+            If Not parsed.IsValid Then
+                result.InvalidReason = parsed.FailureReason
+                Return result
+            End If
+
+            If String.IsNullOrWhiteSpace(parsed.TextBeforeFooter) Then
+                result.InvalidReason = "missing_user_facing_text"
+                Return result
+            End If
+
+            Select Case parsed.Status
+                Case TaskStatusKind.Complete
+                    If hasUnresolvedToolFailure Then
+                        result.InvalidReason = "complete_with_unresolved_tool_failure"
+                        Return result
+                    End If
+
+                    result.TurnKind = ActiveToolingTurnKind.FinalCompleteTurn
+                    Return result
+
+                Case TaskStatusKind.Blocked
+                    result.TurnKind = ActiveToolingTurnKind.FinalBlockedTurn
+                    Return result
+
+                Case TaskStatusKind.ContinueTurn
+                    result.InvalidReason = "task_status_continue_not_final"
+                    Return result
+
+                Case Else
+                    result.InvalidReason = "invalid_turn"
+                    Return result
+            End Select
+        End Function
+
+        Public Shared Function BuildActiveToolingRepairPrompt(Optional runState As ToolingRunState = Nothing) As String
+            Dim prompt As String =
+                "REPAIR: Your previous response was invalid for an active tooling session. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final answer ending with exactly one <TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one <TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>. " &
+                "Progress narration is invalid. Announcements of future work are invalid. TASK_STATUS continue is not a user-facing final answer. Raw internal JSON is invalid as a user-facing answer."
+
+            If runState Is Nothing Then
+                Return prompt
+            End If
+
+            Dim additions As New List(Of String)()
+
+            If Not String.IsNullOrWhiteSpace(runState.LastStructuredToolResult) Then
+                Dim toolLabel As String =
+                    If(String.IsNullOrWhiteSpace(runState.LastStructuredToolName),
+                       "the latest successful tool",
+                       "'" & runState.LastStructuredToolName & "'")
+
+                additions.Add(
+                    "The latest successful structured tool result from " & toolLabel & " remains available during repair. " &
+                    "Do not discard it, do not narrate it as progress, and do not surface it as raw JSON.")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference) Then
+                additions.Add("A generic output or state reference remains available: " & runState.LastKnownOutputReference & ".")
+            End If
+
+            If additions.Count = 0 Then
+                Return prompt
+            End If
+
+            Return prompt & " " & String.Join(" ", additions)
+        End Function
+
+
+        Public Shared Sub NoteToolResultForRepair(runState As ToolingRunState,
+                                                  toolName As String,
+                                                  responseText As String,
+                                                  Optional resultKind As String = "")
+            If runState Is Nothing Then Return
+
+            Dim raw As String = If(responseText, "").Trim()
+            If raw = "" Then Return
+
+            Dim normalizedKind As String = If(resultKind, "").Trim()
+            If String.Equals(normalizedKind, "error", StringComparison.OrdinalIgnoreCase) Then
+                Return
+            End If
+
+            Try
+                Dim token As JToken = JToken.Parse(raw)
+
+                If Not TypeOf token Is JObject AndAlso Not TypeOf token Is JArray Then
+                    Return
+                End If
+
+                runState.LastStructuredToolResult = raw
+                runState.LastStructuredToolName = If(toolName, "")
+
+                If normalizedKind = "" Then
+                    normalizedKind = If(TypeOf token Is JObject, "json_object", "json_array")
+                End If
+
+                runState.LastStructuredToolResultKind = normalizedKind
+
+                If TypeOf token Is JObject Then
+                    TryNoteStructuredOutputReference(runState, DirectCast(token, JObject))
+                End If
+            Catch
+                If normalizedKind <> "" AndAlso
+                   Not String.Equals(normalizedKind, "text", StringComparison.OrdinalIgnoreCase) Then
+
+                    runState.LastStructuredToolResult = raw
+                    runState.LastStructuredToolName = If(toolName, "")
+                    runState.LastStructuredToolResultKind = normalizedKind
+                End If
+            End Try
+        End Sub
+
+        Private Shared Sub TryNoteStructuredOutputReference(runState As ToolingRunState,
+                                                            payload As JObject)
+            If runState Is Nothing OrElse payload Is Nothing Then Return
+
+            Dim reference As String =
+                ExtractFirstStringValue(
+                    payload,
+                    "output_reference",
+                    "state_reference",
+                    "reference",
+                    "output_path",
+                    "state_path",
+                    "path",
+                    "file_path",
+                    "workspace_path",
+                    "memory_key",
+                    "stub")
+
+            If String.IsNullOrWhiteSpace(reference) Then
+                reference =
+                    ExtractFirstStringValue(
+                        TryCast(payload("result"), JObject),
+                        "output_reference",
+                        "state_reference",
+                        "reference",
+                        "output_path",
+                        "state_path",
+                        "path",
+                        "file_path",
+                        "workspace_path",
+                        "memory_key",
+                        "stub")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(reference) Then
+                runState.LastKnownOutputReference = reference
+            End If
+        End Sub
+
+        Private Shared Function ExtractFirstStringValue(payload As JObject,
+                                                        ParamArray keys() As String) As String
+            If payload Is Nothing OrElse keys Is Nothing Then Return ""
+
+            For Each key In keys
+                If String.IsNullOrWhiteSpace(key) Then Continue For
+
+                Dim token As JToken = payload(key)
+                If token Is Nothing Then Continue For
+
+                Dim value As String = token.ToString().Trim()
+                If value <> "" Then
+                    Return value
+                End If
+            Next
+
+            Return ""
+        End Function
+
+
+        Public Shared Sub NoteToolExecutionMetadata(runState As ToolingRunState,
+                                                    toolName As String,
+                                                    arguments As IDictionary(Of String, Object),
+                                                    success As Boolean)
+            If runState Is Nothing Then Return
+
+            runState.ActiveToolingSession = True
+            runState.HasOpenToolWorkflow = True
+
+            Dim classification As ToolCallClassification = ClassifyToolName(toolName)
+
+            If success Then
+                runState.LastSuccessfulToolCall = If(toolName, "")
+            End If
+
+            Select Case classification
+                Case ToolCallClassification.Mutating
+                    runState.LastMutationToolCall = If(toolName, "")
+                Case ToolCallClassification.Agent
+                    runState.LastAgentToolCall = If(toolName, "")
+                Case ToolCallClassification.ReadOnlyIndependent, ToolCallClassification.Stateful
+                    runState.LastReadOnlyStateToolCall = If(toolName, "")
+            End Select
+
+            Dim knownPath As String = ExtractFirstPathArgument(arguments)
+            If Not String.IsNullOrWhiteSpace(knownPath) Then
+                runState.LastKnownOutputReference = knownPath
+                runState.LastStateFilePath = knownPath
+
+                If classification = ToolCallClassification.Mutating Then
+                    runState.LastOutputPath = knownPath
+                End If
+            End If
+
+            Dim collectionSize As Integer? = InferCollectionSize(arguments)
+            If collectionSize.HasValue Then
+                runState.LastCollectionSize = collectionSize
+            End If
+
+            If success AndAlso runState.LastCollectionSize.HasValue AndAlso runState.LastCollectionSize.Value > 1 Then
+                runState.LastProcessedItemCount = If(runState.LastProcessedItemCount, 0) + 1
+            End If
+        End Sub
+
+        Public Shared Function BuildTaskStatusFooter(status As String, reason As String) As String
+            Dim footerObject As New JObject(
+                New JProperty("status", If(status, "").Trim().ToLowerInvariant()),
+                New JProperty("reason", NormalizeFooterReason(reason)))
+
+            Return "<TASK_STATUS>" & footerObject.ToString(Formatting.None) & "</TASK_STATUS>"
+        End Function
+
+        Public Shared Function BuildUserSafeBlockedFinalMessage(runState As ToolingRunState,
+                                                                errorCode As String,
+                                                                message As String,
+                                                                successCount As Integer,
+                                                                failedCount As Integer,
+                                                                Optional userLanguage As String = "",
+                                                                Optional appendTaskStatusFooter As Boolean = True) As String
+            Dim languageKey As String =
+                ResolveBlockedMessageLanguage(If(userLanguage, If(runState?.UserLanguage, "")))
+
+            Dim parts As New List(Of String)()
+
+            parts.Add(
+                GetBlockedMessageText(
+                    languageKey,
+                    "The tool workflow stopped before a valid final answer was produced.",
+                    "Der Tool-Ablauf wurde beendet, bevor eine gültige Schlussantwort erzeugt wurde."))
+
+            If runState IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(runState.LastSuccessfulToolCall) Then
+                parts.Add(
+                    String.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        GetBlockedMessageText(
+                            languageKey,
+                            "Last successful tool call: {0}.",
+                            "Letzter erfolgreicher Tool-Aufruf: {0}."),
+                        runState.LastSuccessfulToolCall))
+            End If
+
+            If runState IsNot Nothing AndAlso runState.HasUnresolvedToolFailure Then
+                Dim failureText As String =
+                    GetBlockedMessageText(
+                        languageKey,
+                        "An unresolved tool failure remains",
+                        "Ein ungelöster Tool-Fehler besteht weiterhin")
+
+                If Not String.IsNullOrWhiteSpace(runState.LastToolName) Then
+                    failureText &= String.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        GetBlockedMessageText(languageKey, " in {0}", " in {0}"),
+                        runState.LastToolName)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(runState.LastErrorCode) Then
+                    failureText &= String.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        GetBlockedMessageText(languageKey, " ({0})", " ({0})"),
+                        runState.LastErrorCode)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(runState.LastErrorMessage) Then
+                    failureText &= String.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        GetBlockedMessageText(languageKey, ": {0}", ": {0}"),
+                        runState.LastErrorMessage)
+                End If
+
+                parts.Add(failureText & ".")
+            Else
+                parts.Add(
+                    GetBlockedMessageText(
+                        languageKey,
+                        "No unresolved tool failure was recorded before response-contract enforcement stopped the run.",
+                        "Vor dem Stopp durch die Antwortvertrags-Prüfung wurde kein ungelöster Tool-Fehler erfasst."))
+            End If
+
+            parts.Add(
+                String.Format(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    GetBlockedMessageText(
+                        languageKey,
+                        "Successful tool-call count: {0}. Failed tool-call count: {1}. These are tool-call counts only; they do not indicate completed business items.",
+                        "Erfolgreiche Tool-Aufruf-Zahl: {0}. Fehlgeschlagene Tool-Aufruf-Zahl: {1}. Diese Zahlen betreffen nur Tool-Aufrufe und bedeuten keine abgeschlossenen Arbeitseinheiten."),
+                    Math.Max(successCount, 0),
+                    Math.Max(failedCount, 0)))
+
+            Dim referenceText As String = GetLastKnownReference(runState)
+            If referenceText <> "" Then
+                parts.Add(
+                    String.Format(
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        GetBlockedMessageText(
+                            languageKey,
+                            "Partial output or state reference: {0}.",
+                            "Teilweise Ausgabe- oder Statusreferenz: {0}."),
+                        referenceText))
+            End If
+
+            Dim hint As String = BuildPracticalHint(runState, languageKey)
+            If hint <> "" Then
+                parts.Add(
+                    GetBlockedMessageText(
+                        languageKey,
+                        "Suggested next action: ",
+                        "Empfohlener nächster Schritt: ") & hint)
+            End If
+
+            Dim finalText As String =
+                String.Join(" ", parts.Where(Function(p) Not String.IsNullOrWhiteSpace(p))).Trim()
+
+            If appendTaskStatusFooter Then
+                finalText &= " " & BuildTaskStatusFooter("blocked", If(errorCode, "host_generated_blocked"))
+            End If
+
+            Return finalText.Trim()
+        End Function
+
+        Private Shared Function IsRawInternalJsonResponse(text As String) As Boolean
+            Dim trimmed As String = If(text, "").Trim()
+            If trimmed = "" Then Return False
+
+            Try
+                Dim token As JToken = JToken.Parse(trimmed)
+                Dim obj As JObject = TryCast(token, JObject)
+                If obj Is Nothing Then Return False
+
+                Return obj("status") IsNot Nothing OrElse
+                       obj("error") IsNot Nothing OrElse
+                       obj("resultKind") IsNot Nothing
+            Catch
+                Return False
+            End Try
+        End Function
+
+        Private Shared Function NormalizeFooterReason(reason As String) As String
+            Dim normalized As String = If(reason, "").Trim()
+            If normalized = "" Then normalized = "blocked"
+            If normalized.Length > 80 Then normalized = normalized.Substring(0, 80).Trim()
+            Return normalized
+        End Function
+
+        Private Shared Function ResolveBlockedMessageLanguage(userLanguage As String) As String
+            Dim normalized As String = If(userLanguage, "").Trim()
+            If normalized = "" Then Return "en"
+
+            Try
+                Dim culture = System.Globalization.CultureInfo.GetCultureInfo(normalized)
+                If String.Equals(culture.TwoLetterISOLanguageName, "de", StringComparison.OrdinalIgnoreCase) Then
+                    Return "de"
+                End If
+            Catch
+                If normalized.StartsWith("de", StringComparison.OrdinalIgnoreCase) Then
+                    Return "de"
+                End If
+            End Try
+
+            Return "en"
+        End Function
+
+        Private Shared Function GetBlockedMessageText(languageKey As String,
+                                                      englishText As String,
+                                                      germanText As String) As String
+            If String.Equals(languageKey, "de", StringComparison.OrdinalIgnoreCase) Then
+                Return germanText
+            End If
+
+            Return englishText
+        End Function
+
+        Private Shared Function GetLastKnownReference(runState As ToolingRunState) As String
+            If runState Is Nothing Then Return ""
+
+            If Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference) Then
+                Return runState.LastKnownOutputReference
+            End If
+
+            If Not String.IsNullOrWhiteSpace(runState.LastOutputPath) Then
+                Return runState.LastOutputPath
+            End If
+
+            If Not String.IsNullOrWhiteSpace(runState.LastStateFilePath) Then
+                Return runState.LastStateFilePath
+            End If
+
+            Return ""
+        End Function
+
+        Private Shared Function BuildPracticalHint(runState As ToolingRunState,
+                                                   languageKey As String) As String
+            If runState Is Nothing Then
+                Return GetBlockedMessageText(
+                    languageKey,
+                    "Retry with a smaller, deterministic next step.",
+                    "Erneut mit einem kleineren, deterministischen nächsten Schritt versuchen.")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(GetLastKnownReference(runState)) Then
+                Return GetBlockedMessageText(
+                    languageKey,
+                    "Review the last known output/state reference and resume from that point.",
+                    "Die letzte bekannte Ausgabe- oder Statusreferenz prüfen und von dort aus fortsetzen.")
+            End If
+
+            If Not String.IsNullOrWhiteSpace(runState.LastSuccessfulToolCall) Then
+                Return GetBlockedMessageText(
+                    languageKey,
+                    "Retry from the last successful tool call or narrow the next requested tool step.",
+                    "Vom letzten erfolgreichen Tool-Aufruf erneut ansetzen oder den nächsten angeforderten Tool-Schritt enger fassen.")
+            End If
+
+            Return GetBlockedMessageText(
+                languageKey,
+                "Retry with a smaller, deterministic next step.",
+                "Erneut mit einem kleineren, deterministischen nächsten Schritt versuchen.")
+        End Function
+
+        Private Shared Function ExtractFirstPathArgument(arguments As IDictionary(Of String, Object)) As String
+            If arguments Is Nothing Then Return ""
+
+            Dim keys As String() = {
+                "path",
+                "file_path",
+                "source_path",
+                "target_path",
+                "output_path",
+                "state_path",
+                "workspace_path"
+            }
+
+            For Each key In keys
+                If Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then Continue For
+
+                Dim value As String = TryGetScalarString(arguments(key))
+                If Not String.IsNullOrWhiteSpace(value) Then
+                    Return value.Trim()
+                End If
+            Next
+
+            Return ""
+        End Function
+
+        Private Shared Function InferCollectionSize(arguments As IDictionary(Of String, Object)) As Integer?
+            If arguments Is Nothing Then Return Nothing
+
+            For Each pair In arguments
+                If pair.Value Is Nothing OrElse TypeOf pair.Value Is String Then Continue For
+
+                If TypeOf pair.Value Is JArray Then
+                    Return DirectCast(pair.Value, JArray).Count
+                End If
+
+                If TypeOf pair.Value Is IEnumerable Then
+                    Dim count As Integer = 0
+                    For Each item In DirectCast(pair.Value, IEnumerable)
+                        count += 1
+                    Next
+                    Return count
+                End If
+            Next
+
+            Return Nothing
+        End Function
+
+        Private Shared Function TryGetScalarString(value As Object) As String
+            If value Is Nothing Then Return ""
+
+            If TypeOf value Is JValue Then
+                Return DirectCast(value, JValue).ToString()
+            End If
+
+            If TypeOf value Is String Then
+                Return CStr(value)
+            End If
+
+            Return value.ToString()
         End Function
 
         Private Shared Function HasAnyPhrase(name As String, ParamArray phrases() As String) As Boolean

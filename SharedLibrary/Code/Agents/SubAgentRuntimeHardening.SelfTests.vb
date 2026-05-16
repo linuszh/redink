@@ -21,6 +21,7 @@ Namespace Agents
             TestRetryFailureReturnsAgentEmptyResult()
             TestErrorEnvelopeIsNotSuccess()
             TestEmptyMainModelResponsePayload()
+            TestModelEmptyResponseRetryUsesCompactRecoveryPrompt()
             TestAllowedToolScoping()
             TestSharedBehaviorParity()
             ToolCallSequencingSelfTests.RunAll()
@@ -118,6 +119,34 @@ Namespace Agents
             AssertTrue(obj.Value(Of String)("status") = "blocked", "Expected blocked status.")
             AssertTrue(obj("error") IsNot Nothing AndAlso obj("error").Value(Of String)("code") = "model_empty_response", "Expected model_empty_response.")
         End Sub
+
+
+        Private Shared Sub TestModelEmptyResponseRetryUsesCompactRecoveryPrompt()
+            Dim host As New FakeHost({
+        SubAgentRuntimeHardening.BuildModelEmptyResponsePayload(
+            lastToolName:="workspace_extract_text",
+            lastToolResultSummary:="workspace_extract_text succeeded with a compacted excerpt and more content is available via next_offset.",
+            compactedToolResponse:=True,
+            retryHint:="Return the final JSON object, or request a smaller follow-up window."),
+        "{""summary"":""ok"",""result"":{""done"":true}}"
+    })
+
+            Dim agent As New AgentDescriptor() With {
+        .Name = "fake_agent_compact_retry",
+        .AllowedTools = New List(Of String) From {"workspace_extract_text", "workspace_read", "js_run", "tool_loader"}
+    }
+
+            Dim payload As String =
+        SubAgentRunner.InvokeResolvedAsync(host, agent, "task", storeResultInMemory:=False).
+            GetAwaiter().
+            GetResult()
+
+            Dim obj = JObject.Parse(payload)
+
+            AssertTrue(host.CallCount = 2, "Expected one retry after model_empty_response.")
+            AssertTrue(obj("error") Is Nothing, "Retry should succeed.")
+        End Sub
+
 
         Private Shared Sub TestAllowedToolScoping()
             Dim reg As New ToolRegistry()

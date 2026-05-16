@@ -23,6 +23,27 @@ Namespace Agents
             RunNamedTest(NameOf(TestSkillThenOtherStopsAtSkill), AddressOf TestSkillThenOtherStopsAtSkill)
             RunNamedTest(NameOf(TestUnknownToolActsAsBarrier), AddressOf TestUnknownToolActsAsBarrier)
             RunNamedTest(NameOf(TestFailedToolSetsUnresolvedToolFailure), AddressOf TestFailedToolSetsUnresolvedToolFailure)
+            RunNamedTest(NameOf(TestActiveToolingAcceptsToolCallTurn), AddressOf TestActiveToolingAcceptsToolCallTurn)
+            RunNamedTest(NameOf(TestActiveToolingAcceptsFinalCompleteTurn), AddressOf TestActiveToolingAcceptsFinalCompleteTurn)
+            RunNamedTest(NameOf(TestActiveToolingAcceptsFinalBlockedTurn), AddressOf TestActiveToolingAcceptsFinalBlockedTurn)
+            RunNamedTest(NameOf(TestActiveToolingRejectsTextWithoutTaskStatus), AddressOf TestActiveToolingRejectsTextWithoutTaskStatus)
+            RunNamedTest(NameOf(TestActiveToolingRejectsProgressNarration), AddressOf TestActiveToolingRejectsProgressNarration)
+            RunNamedTest(NameOf(TestActiveToolingRejectsContinueStatusAsFinal), AddressOf TestActiveToolingRejectsContinueStatusAsFinal)
+            RunNamedTest(NameOf(TestActiveToolingRejectsEmptyResponse), AddressOf TestActiveToolingRejectsEmptyResponse)
+            RunNamedTest(NameOf(TestActiveToolingRejectsMalformedTaskStatus), AddressOf TestActiveToolingRejectsMalformedTaskStatus)
+            RunNamedTest(NameOf(TestActiveToolingRejectsMultipleTaskStatusFooters), AddressOf TestActiveToolingRejectsMultipleTaskStatusFooters)
+            RunNamedTest(NameOf(TestActiveToolingRejectsTaskStatusNotAtEnd), AddressOf TestActiveToolingRejectsTaskStatusNotAtEnd)
+            RunNamedTest(NameOf(TestActiveToolingRejectsRawInternalJson), AddressOf TestActiveToolingRejectsRawInternalJson)
+            RunNamedTest(NameOf(TestActiveToolingRejectsCompleteWithUnresolvedToolFailure), AddressOf TestActiveToolingRejectsCompleteWithUnresolvedToolFailure)
+            RunNamedTest(NameOf(TestActiveToolingRepairPromptIsStrict), AddressOf TestActiveToolingRepairPromptIsStrict)
+            RunNamedTest(NameOf(TestInvalidNarrationAfterStructuredResultIsRejected), AddressOf TestInvalidNarrationAfterStructuredResultIsRejected)
+            RunNamedTest(NameOf(TestStructuredResultRemainsAvailableDuringRepair), AddressOf TestStructuredResultRemainsAvailableDuringRepair)
+            RunNamedTest(NameOf(TestRetryExhaustionProducesHostGeneratedBlockedMessage), AddressOf TestRetryExhaustionProducesHostGeneratedBlockedMessage)
+            RunNamedTest(NameOf(TestNoRawBlockedJsonIsSurfaced), AddressOf TestNoRawBlockedJsonIsSurfaced)
+            RunNamedTest(NameOf(TestFallbackUsesRuntimeUserLanguage), AddressOf TestFallbackUsesRuntimeUserLanguage)
+            RunNamedTest(NameOf(TestToolCallCountIsReportedOnlyAsToolCallCount), AddressOf TestToolCallCountIsReportedOnlyAsToolCallCount)
+            RunNamedTest(NameOf(TestRepairPromptRemainsGeneric), AddressOf TestRepairPromptRemainsGeneric)
+            RunNamedTest(NameOf(TestActiveToolingWordOutlookParity), AddressOf TestActiveToolingWordOutlookParity)
             RunNamedTest(NameOf(TestContinuationGuardRetryExhaustionWithUnresolvedFailureReturnsBlocked), AddressOf TestContinuationGuardRetryExhaustionWithUnresolvedFailureReturnsBlocked)
             RunNamedTest(NameOf(TestSharedBehaviorParity), AddressOf TestSharedBehaviorParity)
             RunNamedTest(NameOf(TestSubAgentEmptyModelResponseRetriesOnceAndBatchContinues), AddressOf TestSubAgentEmptyModelResponseRetriesOnceAndBatchContinues)
@@ -464,7 +485,284 @@ Namespace Agents
         "Initialization failure phase mismatch.")
         End Sub
 
+        Private Shared Sub TestActiveToolingAcceptsToolCallTurn()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                responseText:="tool turn",
+                hasToolCalls:=True,
+                hasUnresolvedToolFailure:=False)
 
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.ToolCallTurn, result.TurnKind, "Tool call turn should be accepted.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingAcceptsFinalCompleteTurn()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Completed successfully.", "complete", "done"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn, result.TurnKind, "Final complete turn should be accepted.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingAcceptsFinalBlockedTurn()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Stopped safely.", "blocked", "stopped"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn, result.TurnKind, "Final blocked turn should be accepted.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsTextWithoutTaskStatus()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "Plain text without a footer.",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Text without TASK_STATUS must be rejected.")
+            AssertEqual("missing_task_status", result.InvalidReason, "Missing TASK_STATUS reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsProgressNarration()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "I will continue with the remaining items next.",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Progress narration must be rejected.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsContinueStatusAsFinal()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Continuing.", "continue", "more_work"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "TASK_STATUS continue must be rejected as final.")
+            AssertEqual("task_status_continue_not_final", result.InvalidReason, "Continue-status reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsEmptyResponse()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "   ",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Empty response must be rejected.")
+            AssertEqual("empty_response", result.InvalidReason, "Empty-response reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsMalformedTaskStatus()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "Bad footer <TASK_STATUS>{""status"":""complete""}</TASK_STATUS>",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Malformed TASK_STATUS must be rejected.")
+            AssertEqual("task_status_missing_reason", result.InvalidReason, "Malformed TASK_STATUS reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsMultipleTaskStatusFooters()
+            Dim text As String =
+                BuildFinalTurnText("First.", "blocked", "one") &
+                BuildFinalTurnText("Second.", "blocked", "two")
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                text,
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Multiple TASK_STATUS footers must be rejected.")
+            AssertEqual("multiple_task_status", result.InvalidReason, "Multiple footer reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsTaskStatusNotAtEnd()
+            Dim text As String =
+                BuildFinalTurnText("Almost done.", "blocked", "stopped") & " trailing text"
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                text,
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "TASK_STATUS not at end must be rejected.")
+            AssertEqual("task_status_not_at_end", result.InvalidReason, "Footer-at-end reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsRawInternalJson()
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "{""status"":""blocked"",""error"":{""code"":""invalid_text_only_finalization""}}",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Raw internal JSON must be rejected.")
+            AssertEqual("raw_internal_json", result.InvalidReason, "Raw-JSON reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRejectsCompleteWithUnresolvedToolFailure()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+            state.NoteToolFailure("fake_tool", "fake_error", "failed")
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Done.", "complete", "finished"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=state.HasUnresolvedToolFailure)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Complete with unresolved failure must be rejected.")
+            AssertEqual("complete_with_unresolved_tool_failure", result.InvalidReason, "Unresolved-failure reason mismatch.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingRepairPromptIsStrict()
+            Dim prompt As String = ToolCallSequencing.BuildActiveToolingRepairPrompt()
+
+            AssertTrue(prompt.Contains("the next required tool call"), "Repair prompt must require the next tool call.")
+            AssertTrue(prompt.Contains("TASK_STATUS continue is not a user-facing final answer"), "Repair prompt must reject continue status.")
+            AssertTrue(prompt.Contains("Raw internal JSON is invalid"), "Repair prompt must reject raw JSON.")
+        End Sub
+
+        Private Shared Sub TestRetryExhaustionProducesHostGeneratedBlockedMessage()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .LastSuccessfulToolCall = "fake_read",
+                .LastStateFilePath = "state/output.json",
+                .ActiveToolingSession = True,
+                .HasOpenToolWorkflow = True
+            }
+
+            Dim message As String = ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                state,
+                ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                "The tooling run ended because the model did not return a valid next tool call or a valid final status.",
+                successCount:=3,
+                failedCount:=0,
+                appendTaskStatusFooter:=True)
+
+            AssertTrue(message.Contains("Last successful step: fake_read."), "Blocked message must include the last successful tool.")
+            AssertTrue(message.Contains("Partial state may exist at: state/output.json."), "Blocked message must mention partial state when known.")
+            AssertTrue(message.Contains("Tool calls completed successfully: 3; failed: 0."), "Blocked message must include tool counts.")
+            AssertTrue(message.Contains("<TASK_STATUS>{""status"":""blocked"""), "Blocked message must include a blocked TASK_STATUS footer.")
+        End Sub
+
+        Private Shared Sub TestNoRawBlockedJsonIsSurfaced()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .ActiveToolingSession = True,
+                .HasOpenToolWorkflow = True
+            }
+
+            Dim message As String = ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                state,
+                ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                "The tooling run ended because the model did not return a valid next tool call or a valid final status.",
+                successCount:=0,
+                failedCount:=0,
+                appendTaskStatusFooter:=True)
+
+            AssertFalse(message.TrimStart().StartsWith("{", StringComparison.Ordinal), "User-facing blocked message must not be raw JSON.")
+            AssertTrue(message.Contains("No tool failure occurred before the response-contract enforcement stopped the run."), "unresolvedToolFailure=false must not be misreported as a tool failure.")
+        End Sub
+
+        Private Shared Sub TestActiveToolingWordOutlookParity()
+            Dim wordResult = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Blocked.", "blocked", "stopped"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            Dim outlookResult = ToolCallSequencing.ValidateActiveToolingTurn(
+                BuildFinalTurnText("Blocked.", "blocked", "stopped"),
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(wordResult.TurnKind, outlookResult.TurnKind, "Word/Outlook parity turn-kind mismatch.")
+            AssertEqual(wordResult.TaskStatusSummary, outlookResult.TaskStatusSummary, "Word/Outlook parity TASK_STATUS mismatch.")
+        End Sub
+
+
+        Private Shared Sub TestInvalidNarrationAfterStructuredResultIsRejected()
+            Dim state As New ToolCallSequencing.ToolingRunState()
+
+            ToolCallSequencing.NoteToolResultForRepair(
+                state,
+                "fake_tool",
+                "{""summary"":""ok"",""result"":{""output_reference"":""partial/ref.bin""},""resultKind"":""json_object""}",
+                "json_object")
+
+            Dim result = ToolCallSequencing.ValidateActiveToolingTurn(
+                "I will continue with the next step.",
+                hasToolCalls:=False,
+                hasUnresolvedToolFailure:=False)
+
+            AssertEqual(ToolCallSequencing.ActiveToolingTurnKind.InvalidTurn, result.TurnKind, "Invalid narration after a structured tool result must be rejected.")
+            AssertEqual("missing_task_status", result.InvalidReason, "Structured-result narration rejection reason mismatch.")
+            AssertEqual("fake_tool", state.LastStructuredToolName, "Structured result should remain attached to the last successful tool.")
+        End Sub
+
+        Private Shared Sub TestStructuredResultRemainsAvailableDuringRepair()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .UserLanguage = "en-US"
+            }
+
+            ToolCallSequencing.NoteToolResultForRepair(
+                state,
+                "fake_tool",
+                "{""summary"":""ok"",""result"":{""output_reference"":""partial/ref.bin""},""resultKind"":""json_object""}",
+                "json_object")
+
+            Dim prompt As String = ToolCallSequencing.BuildActiveToolingRepairPrompt(state)
+
+            AssertEqual("fake_tool", state.LastStructuredToolName, "Structured result tool name mismatch.")
+            AssertTrue(state.LastStructuredToolResult.Contains("""summary"":""ok"""), "Structured result payload should remain available during repair.")
+            AssertEqual("partial/ref.bin", state.LastKnownOutputReference, "Structured output reference should remain available during repair.")
+            AssertTrue(prompt.Contains("structured tool result"), "Repair prompt should explicitly preserve the structured tool result.")
+        End Sub
+
+        Private Shared Sub TestFallbackUsesRuntimeUserLanguage()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .UserLanguage = "de-DE",
+                .LastSuccessfulToolCall = "fake_tool"
+            }
+
+            Dim message As String = ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                state,
+                ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                "internal-only",
+                successCount:=2,
+                failedCount:=1,
+                appendTaskStatusFooter:=True)
+
+            AssertTrue(message.Contains("Der Tool-Ablauf wurde beendet"), "Blocked fallback should use the runtime user language value.")
+            AssertTrue(message.Contains("Letzter erfolgreicher Tool-Aufruf: fake_tool."), "Localized fallback should include the last successful tool.")
+        End Sub
+
+        Private Shared Sub TestToolCallCountIsReportedOnlyAsToolCallCount()
+            Dim state As New ToolCallSequencing.ToolingRunState() With {
+                .UserLanguage = "en-US"
+            }
+
+            Dim message As String = ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                state,
+                ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                "internal-only",
+                successCount:=4,
+                failedCount:=1,
+                appendTaskStatusFooter:=True)
+
+            AssertTrue(message.Contains("Successful tool-call count: 4."), "Blocked fallback must label the successful count as a tool-call count.")
+            AssertTrue(message.Contains("Failed tool-call count: 1."), "Blocked fallback must label the failed count as a tool-call count.")
+            AssertTrue(message.Contains("tool-call counts only"), "Blocked fallback must explicitly avoid conflating tool-call counts with business completion.")
+            AssertTrue(message.IndexOf("items processed", StringComparison.OrdinalIgnoreCase) < 0, "Blocked fallback must not claim business-item completion.")
+        End Sub
+
+        Private Shared Sub TestRepairPromptRemainsGeneric()
+            Dim prompt As String = ToolCallSequencing.BuildActiveToolingRepairPrompt()
+
+            AssertTrue(prompt.IndexOf("Word", StringComparison.OrdinalIgnoreCase) < 0, "Repair prompt must not contain workflow-specific product names.")
+            AssertTrue(prompt.IndexOf("Outlook", StringComparison.OrdinalIgnoreCase) < 0, "Repair prompt must not contain workflow-specific product names.")
+            AssertTrue(prompt.IndexOf(".docx", StringComparison.OrdinalIgnoreCase) < 0, "Repair prompt must not contain document-type examples.")
+            AssertTrue(prompt.IndexOf(".xlsx", StringComparison.OrdinalIgnoreCase) < 0, "Repair prompt must not contain document-type examples.")
+            AssertTrue(prompt.IndexOf("table", StringComparison.OrdinalIgnoreCase) < 0, "Repair prompt must remain generic and avoid workflow examples.")
+        End Sub
+
+        Private Shared Function BuildFinalTurnText(body As String, status As String, reason As String) As String
+            Return body & " " & ToolCallSequencing.BuildTaskStatusFooter(status, reason)
+        End Function
 
         Private Shared Function BuildFakeToolRegistry(toolNames As IEnumerable(Of String)) As Agents.ToolRegistry
             Dim tools As New List(Of SharedLibrary.ModelConfig)()
@@ -1011,7 +1309,7 @@ Namespace Agents
                 {
                     WorkspaceTools.ToolExtractText,
                     New WorkspaceToolSchemaContract() With {
-                        .Properties = New List(Of String) From {"path", "max_chars"},
+                        .Properties = New List(Of String) From {"path", "max_chars", "start_char", "offset", "start_page", "end_page"},
                         .Required = New List(Of String) From {"path"}
                     }
                 },
