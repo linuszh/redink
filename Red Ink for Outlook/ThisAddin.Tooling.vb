@@ -2095,20 +2095,35 @@ Partial Public Class ThisAddIn
         End If
 
         If INI_ToolingLogWindow AndAlso Not hideLogWindow Then
-            Dim logForm As LogWindow = Nothing
-            Try
-                Await SwitchToUi(Sub()
-                                     logForm = New LogWindow()
-                                     logForm.Show()
-                                 End Sub).ConfigureAwait(False)
-            Catch ex As Exception
-                ToolingFileLogger.LogWarn("Failed to create LogWindow.", ex:=ex)
-            End Try
+            ' The LogWindow must be created on the Outlook UI/STA thread.
+            ' ExecuteToolingLoop may run on a thread-pool continuation, so always
+            ' marshal creation/show through the captured UI SynchronizationContext.
+            Dim createdForm As LogWindow = Nothing
+            Dim createError As Exception = Nothing
 
-            context.LogWindowForm = logForm
-            If logForm IsNot Nothing Then
-                AddHandler logForm.CancelRequested, Sub() context.IsCancelled = True
+            Dim createOnUi As Action =
+                Sub()
+                    Try
+                        createdForm = New LogWindow()
+                        createdForm.Show()
+                        AddHandler createdForm.CancelRequested, Sub() context.IsCancelled = True
+                    Catch ex As Exception
+                        createError = ex
+                    End Try
+                End Sub
+
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                UiSyncContext.Send(Sub() createOnUi(), Nothing)
+            Else
+                createOnUi()
             End If
+
+            If createError IsNot Nothing Then
+                ToolingFileLogger.LogWarn("Failed to create LogWindow on UI thread.", ex:=createError)
+            End If
+
+            context.LogWindowForm = createdForm
 
         ElseIf hideLogWindow AndAlso
                parentToolingContext IsNot Nothing AndAlso
@@ -3053,7 +3068,22 @@ Partial Public Class ThisAddIn
 
             If context.LogWindowForm IsNot Nothing AndAlso Not context.LogWindowForm.IsDisposed Then
                 Try
-                    context.LogWindowForm.MarkComplete()
+                    If UiSyncContext IsNot Nothing AndAlso
+                       System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                        UiSyncContext.Post(
+                            Sub()
+                                Try
+                                    If context.LogWindowForm IsNot Nothing AndAlso
+                                       Not context.LogWindowForm.IsDisposed Then
+                                        context.LogWindowForm.MarkComplete()
+                                    End If
+                                Catch ex As Exception
+                                    ToolingFileLogger.LogWarn("Failed to mark LogWindow complete (UI post).", ex:=ex)
+                                End Try
+                            End Sub, Nothing)
+                    Else
+                        context.LogWindowForm.MarkComplete()
+                    End If
                 Catch ex As Exception
                     ToolingFileLogger.LogWarn("Failed to mark LogWindow complete.", ex:=ex)
                 End Try

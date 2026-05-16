@@ -170,6 +170,16 @@ Partial Public Class ThisAddIn
     Private startupFallbackTimer As System.Windows.Forms.Timer
 
     ''' <summary>
+    ''' Shared UI synchronization context used by the shared tooling loop.
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+
+    ''' <summary>
+    ''' Managed thread id of the Outlook UI thread captured at startup.
+    ''' </summary>
+    Public Shared UiThreadId As Integer
+
+    ''' <summary>
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -190,6 +200,10 @@ Partial Public Class ThisAddIn
             _uiContext = New WindowsFormsSynchronizationContext()
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
+
+        UiSyncContext = _uiContext
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it

@@ -1029,9 +1029,38 @@ Partial Public Class ThisAddIn
         End If
 
         If INI_ToolingLogWindow AndAlso Not hideLogWindow Then
-            context.LogWindowForm = New LogWindow()
-            context.LogWindowForm.Show()
-            AddHandler context.LogWindowForm.CancelRequested, Sub() context.IsCancelled = True
+            ' The LogWindow is a WinForms Form and MUST be created on the Word UI/STA thread.
+            ' Callers may await us with ConfigureAwait(False), which can land this code on a
+            ' thread-pool worker without a message pump. In that case, creating/showing the
+            ' Form on the wrong thread causes "frozen, unpositioned" windows and full Word
+            ' hangs on subsequent invocations. Always marshal via the captured UI context.
+            Dim createdForm As LogWindow = Nothing
+            Dim createError As Exception = Nothing
+
+            Dim createOnUi As System.Action =
+                Sub()
+                    Try
+                        createdForm = New LogWindow()
+                        createdForm.Show()
+                        AddHandler createdForm.CancelRequested, Sub() context.IsCancelled = True
+                    Catch ex As Exception
+                        createError = ex
+                    End Try
+                End Sub
+
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                ' Synchronous Send so the form exists before we continue logging into it.
+                UiSyncContext.Send(Sub() createOnUi(), Nothing)
+            Else
+                createOnUi()
+            End If
+
+            If createError IsNot Nothing Then
+                ToolingFileLogger.LogWarn("Failed to create LogWindow on UI thread.", ex:=createError)
+            End If
+
+            context.LogWindowForm = createdForm
 
         ElseIf hideLogWindow AndAlso
                parentToolingContext IsNot Nothing AndAlso
@@ -1768,7 +1797,22 @@ Partial Public Class ThisAddIn
 
             If context.LogWindowForm IsNot Nothing AndAlso Not context.LogWindowForm.IsDisposed Then
                 Try
-                    context.LogWindowForm.MarkComplete()
+                    If UiSyncContext IsNot Nothing AndAlso
+                       System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                        ' Post (async) — MarkComplete itself uses BeginInvoke on the form,
+                        ' but the form may be on a different thread than ours. Using the
+                        ' captured UI context guarantees we hit a thread with a pump.
+                        UiSyncContext.Post(
+                            Sub()
+                                Try
+                                    context.LogWindowForm.MarkComplete()
+                                Catch ex As Exception
+                                    ToolingFileLogger.LogWarn("Failed to mark LogWindow complete (UI post).", ex:=ex)
+                                End Try
+                            End Sub, Nothing)
+                    Else
+                        context.LogWindowForm.MarkComplete()
+                    End If
                 Catch ex As Exception
                     ToolingFileLogger.LogWarn("Failed to mark LogWindow complete.", ex:=ex)
                 End Try

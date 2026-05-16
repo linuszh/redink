@@ -427,6 +427,13 @@ Partial Public Class ThisAddIn
     ' UI threading context and scheduler (captured at Startup)
     Private Shared _uiContext As SynchronizationContext
     Private Shared _uiScheduler As TaskScheduler
+    ''' <summary>
+    ''' Captured WindowsFormsSynchronizationContext for the Word UI/STA thread.
+    ''' Used to marshal LogWindow creation and updates back to the UI thread,
+    ''' regardless of whether the caller awaited with ConfigureAwait(False).
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+    Public Shared UiThreadId As Integer
 
 
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -435,6 +442,14 @@ Partial Public Class ThisAddIn
 
         ' 1) Force the creation of the Control's handle on the Office UI thread
         Dim dummy = mainThreadControl.Handle
+
+        ' Ensure a WinForms sync context exists on the UI thread, then capture it.
+        If System.Threading.SynchronizationContext.Current Is Nothing Then
+            System.Threading.SynchronizationContext.SetSynchronizationContext(
+        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+        End If
+        UiSyncContext = System.Threading.SynchronizationContext.Current
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
 
         ' 2) Capture synchronization context & scheduler after handle exists
         _uiContext = SynchronizationContext.Current
@@ -462,8 +477,6 @@ Partial Public Class ThisAddIn
         SharedMethods.Initialize(Me.CustomTaskPanes)
 
         SharedLibrary.Agents.WordHostPolicy.Host = Me
-
-
 
         If System.Threading.SynchronizationContext.Current Is Nothing Then
             System.Threading.SynchronizationContext.SetSynchronizationContext(

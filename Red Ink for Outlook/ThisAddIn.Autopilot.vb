@@ -333,13 +333,27 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Shows the AutoPilot dashboard if it is available.</summary>
     Public Sub ShowAutoPilotDashboard()
-        If _apDashboard IsNot Nothing Then
-            Try
-                _apDashboard.Show()
-                _apDashboard.BringToFront()
-            Catch
-            End Try
-        End If
+        If _apDashboard Is Nothing Then Return
+
+        Dim showDashboard As System.Action =
+            Sub()
+                Try
+                    If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    _apDashboard.Show()
+                    _apDashboard.BringToFront()
+                Catch
+                End Try
+            End Sub
+
+        Try
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                UiSyncContext.Post(Sub() showDashboard(), Nothing)
+            Else
+                showDashboard()
+            End If
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Starts AutoPilot using the configuration dialog and saved settings.</summary>
@@ -411,48 +425,59 @@ Partial Public Class ThisAddIn
             _apSelectedTools = Nothing
         End If
 
-        _apDashboard = New LogWindow()
-        _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
-        AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
-        AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
-        _apDashboard.ShowAbortJobButton(True)
-        _apDashboard.Show()
+        Dim initializeDashboard As System.Action =
+            Sub()
+                _apDashboard = New LogWindow()
+                _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
+                AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
+                AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                _apDashboard.ShowAbortJobButton(True)
+                _apDashboard.Show()
 
-        ' Add Scheduler dashboard button if scheduler is enabled
-        If config.EnableScheduler Then
-            Try
-                ' Find the button panel (FlowLayoutPanel) in the dashboard
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnScheduler As New Button() With {
-                        .Text = "Scheduler",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
-                    buttonPanel.Controls.Add(btnScheduler)
-                End If
-            Catch
-            End Try
-        End If
+                ' Add Scheduler dashboard button if scheduler is enabled
+                If config.EnableScheduler Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
 
-        ' Add User Storage dashboard button if memory or files are enabled
-        If config.EnableUserMemory OrElse config.EnableUserFiles Then
-            Try
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnUserStorage As New Button() With {
-                        .Text = "User Storage",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
-                    buttonPanel.Controls.Add(btnUserStorage)
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnScheduler As New Button() With {
+                                .Text = "Scheduler",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
+                            buttonPanel.Controls.Add(btnScheduler)
+                        End If
+                    Catch
+                    End Try
                 End If
-            Catch
-            End Try
+
+                ' Add User Storage dashboard button if memory or files are enabled
+                If config.EnableUserMemory OrElse config.EnableUserFiles Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnUserStorage As New Button() With {
+                                .Text = "User Storage",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
+                            buttonPanel.Controls.Add(btnUserStorage)
+                        End If
+                    Catch
+                    End Try
+                End If
+            End Sub
+
+        If UiSyncContext IsNot Nothing AndAlso
+           System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+            UiSyncContext.Send(Sub() initializeDashboard(), Nothing)
+        Else
+            initializeDashboard()
         End If
 
         Dim modelLabel As String
