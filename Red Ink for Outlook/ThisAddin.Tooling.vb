@@ -220,7 +220,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Maximum tool loop iterations used by prompt-building helpers.
     ''' </summary>
-    Public MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = Agents.ToolingConstants.DefaultMaxToolIterations
 
     ''' <summary>
     ''' Holds the active ToolExecutionContext during an ExecuteToolingLoop run.
@@ -1534,6 +1534,42 @@ Partial Public Class ThisAddIn
                 Return _logPath
             End Get
         End Property
+
+
+        ' --- Sub-agent returns: full payload, separate file ----------
+        Private Shared _subAgentLogPath As String = Nothing
+
+        Public Shared Sub LogSubAgentReturn(source As String, rawResponse As String)
+            If Not _isEnabled OrElse rawResponse Is Nothing Then Return
+            Try
+                EnsureSubAgentLogPath()
+                If String.IsNullOrEmpty(_subAgentLogPath) Then Return
+
+                Dim sb As New System.Text.StringBuilder()
+                sb.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {If(source, "")}")
+                sb.AppendLine(If(rawResponse, ""))
+                sb.AppendLine("---")
+
+                SyncLock _lock
+                    IO.File.AppendAllText(_subAgentLogPath, sb.ToString(), System.Text.Encoding.UTF8)
+                End SyncLock
+            Catch
+                ' Never throw from logger.
+            End Try
+        End Sub
+
+        Private Shared Sub EnsureSubAgentLogPath()
+            If Not String.IsNullOrEmpty(_subAgentLogPath) Then Return
+            If String.IsNullOrEmpty(_logPath) Then Return
+            Try
+                Dim dir As String = IO.Path.GetDirectoryName(_logPath)
+                _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns.txt")
+            Catch
+                ' If the path cannot be resolved, sub-agent returns silently skip.
+            End Try
+        End Sub
+
+
     End Class
 
 #End Region
@@ -1731,16 +1767,17 @@ Partial Public Class ThisAddIn
 
         Public Sub Log(message As String, Optional level As String = "step")
             Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
-            Dim leadingMarker As String = ""
+            Dim isSubAgent As Boolean =
+                normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
+            Dim leadingMarker As String = If(isSubAgent, "[subagent]", "")
             Dim humanMessage As String = If(message, "").Trim()
 
-            If normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase) Then
-                leadingMarker = "[subagent]"
-            ElseIf normalizedPrefix <> "" Then
+            If Not isSubAgent AndAlso normalizedPrefix <> "" Then
                 humanMessage = (normalizedPrefix & " " & humanMessage).Trim()
             End If
 
-            Dim visibleMessage As String =
+            ' Full message (file + LogEntries): workflowId/phase/host suffix preserved.
+            Dim fullMessage As String =
                 SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
                     humanMessage,
                     WorkflowId,
@@ -1748,11 +1785,18 @@ Partial Public Class ThisAddIn
                     hostName:=HostKind,
                     leadingMarker:=leadingMarker)
 
-            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {visibleMessage}"
+            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {fullMessage}"
             LogEntries.Add(entry)
             Debug.WriteLine($"[Tooling] {entry}")
 
-            ToolingFileLogger.LogStep(visibleMessage)
+            ToolingFileLogger.LogStep(fullMessage)
+
+            ' "diag" level → file only. End user never sees it.
+            If String.Equals(level, "diag", StringComparison.OrdinalIgnoreCase) Then Return
+
+            ' Visible message: strip workflow suffix, indent sub-agent lines two spaces.
+            Dim visibleMessage As String =
+                If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
 
             If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
                 Try
@@ -1856,7 +1900,7 @@ Partial Public Class ThisAddIn
 
         context.Log(
             "latestUserRequestRaw[" & If(stage, "") & "] " &
-            BuildPromptDiagnosticStub(context.LatestUserRequestRaw))
+            BuildPromptDiagnosticStub(context.LatestUserRequestRaw), "diag")
     End Sub
 
     Private Function BuildLatestUserRequestMetadataBlock(context As ToolExecutionContext) As String
@@ -2288,7 +2332,7 @@ Partial Public Class ThisAddIn
         If subAgentMode Then
             context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
             context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped for sub-agent mode.")
+            context.Log("Memory grounding classifier skipped for sub-agent mode.", "diag")
             Return
         End If
 
@@ -2298,14 +2342,14 @@ Partial Public Class ThisAddIn
                 explicitMemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
 
             context.Log("Memory grounding mode applied from explicit override: " &
-                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState), "diag")
             Return
         End If
 
         If Not HasMemoryGroundingClassifierInputsAvailable(context) Then
             context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
             context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped: no memory tools and no workflow memory available.")
+            context.Log("Memory grounding classifier skipped: no memory tools and no workflow memory available.", "diag")
             Return
         End If
 
@@ -2317,12 +2361,11 @@ Partial Public Class ThisAddIn
         If String.IsNullOrWhiteSpace(classifierInput) Then
             context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
             context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped: no classifier input was available.")
+            context.Log("Memory grounding classifier skipped: no classifier input was available.", "diag")
             Return
         End If
 
-        context.Log("Memory grounding classifier invoked.")
-
+        context.Log("Memory grounding classifier invoked.", "diag")
         Dim raw As String = ""
 
         LogLatestUserRequestDiagnostic(context, "classifier")
@@ -2476,6 +2519,13 @@ Partial Public Class ThisAddIn
         End If
 
         ToolingFileLogger.StartSession()
+
+        ' Per-turn Chat Agent deliverables reset (prevents prior-turn output files
+        ' from being re-presented). Sub-agents inherit parent state and must not
+        ' reset. AutoPilot is single-threaded per Q4.
+        If Not subAgentMode AndAlso _chatAgentActive Then
+            ResetChatAgentDeliverableTrackingForNewTurn()
+        End If
 
         Dim parentToolingContext = _activeToolingContext
         Dim workflowScope As IDisposable = Nothing
@@ -2840,16 +2890,29 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
+            ' Language contract — Mandatory rule that the model must produce final
+            ' user-facing prose in the detected user language regardless of the
+            ' language of guard prompts, host messages, or tool output (P1 fix).
+            Dim languageContractFragment As String =
+                Agents.ToolingOrchestrator.BuildLanguageContractSystemPromptFragment(
+                    If(context.SequencingState IsNot Nothing,
+                       context.SequencingState.UserLanguage,
+                       userLanguage))
+
             Dim enhancedSysPrompt As String =
                 baseSysPrompt & Environment.NewLine & Environment.NewLine &
                 BuildToolInstructionsPromptForSession(context.SelectedTools, subAgentMode)
+
+            If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
+                enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                                    languageContractFragment
+            End If
 
             Dim toolDefinitions = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
             INI_APICall_ToolInstructions_2 = toolDefinitions
             INI_APICall_ToolResponses_2 = ""
 
-            context.Log("Tool definitions prepared for model")
-
+            context.Log("Tool definitions prepared for model", "diag")
             If INI_ToolingDryRun Then
                 Dim preview = $"The following tools will be made available to the model:{Environment.NewLine}{Environment.NewLine}"
                 For Each tool In selectedTools
@@ -3381,7 +3444,7 @@ Partial Public Class ThisAddIn
                             toolResponse.Success)
 
                         context.Log("Memory grounding state updated: " &
-                            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+                            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState), "diag")
 
                         If RegisterToolFailureLoopState(tc, toolResponse, context) Then
                             context.LogWarn(
@@ -3518,7 +3581,7 @@ Partial Public Class ThisAddIn
 
                         If plannedCall.IsBarrier Then
                             If sequencingPlan IsNot Nothing AndAlso sequencingPlan.DeferredCount > 0 Then
-                                context.Log("Sequencing barrier reached; later tool calls from the same model response were deferred.")
+                                context.Log("Sequencing barrier reached; later tool calls from the same model response were deferred.", "diag")
                                 ToolingFileLogger.LogStep(
                                     SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
                                         "Later tool calls were deferred after the sequencing barrier.",
@@ -3527,7 +3590,7 @@ Partial Public Class ThisAddIn
                                         hostName:=context.HostKind) &
                                     " [deferred: " & sequencingPlan.DeferredCount & "]")
                             Else
-                                context.Log("Sequencing barrier reached; the current batch ended at the barrier.")
+                                context.Log("Sequencing barrier reached; the current batch ended at the barrier.", "diag")
                             End If
                             Exit For
                         End If
@@ -3542,8 +3605,7 @@ Partial Public Class ThisAddIn
     context.ToolingModel,
     compactForSubAgent:=subAgentMode)
                     INI_APICall_ToolResponses_2 = toolResponses
-                    context.Log("Tool responses prepared for next iteration")
-
+                    context.Log("Tool responses prepared for next iteration", "diag")
                     If abortDueToToolError Then
                         context.LogWarn("Stopping tooling loop after tool error abort")
                         Exit While
@@ -3627,6 +3689,38 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                             End If
 
+                            ' === Final-turn gate (P3a + P3b) — applies to 'complete' branch.
+                            ' Even 'complete' must not announce future work (contract rule 3).
+                            Dim _ftGateUntried_C As IReadOnlyList(Of String) = CollectUntriedDeliverableFallbackToolNames(context)
+                            Dim _ftGateNeedsDeliverable_C As Boolean =
+                                            context.SequencingState IsNot Nothing AndAlso
+                                            context.SequencingState.RequestRequiresCreatedDeliverable
+                            Dim _ftGateHasDeliverable_C As Boolean =
+                                            context.SequencingState IsNot Nothing AndAlso
+                                            SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+                            Dim _ftGateEval_C As Agents.FinalTurnEvaluation =
+                                            Agents.ToolingOrchestrator.EvaluateFinalTurn(
+                                                currentResponse,
+                                                _ftGateNeedsDeliverable_C,
+                                                _ftGateHasDeliverable_C,
+                                                _ftGateUntried_C)
+
+                            If _ftGateEval_C.Decision <> Agents.FinalTurnDecision.Accept Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = _ftGateEval_C.GuardPrompt
+                                    context.PendingGuardTitle = _ftGateEval_C.GuardTitle
+                                    context.PendingRejectedTurnExplanation = _ftGateEval_C.Reason
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'complete' branch: " & _ftGateEval_C.Reason, "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn(
+                                                "Final-turn repair budget exhausted at 'complete' branch; accepting candidate.",
+                                                details:="reason=" & _ftGateEval_C.Reason)
+                            End If
+
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
@@ -3642,6 +3736,39 @@ Partial Public Class ThisAddIn
 
                                 context.SequencingState.HasOpenToolWorkflow = False
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
+                            End If
+
+                            ' === Final-turn gate (P3a + P3b) — applies to 'blocked' branch.
+                            ' 'blocked' must not pair with prose announcing a fallback (rule 8), and must
+                            ' only be declared after authorized fallback tools have been attempted (rule 9).
+                            Dim _ftGateUntried_B As IReadOnlyList(Of String) = CollectUntriedDeliverableFallbackToolNames(context)
+                            Dim _ftGateNeedsDeliverable_B As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    context.SequencingState.RequestRequiresCreatedDeliverable
+                            Dim _ftGateHasDeliverable_B As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+                            Dim _ftGateEval_B As Agents.FinalTurnEvaluation =
+                                    Agents.ToolingOrchestrator.EvaluateFinalTurn(
+                                        currentResponse,
+                                        _ftGateNeedsDeliverable_B,
+                                        _ftGateHasDeliverable_B,
+                                        _ftGateUntried_B)
+
+                            If _ftGateEval_B.Decision <> Agents.FinalTurnDecision.Accept Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = _ftGateEval_B.GuardPrompt
+                                    context.PendingGuardTitle = _ftGateEval_B.GuardTitle
+                                    context.PendingRejectedTurnExplanation = _ftGateEval_B.Reason
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'blocked' branch: " & _ftGateEval_B.Reason, "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn(
+                                        "Final-turn repair budget exhausted at 'blocked' branch; accepting candidate.",
+                                        details:="reason=" & _ftGateEval_B.Reason)
                             End If
 
                             currentResponse = StripTaskStatus(currentResponse)
@@ -3937,8 +4064,28 @@ Partial Public Class ThisAddIn
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
 
             currentResponse =
-                SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
-                    StripTaskStatus(currentResponse))
+    SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+        StripTaskStatus(currentResponse))
+
+            ' Post-egress localization of BLOCKED finals only (Q3). Sub-agents never localize.
+            If Not subAgentMode AndAlso String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase) Then
+                Dim _userLanguage As String =
+        If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
+                If Agents.ToolingOrchestrator.ShouldPostLocalizeBlockedFinal(currentResponse, _userLanguage) Then
+                    Try
+                        currentResponse = Await LocalizeHostMessageIfNeededAsync(
+                currentResponse,
+                _userLanguage,
+                useSecondAPI,
+                hideSplash,
+                cancellationToken)
+                    Catch ex As Exception
+                        context.LogWarn(
+                "Blocked-final localization failed; returning original prose.",
+                details:=ex.Message)
+                    End Try
+                End If
+            End If
 
             currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
 
@@ -3956,7 +4103,7 @@ Partial Public Class ThisAddIn
                         isBlockedFinal)
 
                 context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
-                context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}")
+                context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
             End If
 
             Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
@@ -4212,13 +4359,55 @@ Partial Public Class ThisAddIn
         End If
     End Sub
 
-    Private Function HasValidTerminalTaskStatus(text As String) As Boolean
-        Select Case ParseTaskStatus(text)
-            Case TaskStatusKind.Complete, TaskStatusKind.Blocked
-                Return True
-            Case Else
-                Return False
-        End Select
+
+
+    ''' <summary>
+    ''' Returns the set of deliverable-capable tool names that are still loaded in
+    ''' <paramref name="ctx"/> and have NOT yet been invoked (successfully or otherwise)
+    ''' in the current run. Used by the deliverable-fallback gate to decide whether
+    ''' 'blocked' is premature.
+    ''' </summary>
+    Private Function CollectUntriedDeliverableFallbackToolNames(ctx As ToolExecutionContext) As IReadOnlyList(Of String)
+        Dim result As New List(Of String)()
+        If ctx Is Nothing OrElse ctx.SelectedTools Is Nothing Then Return result.AsReadOnly()
+
+        ' Tools that can satisfy "create a file / write a document / save output".
+        ' Names are matched case-insensitively and include both Outlook (AutoPilot)
+        ' Advanced Tools and Workspace Tools, plus generic write capabilities.
+        Dim _deliverableCandidates As String() = New String() {
+        "workspace_write",
+        "agent_workspace_write",
+        "create_word_document",
+        "create_pdf",
+        "create_excel_spreadsheet",
+        "create_powerpoint",
+        "create_text_file",
+        "save_text_file",
+        "save_attachment"
+    }
+
+        Dim used As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        If ctx.AllToolResponses IsNot Nothing Then
+            For Each r As ToolResponse In ctx.AllToolResponses
+                If r IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(r.ToolName) Then
+                    used.Add(r.ToolName)
+                End If
+            Next
+        End If
+
+        For Each tool As ModelConfig In ctx.SelectedTools
+            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+            For Each candidate As String In _deliverableCandidates
+                If String.Equals(tool.ToolName, candidate, StringComparison.OrdinalIgnoreCase) Then
+                    If Not used.Contains(tool.ToolName) Then
+                        result.Add(tool.ToolName)
+                    End If
+                    Exit For
+                End If
+            Next
+        Next
+
+        Return result.AsReadOnly()
     End Function
 
 
@@ -4519,10 +4708,9 @@ Partial Public Class ThisAddIn
                              plan As SharedLibrary.Agents.ToolCallSequencing.ToolBatchPlan)
         If context Is Nothing OrElse plan Is Nothing Then Return
 
-        context.Log($"Tool-call batch analysis: total={plan.TotalCallCount}; safeBatch={plan.IsFullyBatchSafe}; executed={plan.ExecutedCount}; deferred={plan.DeferredCount}")
-
+        context.Log($"Tool-call batch analysis: total={plan.TotalCallCount}; safeBatch={plan.IsFullyBatchSafe}; executed={plan.ExecutedCount}; deferred={plan.DeferredCount}", "diag")
         For Each planned In plan.Calls
-            context.Log($"Tool-call classification: index={planned.Index + 1}; tool={planned.ToolName}; class={planned.Classification.ToString().ToLowerInvariant()}; barrier={planned.IsBarrier}; action={If(planned.WillExecute, "execute", "defer")}")
+            context.Log($"Tool-call classification: index={planned.Index + 1}; tool={planned.ToolName}; class={planned.Classification.ToString().ToLowerInvariant()}; barrier={planned.IsBarrier}; action={If(planned.WillExecute, "execute", "defer")}", "diag")
         Next
     End Sub
 
@@ -5537,9 +5725,6 @@ Partial Public Class ThisAddIn
             End Function)
     End Function
 
-    Private Shared ReadOnly _taskStatusRx As New System.Text.RegularExpressions.Regex(
-        "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
-        System.Text.RegularExpressions.RegexOptions.Compiled Or System.Text.RegularExpressions.RegexOptions.Singleline)
 
     Private Enum TaskStatusKind
         Missing
@@ -5549,44 +5734,32 @@ Partial Public Class ThisAddIn
     End Enum
 
     Private Function ParseTaskStatus(text As String) As TaskStatusKind
-        If String.IsNullOrWhiteSpace(text) Then Return TaskStatusKind.Missing
-        Dim m = _taskStatusRx.Match(text)
-        If Not m.Success Then Return TaskStatusKind.Missing
-        Try
-            Dim obj = Newtonsoft.Json.Linq.JObject.Parse(m.Groups(1).Value)
-            Dim s As String = If(obj("status")?.ToString(), "").Trim().ToLowerInvariant()
-            Select Case s
-                Case "complete", "done", "finished" : Return TaskStatusKind.Complete
-                Case "continue", "incomplete", "more", "in_progress" : Return TaskStatusKind.ContinueWork
-                Case "blocked", "failed", "abort", "impossible" : Return TaskStatusKind.Blocked
-                Case Else : Return TaskStatusKind.Missing
-            End Select
-        Catch
-            Return TaskStatusKind.Missing
-        End Try
+        ' Strict JSON parser is centralized in SharedLibrary.Agents.TaskStatusFooterParser.
+        ' We map the shared TaskStatusKind to the local enum to keep all existing call
+        ' sites and Select Case statements in this file working unchanged.
+        Dim parsed As Agents.TaskStatusFooter =
+            Agents.TaskStatusFooterParser.Parse(text)
+
+        Select Case parsed.Kind
+            Case Agents.TaskStatusKind.Complete
+                Return TaskStatusKind.Complete
+            Case Agents.TaskStatusKind.ContinueWork
+                Return TaskStatusKind.ContinueWork
+            Case Agents.TaskStatusKind.Blocked
+                Return TaskStatusKind.Blocked
+            Case Else
+                ' Treat Invalid (malformed JSON, duplicated footer, unknown status value)
+                ' the same as Missing so existing call sites uniformly retry/repair.
+                Return TaskStatusKind.Missing
+        End Select
     End Function
 
     Private Function StripTaskStatus(text As String) As String
-        If String.IsNullOrWhiteSpace(text) Then Return text
-        Return _taskStatusRx.Replace(text, "").TrimEnd()
+        Return Agents.TaskStatusFooterParser.Strip(text)
     End Function
 
-    Private Const TaskStatusFooterInstruction As String =
-        "TASK STATUS FOOTER (MANDATORY CONTRACT, MACHINE-READ): " &
-        "Whenever you produce a final prose response instead of invoking a tool, you MUST append, " &
-        "as the literal last line of that turn, exactly: " &
-        "<TASK_STATUS>{""status"":""<value>"",""reason"":""<short>""}</TASK_STATUS>  " &
-        "Allowed values for <value>: " &
-        "  'complete' = the user's entire request has been FULLY satisfied in THIS turn. " &
-        "  'blocked'  = the task cannot be completed despite reasonable tool attempts. " &
-        "Rules: " &
-        "(1) NEVER include the footer in a turn that contains a tool call. " &
-        "(2) NEVER wrap the footer in code fences or quotes; it must be plain text on its own final line. " &
-        "(3) NEVER claim 'complete' while still announcing future work. " &
-        "(4) During active tooling, final prose MUST end with exactly one valid TASK_STATUS footer whose status is either 'complete' or 'blocked'. " &
-        "(5) If the user's request covers multiple items, you may emit 'complete' only after all required items have actually been processed via tool calls and the full final result is ready. " &
-        "(6) If the task is not yet complete and more tool work is required or possible, emit the next required tool call instead of final prose. " &
-        "(7) If required Memory grounding is active and the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer."
+
+
     Private Function ShouldRetryAfterPrematureTextResponse(context As ToolExecutionContext, lastResponse As String) As Boolean
         If context Is Nothing Then Return False
         If context.PrematureTextRetryCount >= ToolExecutionContext.MaxContinuationRetries Then Return False
@@ -5624,7 +5797,7 @@ Partial Public Class ThisAddIn
         MaxToolIterations = INI_ToolingMaximumIterations
         sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
         sb.AppendLine()
-        sb.AppendLine(TaskStatusFooterInstruction)
+        sb.AppendLine(Agents.ToolingOrchestrator.TaskStatusFooterInstruction)
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
         Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
@@ -7016,7 +7189,7 @@ Partial Public Class ThisAddIn
                     response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
                 End If
 
-                ToolingFileLogger.LogRawResponseStub($"Agent-layer tool ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
                 Dim skillArgs As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
@@ -7046,7 +7219,7 @@ Partial Public Class ThisAddIn
                     response.ErrorMessage = "Skill invocation returned no usable result."
                 End If
 
-                ToolingFileLogger.LogRawResponseStub($"Agent-layer skill ({toolCall.ToolName})", response.Response)
+                ToolingFileLogger.LogSubAgentReturn($"Agent-layer skill ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
             End If
 
@@ -8301,9 +8474,26 @@ __AfterDispatch:
             End If
 
             If String.IsNullOrWhiteSpace(apiCallTemplate) Then
+                ' The tool is advertised but no transport (HTTP/MCP/SSE) is wired for it
+                ' on this host. We return a STRUCTURED error payload (resultKind="error",
+                ' error.code="tool_not_executable") so the orchestrator's deliverable-
+                ' fallback gate can force the model to try a fallback tool instead of
+                ' accepting "blocked" on the first hit.
                 response.Success = False
-                response.ErrorMessage = "Tool has no APICall template defined"
-                ToolingFileLogger.LogError("Tool has no APICall template defined.", details:=$"ToolName='{toolCall.ToolName}'")
+                response.ResultKind = "error"
+                response.ErrorCode = "tool_not_executable"
+                response.ErrorMessage =
+                "The tool '" & If(toolCall.ToolName, "") &
+                "' is advertised but not executable on this host (no transport template). " &
+                "Choose a different tool. If the user authorized a fallback, attempt it before declaring blocked."
+                response.Response = Agents.ToolExecutorRegistry.BuildNotExecutablePayload(
+                toolCall.ToolName,
+                If(context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.HostKind),
+                   context.HostKind,
+                   "Outlook"))
+                ToolingFileLogger.LogError(
+                "Tool advertised but not executable on this host.",
+                details:=$"ToolName='{toolCall.ToolName}'")
                 Return response
             End If
 
@@ -8667,6 +8857,11 @@ __AfterDispatch:
     Public Function LoadToolingServices(iniPath As String, Optional toolsOnly As Boolean = True) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
+        ' Register host-internal tool names in the executor registry (idempotent).
+        ' External (INI) tools are registered below, after they have been confirmed
+        ' to carry an APICall template. Anything not registered cannot be advertised.
+        Agents.HostToolRegistration.RegisterOutlookInternals()
+
         If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
             Return tools
         End If
@@ -8679,13 +8874,25 @@ __AfterDispatch:
 
                 If toolsOnly Then
                     If String.IsNullOrWhiteSpace(mc.ToolInstructionsPrompt) AndAlso
-                       String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
+                    String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
                         Continue For
                     End If
                 End If
 
                 mc.Tool = True
                 tools.Add(mc)
+
+                ' Register transport-backed (external) tools that have an APICall
+                ' template. A tool with no transport is intentionally NOT registered
+                ' here; that prevents it from being advertised and forces the
+                ' deliverable-fallback gate to look elsewhere.
+                Dim apiTemplate As String =
+                 If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
+                If Not String.IsNullOrWhiteSpace(apiTemplate) AndAlso
+                Not String.IsNullOrWhiteSpace(mc.ToolName) Then
+                    Agents.ToolExecutorRegistry.RegisterExternal(
+                     Agents.ToolingHostKind.Outlook, mc.ToolName)
+                End If
             Next
 
         Catch ex As Exception
@@ -9446,19 +9653,7 @@ __AfterDispatch:
     End Function
 
 
-    Private Function BuildToolResponseContentForModel(resp As ToolResponse) As String
-        If resp Is Nothing Then Return ""
 
-        If resp.Success Then
-            Return If(resp.Response, "")
-        End If
-
-        If IsStructuredErrorToolResponse(resp) Then
-            Return If(resp.Response, "")
-        End If
-
-        Return $"Error: {If(resp.ErrorMessage, "Tool failed.")}"
-    End Function
 
 #End Region
 

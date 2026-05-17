@@ -245,7 +245,7 @@ Public Class LogWindow
         Dim displayMessage As String = NormalizeLogMessage(message)
         If displayMessage.Length = 0 Then Return
 
-        Dim timestamp = DateTime.Now.ToString("HH:mm:ss.fff")
+        Dim timestamp = DateTime.Now.ToString("HH:mm:ss")
         Dim textColor As Color = Color.Black
         Select Case (If(level, "info")).ToLowerInvariant()
             Case "error", "err", "fail" : textColor = Color.DarkRed

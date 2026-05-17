@@ -3158,39 +3158,62 @@ Partial Public Class ThisAddIn
     ''' attachment info AND falls back to scanning for new files in tempDir.
     ''' Only files within tempDir are eligible (security: path prefix check).
     ''' </summary>
-    Private Shared Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
+    Private Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
         Dim results As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim tempDirFull = Path.GetFullPath(tempDir)
 
-        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs)
+        ' Files already surfaced in a previous turn (or pre-existing user uploads)
+        ' MUST NOT be returned again. The set is populated by
+        ' ResetChatAgentDeliverableTrackingForNewTurn() at the start of each turn.
+        Dim alreadySurfaced As HashSet(Of String) = _chatAgentSurfacedFiles
+        If alreadySurfaced Is Nothing Then
+            alreadySurfaced = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End If
+
+        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs).
+        '    OutputFiles for the current turn are accumulated as tools run; prior-turn
+        '    entries were cleared by ResetChatAgentDeliverableTrackingForNewTurn().
         If originalAttachments IsNot Nothing Then
             For Each att In originalAttachments
                 If att.OutputFiles IsNot Nothing Then
                     For Each outputPath In att.OutputFiles
                         If Not String.IsNullOrEmpty(outputPath) AndAlso File.Exists(outputPath) Then
-                            ' Security: only include files inside the per-mail temp dir
-                            If Path.GetFullPath(outputPath).StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
-                                results.Add(outputPath)
-                            End If
+                            Dim fullOut As String = Path.GetFullPath(outputPath)
+                            ' Security: only include files inside the per-turn temp dir.
+                            If Not fullOut.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            ' Bleed protection: skip files already surfaced in a previous turn.
+                            If alreadySurfaced.Contains(fullOut) Then Continue For
+                            results.Add(fullOut)
                         End If
                     Next
                 End If
             Next
         End If
 
-        ' 2. Fallback: also scan for any new files in tempDir not in the original set
+        ' 2. Fallback: scan for files in tempDir that are (a) not in the original
+        '    upload set, AND (b) not in the already-surfaced set from prior turns.
         If Directory.Exists(tempDir) Then
             Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             If originalAttachments IsNot Nothing Then
                 For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(att.TempFilePath)
+                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
                 Next
             End If
-            ' Scan all files recursively (tools may create output in subdirectories)
             For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
-                If Not originalPaths.Contains(filePath) Then results.Add(filePath)
+                Dim full As String = Path.GetFullPath(filePath)
+                If originalPaths.Contains(full) Then Continue For
+                If alreadySurfaced.Contains(full) Then Continue For
+                results.Add(full)
             Next
         End If
+
+        ' Promote everything returned this turn into the "already surfaced" set so
+        ' the next turn does not pick it up again — even if the OutputFiles tracking
+        ' on uploads is not perfectly cleared by the next reset.
+        For Each surfaced In results
+            alreadySurfaced.Add(surfaced)
+        Next
+        _chatAgentSurfacedFiles = alreadySurfaced
 
         Return results.ToList()
     End Function

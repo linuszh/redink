@@ -51,6 +51,15 @@ Partial Public Class ThisAddIn
     ''' <summary>Files loaded by the user for the current chat agent session.</summary>
     Private _chatAgentFiles As New List(Of AutoPilotAttachmentInfo)()
 
+    ''' <summary>
+    ''' Snapshot of file paths present in _chatAgentTempDir at the START of the
+    ''' current turn. Files in this set were already surfaced in a previous turn
+    ''' (or are user uploads), so they MUST NOT be presented again. Reset by
+    ''' ResetChatAgentDeliverableTrackingForNewTurn() at the start of every
+    ''' non-sub-agent tooling run while the chat agent is active.
+    ''' </summary>
+    Private _chatAgentSurfacedFiles As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
     ''' <summary>Temp directory used by the current chat agent session.</summary>
     Private _chatAgentTempDir As String = Nothing
 
@@ -551,6 +560,37 @@ Partial Public Class ThisAddIn
 
         Return copiedFiles
     End Function
+
+    ''' <summary>
+    ''' Called at the start of each non-sub-agent tooling run while the chat agent
+    ''' is active. Marks every file currently present in _chatAgentTempDir as
+    ''' "already surfaced", and clears the OutputFiles lists on user-uploaded
+    ''' attachments so prior-turn outputs are not re-presented. Sub-agents inherit
+    ''' parent state and must NOT call this. AutoPilot is single-threaded (Q4).
+    ''' </summary>
+    Friend Sub ResetChatAgentDeliverableTrackingForNewTurn()
+        Try
+            _chatAgentSurfacedFiles = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso Directory.Exists(_chatAgentTempDir) Then
+                For Each filePath In Directory.GetFiles(_chatAgentTempDir, "*.*", IO.SearchOption.AllDirectories)
+                    _chatAgentSurfacedFiles.Add(Path.GetFullPath(filePath))
+                Next
+            End If
+
+            ' OutputFiles accumulated on user uploads from previous turns must not
+            ' surface again. The uploads themselves stay; only their derived outputs
+            ' are forgotten.
+            If _chatAgentFiles IsNot Nothing Then
+                For Each att In _chatAgentFiles
+                    If att.OutputFiles IsNot Nothing Then att.OutputFiles.Clear()
+                Next
+            End If
+        Catch ex As Exception
+            ' Never throw from a per-turn reset. Worst case the user sees a duplicate file once.
+            ToolingFileLogger.LogWarn("ResetChatAgentDeliverableTrackingForNewTurn failed.", ex:=ex)
+        End Try
+    End Sub
 
     ''' <summary>
     ''' Deletes the chat agent temp directory (recursively, including subdirectories)

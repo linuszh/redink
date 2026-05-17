@@ -357,16 +357,19 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Code\Agents\ActionPromiseValidator.vb" />
     <Compile Include="Code\Agents\AgentGate.vb" />
     <Compile Include="Code\Agents\AgentResources.vb" />
     <Compile Include="Code\Agents\AgentResourcesViewerForm.vb">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\HostToolRegistration.vb" />
     <Compile Include="Code\Agents\InkyPromptBuilder.vb" />
     <Compile Include="Code\Agents\ISubAgentHost.vb" />
     <Compile Include="Code\Agents\IWordDocumentHost.vb" />
     <Compile Include="Code\Agents\JsRunTool.vb" />
+    <Compile Include="Code\Agents\LanguageContract.vb" />
     <Compile Include="Code\Agents\MemoryTools.vb" />
     <Compile Include="Code\Agents\PathPolicy.vb" />
     <Compile Include="Code\Agents\SessionMemoryViewerForm.vb">
@@ -380,9 +383,13 @@
     <Compile Include="Code\Agents\SubAgentRuntimeHardening.SelfTests.vb" />
     <Compile Include="Code\Agents\SubAgentRuntimeHardening.vb" />
     <Compile Include="Code\Agents\SubAgentToolScopeInitializer.vb" />
+    <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
     <Compile Include="Code\Agents\TextTools.vb" />
     <Compile Include="Code\Agents\ToolCallSequencing.vb" />
     <Compile Include="Code\Agents\ToolCallSequencingSelfTests.vb" />
+    <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
+    <Compile Include="Code\Agents\ToolingConstants.vb" />
+    <Compile Include="Code\Agents\ToolingOrchestrator.vb" />
     <Compile Include="Code\Agents\ToolLoaderTool.vb" />
     <Compile Include="Code\Agents\ToolRegistry.vb" />
     <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
