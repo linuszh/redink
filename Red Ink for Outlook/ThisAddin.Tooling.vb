@@ -61,7 +61,7 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>User-friendly name for the tooling feature.</summary>
-    Public Const ToolFriendlyName As String = "Agents"
+    Public Const ToolFriendlyName As String = "Sources"
 
     ''' <summary>Auto-close delay for tooling log window.</summary>
     Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
