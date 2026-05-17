@@ -420,7 +420,25 @@ Partial Public Class ThisAddIn
         If modelCanCallTools Then
             _apSelectedTools = New List(Of ModelConfig)()
             _apSelectedTools.AddRange(GetAutoPilotInternalTools())
-            If config.SelectedExternalTools IsNot Nothing Then _apSelectedTools.AddRange(config.SelectedExternalTools)
+
+            If config.SelectedExternalTools IsNot Nothing Then
+                _apSelectedTools.AddRange(
+                    config.SelectedExternalTools.
+                        Where(Function(tool)
+                                  Return tool IsNot Nothing AndAlso
+                                         Not SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
+                              End Function))
+            End If
+
+            _apSelectedTools =
+                _apSelectedTools.
+                    Where(Function(tool)
+                              Return tool IsNot Nothing AndAlso
+                                     Not SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
+                          End Function).
+                    GroupBy(Function(tool) tool.ToolName, StringComparer.OrdinalIgnoreCase).
+                    Select(Function(group) group.First()).
+                    ToList()
         Else
             _apSelectedTools = Nothing
         End If
@@ -1904,7 +1922,11 @@ Partial Public Class ThisAddIn
                             systemPrompt, userPrompt,
                             _apSelectedTools, _apUseSecondApi,
                             hideSplash:=True, hideLogWindow:=True,
-                            cancellationToken:=ct, binaryOutputDirectory:=_apCurrentTempDir)
+                            cancellationToken:=ct,
+                            binaryOutputDirectory:=_apCurrentTempDir,
+                            workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                            memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                            memoryGroundingModeIsExplicit:=True)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -4513,7 +4535,11 @@ Partial Public Class ThisAddIn
                         systemPrompt, userPrompt,
                         _apSelectedTools, _apUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                        cancellationToken:=ct,
+                        binaryOutputDirectory:=tempDir,
+                        workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                        memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                        memoryGroundingModeIsExplicit:=True)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,

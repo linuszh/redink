@@ -257,7 +257,7 @@ Namespace Agents
                     ForceJson:=forceJson,
                     ownerHandle:=Me.Handle)
             Catch ex As Exception
-                MessageBox.Show("Failed to open memory entry: " & ex.Message, "Open", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to open memory entry: " & ex.Message)
             End Try
         End Sub
 

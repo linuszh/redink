@@ -248,7 +248,7 @@ Namespace Agents
             Dim localPath As String = AgentResources.ConfiguredLocalPath
 
             If String.IsNullOrWhiteSpace(localPath) Then
-                MessageBox.Show("No local agent resources path is configured.", "Open Folder", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("No local agent resources path is configured.")
                 Return
             End If
 
@@ -262,7 +262,7 @@ Namespace Agents
                 }
                 Process.Start(psi)
             Catch ex As Exception
-                MessageBox.Show("Failed to open folder: " & ex.Message, "Open Folder", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to open folder: " & ex.Message)
             End Try
         End Sub
 
@@ -275,7 +275,7 @@ Namespace Agents
             If sel Is Nothing Then Return
 
             If String.IsNullOrWhiteSpace(sel.Path) OrElse Not File.Exists(sel.Path) Then
-                MessageBox.Show("File not found: " & If(sel.Path, ""), "View", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("File not found: " & If(sel.Path, ""))
                 Return
             End If
 
@@ -283,7 +283,7 @@ Namespace Agents
                 Dim psi As New ProcessStartInfo(sel.Path) With {.UseShellExecute = True}
                 Process.Start(psi)
             Catch ex As Exception
-                MessageBox.Show("Failed to open file: " & ex.Message, "View", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to open file: " & ex.Message)
             End Try
         End Sub
 

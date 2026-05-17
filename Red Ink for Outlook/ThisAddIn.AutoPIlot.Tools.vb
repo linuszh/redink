@@ -1296,74 +1296,277 @@ Partial Public Class ThisAddIn
             context As ToolExecutionContext,
             Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
 
+        Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
+        Dim response As ToolResponse = Nothing
+
         Select Case toolCall.ToolName
             Case AP_Tool_ProcessWordDoc
-                Return Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_ExtractPdfText
-                Return Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
+                response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
             Case AP_Tool_MergePdfs
-                Return Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReadAttachment
-                Return Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
             Case AP_Tool_ListAttachments
-                Return ExecuteListAttachmentsTool(toolCall, context)
+                response = ExecuteListAttachmentsTool(toolCall, context)
             Case AP_Tool_DescribeBinary
-                Return Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
+                response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
             Case AP_Tool_CommentWordDoc
-                Return Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_CommentPdf
-                Return Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_CompareWordDocs
-                Return Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReadWordDocDetails
-                Return Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreatePdfFromText
-                Return ExecuteCreatePdfFromTextTool(toolCall, context)
+                response = ExecuteCreatePdfFromTextTool(toolCall, context)
             Case AP_Tool_ExtractExcelData
-                Return ExecuteExtractExcelDataTool(toolCall, context)
+                response = ExecuteExtractExcelDataTool(toolCall, context)
             Case AP_Tool_SplitPdf
-                Return ExecuteSplitPdfTool(toolCall, context)
+                response = ExecuteSplitPdfTool(toolCall, context)
             Case AP_Tool_AddPdfWatermark
-                Return ExecuteAddPdfWatermarkTool(toolCall, context)
+                response = ExecuteAddPdfWatermarkTool(toolCall, context)
             Case AP_Tool_WordToPdf
-                Return Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_SearchInAttachments
-                Return Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
             Case AP_Tool_SummarizeThread
-                Return ExecuteSummarizeThreadTool(toolCall, context)
+                response = ExecuteSummarizeThreadTool(toolCall, context)
             Case AP_Tool_PdfToWord
-                Return Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+                response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateWordDoc
-                Return Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateExcel
-                Return Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreatePowerPoint
-                Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateCodeFile
-                Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
             Case AP_Tool_ExtractDataFromAttachments
-                Return Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
             Case AP_Tool_RedactPdf
-                Return Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_OverlayPdf
-                Return Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateAudioFile
-                Return Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
             Case AP_Tool_GenerateImage
-                Return Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+                response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
             Case AP_Tool_WebGrounding
-                Return Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageScheduledTasks
-                Return Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserMemory
-                Return Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserFiles
-                Return Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
-                Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
                 Return Nothing
         End Select
+
+        Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+    End Function
+
+    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)
+        Dim snapshot As New Dictionary(Of String, Long)(StringComparer.OrdinalIgnoreCase)
+
+        If _apCurrentAttachments Is Nothing Then
+            Return snapshot
+        End If
+
+        For Each att In _apCurrentAttachments
+            If att Is Nothing OrElse att.OutputFiles Is Nothing Then Continue For
+
+            For Each outputPath In att.OutputFiles
+                Dim normalized As String = If(outputPath, "").Trim()
+                If normalized = "" Then Continue For
+
+                Dim stamp As Long = Long.MinValue
+
+                Try
+                    If File.Exists(normalized) Then
+                        Dim info As New FileInfo(normalized)
+                        stamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
+                    End If
+                Catch
+                End Try
+
+                snapshot(normalized) = stamp
+            Next
+        Next
+
+        Return snapshot
+    End Function
+
+    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, Long)) As List(Of String)
+        Dim produced As New List(Of String)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If _apCurrentAttachments Is Nothing Then
+            Return produced
+        End If
+
+        For Each att In _apCurrentAttachments
+            If att Is Nothing OrElse att.OutputFiles Is Nothing Then Continue For
+
+            For Each outputPath In att.OutputFiles
+                Dim normalized As String = If(outputPath, "").Trim()
+                If normalized = "" Then Continue For
+                If Not File.Exists(normalized) Then Continue For
+
+                Dim currentStamp As Long = Long.MinValue
+
+                Try
+                    Dim info As New FileInfo(normalized)
+                    currentStamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
+                Catch
+                End Try
+
+                Dim previousStamp As Long = Long.MinValue
+                Dim wasKnown As Boolean =
+                    previousSnapshot IsNot Nothing AndAlso
+                    previousSnapshot.TryGetValue(normalized, previousStamp)
+
+                If Not wasKnown OrElse previousStamp <> currentStamp Then
+                    If seen.Add(normalized) Then
+                        produced.Add(normalized)
+                    End If
+                End If
+            Next
+        Next
+
+        Return produced
+    End Function
+
+    Private Shared Function TryParseToolResultToken(responseText As String) As JToken
+        Dim raw As String = If(responseText, "").Trim()
+        If raw = "" Then
+            Return Nothing
+        End If
+
+        Try
+            Return JToken.Parse(raw)
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Shared Function HasNormalizedToolResultMetadata(responseText As String) As Boolean
+        Dim obj As JObject = TryCast(TryParseToolResultToken(responseText), JObject)
+        If obj Is Nothing Then
+            Return False
+        End If
+
+        Return obj("producesIntermediateData") IsNot Nothing OrElse
+               obj("producesUserDeliverable") IsNot Nothing OrElse
+               obj("outputArtifactRef") IsNot Nothing OrElse
+               obj("outputFilePath") IsNot Nothing OrElse
+               obj("outputFileName") IsNot Nothing OrElse
+               obj("created") IsNot Nothing OrElse
+               obj("saved") IsNot Nothing OrElse
+               obj("exported") IsNot Nothing
+    End Function
+
+    Private Function BuildNormalizedAutoPilotToolResult(toolName As String,
+                                                        summary As String,
+                                                        producesIntermediateData As Boolean,
+                                                        producesUserDeliverable As Boolean,
+                                                        outputFiles As IList(Of String),
+                                                        sourcePayload As JToken) As String
+        Dim normalizedSummary As String = If(summary, "").Trim()
+
+        If normalizedSummary = "" Then
+            normalizedSummary =
+                If(producesUserDeliverable,
+                   "User-facing deliverable created.",
+                   "Structured tool result available.")
+        End If
+
+        Dim obj As New JObject(
+            New JProperty("toolName", If(toolName, "")),
+            New JProperty("summary", normalizedSummary),
+            New JProperty("producesIntermediateData", producesIntermediateData),
+            New JProperty("producesUserDeliverable", producesUserDeliverable))
+
+        If producesUserDeliverable Then
+            obj("created") = True
+        End If
+
+        If outputFiles IsNot Nothing AndAlso outputFiles.Count > 0 Then
+            Dim outputNames As New JArray()
+
+            For Each outputPath In outputFiles
+                Dim outputName As String = Path.GetFileName(If(outputPath, ""))
+                If outputName = "" Then Continue For
+                outputNames.Add(outputName)
+            Next
+
+            If outputNames.Count > 0 Then
+                Dim firstOutputName As String = outputNames(0).ToString()
+                obj("outputFileName") = firstOutputName
+                obj("outputFilePath") = firstOutputName
+                obj("outputArtifactRef") = firstOutputName
+                obj("outputFiles") = outputNames
+            End If
+        End If
+
+        If sourcePayload IsNot Nothing Then
+            obj("result") = sourcePayload
+        End If
+
+        Return obj.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+    Private Function NormalizeAutoPilotToolResponse(toolCall As ToolCall,
+                                                    toolResponse As ToolResponse,
+                                                    outputSnapshot As IDictionary(Of String, Long)) As ToolResponse
+        If toolResponse Is Nothing OrElse Not toolResponse.Success Then
+            Return toolResponse
+        End If
+
+        Dim parsedToken As JToken = TryParseToolResultToken(toolResponse.Response)
+
+        If HasNormalizedToolResultMetadata(toolResponse.Response) Then
+            If String.IsNullOrWhiteSpace(toolResponse.ResultKind) Then
+                toolResponse.ResultKind =
+                    If(TypeOf parsedToken Is JArray, "json_array", "json_object")
+            End If
+
+            Return toolResponse
+        End If
+
+        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
+
+        If producedOutputs.Count > 0 Then
+            toolResponse.Response =
+                BuildNormalizedAutoPilotToolResult(
+                    If(toolCall?.ToolName, toolResponse.ToolName),
+                    toolResponse.Response,
+                    producesIntermediateData:=False,
+                    producesUserDeliverable:=True,
+                    outputFiles:=producedOutputs,
+                    sourcePayload:=If(TypeOf parsedToken Is JObject OrElse TypeOf parsedToken Is JArray, parsedToken, Nothing))
+            toolResponse.ResultKind = "json_object"
+            Return toolResponse
+        End If
+
+        If TypeOf parsedToken Is JObject OrElse TypeOf parsedToken Is JArray Then
+            toolResponse.Response =
+                BuildNormalizedAutoPilotToolResult(
+                    If(toolCall?.ToolName, toolResponse.ToolName),
+                    "Structured tool result available.",
+                    producesIntermediateData:=True,
+                    producesUserDeliverable:=False,
+                    outputFiles:=Nothing,
+                    sourcePayload:=parsedToken)
+            toolResponse.ResultKind = "json_object"
+        End If
+
+        Return toolResponse
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════

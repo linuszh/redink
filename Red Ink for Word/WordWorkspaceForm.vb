@@ -308,13 +308,13 @@ Public Class WordWorkspaceForm
         Dim root As String = If(txtRoot.Text, "").Trim()
 
         If String.IsNullOrWhiteSpace(root) Then
-            MessageBox.Show("Please specify a folder, or press Clear to unset the workspace.", "Workspace", MessageBoxButtons.OK, MessageBoxIcon.Information)
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Please specify a folder, or press Clear to unset the workspace.")
             Me.DialogResult = DialogResult.None
             Return
         End If
 
         If Not Directory.Exists(root) Then
-            MessageBox.Show("Folder does not exist: " & root, "Workspace", MessageBoxButtons.OK, MessageBoxIcon.Warning)
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Folder does not exist: " & root)
             Me.DialogResult = DialogResult.None
             Return
         End If
