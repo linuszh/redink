@@ -91,7 +91,7 @@ Public Class frmAIChat
     ''' <summary>Button: send prompt to LLM.</summary>
     Private WithEvents btnSend As New System.Windows.Forms.Button() With {.Text = "Send", .AutoSize = True}
     ''' <summary>Button: toggle between two configured models.</summary>
-    Private WithEvents btnSwitchModel As New System.Windows.Forms.Button() With {.Text = "Switch Model", .AutoSize = True}
+    Private WithEvents btnSwitchModel As New System.Windows.Forms.Button() With {.Text = "Secondary Model", .AutoSize = True}
     ''' <summary>Checkbox: include entire worksheet UsedRange.</summary>
     Private WithEvents chkIncludeDocText As New System.Windows.Forms.CheckBox() With {.Text = "Include worksheet", .AutoSize = True, .Checked = My.Settings.IncludeDocument}
     ''' <summary>Checkbox: include only current selection (if not including entire sheet).</summary>
@@ -341,6 +341,7 @@ Public Class frmAIChat
         Try : chkPersistContext.Checked = My.Settings.ChatPersistContext : Catch : chkPersistContext.Checked = False : End Try
         _isUpdatingPersistContextCheckbox = False
         UpdatePersistContextTooltip()
+        UpdateSwitchModelButtonText()
 
         If Not chkPersistContext.Checked Then
             DeletePersistedContextFile(False)
@@ -380,6 +381,10 @@ Public Class frmAIChat
             End If
         Catch
         End Try
+    End Sub
+
+    Private Sub UpdateSwitchModelButtonText()
+        btnSwitchModel.Text = If(_useSecondApi, "Primary Model", "Secondary Model")
     End Sub
 
     ''' <summary>
@@ -765,6 +770,7 @@ Public Class frmAIChat
     Private Sub btnSwitchModel_Click(sender As Object, e As EventArgs)
         _useSecondApi = Not _useSecondApi
         Me.Text = $"Chat (using " & If(_useSecondApi, _context.INI_Model_2, _context.INI_Model) & ")"
+        UpdateSwitchModelButtonText()
     End Sub
 
     ''' <summary>

@@ -64,6 +64,9 @@ Partial Public Class ThisAddIn
     Private Const InkyApiRoute As String = "/inky/api"     ' POST (JSON) → commands
     Private Const InkyName As String = "Inky"              ' Fallback; AN6 preferred
 
+    Private Const AllToolUse As String = "Also use tools"
+    Private Const AllToolUseDescription As String = "Enable also document processing and other tools"
+
     Private activeChatId As Integer = 1   ' 1 or 2 – in‑memory only (not persisted)
 
     Private ReadOnly OriginalSecondaryModelName As String = INI_Model_2
@@ -1270,12 +1273,12 @@ Partial Public Class ThisAddIn
 
         html.AppendLine("    <div id=""toolingSlot"" class=""toolingSlot"">")
         html.AppendLine("      <div class=""toolingRow"">")
-        html.AppendLine("        <input type=""checkbox"" id=""toolingChk"" title=""Enable " & System.Net.WebUtility.HtmlEncode(ToolFriendlyName.ToLower()) & """>")
+        html.AppendLine("        <input type=""checkbox"" id=""toolingChk"" title=""Enable the selected " & System.Net.WebUtility.HtmlEncode(ToolFriendlyName.ToLower()) & """>")
         html.AppendLine("        <label for=""toolingChk"" id=""toolingLbl"">Use " & System.Net.WebUtility.HtmlEncode(ToolFriendlyName.ToLower()) & "</label>")
         html.AppendLine("      </div>")
         html.AppendLine("      <div class=""toolingRow"">")
-        html.AppendLine("        <input type=""checkbox"" id=""agentChk"" title=""Enable agent mode with document tools"">")
-        html.AppendLine("        <label for=""agentChk"" id=""agentLbl"">Use all tools</label>")
+        html.AppendLine("        <input type=""checkbox"" id=""agentChk"" title=""" & System.Net.WebUtility.HtmlEncode(AllToolUseDescription) & """>")
+        html.AppendLine("        <label for=""agentChk"" id=""agentLbl"">" & System.Net.WebUtility.HtmlEncode(AllToolUse) & "</label>")
         html.AppendLine("      </div>")
         html.AppendLine("    </div>")
         html.AppendLine("    <button id=""toolLogBtn"" title=""Toggle tooling log window"" style=""display:none;line-height:1;align-items:center;justify-content:center;padding:.45rem .5rem;""><svg viewBox=""0 0 24 24"" width=""16"" height=""16"" fill=""none"" stroke=""currentColor"" stroke-width=""2"" stroke-linecap=""round"" stroke-linejoin=""round""><path d=""M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z""/><polyline points=""14 2 14 8 20 8""/><line x1=""16"" y1=""13"" x2=""8"" y2=""13""/><line x1=""16"" y1=""17"" x2=""8"" y2=""17""/><polyline points=""10 9 9 9 8 9""/></svg></button>")

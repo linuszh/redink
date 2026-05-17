@@ -60,6 +60,15 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 ''' </summary>
 Partial Public Class ThisAddIn
 
+    ''' <summary>User-friendly name for the tooling feature.</summary>
+    Public Const ToolFriendlyName As String = "Sources"
+
+    ''' <summary>Auto-close delay for tooling log window.</summary>
+    Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
+
+    ''' <summary>Selected tool names for persistence.</summary>
+    Public Shared Property SelectedToolNames As List(Of String) = New List(Of String)()
+
     ''' <summary>
     ''' Enables the WebView2-based implementation for internal web content retrieval.
     ''' </summary>
@@ -567,14 +576,7 @@ Partial Public Class ThisAddIn
 
 #End Region
 
-    ''' <summary>User-friendly name for the tooling feature.</summary>
-    Public Const ToolFriendlyName As String = "Sources"
 
-    ''' <summary>Auto-close delay for tooling log window.</summary>
-    Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
-
-    ''' <summary>Selected tool names for persistence.</summary>
-    Public Shared Property SelectedToolNames As List(Of String) = New List(Of String)()
 
 
 #Region "Tooling File Logger (Reduced, Single File)"
@@ -4510,7 +4512,7 @@ Partial Public Class ThisAddIn
         $"{AN} - Select {FriendlyName}",
         resetChecked:=False,
         preselectMany:=If(SelectedToolNames, New List(Of String)()),
-        "Select the sources you want to make available to the model:")
+        $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
 
         If selector.ShowDialog() = DialogResult.OK Then
             Dim selected = selector.SelectedModels

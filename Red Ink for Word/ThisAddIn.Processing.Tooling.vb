@@ -3330,7 +3330,7 @@ Partial Public Class ThisAddIn
         $"{AN} - Select {FriendlyName}",
         resetChecked:=False,
         preselectMany:=If(SelectedToolNames, New List(Of String)()),
-        "Select the sources you want to make available to the model:")
+        $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
 
         If selector.ShowDialog() = DialogResult.OK Then
             Dim selected = selector.SelectedModels
