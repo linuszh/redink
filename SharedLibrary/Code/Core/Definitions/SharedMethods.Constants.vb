@@ -404,7 +404,7 @@ Namespace SharedLibrary
 
         ' Tooling Defaults
 
-        Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = 30
+        Public Const DEFAULT_TOOLING_MAXIMUMITERATIONS As Integer = 50
         Public Const DEFAULT_BOOL_TOOLINGLOGWINDOW As Boolean = True
 
         ' Tooling Constants

@@ -1,31 +1,10 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-'
-' =============================================================================
-' File: SharedLibrary/Code/Agents/HostToolRegistration.vb
-' Purpose: Idempotent per-host registration of internal tool names into
-'          Agents.ToolExecutorRegistry. Called from LoadToolingServices on each
-'          host. External (INI / MCP / HTTP) tools are registered by the hosts
-'          themselves inside LoadToolingServices once they have been confirmed
-'          to carry an APICall template.
-'
-' Design notes:
-'   - Per-host. Outlook gets AutoPilot's "Advanced Tools" registered as Internal;
-'     Word does NOT — they are not implemented there.
-'   - Workspace tools and the shared Word file-edit tools are registered on both
-'     hosts because their implementations live in SharedLibrary.
-'   - This module deliberately uses hardcoded name literals (rather than reflecting
-'     into each host) so the registry is deterministic and reviewable. If a host
-'     adds a new internal tool, add its literal name here in the appropriate list.
-' =============================================================================
-
-Option Explicit On
+﻿Option Explicit On
 Option Strict On
 
 Namespace Agents
 
     Public Module HostToolRegistration
 
-        ' --- Outlook AutoPilot "Advanced Tools" (host-internal, Outlook only) -----
         Private ReadOnly OutlookAutoPilotToolNames As String() = New String() {
             "process_word_document",
             "comment_word_document",
@@ -61,38 +40,6 @@ Namespace Agents
             "report_inability"
         }
 
-        ' --- Built-in internal tools (host implementations) -----------------------
-        Private ReadOnly OutlookBuiltInInternalToolNames As String() = New String() {
-            "retrieve_web_content",
-            "download_web_files",
-            "internet_search",
-            "knowledge_search"
-        }
-
-        Private ReadOnly WordBuiltInInternalToolNames As String() = New String() {
-            "retrieve_web_content",
-            "internet_search",
-            "knowledge_search"
-        }
-
-        ' --- Workspace tools (shared; available on both hosts) --------------------
-        ' These mirror the static set used by SharedLibrary.Agents.WorkspaceTools.
-        ' If a new workspace tool is added there, add its literal here too.
-        Private ReadOnly WorkspaceToolNames As String() = New String() {
-            "workspace_list",
-            "workspace_read",
-            "workspace_read_many",
-            "workspace_write",
-            "workspace_delete",
-            "workspace_move",
-            "workspace_extract_text",
-            "workspace_extract_text_many",
-            "agent_workspace_read",
-            "agent_workspace_write",
-            "agent_workspace_list"
-        }
-
-        ' --- Word file-edit (Word host only) --------------------------------------
         Private ReadOnly WordHostInternalToolNames As String() = New String() {
             "word_doc_read",
             "word_doc_edit",
@@ -100,46 +47,171 @@ Namespace Agents
             "word_doc_export_pdf"
         }
 
+        Private ReadOnly OutlookDeliverableToolNames As String() = New String() {
+            "download_web_files",
+            WorkspaceTools.ToolWrite,
+            TextTools.ToolWrite,
+            "merge_pdfs",
+            "create_pdf_from_text",
+            "split_pdf",
+            "add_pdf_watermark",
+            "word_to_pdf",
+            "pdf_to_word",
+            "create_word_document",
+            "create_excel_spreadsheet",
+            "create_powerpoint",
+            "create_code_file",
+            "redact_pdf",
+            "overlay_pdf",
+            "create_audio_file",
+            "generate_image"
+        }
+
+        Private ReadOnly WordDeliverableToolNames As String() = New String() {
+            "download_web_files",
+            WorkspaceTools.ToolWrite,
+            TextTools.ToolWrite,
+            WordTools.ToolWrite,
+            WordTools.ToolMarkup,
+            WordTools.ToolApplyTemplate,
+            WordTools.ToolSaveAs,
+            "word_doc_create",
+            "word_doc_edit",
+            "word_doc_export_pdf"
+        }
+
+        Private Iterator Function EnumerateCommonInternalToolNames() As IEnumerable(Of String)
+            Yield "retrieve_web_content"
+            Yield "download_web_files"
+            Yield "internet_search"
+            Yield "knowledge_search"
+            Yield ToolLoaderTool.LoaderToolName
+
+            Yield MemoryTools.ToolPut
+            Yield MemoryTools.ToolGet
+            Yield MemoryTools.ToolList
+            Yield MemoryTools.ToolDelete
+
+            Yield TextTools.ToolRead
+            Yield TextTools.ToolWrite
+            Yield TextTools.ToolSearch
+
+            Yield WorkspaceTools.ToolGet
+            Yield WorkspaceTools.ToolInventory
+            Yield WorkspaceTools.ToolRead
+            Yield WorkspaceTools.ToolReadMany
+            Yield WorkspaceTools.ToolWrite
+            Yield WorkspaceTools.ToolSearch
+            Yield WorkspaceTools.ToolCopy
+            Yield WorkspaceTools.ToolMove
+            Yield WorkspaceTools.ToolRename
+            Yield WorkspaceTools.ToolDelete
+            Yield WorkspaceTools.ToolMakeDir
+            Yield WorkspaceTools.ToolExtractText
+            Yield WorkspaceTools.ToolExtractTextMany
+
+            Yield JsRunTool.ToolName
+            Yield SkillInvokeTool.ToolName
+
+            Yield SharedLibrary.M365ToolService.SearchToolName
+            Yield SharedLibrary.M365ToolService.GetMailToolName
+            Yield SharedLibrary.M365ToolService.GetMailThreadToolName
+            Yield SharedLibrary.M365ToolService.GetFileToolName
+            Yield SharedLibrary.M365ToolService.GetEventToolName
+            Yield SharedLibrary.M365ToolService.GetChatThreadToolName
+            Yield SharedLibrary.M365ToolService.GetOneNotePageToolName
+        End Function
+
+        Private Iterator Function EnumerateWordSharedToolNames() As IEnumerable(Of String)
+            For Each name In EnumerateCommonInternalToolNames()
+                Yield name
+            Next
+
+            Yield WordTools.ToolExtract
+            Yield WordTools.ToolSearch
+            Yield WordTools.ToolWrite
+            Yield WordTools.ToolMarkup
+            Yield WordTools.ToolCommentAdd
+            Yield WordTools.ToolCommentList
+            Yield WordTools.ToolCommentRemove
+            Yield WordTools.ToolFormat
+            Yield WordTools.ToolApplyTemplate
+            Yield WordTools.ToolSaveAs
+
+            Yield WordDocTools.ToolListOpen
+            Yield WordDocTools.ToolGetActive
+            Yield WordDocTools.ToolExtract
+            Yield WordDocTools.ToolSearch
+            Yield WordDocTools.ToolListComments
+            Yield WordDocTools.ToolInsert
+            Yield WordDocTools.ToolReplace
+            Yield WordDocTools.ToolCommentAdd
+            Yield WordDocTools.ToolFormat
+        End Function
+
+        Private Sub RegisterSet(host As ToolingHostKind, names As IEnumerable(Of String))
+            If names Is Nothing Then Return
+
+            Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            For Each rawName As String In names
+                Dim name As String = If(rawName, "").Trim()
+                If name = "" Then Continue For
+
+                If seen.Add(name) Then
+                    ToolExecutorRegistry.RegisterInternal(host, name)
+                End If
+            Next
+        End Sub
+
         Public Sub RegisterAll(host As ToolingHostKind)
             Select Case host
                 Case ToolingHostKind.Outlook
                     RegisterOutlookInternals()
                 Case ToolingHostKind.Word
                     RegisterWordInternals()
-                Case Else
-                    ' No-op for unknown hosts.
             End Select
         End Sub
 
-        ''' <summary>Registers Outlook's host-internal tools. Idempotent.</summary>
         Public Sub RegisterOutlookInternals()
             Dim host As ToolingHostKind = ToolingHostKind.Outlook
             ToolExecutorRegistry.Reset(host)
-            For Each name As String In OutlookAutoPilotToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
-            Next
-            For Each name As String In OutlookBuiltInInternalToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
-            Next
-            For Each name As String In WorkspaceToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
-            Next
+            RegisterSet(host, EnumerateCommonInternalToolNames())
+            RegisterSet(host, OutlookAutoPilotToolNames)
         End Sub
 
-        ''' <summary>Registers Word's host-internal tools. Idempotent.</summary>
         Public Sub RegisterWordInternals()
             Dim host As ToolingHostKind = ToolingHostKind.Word
             ToolExecutorRegistry.Reset(host)
-            For Each name As String In WordBuiltInInternalToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
-            Next
-            For Each name As String In WorkspaceToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
-            Next
-            For Each name As String In WordHostInternalToolNames
-                ToolExecutorRegistry.RegisterInternal(host, name)
+            RegisterSet(host, EnumerateWordSharedToolNames())
+            RegisterSet(host, WordHostInternalToolNames)
+        End Sub
+
+        Public Sub RegisterResolvedInternalTools(host As ToolingHostKind, tools As IEnumerable(Of SharedLibrary.ModelConfig))
+            If tools Is Nothing Then Return
+
+            For Each tool As SharedLibrary.ModelConfig In tools
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                ToolExecutorRegistry.RegisterInternal(host, tool.ToolName.Trim())
             Next
         End Sub
+
+        Public Function GetDeliverableCapableToolNames(host As ToolingHostKind) As IReadOnlyCollection(Of String)
+            Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+            Select Case host
+                Case ToolingHostKind.Word
+                    For Each name As String In WordDeliverableToolNames
+                        result.Add(name)
+                    Next
+                Case ToolingHostKind.Outlook
+                    For Each name As String In OutlookDeliverableToolNames
+                        result.Add(name)
+                    Next
+            End Select
+
+            Return result.ToList().AsReadOnly()
+        End Function
 
     End Module
 

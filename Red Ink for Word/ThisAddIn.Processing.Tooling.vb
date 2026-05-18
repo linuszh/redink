@@ -57,457 +57,15 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 ''' </summary>
 Partial Public Class ThisAddIn
 
-    Const UseWebView2 = True
 
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
-    Private Const MaxDownloadedWebFileBytes As Long = 50L * 1024L * 1024L
 
     Private Const SubAgentLargeToolResponseThresholdChars As Integer = 30000
     Private Const SubAgentLargeToolResponseExcerptChars As Integer = 8000
 
     Private Const InternalKnowledgeToolNamePrefix As String = "knowledge_search_store_"
 
-#Region "Tooling File Logger (Reduced, Single File)"
-
-    ''' <summary>
-    ''' Reduced file-based logger for tooling operations.
-    ''' - Single file per run (overwrites).
-    ''' - Writes: LogWindow steps, warnings, errors, and pre-LLM call snapshots.
-    ''' - Writes full raw LLM/tool responses with two empty lines before and after.
-    ''' </summary>
-    Public Class ToolingFileLogger
-
-        ''' <summary>Absolute filesystem path to the current tooling log file (if enabled).</summary>
-        Private Shared _logPath As String = Nothing
-
-        ''' <summary>Whether file logging is enabled (controlled by <c>INI_APIDebug</c> in <see cref="StartSession"/>).</summary>
-        Private Shared _isEnabled As Boolean = False
-
-        ''' <summary>Whether the session header has already been written in this run.</summary>
-        Private Shared _started As Boolean = False
-
-        ''' <summary>Synchronizes file writes to avoid interleaving.</summary>
-        Private Shared ReadOnly _lock As New Object()
-
-        ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
-        Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
-
-        Private Shared _sessionDepth As Integer = 0
-
-        ''' <summary>
-        ''' Starts a tooling log session and writes the log header.
-        ''' Logging is enabled only when <c>INI_APIDebug</c> is <c>True</c>.
-        ''' </summary>
-        ''' <summary>Nested tooling-session depth. Prevents sub-agent runs from tearing down the parent log session.</summary>
-
-        Public Shared Sub StartSession()
-            SyncLock _lock
-                Dim shouldEnable As Boolean = INI_APIDebug
-                If Not shouldEnable Then Return
-
-                _isEnabled = True
-                _sessionDepth += 1
-
-                If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then
-                    WriteLine("STEP", $"Nested tooling session started (depth={_sessionDepth})")
-                    Return
-                End If
-
-                Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-                _logPath = Path.Combine(desktopPath, StableLogFileName)
-
-                Try
-                    WriteHeader()
-                    _started = True
-                Catch ex As Exception
-                    _isEnabled = False
-                    _started = False
-                    _logPath = Nothing
-                    _sessionDepth = 0
-                End Try
-            End SyncLock
-        End Sub
-
-
-        ''' <summary>
-        ''' Writes the session header and overwrites any previous log file with the same name.
-        ''' </summary>
-        Private Shared Sub WriteHeader()
-            Dim header As New StringBuilder()
-            header.AppendLine("=" & New String("="c, 78))
-            header.AppendLine($"{AN} - Tooling Log")
-            header.AppendLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
-            header.AppendLine($"Version: {Version}")
-            header.AppendLine($"File: {StableLogFileName} (overwritten each run)")
-            header.AppendLine("=" & New String("="c, 78))
-            header.AppendLine()
-
-            File.WriteAllText(_logPath, header.ToString())
-        End Sub
-
-        ''' <summary>
-        ''' Logs a step message to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Message text.</param>
-        Public Shared Sub LogStep(message As String)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-            WriteLine("STEP", message)
-        End Sub
-
-        ''' <summary>
-        ''' Logs a warning message and optional details/exception to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Primary message text.</param>
-        ''' <param name="details">Optional detail text written as a separate log line.</param>
-        ''' <param name="ex">Optional exception whose type/message/stack is written.</param>
-        Public Shared Sub LogWarn(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-            WriteLine("WARN", message)
-            If Not String.IsNullOrWhiteSpace(details) Then
-                WriteLine("WARN", $"Details: {details}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("WARN", ex)
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs an error message and optional details/exception to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Primary message text.</param>
-        ''' <param name="details">Optional detail text written as a separate log line.</param>
-        ''' <param name="ex">Optional exception whose type/message/stack is written.</param>
-        Public Shared Sub LogError(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            WriteLine("ERR", message)
-            If Not String.IsNullOrWhiteSpace(details) Then
-                WriteLine("ERR", $"Details: {details}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("ERR", ex)
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Writes exception details to the log under the specified category.
-        ''' </summary>
-        ''' <param name="category">Log category identifier (e.g., WARN/ERR/END).</param>
-        ''' <param name="ex">Exception instance to serialize.</param>
-        Private Shared Sub WriteException(category As String, ex As Exception)
-            If ex Is Nothing Then Return
-            WriteLine(category, $"Exception Type: {ex.GetType().FullName}")
-            WriteLine(category, $"Exception Message: {ex.Message}")
-            If Not String.IsNullOrWhiteSpace(ex.StackTrace) Then
-                WriteLine(category, "Stack Trace:")
-                WriteRaw(category, ex.StackTrace)
-            End If
-            If ex.InnerException IsNot Nothing Then
-                WriteLine(category, $"Inner Exception Type: {ex.InnerException.GetType().FullName}")
-                WriteLine(category, $"Inner Exception Message: {ex.InnerException.Message}")
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs every public instance property of <see cref="ModelConfig"/> (unmodified) for diagnostics,
-        ''' skipping a fixed list of sensitive/high-volume properties.
-        ''' </summary>
-        ''' <param name="config">Configuration instance to log.</param>
-        ''' <param name="label">Label written before the config dump.</param>
-        Public Shared Sub LogModelConfigOnce(config As ModelConfig, label As String)
-            If Not _isEnabled OrElse config Is Nothing Then Return
-
-            WriteLine("CONF", $"{label}:")
-
-            Try
-                Dim excludedExact As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                    "APIEncrypted",
-                    "APIKey",
-                    "APIKeyBack",
-                    "APIKeyPrefix",
-                    "DecodedAPI",
-                    "TokenCount",
-                    "MaxOutputToken",
-                    "MergePrompt",
-                    "QueryPrompt",
-                    "TokenExpiry"
-                }
-
-                Dim excludedPrefixes As String() = {
-                    "OAuth2",
-                    "Parameter"
-                }
-
-                Dim props = GetType(ModelConfig).GetProperties(BindingFlags.Instance Or BindingFlags.Public).
-                    Where(Function(p)
-                              If excludedExact.Contains(p.Name) Then Return False
-                              For Each prefix In excludedPrefixes
-                                  If p.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then Return False
-                              Next
-                              Return True
-                          End Function).
-                    OrderBy(Function(p) p.Name).
-                    ToList()
-
-                For Each p In props
-                    Dim v As Object = Nothing
-                    Try
-                        v = p.GetValue(config, Nothing)
-                    Catch ex As Exception
-                        WriteLine("CONF", $"  {p.Name}: <error reading>")
-                        WriteLine("CONF", $"    {ex.GetType().Name}: {ex.Message}")
-                        Continue For
-                    End Try
-
-                    Dim textValue As String
-                    If v Is Nothing Then
-                        textValue = ""
-                    ElseIf TypeOf v Is DateTime Then
-                        textValue = DirectCast(v, DateTime).ToString("yyyy-MM-dd HH:mm:ss.fff")
-                    Else
-                        textValue = v.ToString()
-                    End If
-
-                    WriteLine("CONF", $"  {p.Name}: {textValue}")
-                Next
-            Catch ex As Exception
-                LogError("Failed to log ModelConfig.", ex:=ex)
-            End Try
-        End Sub
-
-
-        ''' <summary>
-        ''' Logs a snapshot of selected variables prior to calling an external tool/service via <c>LLM</c>.
-        ''' </summary>
-        ''' <param name="ctx">Object expected to expose <c>INI_Model_2</c> and <c>INI_APICall_2</c> members.</param>
-        Public Shared Sub LogPreToolLlmCallSnapshot(ctx As Object)
-            If Not _isEnabled Then Return
-
-            WriteLine("LLM", "Pre LLM() snapshot (tool/service call):")
-            Try
-                WriteLine("LLM", $"  INI_Model_2: {SafeGetMemberString(ctx, "INI_Model_2")}")
-                WriteLine("LLM", $"  INI_APICall_2: {SafeGetMemberString(ctx, "INI_APICall_2")}")
-            Catch ex As Exception
-                LogError("Failed to capture tool LLM snapshot.", ex:=ex)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
-        ''' Tool instructions and tool responses are logged as length stubs only (full content is already
-        ''' recorded via <see cref="LogModelConfigOnce"/>).
-        ''' </summary>
-        Public Shared Sub LogPreMainLlmCallSnapshot()
-            If Not _isEnabled Then Return
-            WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
-            WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
-            WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
-
-            Dim toolInstr = SafeStr(INI_APICall_ToolInstructions_2)
-            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: ({toolInstr.Length} chars)")
-
-            Dim toolResp = SafeStr(INI_APICall_ToolResponses_2)
-            If toolResp.Length <= 500 Then
-                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {toolResp}")
-            Else
-                Dim excerpt = toolResp.Substring(0, 500) & "..."
-                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: ({toolResp.Length} chars) {excerpt}")
-            End If
-
-            WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
-        End Sub
-
-        ''' <summary>
-        ''' Logs raw response content (unmodified) with two blank lines before and after.
-        ''' </summary>
-        ''' <param name="source">Source label (e.g. "Main LLM()" or tool name).</param>
-        ''' <param name="rawResponse">Raw response text.</param>
-        Public Shared Sub LogRawResponse(source As String, rawResponse As String)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            WriteLine("RESP", $"Raw response ({source}) begins:")
-            WriteRaw("RESP", vbCrLf & vbCrLf & SafeStr(rawResponse) & vbCrLf & vbCrLf)
-            WriteLine("RESP", $"Raw response ({source}) ends.")
-        End Sub
-
-        ''' <summary>
-        ''' Logs a brief stub of a raw response (length + short excerpt) without the full content.
-        ''' Used for LLM and tool responses to keep the log file focused on diagnostics.
-        ''' </summary>
-        ''' <param name="source">Source label (e.g. "Main LLM()").</param>
-        ''' <param name="rawResponse">Raw response text.</param>
-        ''' <param name="excerptLength">Maximum number of characters to include in the excerpt.</param>
-        Public Shared Sub LogRawResponseStub(source As String, rawResponse As String, Optional excerptLength As Integer = 200)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            Dim safe As String = SafeStr(rawResponse)
-            Dim charCount As Integer = safe.Length
-            Dim excerpt As String = If(charCount <= excerptLength,
-                safe,
-                safe.Substring(0, excerptLength) & "...")
-
-            WriteLine("RESP", $"Raw response ({source}): {charCount} chars")
-            If charCount > 0 Then
-                WriteLine("RESP", $"Excerpt: {excerpt}")
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Ends a tooling log session and writes summary/exception details (if provided).
-        ''' </summary>
-        ''' <param name="success">Whether the session completed successfully.</param>
-        ''' <param name="summary">Optional summary string written to the log.</param>
-        ''' <param name="ex">Optional exception written to the log.</param>
-        Public Shared Sub EndSession(Optional success As Boolean = True, Optional summary As String = "", Optional ex As Exception = Nothing)
-            SyncLock _lock
-                If _sessionDepth > 0 Then
-                    _sessionDepth -= 1
-                End If
-
-                If Not _isEnabled Then Return
-
-                If _sessionDepth > 0 Then
-                    WriteLine("END", $"Nested tooling session finished; remaining depth={_sessionDepth}")
-                    If Not String.IsNullOrWhiteSpace(summary) Then
-                        WriteLine("END", $"Nested summary: {summary}")
-                    End If
-                    If ex IsNot Nothing Then
-                        WriteException("END", ex)
-                    End If
-                    Return
-                End If
-
-                WriteLine("END", $"Success: {success}")
-                If Not String.IsNullOrWhiteSpace(summary) Then
-                    WriteLine("END", $"Summary: {summary}")
-                End If
-                If ex IsNot Nothing Then
-                    WriteException("END", ex)
-                End If
-                WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
-
-                _isEnabled = False
-                _started = False
-                _logPath = Nothing
-                _sessionDepth = 0
-            End SyncLock
-        End Sub
-
-        ''' <summary>
-        ''' Writes a single timestamped log line.
-        ''' </summary>
-        ''' <param name="category">Category identifier (STEP/WARN/ERR/etc.).</param>
-        ''' <param name="message">Message text.</param>
-        Private Shared Sub WriteLine(category As String, message As String)
-            SyncLock _lock
-                Try
-                    Dim entry = $"[{DateTime.Now:HH:mm:ss.fff}] [{category}] {message}"
-                    File.AppendAllText(_logPath, entry & Environment.NewLine)
-                Catch
-                End Try
-            End SyncLock
-        End Sub
-
-        ''' <summary>
-        ''' Writes raw text to the log file without adding timestamps.
-        ''' </summary>
-        ''' <param name="category">Unused category label; retained to match caller signature.</param>
-        ''' <param name="raw">Raw text to append.</param>
-        Private Shared Sub WriteRaw(category As String, raw As String)
-            SyncLock _lock
-                Try
-                    ' Raw is written as-is; only prefixed by one timestamp line already.
-                    File.AppendAllText(_logPath, raw)
-                Catch
-                End Try
-            End SyncLock
-        End Sub
-
-        ''' <summary>
-        ''' Converts a potentially <c>Nothing</c> string into a non-null string for logging.
-        ''' </summary>
-        Private Shared Function SafeStr(value As String) As String
-            If value Is Nothing Then Return ""
-            Return value
-        End Function
-
-        ''' <summary>
-        ''' Reads a string representation of a named property or field value via reflection.
-        ''' </summary>
-        ''' <param name="obj">Target object.</param>
-        ''' <param name="memberName">Property or field name.</param>
-        ''' <returns>Member value converted to string, or an empty string if missing.</returns>
-        Private Shared Function SafeGetMemberString(obj As Object, memberName As String) As String
-            If obj Is Nothing Then Return ""
-            Dim t = obj.GetType()
-            Dim p = t.GetProperty(memberName)
-            If p IsNot Nothing Then
-                Dim v = p.GetValue(obj, Nothing)
-                Return If(v IsNot Nothing, v.ToString(), "")
-            End If
-            Dim f = t.GetField(memberName)
-            If f IsNot Nothing Then
-                Dim v = f.GetValue(obj)
-                Return If(v IsNot Nothing, v.ToString(), "")
-            End If
-            Return ""
-        End Function
-
-        ''' <summary>
-        ''' Returns whether file logging is currently enabled.
-        ''' </summary>
-        Public Shared ReadOnly Property IsEnabled As Boolean
-            Get
-                Return _isEnabled
-            End Get
-        End Property
-
-        ''' <summary>
-        ''' Returns the currently active log file path (empty/Nothing if not enabled).
-        ''' </summary>
-        Public Shared ReadOnly Property LogFilePath As String
-            Get
-                Return _logPath
-            End Get
-        End Property
-
-        ' --- Sub-agent returns: full payload, separate file ----------
-        Private Shared _subAgentLogPath As String = Nothing
-
-        Public Shared Sub LogSubAgentReturn(source As String, rawResponse As String)
-            If Not _isEnabled OrElse rawResponse Is Nothing Then Return
-            Try
-                EnsureSubAgentLogPath()
-                If String.IsNullOrEmpty(_subAgentLogPath) Then Return
-
-                Dim sb As New System.Text.StringBuilder()
-                sb.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {If(source, "")}")
-                sb.AppendLine(If(rawResponse, ""))
-                sb.AppendLine("---")
-
-                SyncLock _lock
-                    IO.File.AppendAllText(_subAgentLogPath, sb.ToString(), System.Text.Encoding.UTF8)
-                End SyncLock
-            Catch
-                ' Never throw from logger.
-            End Try
-        End Sub
-
-        Private Shared Sub EnsureSubAgentLogPath()
-            If Not String.IsNullOrEmpty(_subAgentLogPath) Then Return
-            If String.IsNullOrEmpty(_logPath) Then Return
-            Try
-                Dim dir As String = IO.Path.GetDirectoryName(_logPath)
-                _subAgentLogPath = IO.Path.Combine(dir, $"{AN5}_SubAgent_Returns.txt")
-            Catch
-                ' If the path cannot be resolved, sub-agent returns silently skip.
-            End Try
-        End Sub
-
-    End Class
-
-#End Region
 
 #Region "Tooling Data Classes"
 
@@ -578,193 +136,7 @@ Partial Public Class ThisAddIn
         End Sub
     End Class
 
-    ''' <summary>
-    ''' Holds per-run state for the tooling loop, including selected tools, iteration counters, and logging.
-    ''' </summary>
-    Public Class ToolExecutionContext
 
-        ''' <summary>Tools selected for this session.</summary>
-        Public Property SelectedTools As List(Of ModelConfig)
-
-        ''' <summary>Allow-listed tools selected by the user, available for on-demand loading.</summary>
-        Public Property AllowedToolRegistry As SharedLibrary.Agents.ToolRegistry
-
-        Public Property AuthoritativeToolRegistry As SharedLibrary.Agents.ToolRegistry
-
-        ''' <summary>True when only a lightweight tool index is initially exposed to the model.</summary>
-        Public Property LazyToolLoadingEnabled As Boolean
-
-        ''' <summary>All responses generated during this session (successful and failed).</summary>
-        Public Property AllToolResponses As List(Of ToolResponse)
-
-        ''' <summary>Current iteration counter within <see cref="ExecuteToolingLoop"/>.</summary>
-        Public Property CurrentIteration As Integer
-
-        ''' <summary>Maximum permitted number of iterations.</summary>
-        Public Property MaxIterations As Integer
-
-        ''' <summary>Cancellation flag set by UI event handler.</summary>
-        Public Property IsCancelled As Boolean
-
-        ''' <summary>In-memory log entries appended during session execution.</summary>
-        Public Property LogEntries As List(Of String)
-
-        ''' <summary>Snapshot of the LLM/tooling model config used for tool call detection/extraction formats.</summary>
-        Public Property ToolingModel As ModelConfig
-
-        ''' <summary>Optional UI log window instance used for user-visible progress logging.</summary>
-        Public Property LogWindowForm As LogWindow
-
-        Public Property LastToolExecutionSignature As String
-        Public Property LastToolExecutionRepeatCount As Integer
-        Public Property DuplicateToolExecutionAbortThreshold As Integer
-
-        Public Property ConsecutiveFailedToolName As String
-        Public Property ConsecutiveFailedToolCount As Integer
-        Public Property ConsecutiveToolFailureAbortThreshold As Integer
-
-        Public Property PrematureTextRetryCount As Integer = 0
-        Public Property PendingContinuationGuardPrompt As String = ""
-        Public Property PendingRejectedAssistantTurn As String = ""
-        Public Property PendingGuardTitle As String = ""
-        Public Property PendingRejectedTurnExplanation As String = ""
-
-        Public Const MaxContinuationRetries As Integer = 5
-
-        Public Property HostKind As String
-        Public Property AllowedToolNames As HashSet(Of String)
-        Public Property EnforceAllowedToolScope As Boolean
-        Public Property EmptyMainModelResponse As Boolean
-
-        Public Property SubAgentEmptyResponseRetryCount As Integer
-
-        Public Property SequencingState As SharedLibrary.Agents.ToolCallSequencing.ToolingRunState
-        Public Property FinalizationBlocked As Boolean
-        Public Property FinalizationBlockedReason As String
-
-        Public Property RunId As String
-        Public Property SubAgentInvocationCount As Integer
-        Public Property SubAgentInvocationCountsByAgent As Dictionary(Of String, Integer)
-
-        Public Property AuthoritativeToolRegistrySnapshot As SharedLibrary.Agents.ToolRegistry
-
-        Public Property WorkflowId As String
-        Public Property RuntimeState As SharedLibrary.Agents.WorkflowRuntimeState
-        Public Property LatestUserRequestRaw As String
-        Public Property HostTaskSummary As String
-
-        ''' <summary>
-        ''' Initializes a new tool execution context with default collections and limits.
-        ''' </summary>
-        Public Sub New()
-            SelectedTools = New List(Of ModelConfig)()
-            AllToolResponses = New List(Of ToolResponse)()
-            LogEntries = New List(Of String)()
-            CurrentIteration = 0
-            MaxIterations = INI_ToolingMaximumIterations
-            IsCancelled = False
-            LastToolExecutionSignature = ""
-            LastToolExecutionRepeatCount = 0
-            DuplicateToolExecutionAbortThreshold = 3
-            ConsecutiveFailedToolName = ""
-            ConsecutiveFailedToolCount = 0
-            ConsecutiveToolFailureAbortThreshold = 3
-            AllowedToolNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-            EnforceAllowedToolScope = False
-            EmptyMainModelResponse = False
-            SequencingState = New SharedLibrary.Agents.ToolCallSequencing.ToolingRunState()
-            FinalizationBlocked = False
-            FinalizationBlockedReason = ""
-            RunId = Guid.NewGuid().ToString("N")
-            SubAgentInvocationCount = 0
-            SubAgentInvocationCountsByAgent = New Dictionary(Of String, Integer)(StringComparer.OrdinalIgnoreCase)
-            AuthoritativeToolRegistry = Nothing
-            AuthoritativeToolRegistrySnapshot = Nothing
-            SubAgentEmptyResponseRetryCount = 0
-        End Sub
-
-        Public Property LogPrefix As String
-        Public Property ExternalLogSink As Action(Of String, String)
-
-        ''' <summary>
-        ''' Appends a message to the in-memory log, debugger output, optional UI log window, and the tooling file log.
-        ''' </summary>
-        ''' <param name="message">Log message.</param>
-        ''' <param name="level">Log level passed to the UI log window.</param>
-
-        Public Sub Log(message As String, Optional level As String = "step")
-            Dim normalizedPrefix As String = If(LogPrefix, "").Trim()
-            Dim isSubAgent As Boolean =
-                normalizedPrefix.StartsWith("[subagent]", StringComparison.OrdinalIgnoreCase)
-            Dim leadingMarker As String = If(isSubAgent, "[subagent]", "")
-            Dim humanMessage As String = If(message, "").Trim()
-
-            If Not isSubAgent AndAlso normalizedPrefix <> "" Then
-                humanMessage = (normalizedPrefix & " " & humanMessage).Trim()
-            End If
-
-            ' Full message (file + LogEntries): workflowId/phase/host suffix preserved.
-            Dim fullMessage As String =
-                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
-                    humanMessage,
-                    WorkflowId,
-                    If(RuntimeState?.CurrentPhase, ""),
-                    hostName:=HostKind,
-                    leadingMarker:=leadingMarker)
-
-            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {fullMessage}"
-            LogEntries.Add(entry)
-            Debug.WriteLine($"[Tooling] {entry}")
-
-            ToolingFileLogger.LogStep(fullMessage)
-
-            ' "diag" level → file only. End user never sees it.
-            If String.Equals(level, "diag", StringComparison.OrdinalIgnoreCase) Then Return
-
-            ' Visible message: strip workflow suffix, indent sub-agent lines two spaces.
-            Dim visibleMessage As String =
-                If(isSubAgent, "  [sub-agent] " & humanMessage, humanMessage)
-
-            If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
-                Try
-                    LogWindowForm.AppendLog(visibleMessage, level)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to append to LogWindow.", ex:=ex)
-                End Try
-            End If
-
-            If ExternalLogSink IsNot Nothing Then
-                Try
-                    ExternalLogSink.Invoke(visibleMessage, level)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to forward log entry.", ex:=ex)
-                End Try
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs a warning through the session logger and file logger.
-        ''' </summary>
-        Public Sub LogWarn(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            Log(message, "warn")
-            ToolingFileLogger.LogWarn(message, details, ex)
-        End Sub
-
-        ''' <summary>
-        ''' Logs an error through the session logger and file logger.
-        ''' </summary>
-        Public Sub LogError(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            Log(message, "error")
-            ToolingFileLogger.LogError(message, details, ex)
-        End Sub
-
-        ''' <summary>
-        ''' Placeholder method (intentionally empty) retained by the caller surface.
-        ''' </summary>
-        Public Sub WriteDebugLog()
-            ' Intentionally empty (avoid multiple log files).
-        End Sub
-    End Class
 
 #End Region
 
@@ -1193,172 +565,6 @@ Partial Public Class ThisAddIn
     End Function
 
 
-    Private Function BuildMemoryGroundingClassifierInput(latestUserRequestRaw As String,
-                                                         hostTaskSummary As String) As String
-        If String.IsNullOrWhiteSpace(latestUserRequestRaw) Then
-            Return ""
-        End If
-
-        Return SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingIntentClassifierUserPrompt(
-            latestUserRequestRaw,
-            hostTaskSummary)
-    End Function
-
-
-    Private Function HasMemoryGroundingClassifierInputsAvailable(context As ToolExecutionContext) As Boolean
-        If context Is Nothing Then
-            Return False
-        End If
-
-        Dim memoryToolsAvailable As Boolean = False
-
-        If context.AuthoritativeToolRegistrySnapshot IsNot Nothing Then
-            memoryToolsAvailable =
-                context.AuthoritativeToolRegistrySnapshot.Contains(SharedLibrary.Agents.MemoryTools.ToolList) OrElse
-                context.AuthoritativeToolRegistrySnapshot.Contains(SharedLibrary.Agents.MemoryTools.ToolGet)
-        End If
-
-        If Not memoryToolsAvailable AndAlso context.SelectedTools IsNot Nothing Then
-            memoryToolsAvailable =
-                context.SelectedTools.Any(
-                    Function(tool)
-                        Return tool IsNot Nothing AndAlso
-                               SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
-                    End Function)
-        End If
-
-        Dim workflowMemoryAvailable As Boolean = False
-
-        Try
-            workflowMemoryAvailable =
-                SharedLibrary.Agents.SessionMemory.ListMostRecentWorkflowEntries(maxItems:=1).Count > 0
-        Catch
-            workflowMemoryAvailable = False
-        End Try
-
-        Return memoryToolsAvailable OrElse workflowMemoryAvailable
-    End Function
-
-    Private Async Function ResolveMemoryGroundingModeAsync(context As ToolExecutionContext,
-                                                           userText As String,
-                                                           otherPrompt As String,
-                                                           fullPromptOverride As String,
-                                                           useSecondAPI As Boolean,
-                                                           hideSplash As Boolean,
-                                                           explicitMemoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode,
-                                                           memoryGroundingModeIsExplicit As Boolean,
-                                                           subAgentMode As Boolean) As Task
-        If context Is Nothing OrElse context.SequencingState Is Nothing Then
-            Return
-        End If
-
-        If subAgentMode Then
-            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
-            context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped for sub-agent mode.", "diag")
-            Return
-        End If
-
-        If memoryGroundingModeIsExplicit Then
-            context.SequencingState.MemoryGroundingMode = explicitMemoryGroundingMode
-            context.SequencingState.ShouldExposeRecentMemoryStubs =
-                explicitMemoryGroundingMode <> SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
-
-            context.Log("Memory grounding mode applied from explicit override: " &
-                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
-            Return
-        End If
-
-        If Not HasMemoryGroundingClassifierInputsAvailable(context) Then
-            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
-            context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped: no memory tools and no workflow memory available.", "diag")
-            Return
-        End If
-
-        Dim classifierInput As String =
-            BuildMemoryGroundingClassifierInput(
-                context.LatestUserRequestRaw,
-                context.HostTaskSummary)
-
-        If String.IsNullOrWhiteSpace(classifierInput) Then
-            context.SequencingState.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None
-            context.SequencingState.ShouldExposeRecentMemoryStubs = False
-            context.Log("Memory grounding classifier skipped: no classifier input was available.", "diag")
-            Return
-        End If
-
-        context.Log("Memory grounding classifier invoked.", "diag")
-        Dim raw As String = ""
-
-        Try
-            raw = Await LLM(
-                SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingIntentClassifierSystemPrompt(),
-                classifierInput,
-                "", "", 0,
-                useSecondAPI,
-                hideSplash,
-                "",
-                "",
-                True)
-        Catch ex As Exception
-            context.LogWarn("Memory grounding classifier failed; defaulting to none.",
-                            details:=$"host={context.HostKind}; error={ex.Message}")
-        End Try
-
-        context.Log("classifierRawOutput=" & If(raw, ""))
-
-        Dim classifierNormalizedOutput As String = ""
-        Dim classifierParseError As String = ""
-        Dim decision =
-            SharedLibrary.Agents.ToolCallSequencing.ParseMemoryGroundingIntentClassifierDecision(
-                raw,
-                classifierNormalizedOutput,
-                classifierParseError)
-
-        Dim normalizedOutputForLog As String = If(classifierNormalizedOutput, "")
-        If normalizedOutputForLog.Length > 600 Then
-            normalizedOutputForLog = normalizedOutputForLog.Substring(0, 600) & "..."
-        End If
-
-        context.Log("classifierNormalizedOutput=" & normalizedOutputForLog)
-        context.Log("classifierParseSuccess=" & If(decision.IsValid, "true", "false"))
-
-        If Not decision.IsValid Then
-            context.Log("classifierParseError=" & If(classifierParseError, "invalid_classifier_output"))
-            context.LogWarn(
-                "classifierParseFailure",
-                details:=$"host={context.HostKind}; classifierParseError={If(classifierParseError, "invalid_classifier_output")}")
-        End If
-
-        context.Log(
-            "parsedMemoryGroundingMode=" &
-            SharedLibrary.Agents.ToolCallSequencing.FormatMemoryGroundingMode(decision.MemoryGroundingMode) &
-            "; shouldExposeRecentMemoryStubs=" &
-            If(decision.ShouldExposeRecentMemoryStubs, "true", "false") &
-            "; explicitStoredMemoryRequired=" &
-            If(decision.ExplicitStoredMemoryRequired, "true", "false") &
-            "; reason=" & If(decision.Reason, ""))
-
-        If decision.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.Required AndAlso
-           Not decision.ExplicitStoredMemoryRequired Then
-
-            context.LogWarn(
-                "classifierRequiredModeDowngraded",
-                details:=$"host={context.HostKind}; reason=missing_explicit_user_demand_for_stored_memory; classifierReason={If(decision.Reason, "")}")
-
-            decision.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.OptionalMode
-        End If
-
-        context.SequencingState.MemoryGroundingMode = decision.MemoryGroundingMode
-        context.SequencingState.ShouldExposeRecentMemoryStubs = decision.ShouldExposeRecentMemoryStubs
-
-        context.Log(
-            "appliedMemoryGroundingMode=" &
-            SharedLibrary.Agents.ToolCallSequencing.FormatMemoryGroundingMode(context.SequencingState.MemoryGroundingMode) &
-            "; explicitStoredMemoryRequired=" &
-            If(decision.ExplicitStoredMemoryRequired, "true", "false"))
-    End Function
 
 #Region "Execute Tooling"
 
@@ -1463,9 +669,18 @@ Partial Public Class ThisAddIn
 
         selectedTools = fullAllowedTools
 
+        Try
+            SharedLibrary.Agents.HostToolRegistration.RegisterResolvedInternalTools(
+                SharedLibrary.Agents.ToolingHostKind.Word,
+                fullAllowedTools)
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to register selected Word tooling tools.", ex:=ex)
+        End Try
+
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations
         }
+
         context.SequencingState.UserLanguage =
             If(Not String.IsNullOrWhiteSpace(userLanguage),
                userLanguage.Trim(),
@@ -1961,7 +1176,7 @@ Partial Public Class ThisAddIn
                     userPromptForThisCall = fullUserPrompt & Environment.NewLine & guardBlock.ToString()
 
                     LogLatestUserRequestDiagnostic(context, "repair")
-                    context.LogWarn("Applying host-side continuation guard.")
+                    context.LogWarn("Applying host-side continuation guard.", visibleToUser:=False)
                     context.PendingContinuationGuardPrompt = ""
                     context.PendingRejectedAssistantTurn = ""
                     context.PendingGuardTitle = ""
@@ -2488,7 +1703,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     context.Log(
-                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}", "diag")
 
                     Select Case turnValidation.TurnKind
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
@@ -3657,42 +2872,46 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Function CollectUntriedDeliverableFallbackToolNames(ctx As ToolExecutionContext) As IReadOnlyList(Of String)
         Dim result As New List(Of String)()
-        If ctx Is Nothing OrElse ctx.SelectedTools Is Nothing Then Return result.AsReadOnly()
+        If ctx Is Nothing Then Return result.AsReadOnly()
 
-        Dim deliverableCandidates As String() = New String() {
-        "workspace_write",
-        "agent_workspace_write",
-        "word_doc_create",
-        "word_doc_edit",
-        "word_doc_export_pdf",
-        "create_text_file",
-        "save_text_file"
-    }
+        Dim deliverableCandidates As New HashSet(Of String)(
+            SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
+                SharedLibrary.Agents.ToolingHostKind.Word),
+            StringComparer.OrdinalIgnoreCase)
 
-        Dim used As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        If ctx.AllToolResponses IsNot Nothing Then
-            For Each r As ToolResponse In ctx.AllToolResponses
-                If r IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(r.ToolName) Then
-                    used.Add(r.ToolName)
-                End If
+        Dim available As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If ctx.SelectedTools IsNot Nothing Then
+            For Each tool As ModelConfig In ctx.SelectedTools
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                available.Add(tool.ToolName.Trim())
             Next
         End If
 
-        For Each tool As ModelConfig In ctx.SelectedTools
-            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
-            For Each candidate As String In deliverableCandidates
-                If String.Equals(tool.ToolName, candidate, StringComparison.OrdinalIgnoreCase) Then
-                    If Not used.Contains(tool.ToolName) Then
-                        result.Add(tool.ToolName)
-                    End If
-                    Exit For
-                End If
+        If ctx.AuthoritativeToolRegistrySnapshot IsNot Nothing Then
+            For Each manifest In ctx.AuthoritativeToolRegistrySnapshot.ListManifests()
+                If manifest Is Nothing OrElse String.IsNullOrWhiteSpace(manifest.Name) Then Continue For
+                available.Add(manifest.Name.Trim())
             Next
+        End If
+
+        Dim used As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If ctx.AllToolResponses IsNot Nothing Then
+            For Each r As ToolResponse In ctx.AllToolResponses
+                If r Is Nothing OrElse String.IsNullOrWhiteSpace(r.ToolName) Then Continue For
+                used.Add(r.ToolName.Trim())
+            Next
+        End If
+
+        For Each candidate In deliverableCandidates.OrderBy(Function(n) n, StringComparer.OrdinalIgnoreCase)
+            If available.Contains(candidate) AndAlso Not used.Contains(candidate) Then
+                result.Add(candidate)
+            End If
         Next
 
         Return result.AsReadOnly()
     End Function
-
 
     Private Function StripTaskStatus(text As String) As String
         Return Agents.TaskStatusFooterParser.Strip(text)
@@ -3748,197 +2967,6 @@ Partial Public Class ThisAddIn
         Return ""
     End Function
 
-    Private Function IsInternalKnowledgeToolName(toolName As String) As Boolean
-        Return Not String.IsNullOrWhiteSpace(toolName) AndAlso
-               toolName.StartsWith(InternalKnowledgeToolNamePrefix, StringComparison.OrdinalIgnoreCase)
-    End Function
-
-    Private Function BuildInternalKnowledgeToolName(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As String
-        If store Is Nothing Then Return ""
-        Return InternalKnowledgeToolNamePrefix & EncodeToolToken(store.StoreId)
-    End Function
-    Private Function GetKnowledgeStoreForToolName(toolName As String) As KnowledgeStoreCatalog.KnowledgeStoreDefinition
-        If Not IsInternalKnowledgeToolName(toolName) Then
-            Return Nothing
-        End If
-
-        Dim encodedToken As String = toolName.Substring(InternalKnowledgeToolNamePrefix.Length)
-
-        ' Hash-based tokens are one-way — match by recomputing the hash for
-        ' each known store and comparing against the token in the tool name.
-        Dim indexedStores = GetIndexedKnowledgeStores()
-        If indexedStores Is Nothing OrElse indexedStores.Count = 0 Then Return Nothing
-
-        ' Exact hash match
-        For Each store In indexedStores
-            Dim expectedHash = EncodeToolToken(store.StoreId)
-            If String.Equals(encodedToken, expectedHash, StringComparison.OrdinalIgnoreCase) Then
-                Return store
-            End If
-        Next
-
-        ' If there is only one knowledge store, return it directly — no ambiguity
-        If indexedStores.Count = 1 Then
-            ToolingFileLogger.LogWarn(
-                "Knowledge tool name did not match any store hash; " &
-                "falling back to the only available store.",
-                details:=$"ToolName='{toolName}', Token='{encodedToken}'")
-            Return indexedStores(0)
-        End If
-
-        ' Multiple stores: fuzzy match by longest common prefix of the token
-        ' (handles cases where the LLM truncates the hash)
-        Dim bestMatch As KnowledgeStoreCatalog.KnowledgeStoreDefinition = Nothing
-        Dim bestMatchLen As Integer = 0
-
-        For Each store In indexedStores
-            Dim expectedName = BuildInternalKnowledgeToolName(store)
-            If String.IsNullOrWhiteSpace(expectedName) Then Continue For
-
-            Dim commonLen = GetCommonPrefixLength(toolName, expectedName)
-            If commonLen > InternalKnowledgeToolNamePrefix.Length AndAlso commonLen > bestMatchLen Then
-                bestMatchLen = commonLen
-                bestMatch = store
-            End If
-        Next
-
-        If bestMatch IsNot Nothing Then
-            ToolingFileLogger.LogWarn(
-                $"Knowledge tool name partially matched store '{bestMatch.Name}' " &
-                $"(prefix match: {bestMatchLen} of {toolName.Length} chars).",
-                details:=$"ToolName='{toolName}', Token='{encodedToken}'")
-        End If
-
-        Return bestMatch
-    End Function
-
-    Private Shared Function GetCommonPrefixLength(a As String, b As String) As Integer
-        If a Is Nothing OrElse b Is Nothing Then Return 0
-        Dim maxLen = Math.Min(a.Length, b.Length)
-        For i As Integer = 0 To maxLen - 1
-            If Char.ToUpperInvariant(a(i)) <> Char.ToUpperInvariant(b(i)) Then Return i
-        Next
-        Return maxLen
-    End Function
-
-    Private Function GetIndexedKnowledgeStores() As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)
-        Dim result As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
-
-        Try
-            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
-
-            result = stores.
-                Where(Function(s)
-                          If s Is Nothing Then Return False
-
-                          Try
-                              Dim manifest = KnowledgeStoreManifest.Load(s)
-                              Return manifest IsNot Nothing AndAlso
-                                     manifest.Entries IsNot Nothing AndAlso
-                                     manifest.Entries.Count > 0
-                          Catch
-                              Return False
-                          End Try
-                      End Function).
-                OrderBy(Function(s) If(KnowledgeStoreCatalog.GetDisplayLabel(s), "").ToLowerInvariant()).
-                ToList()
-        Catch
-        End Try
-
-        Return result
-    End Function
-
-    Private Function BuildInternalKnowledgeToolDefinition(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As String
-        Dim displayLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
-        Dim toolName As String = BuildInternalKnowledgeToolName(store)
-
-        ' Load schema to get the user-authored tooling description
-        Dim schema = KnowledgeStoreSchema.LoadOrCreate(store.ResolvedSourcePath)
-        Dim contentHint As String = ""
-        If schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.ToolingDescription) Then
-            contentHint = " " & schema.ToolingDescription.Trim()
-        End If
-
-        Dim definition As New JObject(
-            New JProperty("name", toolName),
-            New JProperty("description",
-                $"Searches only the user's Knowledge Store '{displayLabel}'.{contentHint} Use this for the user's own materials in that source, not for public-web lookup."),
-            New JProperty("parameters",
-                New JObject(
-                    New JProperty("type", "object"),
-                    New JProperty("properties",
-                        New JObject(
-                            New JProperty("query",
-                                New JObject(
-                                    New JProperty("type", "string"),
-                                    New JProperty("description", "Optional natural-language query to search within this Knowledge Store.")
-                                )
-                            ),
-                            New JProperty("tag",
-                                New JObject(
-                                    New JProperty("type", "string"),
-                                    New JProperty("description", "Optional tag filter within this Knowledge Store.")
-                                )
-                            ),
-                            New JProperty("max_results",
-                                New JObject(
-                                    New JProperty("type", "integer"),
-                                    New JProperty("description", "Optional maximum number of results to retrieve.")
-                                )
-                            )
-                        )
-                    ),
-                    New JProperty("additionalProperties", False)
-                )
-            )
-        )
-
-        Return definition.ToString(Formatting.None)
-    End Function
-
-    Private Function BuildInternalKnowledgeToolInstructionsPrompt(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As String
-        Dim displayLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
-
-        ' Load schema to get the user-authored tooling description
-        Dim schema = KnowledgeStoreSchema.LoadOrCreate(store.ResolvedSourcePath)
-        Dim contentHint As String = ""
-        If schema IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(schema.ToolingDescription) Then
-            contentHint = " Content: " & schema.ToolingDescription.Trim()
-        End If
-
-        Return $"Searches only the user's Knowledge Store '{displayLabel}'.{contentHint} " &
-            "Provide query (optional), tag (optional), and max_results (optional). " &
-            "If query is omitted, the tool may return the most relevant documents from that store or all documents matching the tag. " &
-            "Do NOT use this tool for public information or general knowledge. " &
-            $"When citing results, mention the document name And store name '{displayLabel}'."
-    End Function
-
-    Private Function GetInternalKnowledgeTool(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition) As ModelConfig
-        Dim displayLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
-
-        Return New ModelConfig() With {
-            .ToolName = BuildInternalKnowledgeToolName(store),
-            .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(store),
-            .ToolDefinition = BuildInternalKnowledgeToolDefinition(store),
-            .ModelDescription = $"Knowledge Store: {displayLabel}{InternalToolSuffix}",
-            .Tool = True,
-            .ToolPriority = 997,
-            .ToolErrorHandling = "skip"
-        }
-    End Function
-
-    Private Function GetInternalKnowledgeTool(toolName As String) As ModelConfig
-        Dim store = GetKnowledgeStoreForToolName(toolName)
-        If store Is Nothing Then Return Nothing
-        Return GetInternalKnowledgeTool(store)
-    End Function
-
-    Private Function GetInternalKnowledgeTools() As List(Of ModelConfig)
-        Return GetIndexedKnowledgeStores().
-            Select(Function(store) GetInternalKnowledgeTool(store)).
-            Where(Function(tool) tool IsNot Nothing).
-            ToList()
-    End Function
 
 
     ''' <summary>
@@ -4624,236 +3652,6 @@ Partial Public Class ThisAddIn
     End Function
 
 
-    Private Function BuildKnowledgeToolStoreInventoryLine() As String
-        Dim storeLabels As New List(Of String)()
-
-        Try
-            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
-
-            For Each store In stores
-                If store Is Nothing Then Continue For
-
-                Dim label As String = KnowledgeStoreCatalog.GetDisplayLabel(store)
-                If String.IsNullOrWhiteSpace(label) Then Continue For
-
-                Try
-                    Dim manifest = KnowledgeStoreManifest.Load(store)
-                    If manifest IsNot Nothing AndAlso manifest.Entries IsNot Nothing AndAlso manifest.Entries.Count > 0 Then
-                        label &= $" ({manifest.Entries.Count} docs)"
-                    End If
-                Catch
-                End Try
-
-                If Not storeLabels.Any(Function(x) String.Equals(x, label, StringComparison.OrdinalIgnoreCase)) Then
-                    storeLabels.Add(label)
-                End If
-            Next
-        Catch
-        End Try
-
-        If storeLabels.Count = 0 Then
-            Return ""
-        End If
-
-        Return "Knowledge stores currently available: " & String.Join(", ", storeLabels) & "."
-    End Function
-
-    Private Function GetAvailableKnowledgeStoreNames() As List(Of String)
-        Dim storeNames As New List(Of String)()
-
-        Try
-            Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
-
-            For Each store In stores
-                If store Is Nothing Then Continue For
-
-                Dim displayLabel = KnowledgeStoreCatalog.GetDisplayLabel(store)
-                If Not String.IsNullOrWhiteSpace(displayLabel) Then
-                    If Not storeNames.Any(Function(x) String.Equals(x, displayLabel, StringComparison.OrdinalIgnoreCase)) Then
-                        storeNames.Add(displayLabel)
-                    End If
-                End If
-
-                Dim plainName As String = If(store.Name, "").Trim()
-                If plainName <> "" Then
-                    If Not storeNames.Any(Function(x) String.Equals(x, plainName, StringComparison.OrdinalIgnoreCase)) Then
-                        storeNames.Add(plainName)
-                    End If
-                End If
-            Next
-        Catch
-        End Try
-
-        Return storeNames
-    End Function
-
-
-    Private Function BuildInternalKnowledgeToolDefinition() As String
-        Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
-        Dim descriptionSuffix As String = If(String.IsNullOrWhiteSpace(storeInventory), "", " " & storeInventory)
-
-        Dim definition As New JObject(
-        New JProperty("name", InternalKnowledgeToolName),
-        New JProperty("description",
-            "Searches the user's local knowledge stores (their own curated document collections). " &
-            "This tool mirrors the Freestyle knowledge trigger functionality. " &
-            "You can either use structured arguments (query/store/tag/max_results) or pass the exact Freestyle trigger syntax via raw_trigger. " &
-            "Use this for the user's own materials, not for public-web lookup." & descriptionSuffix),
-        New JProperty("parameters",
-            New JObject(
-                New JProperty("type", "object"),
-                New JProperty("properties",
-                    New JObject(
-                        New JProperty("query",
-                            New JObject(
-                                New JProperty("type", "string"),
-                                New JProperty("description", "Optional natural-language knowledge-store query. If omitted, the tool can still search broadly or within a given store/tag scope.")
-                            )
-                        ),
-                        New JProperty("store",
-                            New JObject(
-                                New JProperty("type", "string"),
-                                New JProperty("description", "Optional knowledge store name. Use exactly one of the store names exposed in the tool instructions.")
-                            )
-                        ),
-                        New JProperty("tag",
-                            New JObject(
-                                New JProperty("type", "string"),
-                                New JProperty("description", "Optional tag filter, equivalent to Freestyle syntax 'tag:YourTag'.")
-                            )
-                        ),
-                        New JProperty("raw_trigger",
-                            New JObject(
-                                New JProperty("type", "string"),
-                                New JProperty("description", "Optional exact Freestyle-style trigger. Examples: '(kb)', '(kb:termination without notice)', '(kb:store:Policies confidentiality)', '(kb:tag:NDA confidentiality)'. If supplied, this takes precedence over query/store/tag.")
-                            )
-                        ),
-                        New JProperty("max_results",
-                            New JObject(
-                                New JProperty("type", "integer"),
-                                New JProperty("description", "Optional maximum number of results to retrieve. Best effort; the resolver may still enforce its own cap.")
-                            )
-                        )
-                    )
-                ),
-                New JProperty("additionalProperties", False)
-            )
-        )
-    )
-
-        Return definition.ToString(Formatting.None)
-    End Function
-
-    Private Function BuildInternalKnowledgeToolInstructionsPrompt() As String
-        Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
-        Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
-
-        Dim sb As New StringBuilder()
-        sb.Append("knowledge_search: Searches the user's local knowledge stores — the user's own curated document collections such as contracts, policies, briefs, manuals, templates, emails, and reference material. ")
-        sb.Append("This tool supports the same search semantics as the Freestyle knowledge trigger. ")
-        sb.Append("Prefer structured arguments for normal calls: query (optional), store (optional), tag (optional), max_results (optional). ")
-        sb.Append("If you need exact parity with Freestyle, pass raw_trigger using the literal syntax. ")
-        sb.Append($"Valid trigger forms include '{kbTrigger}', '{kbTriggerPrefix}your query)', '{kbTriggerPrefix}store:StoreName your query)', '{kbTriggerPrefix}tag:TagName your query)', and combinations such as '{kbTriggerPrefix}store:StoreName tag:TagName your query)'. ")
-        sb.Append("If store is omitted, all stores are searched. If query is omitted but store and/or tag is provided, the tool still performs a scoped retrieval. If everything is omitted, it performs a broad cross-store retrieval. ")
-
-        Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
-        If Not String.IsNullOrWhiteSpace(storeInventory) Then
-            sb.Append(storeInventory & " ")
-            sb.Append("Use the store names exactly as listed. ")
-        End If
-
-        sb.Append("Do NOT use this tool for public information or general knowledge — use your own knowledge or internet_search for that. ")
-        sb.Append("When citing results, mention the document name and store name.")
-
-        Return sb.ToString()
-    End Function
-
-    Private Function BuildKnowledgeToolTrigger(query As String, storeName As String, tagName As String, rawTrigger As String) As String
-        Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
-        Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
-
-        ' raw_trigger takes precedence — normalize and return as-is
-        If Not String.IsNullOrWhiteSpace(rawTrigger) Then
-            Dim normalized As String = rawTrigger.Trim()
-
-            If String.Equals(normalized, kbTrigger, StringComparison.OrdinalIgnoreCase) Then
-                Return kbTrigger
-            End If
-
-            If normalized.StartsWith(kbTriggerPrefix, StringComparison.OrdinalIgnoreCase) Then
-                If Not normalized.EndsWith(")") Then
-                    normalized &= ")"
-                End If
-                Return normalized
-            End If
-
-            If normalized.StartsWith("(kb", StringComparison.OrdinalIgnoreCase) Then
-                If Not normalized.EndsWith(")") Then
-                    normalized &= ")"
-                End If
-                Return normalized
-            End If
-
-            Return kbTriggerPrefix & normalized.TrimEnd(")"c).Trim() & ")"
-        End If
-
-        ' Query-only (no store, no tag): use bare (kb) trigger.
-        ' The search query will be handled separately via KnowledgeQueryService
-        ' semantic search in ExecuteInternalKnowledgeTool, NOT embedded in the trigger.
-        ' This matches Freestyle behavior where "Nudging (kb)" loads all docs
-        ' and the query is used as the LLM prompt, not as a metadata filter.
-        If Not String.IsNullOrWhiteSpace(query) AndAlso
-       String.IsNullOrWhiteSpace(storeName) AndAlso
-       String.IsNullOrWhiteSpace(tagName) Then
-
-            Dim normalizedQuery As String = query.Trim()
-
-            ' If the query already IS or contains a trigger, return it directly
-            If String.Equals(normalizedQuery, kbTrigger, StringComparison.OrdinalIgnoreCase) Then
-                Return kbTrigger
-            End If
-
-            If normalizedQuery.IndexOf(kbTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                Return normalizedQuery
-            End If
-
-            If normalizedQuery.IndexOf(kbTriggerPrefix, StringComparison.OrdinalIgnoreCase) >= 0 Then
-                Return normalizedQuery
-            End If
-
-            If normalizedQuery.StartsWith("(kb", StringComparison.OrdinalIgnoreCase) Then
-                If Not normalizedQuery.EndsWith(")") Then
-                    normalizedQuery &= ")"
-                End If
-                Return normalizedQuery
-            End If
-
-            ' Query-only: return bare (kb) — semantic search handles the query separately
-            Return kbTrigger
-        End If
-
-        ' Store and/or tag specified: build parameterized trigger
-        Dim parts As New List(Of String)()
-
-        If Not String.IsNullOrWhiteSpace(storeName) Then
-            parts.Add("store:" & storeName.Trim())
-        End If
-
-        If Not String.IsNullOrWhiteSpace(tagName) Then
-            parts.Add("tag:" & tagName.Trim())
-        End If
-
-        If Not String.IsNullOrWhiteSpace(query) Then
-            parts.Add(query.Trim())
-        End If
-
-        If parts.Count = 0 Then
-            Return kbTrigger
-        End If
-
-        Return kbTriggerPrefix & String.Join(" ", parts).Trim() & ")"
-    End Function
-
     Private Function GetToolArgumentString(arguments As Dictionary(Of String, Object), key As String) As String
         If arguments Is Nothing OrElse Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then
             Return ""
@@ -4978,555 +3776,10 @@ Partial Public Class ThisAddIn
         Return result
     End Function
 
-    Private Function BuildWebLinkExtractionResult(requestedUrl As String,
-                                                  resolvedUrl As String,
-                                                  linkExtensions As List(Of String),
-                                                  linksJson As String,
-                                                  Optional note As String = "") As String
 
-        Dim linksToken As JToken = New JArray()
 
-        If Not String.IsNullOrWhiteSpace(linksJson) Then
-            Try
-                Dim parsed As JToken = JToken.Parse(linksJson)
-                If parsed.Type = JTokenType.Array Then
-                    linksToken = parsed
-                End If
-            Catch
-            End Try
-        End If
 
-        Dim payload As New JObject(
-            New JProperty("requested_url", requestedUrl),
-            New JProperty("source_url", If(String.IsNullOrWhiteSpace(resolvedUrl), requestedUrl, resolvedUrl)),
-            New JProperty("filters",
-                New JObject(
-                    New JProperty("extensions", New JArray(If(linkExtensions, New List(Of String)()).ToArray()))
-                )
-            ),
-            New JProperty("links", linksToken)
-        )
 
-        If Not String.IsNullOrWhiteSpace(note) Then
-            payload.Add("note", note)
-        End If
-
-        Return payload.ToString(Formatting.None)
-    End Function
-
-
-    Private Sub TrySetLateBoundProperty(target As Object, propertyName As String, value As Object)
-        If target Is Nothing Then Return
-
-        Try
-            Dim prop = target.GetType().GetProperty(
-            propertyName,
-            BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
-
-            If prop Is Nothing OrElse Not prop.CanWrite Then Return
-
-            Dim convertedValue As Object = value
-
-            If value IsNot Nothing Then
-                Dim targetType = If(Nullable.GetUnderlyingType(prop.PropertyType), prop.PropertyType)
-                convertedValue = System.Convert.ChangeType(value, targetType, Globalization.CultureInfo.InvariantCulture)
-            End If
-
-            prop.SetValue(target, convertedValue, Nothing)
-        Catch
-        End Try
-    End Sub
-
-    Private Function TryGetLateBoundString(target As Object, propertyName As String) As String
-        If target Is Nothing Then
-            Return ""
-        End If
-
-        Try
-            Dim prop = target.GetType().GetProperty(
-            propertyName,
-            BindingFlags.Instance Or BindingFlags.Public Or BindingFlags.IgnoreCase)
-
-            If prop Is Nothing OrElse Not prop.CanRead Then
-                Return ""
-            End If
-
-            Dim value = prop.GetValue(target, Nothing)
-            Return If(value, "").ToString()
-        Catch
-            Return ""
-        End Try
-    End Function
-
-
-
-    Private Function BuildWebRetrieverFallbackNote(includeLinks As Boolean,
-                                               linkExtensions As List(Of String),
-                                               linksJson As String) As String
-        If Not includeLinks Then
-            Return ""
-        End If
-
-        Try
-            Dim parsed As JToken = JToken.Parse(If(linksJson, "[]"))
-            If parsed.Type = JTokenType.Array AndAlso DirectCast(parsed, JArray).Count > 0 Then
-                Return ""
-            End If
-        Catch
-        End Try
-
-        Dim extText As String =
-            If(linkExtensions Is Nothing OrElse linkExtensions.Count = 0,
-               "matching links",
-               String.Join(", ", linkExtensions).ToUpperInvariant() & " links")
-
-        Return $"No {extText} were detected in the rendered DOM. " &
-            "If this page computes links client-side, stores them in script state, Or reveals them only after richer interaction, " &
-            "use js_run as a fallback with allow_network=true And navigate_url set to this page. " &
-            "In js_run, return the final result explicitly at top level."
-    End Function
-
-
-
-    ''' <summary>
-    ''' Creates a built-in internal web retrieval tool configuration as a <see cref="ModelConfig"/>.
-    ''' </summary>
-    ''' <returns>Internal tool configuration.</returns>
-    Public Function GetInternalWebTool() As ModelConfig
-        Return New ModelConfig() With {
-            .ToolName = InternalWebToolName,
-            .ToolInstructionsPrompt = InternalWebToolInstructionsPrompt,
-            .ToolDefinition = InternalWebToolDefinition,
-            .ModelDescription = "Web Content Retriever" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 999,
-            .ToolErrorHandling = "skip"
-        }
-    End Function
-
-    Public Function GetInternalDownloadWebFilesTool() As ModelConfig
-        Return New ModelConfig() With {
-            .ToolName = InternalDownloadWebFilesToolName,
-            .ToolInstructionsPrompt = InternalDownloadWebFilesToolInstructionsPrompt,
-            .ToolDefinition = InternalDownloadWebFilesToolDefinition,
-            .ModelDescription = "Web File Downloader" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 996,
-            .ToolErrorHandling = "skip"
-        }
-    End Function
-
-    Private Function GetSafeDownloadRoot() As String
-        Try
-            Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
-
-            If ws IsNot Nothing AndAlso
-               ws.AllowWrite AndAlso
-               Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
-               Directory.Exists(ws.RootPath) Then
-                Return Path.GetFullPath(ws.RootPath)
-            End If
-        Catch
-        End Try
-
-        Try
-            Dim policyRoot = SharedLibrary.Agents.PathPolicy.WorkspaceRoot
-
-            If Not String.IsNullOrWhiteSpace(policyRoot) AndAlso Directory.Exists(policyRoot) Then
-                Return Path.GetFullPath(policyRoot)
-            End If
-        Catch
-        End Try
-
-        Throw New InvalidOperationException(
-            "No writable workspace is available for download_web_files. " &
-            "Connect a writable workspace first, or provide an explicit absolute target_directory.")
-    End Function
-
-    Private Function ResolveDownloadTargetDirectory(requestedDirectory As String) As String
-        If String.IsNullOrWhiteSpace(requestedDirectory) Then
-            Dim workspaceRoot = GetSafeDownloadRoot()
-            If Not Directory.Exists(workspaceRoot) Then Directory.CreateDirectory(workspaceRoot)
-            Return workspaceRoot
-        End If
-
-        If Path.IsPathRooted(requestedDirectory) Then
-            Dim absoluteTarget = Path.GetFullPath(requestedDirectory)
-            Dim absoluteDir = Path.GetDirectoryName(absoluteTarget)
-
-            If String.IsNullOrWhiteSpace(absoluteDir) Then
-                Throw New UnauthorizedAccessException("The absolute target_directory is invalid.")
-            End If
-
-            If Not Directory.Exists(absoluteTarget) Then Directory.CreateDirectory(absoluteTarget)
-            Return absoluteTarget
-        End If
-
-        Dim root As String = GetSafeDownloadRoot()
-        Dim fullPath As String = Path.GetFullPath(Path.Combine(root, requestedDirectory))
-
-        If Not fullPath.Equals(root, StringComparison.OrdinalIgnoreCase) AndAlso
-           Not fullPath.StartsWith(root & Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) Then
-            Throw New UnauthorizedAccessException("Download target directory is outside the permitted workspace root.")
-        End If
-
-        If Not Directory.Exists(fullPath) Then Directory.CreateDirectory(fullPath)
-        Return fullPath
-    End Function
-
-    Private Function SanitizeDownloadFileName(name As String) As String
-        Dim candidate As String = If(name, "").Trim().Trim(""""c)
-        If candidate = "" Then candidate = "download.bin"
-
-        For Each invalidChar In Path.GetInvalidFileNameChars()
-            candidate = candidate.Replace(invalidChar, "_"c)
-        Next
-
-        If candidate = "" Then candidate = "download.bin"
-        Return candidate
-    End Function
-
-    Private Function GetExtensionFromContentType(contentType As String) As String
-        Dim mediaType As String = If(contentType, "").Trim().ToLowerInvariant()
-
-        Select Case mediaType
-            Case "application/pdf" : Return ".pdf"
-            Case "application/zip" : Return ".zip"
-            Case "application/json" : Return ".json"
-            Case "text/plain" : Return ".txt"
-            Case "text/html" : Return ".html"
-            Case "application/xml", "text/xml" : Return ".xml"
-            Case "image/png" : Return ".png"
-            Case "image/jpeg" : Return ".jpg"
-            Case "image/gif" : Return ".gif"
-            Case Else : Return ""
-        End Select
-    End Function
-
-    Private Function BuildDownloadFileName(url As String,
-                                           response As System.Net.Http.HttpResponseMessage) As String
-        Dim candidate As String = ""
-
-        Try
-            Dim cd = response.Content.Headers.ContentDisposition
-            If cd IsNot Nothing Then
-                If Not String.IsNullOrWhiteSpace(cd.FileNameStar) Then
-                    candidate = cd.FileNameStar
-                ElseIf Not String.IsNullOrWhiteSpace(cd.FileName) Then
-                    candidate = cd.FileName
-                End If
-            End If
-        Catch
-        End Try
-
-        If String.IsNullOrWhiteSpace(candidate) Then
-            Try
-                candidate = Path.GetFileName(New Uri(url).LocalPath)
-            Catch
-            End Try
-        End If
-
-        candidate = SanitizeDownloadFileName(candidate)
-
-        If Path.GetExtension(candidate) = "" Then
-            Dim ext = GetExtensionFromContentType(If(response.Content.Headers.ContentType?.MediaType, ""))
-            If ext <> "" Then candidate &= ext
-        End If
-
-        Return candidate
-    End Function
-
-    Private Function GetUniqueDownloadPath(path As String) As String
-        If Not File.Exists(path) Then Return path
-
-        Dim dir = System.IO.Path.GetDirectoryName(path)
-        Dim name = System.IO.Path.GetFileNameWithoutExtension(path)
-        Dim ext = System.IO.Path.GetExtension(path)
-
-        For i As Integer = 2 To 1000
-            Dim candidate = System.IO.Path.Combine(dir, $"{name} ({i}){ext}")
-            If Not File.Exists(candidate) Then Return candidate
-        Next
-
-        Return System.IO.Path.Combine(dir, $"{name}_{Guid.NewGuid():N}{ext}")
-    End Function
-
-    Private Async Function ReadResponseBytesLimitedAsync(content As System.Net.Http.HttpContent,
-                                                         maxBytes As Long,
-                                                         cancellationToken As System.Threading.CancellationToken) As Task(Of Byte())
-        Using sourceStream = Await content.ReadAsStreamAsync().ConfigureAwait(False)
-            Using ms As New MemoryStream()
-                Dim buffer(8191) As Byte
-
-                Do
-                    cancellationToken.ThrowIfCancellationRequested()
-                    Dim read = Await sourceStream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(False)
-                    If read <= 0 Then Exit Do
-
-                    ms.Write(buffer, 0, read)
-
-                    If ms.Length > maxBytes Then
-                        Throw New InvalidOperationException($"Remote file exceeds the maximum allowed size of {maxBytes} bytes.")
-                    End If
-                Loop
-
-                Return ms.ToArray()
-            End Using
-        End Using
-    End Function
-
-    Private Function LooksLikeHtml(bytes As Byte()) As Boolean
-        If bytes Is Nothing OrElse bytes.Length = 0 Then Return False
-
-        Dim sampleLength = Math.Min(bytes.Length, 1024)
-        Dim sample = System.Text.Encoding.UTF8.GetString(bytes, 0, sampleLength).ToLowerInvariant()
-
-        Return sample.Contains("<html") OrElse
-               sample.Contains("<!doctype html") OrElse
-               sample.Contains("<body") OrElse
-               sample.Contains("<head")
-    End Function
-
-    Private Function LooksLikePdf(bytes As Byte()) As Boolean
-        If bytes Is Nothing OrElse bytes.Length < 5 Then Return False
-        Return bytes(0) = AscW("%"c) AndAlso
-               bytes(1) = AscW("P"c) AndAlso
-               bytes(2) = AscW("D"c) AndAlso
-               bytes(3) = AscW("F"c) AndAlso
-               bytes(4) = AscW("-"c)
-    End Function
-
-    Private Async Function ExecuteInternalDownloadWebFilesTool(toolCall As ToolCall,
-                                                               context As ToolExecutionContext,
-                                                               Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            cancellationToken.ThrowIfCancellationRequested()
-
-            Dim urls As New List(Of String)()
-
-            If toolCall.Arguments.ContainsKey("urls") Then
-                Dim urlsArg = toolCall.Arguments("urls")
-                If TypeOf urlsArg Is JArray Then
-                    For Each item In DirectCast(urlsArg, JArray)
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is IEnumerable(Of Object) Then
-                    For Each item In DirectCast(urlsArg, IEnumerable(Of Object))
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is String Then
-                    urls.Add(urlsArg.ToString())
-                End If
-            ElseIf toolCall.Arguments.ContainsKey("url") Then
-                urls.Add(toolCall.Arguments("url").ToString())
-            End If
-
-            If urls.Count = 0 Then
-                response.Success = False
-                response.ErrorMessage = "No URLs provided."
-                Return response
-            End If
-
-            Dim blockedPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
-            For Each url In urls
-                Dim lowerUrl = url.ToLowerInvariant()
-                If blockedPatterns.Any(Function(pattern) lowerUrl.Contains(pattern)) Then
-                    response.Success = False
-                    response.ErrorMessage = "Authenticated SharePoint/OneDrive/Teams URLs are not supported by download_web_files."
-                    Return response
-                End If
-
-                If Not IsSafeWebUrl(url) Then
-                    response.Success = False
-                    response.ErrorMessage = $"Blocked unsafe URL: {url}"
-                    Return response
-                End If
-            Next
-
-            Dim overwrite As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "overwrite", False)
-            Dim targetDirectory As String = GetToolArgumentString(toolCall.Arguments, "target_directory")
-            Dim resolvedTargetDirectory As String = ResolveDownloadTargetDirectory(targetDirectory)
-            context.Log($"Resolved download target directory: {resolvedTargetDirectory}")
-
-            context.Log($"Downloading {urls.Count} remote file(s) to: {resolvedTargetDirectory}")
-
-            Dim results As New JArray()
-
-            Using handler As New System.Net.Http.HttpClientHandler() With {.AllowAutoRedirect = True}
-                Using client As New System.Net.Http.HttpClient(handler)
-                    client.Timeout = TimeSpan.FromSeconds(90)
-                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-
-                    For Each url In urls
-                        cancellationToken.ThrowIfCancellationRequested()
-
-                        Dim item As New JObject(New JProperty("url", url))
-
-                        Try
-                            context.Log($"  Downloading: {url}")
-
-                            Using request As New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Get, url)
-                                Using httpResponse = Await client.SendAsync(
-                                    request,
-                                    System.Net.Http.HttpCompletionOption.ResponseHeadersRead,
-                                    cancellationToken).ConfigureAwait(False)
-
-                                    If Not httpResponse.IsSuccessStatusCode Then
-                                        item("ok") = False
-                                        item("status") = CInt(httpResponse.StatusCode)
-                                        item("error") = $"HTTP {(CInt(httpResponse.StatusCode)).ToString()} {httpResponse.ReasonPhrase}"
-                                        results.Add(item)
-                                        Continue For
-                                    End If
-
-                                    Dim contentType As String = If(httpResponse.Content.Headers.ContentType?.MediaType, "")
-                                    item("content_type") = contentType
-
-                                    If contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase) OrElse
-                                       contentType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                                       contentType.IndexOf("xml", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-                                       contentType.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0 Then
-
-                                        item("ok") = False
-                                        item("error") = "Remote response is textual/HTML, not a downloadable binary file."
-                                        results.Add(item)
-                                        Continue For
-                                    End If
-
-                                    Dim bytes = Await ReadResponseBytesLimitedAsync(
-                                        httpResponse.Content,
-                                        MaxDownloadedWebFileBytes,
-                                        cancellationToken).ConfigureAwait(False)
-
-                                    If bytes Is Nothing OrElse bytes.Length = 0 Then
-                                        item("ok") = False
-                                        item("error") = "Empty response body."
-                                        results.Add(item)
-                                        Continue For
-                                    End If
-
-                                    If LooksLikeHtml(bytes) Then
-                                        item("ok") = False
-                                        item("error") = "Remote response appears to be HTML, not the original binary file."
-                                        results.Add(item)
-                                        Continue For
-                                    End If
-
-                                    Dim fileName As String = BuildDownloadFileName(url, httpResponse)
-                                    Dim targetPath As String = Path.Combine(resolvedTargetDirectory, fileName)
-
-                                    If Not overwrite Then
-                                        targetPath = GetUniqueDownloadPath(targetPath)
-                                    End If
-
-                                    Dim ext = Path.GetExtension(targetPath).ToLowerInvariant()
-                                    If ext = ".pdf" OrElse String.Equals(contentType, "application/pdf", StringComparison.OrdinalIgnoreCase) Then
-                                        If Not LooksLikePdf(bytes) Then
-                                            item("ok") = False
-                                            item("error") = "Downloaded content does not have a valid PDF signature."
-                                            results.Add(item)
-                                            Continue For
-                                        End If
-                                    End If
-
-                                    File.WriteAllBytes(targetPath, bytes)
-
-                                    item("ok") = True
-                                    item("path") = targetPath
-                                    item("file_name") = Path.GetFileName(targetPath)
-                                    item("size_bytes") = bytes.Length
-                                    results.Add(item)
-                                End Using
-                            End Using
-
-                        Catch ex As OperationCanceledException
-                            Throw
-                        Catch ex As Exception
-                            item("ok") = False
-                            item("error") = ex.Message
-                            results.Add(item)
-                        End Try
-                    Next
-                End Using
-            End Using
-
-            response.Success = True
-            response.Response = New JObject(
-                        New JProperty("target_directory", resolvedTargetDirectory),
-                        New JProperty("results", results)
-                    ).ToString(Formatting.None)
-            Return response
-
-        Catch ex As OperationCanceledException
-            response.Success = False
-            response.ErrorMessage = "Operation was cancelled"
-            Return response
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            Return response
-        End Try
-    End Function
-
-    ''' <summary>
-    ''' Creates a built-in internal internet search tool configuration as a <see cref="ModelConfig"/>.
-    ''' Only meaningful when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured.
-    ''' </summary>
-    ''' <param name="enforcePrivacy">When True, privacy constraints are included in the tool definition and instructions.</param>
-    ''' <returns>Internal search tool configuration.</returns>
-    Public Function GetInternalSearchTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
-        Dim definition As String = InternalSearchToolDefinition
-        Dim instructions As String = InternalSearchToolInstructionsPrompt
-
-        If Not enforcePrivacy Then
-            definition =
-                "{""name"":""internet_search""," &
-                """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """query"":{""type"":""string"",""description"":""The search query.""}," &
-                """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
-                """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
-
-            instructions =
-                "internet_search: Searches the internet and returns readable text from the top result pages. " &
-                "Call this tool when you need current or factual information you are not confident about. " &
-                "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
-                "Return value includes the search query used, the URLs visited, and the page content for each qualifying result."
-        End If
-
-        Return New ModelConfig() With {
-            .ToolName = InternalSearchToolName,
-            .ToolInstructionsPrompt = instructions,
-            .ToolDefinition = definition,
-            .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 998,
-            .ToolErrorHandling = "skip"
-        }
-    End Function
-
-    ''' <summary>
-    ''' Creates a built-in internal knowledge store search tool configuration as a <see cref="ModelConfig"/>.
-    ''' Only meaningful when <c>INI_KnowledgeStorePath</c> or <c>INI_KnowledgeStorePathLocal</c> is configured
-    ''' and at least one knowledge store has an indexed manifest.
-    ''' </summary>
-    ''' <returns>Internal knowledge search tool configuration.</returns>
-    Public Function GetInternalKnowledgeTool() As ModelConfig
-        Return New ModelConfig() With {
-        .ToolName = InternalKnowledgeToolName,
-        .ToolInstructionsPrompt = BuildInternalKnowledgeToolInstructionsPrompt(),
-        .ToolDefinition = BuildInternalKnowledgeToolDefinition(),
-        .ModelDescription = "Knowledge Store Search" & InternalToolSuffix,
-        .Tool = True,
-        .ToolPriority = 997,
-        .ToolErrorHandling = "skip"
-    }
-    End Function
 
     Private Function BuildToolArgumentsSignature(arguments As Dictionary(Of String, Object)) As String
         If arguments Is Nothing OrElse arguments.Count = 0 Then
@@ -5669,85 +3922,92 @@ Partial Public Class ThisAddIn
 
         ' Build condensed parameter summary for log window
         Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
-        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
+        Dim visibleToolLabel As String = Regex.Replace(If(toolCall.ToolName, ""), "_+", " ").Trim()
+
+        If visibleToolLabel = "" Then
+            visibleToolLabel = "processing step"
+        End If
+
+        context.Log("Running " & visibleToolLabel & "...")
+        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}", "diag")
 
 
         Try
-                cancellationToken.ThrowIfCancellationRequested()
+            cancellationToken.ThrowIfCancellationRequested()
 
-                ' ── workspace_extract_text: read any supported file via GetFileContent (unified extractor) ──
-                If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
-                    Dim relPath As String = GetToolArgumentString(toolCall.Arguments, "path")
-                    Dim maxChars As Integer = 12000
-                    Dim startChar As Integer = 0
-                    Dim startPage As Integer = 0
-                    Dim endPage As Integer = 0
+            ' ── workspace_extract_text: read any supported file via GetFileContent (unified extractor) ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
+                Dim relPath As String = GetToolArgumentString(toolCall.Arguments, "path")
+                Dim maxChars As Integer = 12000
+                Dim startChar As Integer = 0
+                Dim startPage As Integer = 0
+                Dim endPage As Integer = 0
 
-                    Try
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars") Then
-                            Integer.TryParse(toolCall.Arguments("max_chars").ToString(), maxChars)
-                        End If
-
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_char") Then
-                            Integer.TryParse(toolCall.Arguments("start_char").ToString(), startChar)
-                        ElseIf toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("offset") Then
-                            Integer.TryParse(toolCall.Arguments("offset").ToString(), startChar)
-                        End If
-
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_page") Then
-                            Integer.TryParse(toolCall.Arguments("start_page").ToString(), startPage)
-                        End If
-
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("end_page") Then
-                            Integer.TryParse(toolCall.Arguments("end_page").ToString(), endPage)
-                        End If
-                    Catch
-                    End Try
-
-                    maxChars = Math.Min(Math.Max(maxChars, 1000), 500000)
-                    startChar = Math.Max(startChar, 0)
-
-                    Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
-                    If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
-                        response.Success = False
-                        response.ErrorMessage = "No readable workspace is connected."
-                        GoTo __AfterDispatch
+                Try
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars") Then
+                        Integer.TryParse(toolCall.Arguments("max_chars").ToString(), maxChars)
                     End If
 
-                    Dim fullPath As String = ""
-                    Try
-                        fullPath = SharedLibrary.Agents.PathPolicy.Resolve(relPath, SharedLibrary.Agents.PathAccess.Read)
-                    Catch ex As Exception
-                        response.Success = False
-                        response.ErrorMessage = "Invalid workspace path: " & ex.Message
-                        GoTo __AfterDispatch
-                    End Try
-
-                    If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
-                        response.Success = False
-                        response.ErrorMessage = "Workspace file not found: " & If(relPath, "")
-                        GoTo __AfterDispatch
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_char") Then
+                        Integer.TryParse(toolCall.Arguments("start_char").ToString(), startChar)
+                    ElseIf toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("offset") Then
+                        Integer.TryParse(toolCall.Arguments("offset").ToString(), startChar)
                     End If
 
-                    Dim extracted As String = ""
-                    Try
-                        extracted = Await GetFileContent(fullPath, Silent:=True, DoOCR:=True, AskUser:=False)
-                    Catch ex As Exception
-                        response.Success = False
-                        response.ErrorMessage = "Extraction failed: " & ex.Message
-                        GoTo __AfterDispatch
-                    End Try
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("start_page") Then
+                        Integer.TryParse(toolCall.Arguments("start_page").ToString(), startPage)
+                    End If
 
-                    Dim fullText As String = If(extracted, "")
-                    Dim totalChars As Integer = fullText.Length
-                    Dim safeStart As Integer = Math.Min(startChar, totalChars)
-                    Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
-                    Dim takeChars As Integer = Math.Min(maxChars, remaining)
-                    Dim chunk As String = If(takeChars > 0, fullText.Substring(safeStart, takeChars), "")
-                    Dim truncated As Boolean = (safeStart + takeChars) < totalChars
-                    Dim nextOffset As Integer = safeStart + takeChars
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("end_page") Then
+                        Integer.TryParse(toolCall.Arguments("end_page").ToString(), endPage)
+                    End If
+                Catch
+                End Try
 
-                    Dim payload As New JObject(
+                maxChars = Math.Min(Math.Max(maxChars, 1000), 500000)
+                startChar = Math.Max(startChar, 0)
+
+                Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
+                If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
+                    GoTo __AfterDispatch
+                End If
+
+                Dim fullPath As String = ""
+                Try
+                    fullPath = SharedLibrary.Agents.PathPolicy.Resolve(relPath, SharedLibrary.Agents.PathAccess.Read)
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = "Invalid workspace path: " & ex.Message
+                    GoTo __AfterDispatch
+                End Try
+
+                If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "Workspace file not found: " & If(relPath, "")
+                    GoTo __AfterDispatch
+                End If
+
+                Dim extracted As String = ""
+                Try
+                    extracted = Await GetFileContent(fullPath, Silent:=True, DoOCR:=True, AskUser:=False)
+                Catch ex As Exception
+                    response.Success = False
+                    response.ErrorMessage = "Extraction failed: " & ex.Message
+                    GoTo __AfterDispatch
+                End Try
+
+                Dim fullText As String = If(extracted, "")
+                Dim totalChars As Integer = fullText.Length
+                Dim safeStart As Integer = Math.Min(startChar, totalChars)
+                Dim remaining As Integer = Math.Max(totalChars - safeStart, 0)
+                Dim takeChars As Integer = Math.Min(maxChars, remaining)
+                Dim chunk As String = If(takeChars > 0, fullText.Substring(safeStart, takeChars), "")
+                Dim truncated As Boolean = (safeStart + takeChars) < totalChars
+                Dim nextOffset As Integer = safeStart + takeChars
+
+                Dim payload As New JObject(
         New JProperty("path", If(relPath, "")),
         New JProperty("text", chunk),
         New JProperty("excerpt", BuildResultExcerpt(chunk, 800)),
@@ -5757,176 +4017,176 @@ Partial Public Class ThisAddIn
         New JProperty("truncated", truncated),
         New JProperty("continuation", "If more content is needed, call workspace_extract_text again with start_char=next_offset and a suitable max_chars value."))
 
-                    If truncated Then
-                        payload("next_offset") = nextOffset
-                    End If
+                If truncated Then
+                    payload("next_offset") = nextOffset
+                End If
 
-                    If startPage > 0 Then
-                        payload("start_page") = startPage
-                    End If
+                If startPage > 0 Then
+                    payload("start_page") = startPage
+                End If
 
-                    If endPage > 0 Then
-                        payload("end_page") = endPage
-                    End If
+                If endPage > 0 Then
+                    payload("end_page") = endPage
+                End If
 
-                    response.Success = True
-                    response.Response = payload.ToString(Formatting.None)
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                response.Success = True
+                response.Response = payload.ToString(Formatting.None)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            ' ── workspace_read_many: shared UTF-8 text reader for multiple files ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolReadMany, StringComparison.OrdinalIgnoreCase) Then
+                Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
+                If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
                     GoTo __AfterDispatch
                 End If
 
-                ' ── workspace_read_many: shared UTF-8 text reader for multiple files ──
-                If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolReadMany, StringComparison.OrdinalIgnoreCase) Then
-                    Dim ws = SharedLibrary.Agents.WorkspaceTools.Active
-                    If ws Is Nothing OrElse Not ws.AllowRead OrElse String.IsNullOrWhiteSpace(ws.RootPath) Then
-                        response.Success = False
-                        response.ErrorMessage = "No readable workspace is connected."
-                        GoTo __AfterDispatch
-                    End If
+                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+                response.Success = True
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
 
-                    response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
-                    response.Success = True
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+            ' ── workspace_extract_text_many: extract text from multiple files via GetFileContent ──
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
+                Dim manyMaxFiles As Integer = 20
+                Dim manyMaxCharsPerFile As Integer = 100000
+                Try
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_files") Then
+                        Integer.TryParse(toolCall.Arguments("max_files").ToString(), manyMaxFiles)
+                    End If
+                    If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars_per_file") Then
+                        Integer.TryParse(toolCall.Arguments("max_chars_per_file").ToString(), manyMaxCharsPerFile)
+                    End If
+                Catch
+                End Try
+                manyMaxFiles = Math.Min(Math.Max(manyMaxFiles, 1), 100)
+                manyMaxCharsPerFile = Math.Min(Math.Max(manyMaxCharsPerFile, 1000), 500000)
+
+                Dim manyWs = SharedLibrary.Agents.WorkspaceTools.Active
+                If manyWs Is Nothing OrElse Not manyWs.AllowRead OrElse String.IsNullOrWhiteSpace(manyWs.RootPath) Then
+                    response.Success = False
+                    response.ErrorMessage = "No readable workspace is connected."
                     GoTo __AfterDispatch
                 End If
 
-                ' ── workspace_extract_text_many: extract text from multiple files via GetFileContent ──
-                If toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
-                    Dim manyMaxFiles As Integer = 20
-                    Dim manyMaxCharsPerFile As Integer = 100000
+                Dim manyPaths As List(Of String) = GetToolArgumentStringList(toolCall.Arguments, "paths")
+                Dim manyRequestedCount As Integer = manyPaths.Count
+                Dim manySelected As List(Of String) = manyPaths.Take(manyMaxFiles).ToList()
+                Dim manyItems As New List(Of Object)()
+
+                For Each manyRelPath In manySelected
+                    Dim manyFullPath As String = ""
                     Try
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_files") Then
-                            Integer.TryParse(toolCall.Arguments("max_files").ToString(), manyMaxFiles)
-                        End If
-                        If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars_per_file") Then
-                            Integer.TryParse(toolCall.Arguments("max_chars_per_file").ToString(), manyMaxCharsPerFile)
-                        End If
-                    Catch
+                        manyFullPath = SharedLibrary.Agents.PathPolicy.Resolve(manyRelPath, SharedLibrary.Agents.PathAccess.Read)
+                    Catch ex As Exception
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "invalid_path", Key .message = ex.Message})
+                        Continue For
                     End Try
-                    manyMaxFiles = Math.Min(Math.Max(manyMaxFiles, 1), 100)
-                    manyMaxCharsPerFile = Math.Min(Math.Max(manyMaxCharsPerFile, 1000), 500000)
 
-                    Dim manyWs = SharedLibrary.Agents.WorkspaceTools.Active
-                    If manyWs Is Nothing OrElse Not manyWs.AllowRead OrElse String.IsNullOrWhiteSpace(manyWs.RootPath) Then
-                        response.Success = False
-                        response.ErrorMessage = "No readable workspace is connected."
-                        GoTo __AfterDispatch
+                    If String.IsNullOrWhiteSpace(manyFullPath) OrElse Not IO.File.Exists(manyFullPath) Then
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "not_found", Key .message = "File not found."})
+                        Continue For
                     End If
 
-                    Dim manyPaths As List(Of String) = GetToolArgumentStringList(toolCall.Arguments, "paths")
-                    Dim manyRequestedCount As Integer = manyPaths.Count
-                    Dim manySelected As List(Of String) = manyPaths.Take(manyMaxFiles).ToList()
-                    Dim manyItems As New List(Of Object)()
-
-                    For Each manyRelPath In manySelected
-                        Dim manyFullPath As String = ""
-                        Try
-                            manyFullPath = SharedLibrary.Agents.PathPolicy.Resolve(manyRelPath, SharedLibrary.Agents.PathAccess.Read)
-                        Catch ex As Exception
-                            manyItems.Add(New With {Key .path = manyRelPath, Key .error = "invalid_path", Key .message = ex.Message})
-                            Continue For
-                        End Try
-
-                        If String.IsNullOrWhiteSpace(manyFullPath) OrElse Not IO.File.Exists(manyFullPath) Then
-                            manyItems.Add(New With {Key .path = manyRelPath, Key .error = "not_found", Key .message = "File not found."})
-                            Continue For
+                    Try
+                        Dim manyExtracted As String = Await GetFileContent(manyFullPath, Silent:=True, DoOCR:=True, AskUser:=False)
+                        Dim manyTruncated As Boolean = False
+                        If Not String.IsNullOrWhiteSpace(manyExtracted) AndAlso manyExtracted.Length > manyMaxCharsPerFile Then
+                            manyExtracted = manyExtracted.Substring(0, manyMaxCharsPerFile) & Environment.NewLine & "[Truncated at " & manyMaxCharsPerFile & " characters.]"
+                            manyTruncated = True
                         End If
-
-                        Try
-                            Dim manyExtracted As String = Await GetFileContent(manyFullPath, Silent:=True, DoOCR:=True, AskUser:=False)
-                            Dim manyTruncated As Boolean = False
-                            If Not String.IsNullOrWhiteSpace(manyExtracted) AndAlso manyExtracted.Length > manyMaxCharsPerFile Then
-                                manyExtracted = manyExtracted.Substring(0, manyMaxCharsPerFile) & Environment.NewLine & "[Truncated at " & manyMaxCharsPerFile & " characters.]"
-                                manyTruncated = True
-                            End If
-                            manyItems.Add(New With {
+                        manyItems.Add(New With {
                             Key .path = manyFullPath,
                             Key .truncated = manyTruncated,
                             Key .text = If(manyExtracted, "")
                         })
-                        Catch ex As Exception
-                            manyItems.Add(New With {Key .path = manyRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
-                        End Try
-                    Next
+                    Catch ex As Exception
+                        manyItems.Add(New With {Key .path = manyRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
+                    End Try
+                Next
 
-                    response.Success = True
-                    response.Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
+                response.Success = True
+                response.Response = Newtonsoft.Json.JsonConvert.SerializeObject(New With {
                     Key .requested_count = manyRequestedCount,
                     Key .processed_count = manySelected.Count,
                     Key .items = manyItems
                 })
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
-                    GoTo __AfterDispatch
-                End If
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
 
-                If SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
-                    response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
-                    response.Success = True
+            If SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
+                response.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+                response.Success = True
 
-                    Try
-                        Dim wsToken As JToken = JToken.Parse(response.Response)
-                        If wsToken.Type = JTokenType.Object Then
-                            Dim wsObj = DirectCast(wsToken, JObject)
-                            Dim errToken = wsObj("error")
-                            If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null AndAlso errToken.ToString().Trim() <> "" Then
-                                response.Success = False
-                                response.ErrorMessage = If(wsObj("message")?.ToString(), errToken.ToString())
-                            End If
+                Try
+                    Dim wsToken As JToken = JToken.Parse(response.Response)
+                    If wsToken.Type = JTokenType.Object Then
+                        Dim wsObj = DirectCast(wsToken, JObject)
+                        Dim errToken = wsObj("error")
+                        If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null AndAlso errToken.ToString().Trim() <> "" Then
+                            response.Success = False
+                            response.ErrorMessage = If(wsObj("message")?.ToString(), errToken.ToString())
                         End If
-                    Catch
-                    End Try
+                    End If
+                Catch
+                End Try
 
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
-                    GoTo __AfterDispatch
-                End If
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
 
-                If toolCall.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
-                    response = ExecuteToolLoaderCall(toolCall, context)
-                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
-                    GoTo __AfterDispatch
-                End If
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = ExecuteToolLoaderCall(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
 
-                ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
-                If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
-                    cancellationToken.ThrowIfCancellationRequested()
-                    Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
+            ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
+            If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
+                cancellationToken.ThrowIfCancellationRequested()
+                Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
         toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken).ConfigureAwait(False)
 
-                    response.Response = If(__agentJson, "")
-                    response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+                response.Response = If(__agentJson, "")
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
-                    ApplyStructuredAgentResult(response, context)
+                ApplyStructuredAgentResult(response, context)
 
-                    If Not response.Success AndAlso String.IsNullOrWhiteSpace(response.ErrorMessage) Then
-                        response.ErrorMessage = "Agent-layer tool returned no usable result."
-                    ElseIf response.Success AndAlso SharedLibrary.Agents.JsRunTool.IsJsTool(toolCall.ToolName) AndAlso IsEmptyJsRunResult(response.Response) Then
-                        response.Success = False
-                        response.ResultKind = "error"
-                        response.ErrorCode = "agent_empty_result"
-                        response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
-                        response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
-                    End If
+                If Not response.Success AndAlso String.IsNullOrWhiteSpace(response.ErrorMessage) Then
+                    response.ErrorMessage = "Agent-layer tool returned no usable result."
+                ElseIf response.Success AndAlso SharedLibrary.Agents.JsRunTool.IsJsTool(toolCall.ToolName) AndAlso IsEmptyJsRunResult(response.Response) Then
+                    response.Success = False
+                    response.ResultKind = "error"
+                    response.ErrorCode = "agent_empty_result"
+                    response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
+                    response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
+                End If
 
                 ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
                 GoTo __AfterDispatch
-                ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
-                    Dim skillArgs As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+            ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+                Dim skillArgs As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
 
-                    skillArgs("name") = toolCall.ToolName.Substring("skill_".Length)
+                skillArgs("name") = toolCall.ToolName.Substring("skill_".Length)
 
-                    If toolCall.Arguments IsNot Nothing Then
-                        For Each kvp In toolCall.Arguments
-                            If Not skillArgs.ContainsKey(kvp.Key) Then
-                                skillArgs(kvp.Key) = kvp.Value
-                            End If
-                        Next
-
-                        If Not skillArgs.ContainsKey("input") AndAlso toolCall.Arguments.ContainsKey("instruction") Then
-                            skillArgs("input") = toolCall.Arguments("instruction")
+                If toolCall.Arguments IsNot Nothing Then
+                    For Each kvp In toolCall.Arguments
+                        If Not skillArgs.ContainsKey(kvp.Key) Then
+                            skillArgs(kvp.Key) = kvp.Value
                         End If
-                    End If
+                    Next
 
-                    response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+                    If Not skillArgs.ContainsKey("input") AndAlso toolCall.Arguments.ContainsKey("instruction") Then
+                        skillArgs("input") = toolCall.Arguments("instruction")
+                    End If
+                End If
+
+                response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
                     response.Success = Not String.IsNullOrWhiteSpace(response.Response)
 
                     ApplyStructuredAgentResult(response, context)
@@ -5970,15 +4230,18 @@ Partial Public Class ThisAddIn
 
 __AfterDispatch:
 
-                ' Log completion with excerpt
-                If response.Success Then
-                    Dim resultSummary As String = BuildResultExcerpt(response.Response, 80)
-                    context.Log($"Tool {toolCall.ToolName} completed: {resultSummary}", "success")
-                Else
-                    context.Log($"Tool {toolCall.ToolName} failed: {response.ErrorMessage}", "error")
-                End If
+            ' Log completion with excerpt
+            If response.Success Then
+                context.Log("Finished " & visibleToolLabel & ".", "success")
+                context.Log($"Tool {toolCall.ToolName} completed: {BuildResultExcerpt(response.Response, 160)}", "diag")
+            Else
+                context.LogError(
+                        $"Tool {toolCall.ToolName} failed: {If(response.ErrorMessage, "Tool failed.")}",
+                        details:=$"CallId={toolCall.CallId}; Result={BuildResultExcerpt(If(response.Response, ""), 200)}",
+                        userMessage:="A processing step could not be completed.")
+            End If
 
-            Catch ex As OperationCanceledException
+        Catch ex As OperationCanceledException
                 response.Success = False
                 response.ErrorMessage = "Operation was cancelled"
                 context.Log($"Tool {toolCall.ToolName} cancelled")
@@ -6055,551 +4318,7 @@ __AfterDispatch:
         Return $"{formattedCount} chars: '{excerpt}'"
     End Function
 
-    ''' <summary>
-    ''' Executes the internal web retrieval tool by fetching content for one or more URLs and returning tagged content blocks.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call payload containing <c>url</c> or <c>urls</c> arguments.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <returns>Tool response containing retrieved content or an error.</returns>
-    Private Async Function ExecuteInternalWebTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
 
-        Try
-            Dim urls As New List(Of String)()
-
-            If toolCall.Arguments.ContainsKey("urls") Then
-                Dim urlsArg = toolCall.Arguments("urls")
-                If TypeOf urlsArg Is JArray Then
-                    For Each item In DirectCast(urlsArg, JArray)
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is IEnumerable(Of Object) Then
-                    For Each item In DirectCast(urlsArg, IEnumerable(Of Object))
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is String Then
-                    urls.Add(urlsArg.ToString())
-                End If
-            ElseIf toolCall.Arguments.ContainsKey("url") Then
-                urls.Add(toolCall.Arguments("url").ToString())
-            End If
-
-            If urls.Count = 0 Then
-                response.Success = False
-                response.ErrorMessage = "No URLs provided"
-                ToolingFileLogger.LogWarn("Internal web tool: No URLs provided.", details:=$"CallId={toolCall.CallId}; Args={JsonConvert.SerializeObject(toolCall.Arguments)}")
-                Return response
-            End If
-
-            Dim includeLinks As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "include_links", False)
-            Dim expandInteractiveSections As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "expand_interactive_sections", False)
-            Dim linkExtensions As List(Of String) = NormalizeLinkExtensions(GetToolArgumentStringList(toolCall.Arguments, "link_extensions"))
-
-            Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
-            Dim blockedUrls As New List(Of String)()
-
-            For Each url In urls
-                Dim lowerUrl = url.ToLowerInvariant()
-                For Each pattern In sharepointPatterns
-                    If lowerUrl.Contains(pattern) Then
-                        blockedUrls.Add(url)
-                        Exit For
-                    End If
-                Next
-            Next
-
-            If blockedUrls.Count > 0 Then
-                Dim blockedList = String.Join(", ", blockedUrls)
-                response.Success = False
-                response.ErrorMessage =
-                    $"Cannot retrieve content from the following URL(s) because they point to SharePoint, OneDrive, or Microsoft Teams — " &
-                    $"these are authenticated cloud storage resources that require login and cannot be accessed remotely: {blockedList}. " &
-                    "Please ask the user to download the file(s) and provide them directly."
-                context.Log($"Blocked SharePoint/OneDrive URL(s): {blockedList}", "warn")
-                ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
-                Return response
-            End If
-
-            context.Log($"Retrieving content from {urls.Count} URL(s)...")
-
-            Dim results As New StringBuilder()
-
-            If UseWebView2 Then
-                For i = 0 To urls.Count - 1
-                    Dim requestedUrl = urls(i)
-
-                    Try
-                        context.Log($"  Fetching: {requestedUrl}")
-
-                        Dim pageResult = Await RetrieveWebsiteContent_WebView2Detailed(
-                            requestedUrl,
-                            0,
-                            expandCollapsed:=expandInteractiveSections,
-                            includeLinks:=includeLinks,
-                            linkExtensions:=linkExtensions)
-
-                        Dim resolvedUrl As String = If(pageResult?.FinalUrl, requestedUrl)
-                        Dim content As String = If(pageResult?.TextContent, "")
-                        Dim linksJson As String = If(pageResult?.LinksJson, "[]")
-
-                        results.AppendLine($"<URL_{i + 1}>{resolvedUrl}</URL_{i + 1}>")
-
-                        If Not String.IsNullOrWhiteSpace(content) Then
-                            results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
-                            results.AppendLine($"</CONTENT_{i + 1}>")
-                        Else
-                            results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                            ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
-                        End If
-                        If includeLinks Then
-                            results.AppendLine($"<LINKS_{i + 1}>")
-                            results.AppendLine(
-                                BuildWebLinkExtractionResult(
-                                    requestedUrl,
-                                    resolvedUrl,
-                                    linkExtensions,
-                                    linksJson,
-                                    BuildWebRetrieverFallbackNote(includeLinks, linkExtensions, linksJson)))
-                            results.AppendLine($"</LINKS_{i + 1}>")
-                        End If
-
-                        results.AppendLine()
-
-                    Catch ex As Exception
-                        results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
-                        results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
-
-                        If includeLinks Then
-                            results.AppendLine($"<LINKS_{i + 1}>")
-                            results.AppendLine(
-                                BuildWebLinkExtractionResult(
-                                    requestedUrl,
-                                    requestedUrl,
-                                    linkExtensions,
-                                    "[]",
-                                    "Link extraction failed because page retrieval failed."))
-                            results.AppendLine($"</LINKS_{i + 1}>")
-                        End If
-
-                        results.AppendLine()
-                        ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={requestedUrl}", ex:=ex)
-                    End Try
-                Next
-            Else
-                Using httpClient As New HttpClient()
-                    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    httpClient.Timeout = TimeSpan.FromSeconds(30)
-
-                    For i = 0 To urls.Count - 1
-                        Dim requestedUrl = urls(i)
-
-                        Try
-                            context.Log($"  Fetching: {requestedUrl}")
-                            Dim content = Await RetrieveWebsiteContent(requestedUrl, INI_ISearch_MaxDepth, httpClient)
-
-                            results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
-
-                            If Not String.IsNullOrWhiteSpace(content) Then
-                                results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
-                                results.AppendLine($"</CONTENT_{i + 1}>")
-                            Else
-                                results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                                ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={requestedUrl}")
-                            End If
-
-                            If includeLinks Then
-                                results.AppendLine($"<LINKS_{i + 1}>")
-                                results.AppendLine(
-                                    BuildWebLinkExtractionResult(
-                                        requestedUrl,
-                                        requestedUrl,
-                                        linkExtensions,
-                                        "[]",
-                                        "Structured link extraction is unavailable in the HTTP fallback path."))
-                                results.AppendLine($"</LINKS_{i + 1}>")
-                            End If
-
-                            results.AppendLine()
-
-                        Catch ex As Exception
-                            results.AppendLine($"<URL_{i + 1}>{requestedUrl}</URL_{i + 1}>")
-                            results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
-
-                            If includeLinks Then
-                                results.AppendLine($"<LINKS_{i + 1}>")
-                                results.AppendLine(
-                                    BuildWebLinkExtractionResult(
-                                        requestedUrl,
-                                        requestedUrl,
-                                        linkExtensions,
-                                        "[]",
-                                        "Link extraction failed because page retrieval failed."))
-                                results.AppendLine($"</LINKS_{i + 1}>")
-                            End If
-
-                            results.AppendLine()
-                            ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={requestedUrl}", ex:=ex)
-                        End Try
-                    Next
-                End Using
-            End If
-
-            response.Response = results.ToString()
-            response.Success = True
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            ToolingFileLogger.LogError("Internal web tool error.", ex:=ex)
-        End Try
-
-        Return response
-    End Function
-
-
-    ''' <summary>
-    ''' Executes the internal internet search tool by querying the configured search engine,
-    ''' extracting result URLs via response masks, fetching qualifying page content, and returning
-    ''' tagged result blocks including the search query and all visited URLs for transparency.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call payload containing <c>query</c> and optional <c>max_results</c>/<c>max_depth</c>.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <returns>Tool response containing search results or an error.</returns>
-    Private Async Function ExecuteInternalSearchTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            ' ── Validate search configuration ────────────────────────────
-            If Not INI_ISearch OrElse String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
-                response.Success = False
-                response.ErrorMessage = "Internet search is not configured or not enabled."
-                ToolingFileLogger.LogWarn("Internal search tool: search not enabled/configured.",
-                    details:=$"INI_ISearch={INI_ISearch}; INI_ISearch_URL='{INI_ISearch_URL}'")
-                Return response
-            End If
-
-            ' ── Extract and validate parameters ──────────────────────────
-            Dim query As String = ""
-            If toolCall.Arguments.ContainsKey("query") Then
-                query = If(toolCall.Arguments("query")?.ToString(), "").Trim()
-            End If
-
-            If String.IsNullOrWhiteSpace(query) Then
-                response.Success = False
-                response.ErrorMessage = "No search query provided."
-                ToolingFileLogger.LogWarn("Internal search tool: empty query.",
-                    details:=$"CallId={toolCall.CallId}; Args={JsonConvert.SerializeObject(toolCall.Arguments)}")
-                Return response
-            End If
-
-            ' ── PII / confidential data safety net ───────────────────────
-            ' Block queries that contain obvious personal data patterns.
-            ' This is a last-resort filter; the model is instructed not to include such data,
-            ' but defense-in-depth requires a code-level check before the query leaves the system.
-            Dim piiPatterns As String() = {
-                "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-                "\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
-                "\b\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}[-.\s]?\d{0,4}\b",
-                "\b\d{3}-\d{2}-\d{4}\b",
-                "\b\d{2}[\./]\d{2}[\./]\d{2,4}\b(?=.*\d{2}[\./]\d{2}[\./]\d{2,4})",
-                "\b[A-Z]{2}\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{0,2}\b",
-                "\b(?:4\d{3}|5[1-5]\d{2}|6011|3[47]\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
-                "\bAHV[\s-]?\d{3}[\.\s]?\d{4}[\.\s]?\d{4}[\.\s]?\d{2}\b"
-            }
-
-            For Each piiPattern In piiPatterns
-                If Regex.IsMatch(query, piiPattern, RegexOptions.IgnoreCase) Then
-                    response.Success = False
-                    response.ErrorMessage = "Search query blocked: appears to contain personal or confidential data."
-                    ToolingFileLogger.LogWarn("Internal search tool: query blocked by PII filter.",
-                        details:=$"CallId={toolCall.CallId}; Pattern='{piiPattern}'")
-                    context.Log("  ⚠ Search query blocked — contains data that appears personal or confidential.", "warn")
-                    Return response
-                End If
-            Next
-
-            ' Clamp max_results to server limit (INI_ISearch_Tries)
-            Dim maxResults As Integer = INI_ISearch_Results
-            If toolCall.Arguments.ContainsKey("max_results") Then
-                Dim requested As Integer
-                If Integer.TryParse(toolCall.Arguments("max_results")?.ToString(), requested) AndAlso requested > 0 Then
-                    maxResults = Math.Min(requested, INI_ISearch_Tries)
-                End If
-            End If
-
-            ' Clamp max_depth to server limit (INI_ISearch_MaxDepth)
-            Dim maxDepth As Integer = 0
-            If toolCall.Arguments.ContainsKey("max_depth") Then
-                Dim requested As Integer
-                If Integer.TryParse(toolCall.Arguments("max_depth")?.ToString(), requested) AndAlso requested >= 0 Then
-                    maxDepth = Math.Min(requested, INI_ISearch_MaxDepth)
-                End If
-            End If
-
-            context.Log($"Internet search: query='{query}', max_results={maxResults}, max_depth={maxDepth}")
-            ToolingFileLogger.LogStep($"Search query: '{query}'; max_results={maxResults}; max_depth={maxDepth}; engine={INI_ISearch_Name}")
-
-            ' ── Perform the HTTP search request ──────────────────────────
-            Dim searchUrl As String = INI_ISearch_URL & Uri.EscapeDataString(query)
-            context.Log($"  Search URL: {searchUrl}")
-
-            Dim searchResponse As String = ""
-            Using httpClient As New HttpClient()
-                httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-                httpClient.Timeout = TimeSpan.FromSeconds(30)
-
-                searchResponse = Await httpClient.GetStringAsync(searchUrl)
-            End Using
-
-            If String.IsNullOrWhiteSpace(searchResponse) Then
-                response.Success = False
-                response.ErrorMessage = "Search engine returned an empty response."
-                ToolingFileLogger.LogWarn("Internal search tool: empty search response.",
-                    details:=$"searchUrl={searchUrl}")
-                Return response
-            End If
-
-            ' ── Extract unique URLs using response masks ─────────────────
-            Dim urlPattern As String = Regex.Escape(INI_ISearch_ResponseMask1) & "(.*?)" & Regex.Escape(INI_ISearch_ResponseMask2)
-            Dim matches As MatchCollection = Regex.Matches(searchResponse, urlPattern)
-
-            Dim extractedUrls As New List(Of String)()
-            For Each m As Match In matches
-                Dim rawUrl As String = m.Groups(1).Value
-                Dim decodedUrl As String = WebUtility.UrlDecode(rawUrl.Replace(INI_ISearch_ResponseMask1, ""))
-
-                If Not extractedUrls.Contains(decodedUrl) AndAlso IsSafeWebUrl(decodedUrl) Then
-                    extractedUrls.Add(decodedUrl)
-                End If
-
-                If extractedUrls.Count >= INI_ISearch_Tries Then Exit For
-            Next
-
-            context.Log($"  Extracted {extractedUrls.Count} unique URL(s) from search results")
-            ToolingFileLogger.LogStep($"Extracted URLs: {extractedUrls.Count}")
-
-            If extractedUrls.Count = 0 Then
-                response.Success = False
-                response.ErrorMessage = "No result URLs could be extracted from the search engine response."
-                ToolingFileLogger.LogWarn("Internal search tool: no URLs extracted.",
-                    details:=$"searchUrl={searchUrl}; ResponseMask1='{INI_ISearch_ResponseMask1}'; ResponseMask2='{INI_ISearch_ResponseMask2}'")
-                Return response
-            End If
-
-            ' ── Fetch content from each result URL ───────────────────────
-            Dim results As New StringBuilder()
-            Dim visitedUrls As New List(Of String)()
-            Dim resultIndex As Integer = 0
-
-            ' Header: report the search query and engine
-            results.AppendLine($"<SEARCH_QUERY>{query}</SEARCH_QUERY>")
-            results.AppendLine($"<SEARCH_ENGINE>{If(INI_ISearch_Name, "Search")}</SEARCH_ENGINE>")
-            results.AppendLine()
-
-            For Each url In extractedUrls
-                If resultIndex >= maxResults Then Exit For
-
-                Try
-                    context.Log($"  Fetching result: {url}")
-                    visitedUrls.Add(url)
-
-                    Dim content As String = ""
-
-                    If UseWebView2 Then
-                        content = Await RetrieveWebsiteContent_WebView2(url, ISearch_MaxChars)
-                    Else
-                        Using httpClient As New HttpClient()
-                            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                            httpClient.Timeout = TimeSpan.FromSeconds(30)
-                            content = Await RetrieveWebsiteContent(url, maxDepth, httpClient)
-                        End Using
-                    End If
-
-                    ' Apply character cap (ISearch_MaxChars) for WebView2 results that exceed it
-                    If Not String.IsNullOrWhiteSpace(content) AndAlso ISearch_MaxChars > 0 AndAlso content.Length > ISearch_MaxChars Then
-                        content = content.Substring(0, ISearch_MaxChars)
-                    End If
-
-                    ' Discard noise (pages shorter than ISearch_MinChars)
-                    If Not String.IsNullOrWhiteSpace(content) AndAlso content.Length >= ISearch_MinChars Then
-                        resultIndex += 1
-                        results.AppendLine($"<SEARCHRESULT_{resultIndex}_URL>{url}</SEARCHRESULT_{resultIndex}_URL>")
-                        results.AppendLine($"<SEARCHRESULT_{resultIndex}>")
-                        results.AppendLine(content)
-                        results.AppendLine($"</SEARCHRESULT_{resultIndex}>")
-                        results.AppendLine()
-                        context.Log($"  Result #{resultIndex}: {content.Length} chars from {url}")
-                    Else
-                        Dim charCount = If(content Is Nothing, 0, content.Length)
-                        context.Log($"  Skipped (too short: {charCount} chars, min {ISearch_MinChars}): {url}")
-                        ToolingFileLogger.LogStep($"Search result skipped (too short: {charCount} < {ISearch_MinChars}): {url}")
-                    End If
-
-                Catch ex As Exception
-                    context.Log($"  Error fetching {url}: {ex.Message}")
-                    ToolingFileLogger.LogError("Internal search tool fetch error.", details:=$"url={url}", ex:=ex)
-                End Try
-            Next
-
-            ' Footer: report all visited URLs for transparency
-            results.AppendLine("<URLS_VISITED>")
-            For Each vUrl In visitedUrls
-                results.AppendLine($"  {vUrl}")
-            Next
-            results.AppendLine("</URLS_VISITED>")
-
-            context.Log($"Search complete: {resultIndex} qualifying result(s) from {visitedUrls.Count} URL(s) visited")
-
-            response.Response = results.ToString()
-            response.Success = True
-
-        Catch ex As HttpRequestException
-            response.Success = False
-            response.ErrorMessage = $"Search HTTP error: {ex.Message}"
-            ToolingFileLogger.LogError("Internal search tool HTTP error.", ex:=ex)
-
-        Catch ex As TaskCanceledException
-            response.Success = False
-            response.ErrorMessage = $"Search request timed out: {ex.Message}"
-            ToolingFileLogger.LogError("Internal search tool timeout.", ex:=ex)
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            ToolingFileLogger.LogError("Internal search tool error.", ex:=ex)
-        End Try
-
-        Return response
-    End Function
-
-
-    ''' <summary>
-    ''' Executes the internal knowledge store search tool by querying the merged index
-    ''' via KnowledgeQueryService and returning tagged document content blocks.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call payload containing <c>query</c> and optional <c>max_results</c>.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <returns>Tool response containing relevant document content or an error.</returns>
-    Private Async Function ExecuteInternalKnowledgeTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            Dim boundStore = GetKnowledgeStoreForToolName(toolCall.ToolName)
-
-            If boundStore Is Nothing Then
-                response.Success = False
-                response.ErrorMessage = "The selected Knowledge Store source could not be resolved."
-                ToolingFileLogger.LogWarn("Internal knowledge tool: bound store could not be resolved.",
-                    details:=$"ToolName='{toolCall.ToolName}'")
-                Return response
-            End If
-
-            Dim storeLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(boundStore)
-            Dim query As String = GetToolArgumentString(toolCall.Arguments, "query")
-            Dim tagName As String = GetToolArgumentString(toolCall.Arguments, "tag")
-
-            Dim maxResults As Integer = 5
-            If toolCall.Arguments.ContainsKey("max_results") Then
-                Dim mr As Integer
-                If Integer.TryParse(toolCall.Arguments("max_results")?.ToString(), mr) Then
-                    maxResults = Math.Min(Math.Max(1, mr), 10)
-                End If
-            End If
-
-            context.Log($"Knowledge store source: {storeLabel}")
-            ToolingFileLogger.LogStep($"Knowledge store source: '{storeLabel}'; query='{query}'; tag='{tagName}'; max_results={maxResults}")
-
-            ' Build the query for KnowledgeQueryService.
-            ' IMPORTANT: Do NOT use "store:<name>" prefix — ResolveQueryAsync splits tokens
-            ' by whitespace, so multi-word store names like "VISCHER Compliance" get truncated
-            ' to just the first word, causing a name mismatch and zero results.
-            ' Instead, pass only the tag filter (single-word) and the free-text query,
-            ' then filter the returned matches to the bound store afterward.
-            Dim resolveQuery As String = ""
-
-            If Not String.IsNullOrWhiteSpace(tagName) Then
-                resolveQuery &= $"tag:{tagName} "
-            End If
-
-            If Not String.IsNullOrWhiteSpace(query) Then
-                resolveQuery &= query
-            End If
-
-            resolveQuery = resolveQuery.Trim()
-
-            If String.IsNullOrWhiteSpace(resolveQuery) Then
-                ' No query and no tag — pass just the store name as a broad keyword search
-                Dim storeName As String = If(boundStore.Name, "").Trim()
-                If Not String.IsNullOrWhiteSpace(storeName) Then
-                    resolveQuery = storeName
-                Else
-                    response.Success = True
-                    response.Response = $"No query provided for Knowledge Store '{storeLabel}'."
-                    Return response
-                End If
-            End If
-
-            context.Log($"Resolving knowledge query: '{resolveQuery}'")
-            ToolingFileLogger.LogStep($"KnowledgeQueryService query: '{resolveQuery}'")
-
-            ' Use the same semantic search path that Freestyle uses.
-            ' Request extra results so we have enough after filtering to the bound store.
-            Dim matches = Await KnowledgeQueryService.ResolveQueryAsync(resolveQuery, _context, maxResults * 4).ConfigureAwait(False)
-
-            ' Filter to only the bound store (by Name match, case-insensitive)
-            Dim storeName2 As String = If(boundStore.Name, "").Trim()
-            If Not String.IsNullOrWhiteSpace(storeName2) AndAlso matches IsNot Nothing Then
-                matches = matches.
-                    Where(Function(m) Not String.IsNullOrWhiteSpace(m.StoreName) AndAlso
-                                      m.StoreName.Equals(storeName2, StringComparison.OrdinalIgnoreCase)).
-                    ToList()
-            End If
-
-            ' Apply the requested limit
-            If matches IsNot Nothing AndAlso matches.Count > maxResults Then
-                matches = matches.Take(maxResults).ToList()
-            End If
-
-            If matches Is Nothing OrElse matches.Count = 0 Then
-                response.Success = True
-                response.Response = $"No relevant documents found in Knowledge Store '{storeLabel}'."
-                Return response
-            End If
-
-            Dim knowledgeContext As String = KnowledgeQueryService.BuildKnowledgeContext(matches, 200000)
-
-            If String.IsNullOrWhiteSpace(knowledgeContext) Then
-                response.Success = True
-                response.Response = $"No readable content could be built from Knowledge Store '{storeLabel}'."
-                Return response
-            End If
-
-            response.Success = True
-            response.Response = knowledgeContext
-
-            context.Log($"Knowledge search returned content ({knowledgeContext.Length:N0} chars) from '{storeLabel}'.", "success")
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = $"Knowledge store search failed: {ex.Message}"
-            ToolingFileLogger.LogError("Internal knowledge tool error.", ex:=ex)
-        End Try
-
-        Return response
-    End Function
 
 
     Private Function GetToolParameterSchemas(toolConfig As ModelConfig) As Dictionary(Of String, JToken)
@@ -7790,307 +5509,6 @@ __AfterDispatch:
         Return GetDiscussInkyEffectiveTools()
     End Function
 
-    Private Class ToolSourceLink
-        Public Property Url As String
-        Public Property Title As String
-        Public Property Source As String
-    End Class
-
-    Private Function AppendM365SourcesFooter(finalAnswer As String,
-                                             toolResponses As List(Of ToolResponse)) As String
-        Dim answer As String = If(finalAnswer, "").Trim()
-        Dim links As List(Of ToolSourceLink) = ExtractM365SourceLinks(toolResponses, answer)
-
-        If links.Count = 0 Then
-            Return answer
-        End If
-
-        Dim sb As New StringBuilder()
-
-        If answer.Length > 0 Then
-            sb.AppendLine(answer)
-            sb.AppendLine()
-        End If
-
-        sb.AppendLine("### Sources")
-
-        For Each link In links
-            Dim label As String = BuildSourceLinkLabel(link)
-            sb.AppendLine($"- [{EscapeMarkdownLinkText(label)}]({link.Url})")
-        Next
-
-        Return sb.ToString().Trim()
-    End Function
-
-    Private Function ExtractM365SourceLinks(toolResponses As List(Of ToolResponse),
-                                            existingAnswer As String) As List(Of ToolSourceLink)
-        Dim results As New List(Of ToolSourceLink)()
-        Dim seenUrls As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-        Dim answerText As String = If(existingAnswer, "")
-
-        If toolResponses Is Nothing OrElse toolResponses.Count = 0 Then
-            Return results
-        End If
-
-        For Each response As ToolResponse In toolResponses
-            If response Is Nothing OrElse Not response.Success OrElse String.IsNullOrWhiteSpace(response.Response) Then
-                Continue For
-            End If
-
-            If String.Equals(response.ToolName, "m365_search", StringComparison.OrdinalIgnoreCase) Then
-                ExtractM365SearchLinks(response.Response, answerText, seenUrls, results)
-            ElseIf IsM365RetrievalToolName(response.ToolName) Then
-                ExtractM365WrappedContentLink(response.ToolName, response.Response, answerText, seenUrls, results)
-            End If
-
-            If results.Count >= 12 Then
-                Exit For
-            End If
-        Next
-
-        Return results
-    End Function
-
-    Private Sub ExtractM365SearchLinks(responseText As String,
-                                       existingAnswer As String,
-                                       seenUrls As HashSet(Of String),
-                                       results As List(Of ToolSourceLink))
-        Dim root As JObject = Nothing
-
-        Try
-            root = JObject.Parse(responseText)
-        Catch
-            Exit Sub
-        End Try
-
-        Dim hits As JArray = TryCast(root("hits"), JArray)
-        If hits Is Nothing OrElse hits.Count = 0 Then
-            Exit Sub
-        End If
-
-        For Each hitToken As JToken In hits
-            Dim hit As JObject = TryCast(hitToken, JObject)
-            If hit Is Nothing Then Continue For
-
-            Dim url As String = If(hit("web_url")?.ToString(), "").Trim()
-            Dim title As String = If(hit("title")?.ToString(), "").Trim()
-            Dim source As String = If(hit("source")?.ToString(), "").Trim()
-
-            TryAddSourceLink(url, title, source, existingAnswer, seenUrls, results)
-
-            If results.Count >= 12 Then
-                Exit For
-            End If
-        Next
-    End Sub
-
-    Private Sub ExtractM365WrappedContentLink(toolName As String,
-                                              responseText As String,
-                                              existingAnswer As String,
-                                              seenUrls As HashSet(Of String),
-                                              results As List(Of ToolSourceLink))
-        Dim urlMatch As Match = Regex.Match(
-            responseText,
-            "<WEB_URL>\s*(.*?)\s*</WEB_URL>",
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
-
-        If Not urlMatch.Success Then
-            Exit Sub
-        End If
-
-        Dim titleMatch As Match = Regex.Match(
-            responseText,
-            "^<(?<kind>[A-Z_]+)\s+id=""[^""]*""\s+title=""(?<title>[^""]*)""[^>]*>",
-            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
-
-        Dim title As String = ""
-        If titleMatch.Success Then
-            title = titleMatch.Groups("title").Value.Trim()
-        End If
-
-        Dim url As String = urlMatch.Groups(1).Value.Trim()
-        Dim source As String = GetM365SourceFromToolName(toolName)
-
-        TryAddSourceLink(url, title, source, existingAnswer, seenUrls, results)
-    End Sub
-
-    Private Sub TryAddSourceLink(url As String,
-                                 title As String,
-                                 source As String,
-                                 existingAnswer As String,
-                                 seenUrls As HashSet(Of String),
-                                 results As List(Of ToolSourceLink))
-        Dim cleanUrl As String = If(url, "").Trim()
-        If String.IsNullOrWhiteSpace(cleanUrl) Then
-            Exit Sub
-        End If
-
-        If Not String.IsNullOrWhiteSpace(existingAnswer) AndAlso
-           existingAnswer.IndexOf(cleanUrl, StringComparison.OrdinalIgnoreCase) >= 0 Then
-            Exit Sub
-        End If
-
-        If Not seenUrls.Add(cleanUrl) Then
-            Exit Sub
-        End If
-
-        results.Add(New ToolSourceLink With {
-            .Url = cleanUrl,
-            .Title = If(title, "").Trim(),
-            .Source = If(source, "").Trim()
-        })
-    End Sub
-
-    Private Function IsM365RetrievalToolName(toolName As String) As Boolean
-        If String.IsNullOrWhiteSpace(toolName) Then
-            Return False
-        End If
-
-        Select Case toolName.Trim().ToLowerInvariant()
-            Case "m365_get_mail",
-                 "m365_get_mail_thread",
-                 "m365_get_file",
-                 "m365_get_event",
-                 "m365_get_chat_thread",
-                 "m365_get_onenote_page"
-                Return True
-            Case Else
-                Return False
-        End Select
-    End Function
-
-    Private Function GetM365SourceFromToolName(toolName As String) As String
-        If String.IsNullOrWhiteSpace(toolName) Then
-            Return ""
-        End If
-
-        Select Case toolName.Trim().ToLowerInvariant()
-            Case "m365_get_mail", "m365_get_mail_thread"
-                Return "mail"
-            Case "m365_get_file"
-                Return "file"
-            Case "m365_get_event"
-                Return "calendar"
-            Case "m365_get_chat_thread"
-                Return "teams"
-            Case "m365_get_onenote_page"
-                Return "onenote"
-            Case Else
-                Return "m365"
-        End Select
-    End Function
-
-    Private Function BuildSourceLinkLabel(link As ToolSourceLink) As String
-        If link Is Nothing Then Return "Open source"
-
-        Dim title As String = If(link.Title, "").Trim()
-        Dim source As String = If(link.Source, "").Trim().ToLowerInvariant()
-
-        If String.IsNullOrWhiteSpace(title) Then
-            title = "Open item"
-        End If
-
-        Select Case source
-            Case "mail"
-                Return title & " (e-mail)"
-            Case "onedrive"
-                Return title & " (OneDrive)"
-            Case "sharepoint"
-                Return title & " (SharePoint)"
-            Case "file"
-                Return title & " (file)"
-            Case "teams"
-                Return title & " (Teams)"
-            Case "calendar"
-                Return title & " (calendar)"
-            Case "onenote"
-                Return title & " (OneNote)"
-            Case Else
-                Return title
-        End Select
-    End Function
-
-    Private Function EscapeMarkdownLinkText(value As String) As String
-        Dim s As String = If(value, "")
-        s = s.Replace("\", "\\")
-        s = s.Replace("[", "\[")
-        s = s.Replace("]", "\]")
-        Return s
-    End Function
-
-    Private Function IsMCPStreamableToolCall(endpoint As String, apiCall As String) As Boolean
-        If String.IsNullOrWhiteSpace(endpoint) Then
-            Return False
-        End If
-
-        If endpoint.StartsWith(SharedMethods.MCP_STREAMABLE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
-            Return True
-        End If
-
-        If endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
-            Return False
-        End If
-
-        If String.IsNullOrWhiteSpace(apiCall) Then
-            Return False
-        End If
-
-        Try
-            Dim requestObj As JObject = JObject.Parse(apiCall)
-
-            Return String.Equals(
-                If(requestObj("jsonrpc")?.ToString(), ""),
-                "2.0",
-                StringComparison.OrdinalIgnoreCase) AndAlso
-                String.Equals(
-                    If(requestObj("method")?.ToString(), ""),
-                    "tools/call",
-                    StringComparison.OrdinalIgnoreCase)
-        Catch
-            Return False
-        End Try
-    End Function
-
-    Private Function ShouldRetryMCPAfterUnauthorized(toolConfig As ModelConfig, ex As Exception) As Boolean
-        If toolConfig Is Nothing OrElse Not toolConfig.OAuth2 Then Return False
-        If ex Is Nothing Then Return False
-
-        Dim message As String = If(ex.Message, "")
-        Return message.IndexOf("401", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-               message.IndexOf("Unauthorized", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
-               message.IndexOf("Invalid or expired access token", StringComparison.OrdinalIgnoreCase) >= 0
-    End Function
-
-    Private Async Function ForceRefreshToolOAuthToken(toolConfig As ModelConfig, toolName As String) As Task(Of Boolean)
-        Try
-            toolConfig.DecodedAPI = Await SharedMethods.GetFreshAccessToken(
-                _context,
-                toolConfig.OAuth2ClientMail,
-                toolConfig.OAuth2Scopes,
-                toolConfig.APIKey,
-                toolConfig.OAuth2Endpoint,
-                toolConfig.OAuth2ATExpiry,
-                True,
-                False,
-                forceRefresh:=True).ConfigureAwait(False)
-
-            If String.IsNullOrWhiteSpace(toolConfig.DecodedAPI) Then
-                ToolingFileLogger.LogError(
-                    "Forced MCP OAuth refresh returned an empty token.",
-                    details:=$"ToolName='{toolName}'")
-                Return False
-            End If
-
-            Return True
-
-        Catch refreshEx As Exception
-            ToolingFileLogger.LogError(
-                "Forced MCP OAuth refresh failed.",
-                details:=$"ToolName='{toolName}'",
-                ex:=refreshEx)
-            Return False
-        End Try
-    End Function
 
 
 

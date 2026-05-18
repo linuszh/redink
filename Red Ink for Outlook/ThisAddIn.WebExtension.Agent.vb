@@ -2223,18 +2223,27 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Shared Function GetUniqueFilePath(pathValue As String) As String
-        If Not File.Exists(pathValue) AndAlso Not Directory.Exists(pathValue) Then Return pathValue
+        If String.IsNullOrWhiteSpace(pathValue) Then
+            Return pathValue
+        End If
 
-        Dim dir = Path.GetDirectoryName(pathValue)
-        Dim baseName = Path.GetFileNameWithoutExtension(pathValue)
-        Dim ext = Path.GetExtension(pathValue)
-        Dim counter = 1
+        If Not File.Exists(pathValue) AndAlso Not Directory.Exists(pathValue) Then
+            Return pathValue
+        End If
 
-        Do
-            Dim candidate = Path.Combine(dir, $"{baseName}_{counter}{ext}")
-            If Not File.Exists(candidate) AndAlso Not Directory.Exists(candidate) Then Return candidate
-            counter += 1
-        Loop
+        Dim directoryName As String = Path.GetDirectoryName(pathValue)
+        Dim baseName As String = Path.GetFileNameWithoutExtension(pathValue)
+        Dim extension As String = Path.GetExtension(pathValue)
+
+        For i As Integer = 1 To 9999
+            Dim candidate As String = Path.Combine(directoryName, $"{baseName} ({i}){extension}")
+
+            If Not File.Exists(candidate) AndAlso Not Directory.Exists(candidate) Then
+                Return candidate
+            End If
+        Next
+
+        Return Path.Combine(directoryName, $"{baseName}-{Guid.NewGuid():N}{extension}")
     End Function
 
     Private Shared Function RemoveWorkspacePath(pathValue As String) As Boolean
