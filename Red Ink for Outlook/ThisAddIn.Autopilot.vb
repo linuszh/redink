@@ -333,13 +333,27 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Shows the AutoPilot dashboard if it is available.</summary>
     Public Sub ShowAutoPilotDashboard()
-        If _apDashboard IsNot Nothing Then
-            Try
-                _apDashboard.Show()
-                _apDashboard.BringToFront()
-            Catch
-            End Try
-        End If
+        If _apDashboard Is Nothing Then Return
+
+        Dim showDashboard As System.Action =
+            Sub()
+                Try
+                    If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    _apDashboard.Show()
+                    _apDashboard.BringToFront()
+                Catch
+                End Try
+            End Sub
+
+        Try
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                UiSyncContext.Post(Sub() showDashboard(), Nothing)
+            Else
+                showDashboard()
+            End If
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Starts AutoPilot using the configuration dialog and saved settings.</summary>
@@ -406,53 +420,78 @@ Partial Public Class ThisAddIn
         If modelCanCallTools Then
             _apSelectedTools = New List(Of ModelConfig)()
             _apSelectedTools.AddRange(GetAutoPilotInternalTools())
-            If config.SelectedExternalTools IsNot Nothing Then _apSelectedTools.AddRange(config.SelectedExternalTools)
+
+            If config.SelectedExternalTools IsNot Nothing Then
+                _apSelectedTools.AddRange(
+                    NormalizeAutoPilotSelectableExternalTools(config.SelectedExternalTools))
+            End If
+
+            _apSelectedTools =
+                _apSelectedTools.
+                    Where(Function(tool)
+                              Return tool IsNot Nothing AndAlso
+                                     Not SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
+                          End Function).
+                    GroupBy(Function(tool) tool.ToolName, StringComparer.OrdinalIgnoreCase).
+                    Select(Function(group) group.First()).
+                    ToList()
         Else
             _apSelectedTools = Nothing
         End If
 
-        _apDashboard = New LogWindow()
-        _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
-        AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
-        AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
-        _apDashboard.ShowAbortJobButton(True)
-        _apDashboard.Show()
+        Dim initializeDashboard As System.Action =
+            Sub()
+                _apDashboard = New LogWindow()
+                _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
+                AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
+                AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                _apDashboard.ShowAbortJobButton(True)
+                _apDashboard.Show()
 
-        ' Add Scheduler dashboard button if scheduler is enabled
-        If config.EnableScheduler Then
-            Try
-                ' Find the button panel (FlowLayoutPanel) in the dashboard
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnScheduler As New Button() With {
-                        .Text = "Scheduler",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
-                    buttonPanel.Controls.Add(btnScheduler)
-                End If
-            Catch
-            End Try
-        End If
+                ' Add Scheduler dashboard button if scheduler is enabled
+                If config.EnableScheduler Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
 
-        ' Add User Storage dashboard button if memory or files are enabled
-        If config.EnableUserMemory OrElse config.EnableUserFiles Then
-            Try
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnUserStorage As New Button() With {
-                        .Text = "User Storage",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
-                    buttonPanel.Controls.Add(btnUserStorage)
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnScheduler As New Button() With {
+                                .Text = "Scheduler",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
+                            buttonPanel.Controls.Add(btnScheduler)
+                        End If
+                    Catch
+                    End Try
                 End If
-            Catch
-            End Try
+
+                ' Add User Storage dashboard button if memory or files are enabled
+                If config.EnableUserMemory OrElse config.EnableUserFiles Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnUserStorage As New Button() With {
+                                .Text = "User Storage",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
+                            buttonPanel.Controls.Add(btnUserStorage)
+                        End If
+                    Catch
+                    End Try
+                End If
+            End Sub
+
+        If UiSyncContext IsNot Nothing AndAlso
+           System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+            UiSyncContext.Send(Sub() initializeDashboard(), Nothing)
+        Else
+            initializeDashboard()
         End If
 
         Dim modelLabel As String
@@ -1879,7 +1918,11 @@ Partial Public Class ThisAddIn
                             systemPrompt, userPrompt,
                             _apSelectedTools, _apUseSecondApi,
                             hideSplash:=True, hideLogWindow:=True,
-                            cancellationToken:=ct, binaryOutputDirectory:=_apCurrentTempDir)
+                            cancellationToken:=ct,
+                            binaryOutputDirectory:=_apCurrentTempDir,
+                            workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                            memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                            memoryGroundingModeIsExplicit:=True)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -3111,39 +3154,62 @@ Partial Public Class ThisAddIn
     ''' attachment info AND falls back to scanning for new files in tempDir.
     ''' Only files within tempDir are eligible (security: path prefix check).
     ''' </summary>
-    Private Shared Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
+    Private Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
         Dim results As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim tempDirFull = Path.GetFullPath(tempDir)
 
-        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs)
+        ' Files already surfaced in a previous turn (or pre-existing user uploads)
+        ' MUST NOT be returned again. The set is populated by
+        ' ResetChatAgentDeliverableTrackingForNewTurn() at the start of each turn.
+        Dim alreadySurfaced As HashSet(Of String) = _chatAgentSurfacedFiles
+        If alreadySurfaced Is Nothing Then
+            alreadySurfaced = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End If
+
+        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs).
+        '    OutputFiles for the current turn are accumulated as tools run; prior-turn
+        '    entries were cleared by ResetChatAgentDeliverableTrackingForNewTurn().
         If originalAttachments IsNot Nothing Then
             For Each att In originalAttachments
                 If att.OutputFiles IsNot Nothing Then
                     For Each outputPath In att.OutputFiles
                         If Not String.IsNullOrEmpty(outputPath) AndAlso File.Exists(outputPath) Then
-                            ' Security: only include files inside the per-mail temp dir
-                            If Path.GetFullPath(outputPath).StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
-                                results.Add(outputPath)
-                            End If
+                            Dim fullOut As String = Path.GetFullPath(outputPath)
+                            ' Security: only include files inside the per-turn temp dir.
+                            If Not fullOut.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            ' Bleed protection: skip files already surfaced in a previous turn.
+                            If alreadySurfaced.Contains(fullOut) Then Continue For
+                            results.Add(fullOut)
                         End If
                     Next
                 End If
             Next
         End If
 
-        ' 2. Fallback: also scan for any new files in tempDir not in the original set
+        ' 2. Fallback: scan for files in tempDir that are (a) not in the original
+        '    upload set, AND (b) not in the already-surfaced set from prior turns.
         If Directory.Exists(tempDir) Then
             Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             If originalAttachments IsNot Nothing Then
                 For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(att.TempFilePath)
+                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
                 Next
             End If
-            ' Scan all files recursively (tools may create output in subdirectories)
             For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
-                If Not originalPaths.Contains(filePath) Then results.Add(filePath)
+                Dim full As String = Path.GetFullPath(filePath)
+                If originalPaths.Contains(full) Then Continue For
+                If alreadySurfaced.Contains(full) Then Continue For
+                results.Add(full)
             Next
         End If
+
+        ' Promote everything returned this turn into the "already surfaced" set so
+        ' the next turn does not pick it up again — even if the OutputFiles tracking
+        ' on uploads is not perfectly cleared by the next reset.
+        For Each surfaced In results
+            alreadySurfaced.Add(surfaced)
+        Next
+        _chatAgentSurfacedFiles = alreadySurfaced
 
         Return results.ToList()
     End Function
@@ -4488,7 +4554,11 @@ Partial Public Class ThisAddIn
                         systemPrompt, userPrompt,
                         _apSelectedTools, _apUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                        cancellationToken:=ct,
+                        binaryOutputDirectory:=tempDir,
+                        workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                        memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                        memoryGroundingModeIsExplicit:=True)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,
@@ -4662,6 +4732,7 @@ Partial Public Class ThisAddIn
     Friend Class AutoPilotAttachmentInfo
         Public Property OriginalFileName As String
         Public Property TempFilePath As String
+        Public Property SourcePath As String
         Public Property Extension As String
         Public Property SizeBytes As Long
         Public Property IsOverSizeLimit As Boolean

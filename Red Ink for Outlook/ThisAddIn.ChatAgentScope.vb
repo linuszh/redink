@@ -1,10 +1,16 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' Provides a small RAII-style helper that flips the existing
-' _chatAgentActive flag for the lifetime of the returned token, so the
-' built-in M365 tools become available to ExecuteToolingLoop without
-' modifying ThisAddIn.Tooling.vb.
+' =============================================================================
+' File: ThisAddIn.ChatAgentScope.vb
+' Purpose: Provides RAII-style scope token for temporarily elevating _chatAgentActive flag.
+'          Enables built-in M365 tools during isolated tooling loops without modifying core tooling logic.
+' 
+' Architecture:
+'  - EnterChatAgentScope(): Returns disposable token that sets _chatAgentActive = True on entry.
+'  - ChatAgentScopeToken: Nested IDisposable class that restores previous flag state on Dispose.
+'  - Used by ExecuteToolingLoop to isolate sub-agent M365 tool access without side effects.
+' =============================================================================
 
 Option Explicit On
 Option Strict On

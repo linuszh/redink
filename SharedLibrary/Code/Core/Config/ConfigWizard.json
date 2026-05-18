@@ -1049,8 +1049,22 @@
     {
       "id": "content_resources",
       "title": "Content Libraries & Rule Sets",
-      "description": "Shared and local files that power document-centric functions such as WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
+      "description": "Shared and local files that power document-centric functions such as the resources for Red Ink's agentic features, WebAgent, Find Clause, Document Check, MyDocStyle, redaction and discussion personas. The local files can edited by the users themselves, whereas the shared files can be edited via the ''Expert Config'' menu. You can have these parameters set automatically by using the ''Get Sample Files'' feature in ''Settings'', which will also download sample files to give you an idea on how to build such files.",
       "fields": [
+        {
+          "key": "AgentResourcesPath",
+          "label": "Agent Resources Directory",
+          "type": "path",
+          "default": "%APPDATA%\\microsoft\\word",
+          "description": "Path to the shared directory that contains agent scripts (inky.md, skills, agents). Use a central network location if the same resources should be shared across users. Example: N:\\AI\\Library. [AgentResourcesPath"
+        },
+        {
+          "key": "AgentResourcesPathLocal",
+          "label": "Agent Resources Directory (Local)",
+          "type": "path",
+          "default": "",
+          "description": "Path to the user's local version of the same resource so personal files can be kept separate from the shared central file or directory. This is the value users usually edit themselves. Example: %APPDATA%\\Microsoft\\Word. [AgentResourcesPathLocal]"
+        },
         {
           "key": "WebAgentPath",
           "label": "Web Agent Directory",

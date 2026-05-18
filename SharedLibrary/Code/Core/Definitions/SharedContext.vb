@@ -282,6 +282,8 @@ Namespace SharedLibrary
             Property INI_SpecialServicePath As String
             Property INI_FindClausePath As String
             Property INI_FindClausePathLocal As String
+            Property INI_AgentResourcesPath As String
+            Property INI_AgentResourcesPathLocal As String
             Property INI_WebAgentPath As String
             Property INI_WebAgentPathLocal As String
             Property INI_SnapshotLibPath As String
@@ -620,6 +622,8 @@ Namespace SharedLibrary
         Public Property INI_SpecialServicePath As String Implements ISharedContext.INI_SpecialServicePath
         Public Property INI_FindClausePath As String Implements ISharedContext.INI_FindClausePath
         Public Property INI_FindClausePathLocal As String Implements ISharedContext.INI_FindClausePathLocal
+        Public Property INI_AgentResourcesPath As String Implements ISharedContext.INI_AgentResourcesPath
+        Public Property INI_AgentResourcesPathLocal As String Implements ISharedContext.INI_AgentResourcesPathLocal
         Public Property INI_WebAgentPath As String Implements ISharedContext.INI_WebAgentPath
         Public Property INI_WebAgentPathLocal As String Implements ISharedContext.INI_WebAgentPathLocal
         Public Property INI_SnapshotLibPath As String Implements ISharedContext.INI_SnapshotLibPath

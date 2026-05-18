@@ -982,6 +982,10 @@ Namespace SharedLibrary
                     Return context.INI_FindClausePath
                 Case "FindClausePathLocal"
                     Return context.INI_FindClausePathLocal
+                Case "AgentResourcesPath"
+                    Return context.INI_AgentResourcesPath
+                Case "AgentResourcesPathLocal"
+                    Return context.INI_AgentResourcesPathLocal
                 Case "WebAgentPath"
                     Return context.INI_WebAgentPath
                 Case "WebAgentPathLocal"
@@ -1348,6 +1352,10 @@ Namespace SharedLibrary
                     context.INI_FindClausePath = value
                 Case "FindClausePathLocal"
                     context.INI_FindClausePathLocal = value
+                Case "AgentResourcesPath"
+                    context.INI_AgentResourcesPath = value
+                Case "AgentResourcesPathLocal"
+                    context.INI_AgentResourcesPathLocal = value
                 Case "DocCheckPath"
                     context.INI_DocCheckPath = value
                 Case "DocCheckPathLocal"
@@ -1819,6 +1827,8 @@ Namespace SharedLibrary
                     {"SpecialServicePath", context.INI_SpecialServicePath},
                     {"FindClausePath", context.INI_FindClausePath},
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
+                    {"AgentResourcesPath", context.INI_AgentResourcesPath},
+                    {"AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
                     {"SnapshotLibPath", context.INI_SnapshotLibPath},
@@ -2426,6 +2436,8 @@ Namespace SharedLibrary
                     {"SpecialServicePath", context.INI_SpecialServicePath},
                     {"FindClausePath", context.INI_FindClausePath},
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
+                    {"AgentResourcesPath", context.INI_AgentResourcesPath},
+                    {"AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
                     {"SnapshotLibPath", context.INI_SnapshotLibPath},
@@ -2973,6 +2985,8 @@ Namespace SharedLibrary
                                     Tuple.Create("AutoPilot", context.INI_AutoPilot, True, "", ""),
                                     Tuple.Create("Find Clause", context.INI_FindClausePath, False, AN2 & "-lib-", ".txt"),
                                     Tuple.Create("Find Clause (Local)", context.INI_FindClausePathLocal, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("Agent Resources", context.INI_AgentResourcesPath, False, "*", ".md"),
+                                    Tuple.Create("Agent Resources (Local)", context.INI_AgentResourcesPathLocal, False, "*", ".md"),
                                     Tuple.Create("DocCheck", context.INI_DocCheckPath, False, AN2 & "-dc-", ".txt"),
                                     Tuple.Create("DocCheck (Local)", context.INI_DocCheckPathLocal, False, AN2 & "-dc-", ".txt"),
                                     Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
@@ -3261,6 +3275,8 @@ Namespace SharedLibrary
             variableValues.Add("SpecialServicePath", context.INI_SpecialServicePath)
             variableValues.Add("FindClausePath", context.INI_FindClausePath)
             variableValues.Add("FindClausePathLocal", context.INI_FindClausePathLocal)
+            variableValues.Add("AgentResourcesPath", context.INI_AgentResourcesPath)
+            variableValues.Add("AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal)
             variableValues.Add("WebAgentPath", context.INI_WebAgentPath)
             variableValues.Add("WebAgentPathLocal", context.INI_WebAgentPathLocal)
             variableValues.Add("SnapshotLibPath", context.INI_SnapshotLibPath)
@@ -3630,6 +3646,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SpecialServicePath") Then context.INI_SpecialServicePath = CStr(updatedValues("SpecialServicePath"))
                 If updatedValues.ContainsKey("FindClausePath") Then context.INI_FindClausePath = CStr(updatedValues("FindClausePath"))
                 If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
+                If updatedValues.ContainsKey("AgentResourcesPath") Then context.INI_AgentResourcesPath = CStr(updatedValues("AgentResourcesPath"))
+                If updatedValues.ContainsKey("AgentResourcesPathLocal") Then context.INI_AgentResourcesPathLocal = CStr(updatedValues("AgentResourcesPathLocal"))
                 If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
                 If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
                 If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))

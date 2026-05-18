@@ -89,6 +89,12 @@
     <Reference Include="DiffPlex, Version=1.9.0.0, Culture=neutral, PublicKeyToken=1d35e91d1bd7bc0f, processorArchitecture=MSIL">
       <HintPath>..\packages\DiffPlex.1.9.0\lib\net45\DiffPlex.dll</HintPath>
     </Reference>
+    <Reference Include="DocumentFormat.OpenXml, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.3.5.1\lib\net46\DocumentFormat.OpenXml.dll</HintPath>
+    </Reference>
+    <Reference Include="DocumentFormat.OpenXml.Framework, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.Framework.3.5.1\lib\net46\DocumentFormat.OpenXml.Framework.dll</HintPath>
+    </Reference>
     <Reference Include="Google.Protobuf, Version=3.34.1.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
       <HintPath>..\packages\Google.Protobuf.3.34.1\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
@@ -337,6 +343,7 @@
     <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
       <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
     </Reference>
+    <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
@@ -350,6 +357,45 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Code\Agents\ActionPromiseValidator.vb" />
+    <Compile Include="Code\Agents\AgentGate.vb" />
+    <Compile Include="Code\Agents\AgentResources.vb" />
+    <Compile Include="Code\Agents\AgentResourcesViewerForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\HostToolRegistration.vb" />
+    <Compile Include="Code\Agents\InkyPromptBuilder.vb" />
+    <Compile Include="Code\Agents\ISubAgentHost.vb" />
+    <Compile Include="Code\Agents\IWordDocumentHost.vb" />
+    <Compile Include="Code\Agents\JsRunTool.vb" />
+    <Compile Include="Code\Agents\LanguageContract.vb" />
+    <Compile Include="Code\Agents\MemoryTools.vb" />
+    <Compile Include="Code\Agents\PathPolicy.vb" />
+    <Compile Include="Code\Agents\SessionMemoryViewerForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\Agents\SessionMemory.vb" />
+    <Compile Include="Code\Agents\SkillAuthorMode.vb" />
+    <Compile Include="Code\Agents\SkillInvokeTool.vb" />
+    <Compile Include="Code\Agents\SubAgentRunner.vb" />
+    <Compile Include="Code\Agents\SubAgentRuntimeHardening.vb" />
+    <Compile Include="Code\Agents\SubAgentToolScopeInitializer.vb" />
+    <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
+    <Compile Include="Code\Agents\TextTools.vb" />
+    <Compile Include="Code\Agents\ToolCallSequencing.vb" />
+    <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
+    <Compile Include="Code\Agents\ToolingConstants.vb" />
+    <Compile Include="Code\Agents\ToolingOrchestrator.vb" />
+    <Compile Include="Code\Agents\ToolLoaderTool.vb" />
+    <Compile Include="Code\Agents\ToolRegistry.vb" />
+    <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
+    <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
+    <Compile Include="Code\Agents\WordDocTools.vb" />
+    <Compile Include="Code\Agents\WordTools.vb" />
+    <Compile Include="Code\Agents\WorkflowContinuity.vb" />
+    <Compile Include="Code\Agents\WorkspaceState.vb" />
+    <Compile Include="Code\Agents\WorkspaceTools.vb" />
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeEmbeddingService.vb" />
     <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeIndexer.vb" />
