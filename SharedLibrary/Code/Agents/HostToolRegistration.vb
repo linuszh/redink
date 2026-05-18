@@ -1,4 +1,22 @@
-﻿Option Explicit On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: HostToolRegistration.vb
+' Purpose: Declares which tools are internal (registered on the host),
+'          which are deliverable-producing (used for user-facing output),
+'          and which are memory-management tools used across the agentic layer.
+'
+' Tool Categories:
+'  - OutlookAutoPilotToolNames: Full set of Outlook autopilot capabilities.
+'  - WordHostInternalToolNames: Word document interop via IWordDocumentHost.
+'  - OutlookDeliverableToolNames: Tools that produce user-facing deliverables.
+'  - WordDeliverableToolNames: Word-specific deliverable tools.
+'  - Common internal tools: memory, text, workspace, and common utilities.
+' =============================================================================
+
+
+Option Explicit On
 Option Strict On
 
 Namespace Agents

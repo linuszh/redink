@@ -1,14 +1,15 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: SessionMemoryViewerForm.vb
 ' Purpose: Lets the user inspect and manage the persistent session memory used by
-'          the agent layer.
+'          the agent layer. Displays memory entries with summaries, allows opening
+'          values in a text editor, deleting entries, and clearing all memory.
 '
-' Behavior:
-'  - Lists "[KEY] SUMMARY" entries.
-'  - "Open" exports the selected value to a temp text/JSON file and opens it in
-'    the shared text editor.
+' UI Features:
+'  - Lists "[KEY] SUMMARY" entries with optional filter.
+'  - "Open" exports the selected value to a temp text/JSON file and opens it.
 '  - "Delete" removes the selected entry.
 '  - "Clear All" wipes the entire memory (with confirmation).
 '  - "Refresh" re-reads from storage.
@@ -309,8 +310,11 @@ Namespace Agents
             Dim sel = TryCast(Me.lstItems.SelectedItem, ItemWrap)
             If sel Is Nothing OrElse sel.Entry Is Nothing Then Return
 
-            If MessageBox.Show("Delete memory entry '" & sel.Entry.Key & "'?", "Confirm",
-                               MessageBoxButtons.YesNo, MessageBoxIcon.Question) = DialogResult.Yes Then
+            If SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+                "Delete memory entry '" & sel.Entry.Key & "'?",
+                "Yes",
+                "No",
+                "Confirm") = 1 Then
                 SessionMemory.Delete(sel.Entry.Key)
                 ReloadEntries()
             End If
@@ -319,8 +323,11 @@ Namespace Agents
         Private Sub OnClearAllClicked(sender As Object, e As EventArgs)
             If Me.entries.Count = 0 Then Return
 
-            If MessageBox.Show("Delete ALL session-memory entries? This cannot be undone.", "Confirm",
-                               MessageBoxButtons.YesNo, MessageBoxIcon.Warning) = DialogResult.Yes Then
+            If SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+                "Delete ALL session-memory entries? This cannot be undone.",
+                "Yes",
+                "No",
+                "Confirm") = 1 Then
                 SessionMemory.Clear()
                 ReloadEntries()
             End If

@@ -5,20 +5,18 @@
 ' File: WordTools.vb
 ' Purpose: File-level (.docx) tools using DocumentFormat.OpenXml. Operate ONLY
 '          on file paths sandboxed by PathPolicy. Never touches the currently
-'          open Word document (that surface is worddoc_* in step 10C).
+'          open Word document (that surface is worddoc_* tools).
 '
 ' Tools:
-'   word_extract_text   — return plain text of the document.
-'   word_search         — substring/regex search; returns W.Paragraph index + match.
-'   word_write          — replace/insert/append W.Paragraph text WITHOUT markup.
-'   word_markup         — same as word_write but produces tracked-change w:ins / w:del.
-'   word_comment_add    — add a Word comment to a matched substring.
-'   word_comment_list   — list all comments.
-'   word_comment_remove — remove a comment by id.
-'   word_format         — set W.Paragraph style and/or W.Run formatting on a match.
-'   word_apply_template — clone a template from a skill's references/ dir and
-'                         substitute {{placeholders}} from a JSON map.
-'   word_save_as        — copy a .docx to a new path (workspace or Desktop).
+'  - word_extract_text: return plain text of .docx file.
+'  - word_search: substring/regex search in document; returns paragraph indices.
+'  - word_write: replace/insert/append paragraph text WITHOUT markup.
+'  - word_markup: same as word_write but produces tracked-change w:ins/w:del.
+'  - word_comment_add: add Word comment anchored to matched substring.
+'  - word_comment_list / word_comment_remove: manage comments.
+'  - word_format: set paragraph style and/or run formatting on match.
+'  - word_apply_template: clone template from skill references/ with substitutions.
+'  - word_save_as: copy .docx to new path (workspace or Desktop).
 ' =============================================================================
 
 Option Strict On

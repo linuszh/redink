@@ -1,9 +1,32 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.AgentHost.vb
-' Purpose: Agent host that manages sub-agent execution and tooling loops.
+' Purpose: Implements ISubAgentHost for managing isolated sub-agent execution within the Outlook host.
+'          Handles model swapping, tool registry snapshots, tool scope filtering, and execution isolation.
+'
+' Architecture:
+'  - RunIsolatedToolingLoopAsync(): Entry point for sub-agent requests.
+'      - Captures parent model configuration scope.
+'      - Swaps to special-task model (from INI_AlternateModelPath).
+'      - Initializes tool scope via SubAgentToolScopeInitializer with parent registry snapshot.
+'      - Executes single isolated ExecuteToolingLoop pass with clean message history.
+'      - Restores parent model configuration on completion.
+'      - Returns final model response or error payload.
+'  - Tool Registry Snapshot:
+'      - Captures parent's AuthoritativeToolRegistrySnapshot before sub-agent run.
+'      - Passes snapshot to tool scope initializer for safe tool selection.
+'      - Filters allowed tools based on AllowedToolNames (whitelist).
+'  - Execution Tracking:
+'      - Maintains SubAgentInvocationCount and per-agent invocation counters.
+'      - Logs nested invocation depth and registry state.
+'      - Routes all logs through ToolingFileLogger with [subagent] marker.
+'  - Error Handling:
+'      - Returns structured error payloads (SubAgentRuntimeHardening) on:
+'          - Missing parent registry snapshot.
+'          - Unresolved required tools.
+'          - Model configuration failures.
 ' =============================================================================
 
 Option Strict Off

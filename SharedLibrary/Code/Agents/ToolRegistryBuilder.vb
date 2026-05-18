@@ -3,13 +3,16 @@
 '
 ' =============================================================================
 ' File: ToolRegistryBuilder.vb
-' Purpose: Convenience helpers that fill a ToolRegistry from the data sources the
+' Purpose: Convenience helpers that fill a ToolRegistry from the data sources
 '          existing tooling loops already produce (List(Of ModelConfig)) and from
-'          discovered Skills/Agents. Lazy where possible.
+'          discovered Skills/Agents. Lazy registration where possible.
 '
-' This file is additive: it does not alter any existing call site. The result
-' (a populated ToolRegistry) is consumed by later steps (skill.use / agent.delegate
-' and the source-selection UI).
+' Builders:
+'  - FromModelConfigs(...): wraps existing list of tools into registry (eager).
+'  - AddModelConfigs(...): adds tools to an existing registry.
+'  - AddSkills(...): registers discovered skills as lazy skill_<name> entries.
+'  - AddAgents(...): registers discovered agents as lazy agent_<name> entries.
+'  - This file is additive; does not alter existing call sites.
 ' =============================================================================
 
 Option Strict On

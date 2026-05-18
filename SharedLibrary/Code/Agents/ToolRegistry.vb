@@ -5,17 +5,17 @@
 ' File: ToolRegistry.vb
 ' Purpose: Lazy registry of tools (ModelConfig-shaped entries) keyed by name.
 '          Lets the host add tools by manifest (cheap) and defer materialization
-'          (full ModelConfig with ToolDefinition / ToolInstructionsPrompt) until
+'          (full ModelConfig with ToolDefinition/ToolInstructionsPrompt) until
 '          the tool is actually selected for an LLM call.
 '
-' Notes:
-'  - "Eager" registration accepts a fully-built ModelConfig (used to wrap the
-'    existing tool lists without behavior change).
-'  - "Lazy" registration accepts a manifest + factory; the factory is invoked
-'    at most once and the result is cached.
-'  - The registry is per-instance (typically one per tooling loop invocation /
-'    add-in lifetime). It is thread-safe.
-'  - This file does not perform any LLM/tool calls. It is pure plumbing.
+' Registration:
+'  - RegisterEager(...): accepts fully-built ModelConfig (used to wrap existing
+'    tool lists without behavior change).
+'  - RegisterLazy(...): accepts manifest + factory; factory invoked once, cached.
+'
+' Thread-Safety:
+'  - Per-instance registry (one per tooling loop or add-in lifetime).
+'  - Coarse sync lock protects all mutations and lookups.
 ' =============================================================================
 
 Option Strict On

@@ -1,4 +1,25 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SubAgentRuntimeHardening.vb
+' Purpose: Normalizes and validates sub-agent final outputs to ensure
+'          semantic non-emptiness and correct JSON/text envelope handling.
+'
+' Envelope Handling:
+'  - Recognizes {summary, result} envelope format (preserved as-is).
+'  - Fallback: direct JSON objects/arrays treated as structured results.
+'  - Fallback: plain text (when jsonRequired=false) with auto-generated summary.
+'  - Empty check: no usable output triggers agent_empty_result error.
+'
+' Normalized Output:
+'  - Summary (short textual description).
+'  - Result (JToken: object, array, or string).
+'  - ResultKind (envelope, json_object, json_array, text, error).
+'  - Error envelope (when IsError=true).
+' =============================================================================
+
+Option Strict On
 Option Explicit On
 
 Imports Newtonsoft.Json

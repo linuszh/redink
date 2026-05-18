@@ -4,20 +4,18 @@
 ' =============================================================================
 ' File: PathPolicy.vb
 ' Purpose: Centralized path-access policy for agent-layer file tools.
+'          Enforces workspace boundaries, skill reference/script access, and
+'          symlink-traversal blocking.
 '
-' Rules (locked decisions):
-'  - Default writable root:
-'      (a) The workspace path, if a workspace is maintained for the current session.
-'      (b) Otherwise the user's Desktop.
-'  - Read-only roots (always allowed for read; never for write unless flagged):
-'      (a) Skill <scripts/> and <references/> directories (any discovered skill).
-'  - In "chat-author mode" the model is permitted to write under a skill's own
-'     scripts/references directories (used when authoring/refining skills from chat).
-'     The host sets the flag through PathPolicy.BeginChatAuthorScope().
-'  - All paths are canonicalized; symlink-traversal and ".." are blocked.
-'  - Maximum file size for read/write is configurable; default 2 MiB.
+' Writable Root Precedence:
+'  1. Workspace path (if maintained in current session).
+'  2. Otherwise user's Desktop.
 '
-' This class is process-wide; per-call overrides are passed in the helper.
+' Read-only Roots (always allowed for read):
+'  - Skill scripts/ and references/ directories (any discovered skill).
+'  - In "chat author mode", also writable under skill directories.
+'  - All paths canonicalized; ".." and symlink traversal blocked.
+'  - Default file size limit: 2 MiB (configurable via MaxFileSizeBytes).
 ' =============================================================================
 
 Option Strict On

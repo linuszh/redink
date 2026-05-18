@@ -1,4 +1,23 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: WorkflowContinuity.vb
+' Purpose: Tracks workflow execution state across multiple tool loop iterations,
+'          sub-agents, and source grounding. Enables runtime introspection and
+'          post-completion workflow auditing.
+'
+' State Management:
+'  - WorkflowId: unique identifier for a user request (created via CreateWorkflowId).
+'  - HostPipeline: current host (Outlook, Word).
+'  - Runtime state: track active skill, current phase, tool success/failure counts.
+'  - Source records: track web/document sources used in output.
+'  - AsyncLocal scoping: BeginWorkflowScope(...) for per-call isolation.
+'  - Checkpoint serialization: WorkflowCheckpointEnvelope for persistence.
+' =============================================================================
+
+
+Option Strict On
 Option Explicit On
 
 Imports System.IO

@@ -4,18 +4,17 @@
 ' =============================================================================
 ' File: AgentToolRouter.vb
 ' Purpose: Centralized dispatch for the agent-layer tools so call-site wiring in
-'          the existing tooling loops is a single line:
+'          the existing tooling loops is a single line: TryHandleAsync(...).
+'          Returns tool response string when handled, Nothing if not recognized.
 '
-'             Dim handled = Await AgentToolRouter.TryHandleAsync(
-'                 toolName, arguments, subAgentHost, cancellationToken)
-'             If handled IsNot Nothing Then ' use handled as the tool response
-'
-' Handles:
-'   - memory_put / memory_get / memory_list / memory_delete
-'   - skill_use
-'   - agent_<name>   (delegated to SubAgentRunner)
-'
-' Returns Nothing when the tool is not recognized so existing dispatchers run.
+' Tools Routed:
+'  - memory_put / memory_get / memory_list / memory_delete (SessionMemory)
+'  - skill_use (SkillInvokeTool)
+'  - agent_<name> (SubAgentRunner for sub-agent delegation)
+'  - text_* tools (TextTools for plain file operations)
+'  - workspace_* tools (WorkspaceTools for workspace-scoped operations)
+'  - word_* / worddoc_* tools (Word document operations)
+'  - js_run (WebView2 JavaScript sandbox)
 ' =============================================================================
 
 Option Strict On

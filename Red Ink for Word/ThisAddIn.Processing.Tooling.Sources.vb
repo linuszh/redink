@@ -1,8 +1,29 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.Sources.vb
+' Purpose: Internal knowledge store tool management and source resolution.
+'
+' Responsibilities:
+'  - Identify knowledge store tools by encoded hash tokens.
+'  - Build knowledge store tool names (prefix + SHA256 token).
+'  - Resolve tool names to KnowledgeStoreCatalog definitions.
+'  - Implement hash-based token matching for indexed stores.
+'  - Support fallback matching (single store, prefix-based fuzzy match).
+'  - Log token resolution diagnostics and ambiguity handling.
+'  - Provide common prefix matching for truncated hash recovery.
+'
+' Architecture:
+'  - One-way hash encoding (SHA256) for knowledge store identification.
+'  - Exact match preferred, fallback to single-store default, then fuzzy prefix match.
+'  - Prevents tool name collisions across knowledge stores.
+'
+' External Dependencies:
+'  - System.Security.Cryptography for SHA256 hashing.
+'  - KnowledgeStoreCatalog for store definitions.
+'  - ToolingFileLogger for diagnostics.
+' =============================================================================
 
 Option Explicit On
 Option Strict Off

@@ -7,8 +7,12 @@
 '          without taking a direct dependency on Microsoft.Office.Interop.Word.
 '          The Word host implements this; Outlook implements a stub.
 '
-' All methods are SYNCHRONOUS by design: COM/STA calls do not benefit from async,
-' and the agent tooling loop already serializes via AgentGate.
+' Operations (all SYNCHRONOUS by design):
+'  - Read verbs: HasActiveDocument, ListOpenDocuments, GetActiveDocument,
+'    ExtractText, SearchJson, ListComments (always available).
+'  - Write verbs: InsertTextJson, ReplaceJson, AddCommentJson, FormatJson
+'    (gated by WordHostPolicy.ActiveDocReadOnly).
+'  - Host enforces read-only policy; COM/STA calls do not benefit from async.
 ' =============================================================================
 
 Option Strict On

@@ -1,8 +1,34 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Memory.vb
+' Purpose: Manages memory grounding classifier for resolving when stored memory should be injected.
+'          Integrates with ToolCallSequencing to drive tool availability and context injection.
+'
+' Architecture:
+'  - Memory Grounding Classification:
+'      - ResolveMemoryGroundingModeAsync(): Async classifier invocation and decision application.
+'      - Builds classifier input from LatestUserRequestRaw and HostTaskSummary.
+'      - Calls LLM with memory grounding intent classifier system/user prompts.
+'      - Parses classifier decision (MemoryGroundingMode, ShouldExposeRecentMemoryStubs).
+'      - Applies hardening: downgrades Required mode if explicit memory not demanded.
+'      - Stores decision in context.SequencingState for tool sequencing and prompt injection.
+'  - Prerequisites Check:
+'      - HasMemoryGroundingClassifierInputsAvailable(): Validates conditions before classifier invocation.
+'      - Checks for memory tools in AuthoritativeToolRegistrySnapshot or SelectedTools.
+'      - Checks for workflow memory via SessionMemory.ListMostRecentWorkflowEntries.
+'      - Returns False if neither memory tools nor workflow memory present.
+'  - Sub-Agent Mode Handling:
+'      - Skips classifier entirely in subAgentMode (forced to MemoryGroundingMode.None).
+'      - ShouldExposeRecentMemoryStubs set to False for isolated sub-agent runs.
+'  - Explicit Override Support:
+'      - Accepts explicitMemoryGroundingMode and memoryGroundingModeIsExplicit parameters.
+'      - Bypasses classifier when explicit mode is provided.
+'  - Logging & Diagnostics:
+'      - Logs classifier input/output, parse status, hardening decisions, and applied mode.
+'      - Records warning if classifier parse fails or mode downgrades.
+'      - All logs routed through context.Log() and ToolingFileLogger.
 ' =============================================================================
 
 Option Explicit On

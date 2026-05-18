@@ -1,11 +1,30 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SubAgentRuntimeHardening.SelfTests.vb
+' Purpose: Self-tests for SubAgentRuntimeHardening envelope normalization,
+'          empty-output detection, and error envelope handling. Validates
+'          correct parse behavior for all final-output patterns.
+'
+' Tests:
+'  - Envelope preserved: {summary, result} recognized as complete.
+'  - Direct object preserved: {x:1} treated as json_object result.
+'  - Array preserved: [{x:1}] treated as json_array result.
+'  - Plain text fallback: "plain text" recognized as text result.
+'  - Empty output retries: single retry on empty, then agent_empty_result if still empty.
+'  - Error envelope: {error:{code,...}} recognized as error resultKind.
+'  - Allowed tool scoping: tools list respected from agent descriptor.
+' =============================================================================
+
+Option Strict On
 Option Explicit On
 
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports Newtonsoft.Json.Linq
 
-Namespace Agents
+Namespace AgentsXX
 
     Public NotInheritable Class SubAgentRuntimeHardeningSelfTests
 

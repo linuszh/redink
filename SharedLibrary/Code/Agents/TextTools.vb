@@ -4,12 +4,15 @@
 ' =============================================================================
 ' File: TextTools.vb
 ' Purpose: Built-in tools for plain-text file operations:
-'            text_read   — read a UTF-8 text file (capped by PathPolicy size limit).
-'            text_write  — write/replace/append a UTF-8 text file.
-'            text_search — search the text for a string or regex; returns hits.
+'            text_read — read a UTF-8 text file (capped by PathPolicy size limit).
+'            text_write — write/replace/append a UTF-8 text file.
+'            text_search — search for substring or regex; returns hits with indices.
 '
-' All file I/O goes through PathPolicy.Resolve(...). The tools are deterministic
-' and side-effect-free except for text_write.
+' Architecture:
+'  - All file I/O goes through PathPolicy.Resolve(...) for workspace boundary.
+'  - Tools are deterministic and side-effect-free except text_write.
+'  - Search supports regex mode and case-sensitivity toggles.
+'  - Write supports overwrite/append/create_new modes.
 ' =============================================================================
 
 Option Strict On

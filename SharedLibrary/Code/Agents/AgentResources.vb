@@ -3,15 +3,17 @@
 '
 ' =============================================================================
 ' File: AgentResources.vb
-' Purpose: Discovers and parses Claude-style agent resources (Inky.md, Skills, Agents)
-'          from two roots: INI_AgentResourcesPath (central) and INI_AgentResourcesPathLocal
-'          (user-local). Local entries win over central entries with the same name.
+' Purpose: Discovers and parses Claude-style agent resources (Inky.md, Skills,
+'          Agents) from two roots: INI_AgentResourcesPath (central) and
+'          INI_AgentResourcesPathLocal (user-local). Local entries win over
+'          central entries with the same name.
 '
-' Notes:
-'  - Parses YAML-frontmatter at the top of *.md files (subset compatible with Claude:
-'    name, description, allowed-tools, model, network, timeout). Unknown keys are kept.
-'  - Bodies are read on demand via LoadBody() to keep startup cheap.
-'  - This file is discovery-only; it does not register tools or load skill scripts.
+' Resource Types:
+'  - Inky.md: Project-wide guidance appended to system prompts by InkyPromptBuilder.
+'  - SkillDescriptor: Skill resources with YAML frontmatter and optional scripts/.
+'  - AgentDescriptor: Agent resources with YAML frontmatter for sub-agent delegation.
+'  - YAML parsing: Supports name, description, allowed-tools, model, network, timeout.
+'  - Lazy loading: Bodies and scripts are loaded on demand to keep startup fast.
 ' =============================================================================
 
 Option Strict On

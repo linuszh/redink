@@ -1,8 +1,32 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Sources.vb
+' Purpose: Manages internal knowledge store search tools and knowledge source indexing.
+'          Handles tool definition generation, store discovery, and fuzzy token matching.
+'
+' Architecture:
+'  - Knowledge Store Tool Definition:
+'      - GetInternalKnowledgeTool(): Factory for per-store knowledge search tool configs.
+'      - BuildInternalKnowledgeToolDefinition(): Generates JSON schema for tool parameters.
+'      - BuildInternalKnowledgeToolInstructionsPrompt(): Creates instructions for LLM usage.
+'  - Token-Based Tool Naming:
+'      - EncodeToolToken(): SHA256 hash of store ID to fixed-length 64-char token (safe for API names).
+'      - DecodeToolToken(): Returns empty string (hash is one-way).
+'      - IsInternalKnowledgeToolName(): Checks InternalKnowledgeToolNamePrefix.
+'      - GetKnowledgeStoreForToolName(): Matches tool name token to store via hash recomputation.
+'  - Store Discovery & Indexing:
+'      - GetIndexedKnowledgeStores(): Returns active stores with valid manifests, sorted by display label.
+'      - BuildKnowledgeToolStoreInventoryLine(): Human-readable store list with document counts.
+'      - GetAvailableKnowledgeStoreNames(): Returns both display labels and plain store names.
+'  - Fuzzy Matching:
+'      - Handles LLM truncation of tool names via longest common prefix matching.
+'      - Falls back to single-store detection when only one store is available.
+'      - Logs warnings when matches are inexact.
+'  - Knowledge Tool Trigger Building:
+'      - BuildKnowledgeToolTrigger(): Constructs Freestyle-compatible (kb) trigger syntax.
+'      - Supports raw trigger pass-through, query-only, store-scoped, and tag-filtered searches.
 ' =============================================================================
 
 Option Explicit On

@@ -1,11 +1,19 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/TaskStatusFooterParser.vb
-' Purpose: STRICT JSON parser for the <TASK_STATUS>{...}</TASK_STATUS> footer (Q13).
-'          Replaces the regex-only ParseTaskStatus/StripTaskStatus pair previously
-'          duplicated in Outlook and Word host files.
+' File: TaskStatusFooterParser.vb
+' Purpose: STRICT JSON parser for the <TASK_STATUS>{...}</TASK_STATUS> footer
+'          (Q13). Replaces the regex-only ParseTaskStatus/StripTaskStatus pair
+'          previously duplicated in Outlook and Word host files.
+'
+' Strict Rules (per Q13):
+'  - Exactly zero or one footer allowed in final turn (two+ => Invalid).
+'  - Body must parse as JSON object with string "status" field.
+'  - Allowed status values: complete, blocked, continue (else => Invalid).
+'  - Returns TaskStatusFooter with Kind, Reason, RawJson, position indices.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict On

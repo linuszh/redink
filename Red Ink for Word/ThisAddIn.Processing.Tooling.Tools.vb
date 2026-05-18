@@ -1,8 +1,28 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
-' File: ThisAddIn.Processing.Tooling.Sources.vb
+' File: ThisAddIn.Processing.Tooling.Tools.vb
+' Purpose: Internal tool utilities, web link extraction, and reflection helpers.
+'
+' Responsibilities:
+'  - Build web link extraction result payloads (JSON).
+'  - Extract and filter web links by file extension.
+'  - Construct result metadata (requested URL, source URL, filter info).
+'  - Late-bound property getters/setters via reflection.
+'  - Type-safe property value conversion (int, bool, string, enum).
+'  - Handle WebView2 configuration and browser automation setup.
+'  - Support OCR initialization and execution.
+'  - Manage large downloaded file handling (50MB limit).
+'
+' Architecture:
+'  - Reflection-based late binding to support dynamic object manipulation.
+'  - Culture-invariant type conversions (ISO date formats, numeric parsing).
+'
+' External Dependencies:
+'  - System.Reflection for property manipulation.
+'  - Newtonsoft.Json for payload construction.
+' =============================================================================
 
 Option Explicit On
 Option Strict Off

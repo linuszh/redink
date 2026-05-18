@@ -3,8 +3,16 @@
 '
 ' =============================================================================
 ' File: JsRunTool.vb
-' Purpose: ModelConfig + dispatcher entry for the js_run tool. The actual
-'          execution happens in WebView2JsSandbox.
+' Purpose: ModelConfig + dispatcher entry for the js_run tool. Executes
+'          untrusted JavaScript inside a hidden WebView2 sandbox with
+'          restricted network access and captured console output.
+'
+' Architecture:
+'  - Tool definition for use in model configs (safe, human-readable).
+'  - Dispatcher that marshals arguments to WebView2JsSandbox.RunAsync.
+'  - Returns JSON envelope: { ok, result, logs } or { ok:false, error }.
+'  - Security: network disabled by default; set allow_network=true per-call.
+'  - Timeout: 500..120000 ms; default 15000 ms.
 ' =============================================================================
 
 Option Strict On

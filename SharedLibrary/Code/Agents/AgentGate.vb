@@ -7,17 +7,12 @@
 '          execute concurrently. Required because sub-agents are not yet
 '          isolated; only one model interaction may run at a time.
 '
-' Usage:
-'   Await AgentGate.EnterAsync(cancellationToken)
-'   Try
-'       ' ... single model call ...
-'   Finally
-'       AgentGate.Release()
-'   End Try
-'
-'   The gate is re-entrant for the SAME logical owner via BeginOwnedScope /
-'   EndOwnedScope. Tooling loops that already hold the gate for an outer
-'   transaction can suppress nested waits within the same async flow.
+' Architecture:
+'  - Uses SemaphoreSlim(1, 1) for mutual exclusion across all concurrent async flows.
+'  - Re-entrant support via BeginOwnedScope / EndOwnedScope for tooling loops that
+'    hold the gate across nested LLM calls without deadlock.
+'  - AsyncLocal(Of OwnerHolder) tracks ownership per logical async flow.
+'  - IsBusy property exposes gate status for debugging and monitoring.
 ' =============================================================================
 
 Option Strict On

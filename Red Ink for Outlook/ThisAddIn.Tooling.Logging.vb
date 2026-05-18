@@ -1,8 +1,33 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Tooling.Logging.vb
+' Purpose: Reduced file-based logger for tooling operations with nested session depth support.
+'          Writes per-run log file with system prompt snapshots, LLM calls, and diagnostic traces.
+'
+' Architecture:
+'  - Session Management:
+'      - StartSession(): Enables logging (when INI_APIDebug=True) and increments _sessionDepth.
+'          - Tracks nested tooling sessions (prevents sub-agent runs from tearing down parent log).
+'          - WriteHeader(): Creates stable overwrite-per-run log file on Desktop.
+'  - Logging API:
+'      - LogStep(): Standard step logging (written to file and UI LogWindow).
+'      - LogDiag(): Diagnostic logging (file only, not UI-visible).
+'      - LogWarn(): Warning logging with optional details and exception.
+'      - LogError(): Error logging with optional details and exception.
+'      - LogModelConfigOnce(): Dumps ModelConfig properties (excluding sensitive fields).
+'      - LogRawResponseStub(): Writes full LLM/tool responses with blank line separators.
+'  - File Operations:
+'      - Single stable filename per session (StableLogFileName, overwritten each run).
+'      - Synchronized file writes via _lock to prevent interleaving.
+'      - File path on Desktop (Environment.SpecialFolder.DesktopDirectory).
+'  - Output Format:
+'      - Header with session timestamp, version, and log location.
+'      - Timestamped entries: [HH:mm:ss] category: message.
+'      - Exception details include type, message, stack trace, and inner exception.
+'  - Exception Serialization:
+'      - WriteException(): Dumps full exception hierarchy (type, message, stack trace, inner exception).
 ' =============================================================================
 
 Option Explicit On
@@ -462,6 +487,40 @@ Partial Public Class ThisAddIn
 
     End Class
 
+
+    Private Function BuildPromptDiagnosticStub(text As String,
+                                            Optional maxExcerptChars As Integer = 120) As String
+        Dim raw As String = If(text, "")
+        Dim excerpt As String = Regex.Replace(raw, "\s+", " ").Trim()
+
+        If excerpt.Length > maxExcerptChars Then
+            excerpt = excerpt.Substring(0, maxExcerptChars) & "..."
+        End If
+
+        Dim hashText As String = ""
+
+        Using sha = System.Security.Cryptography.SHA256.Create()
+            Dim bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw))
+            hashText = BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant()
+
+            If hashText.Length > 16 Then
+                hashText = hashText.Substring(0, 16)
+            End If
+        End Using
+
+        Return $"len={raw.Length}; sha256={hashText}; excerpt=""{excerpt}"""
+    End Function
+
+
+    Private Sub LogLatestUserRequestDiagnostic(context As ToolExecutionContext, stage As String)
+        If context Is Nothing Then
+            Return
+        End If
+
+        context.Log(
+            "latestUserRequestRaw[" & If(stage, "") & "] " &
+            BuildPromptDiagnosticStub(context.LatestUserRequestRaw), "diag")
+    End Sub
 
 End Class
 

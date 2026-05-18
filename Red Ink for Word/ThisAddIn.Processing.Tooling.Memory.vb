@@ -1,8 +1,24 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.Memory.vb
+' Purpose: Memory grounding mode resolution and classification for the tooling loop.
+'
+' Responsibilities:
+'  - Classify user intent for memory access requirements via LLM classifier.
+'  - Build memory grounding system/user prompts for intent detection.
+'  - Validate memory tool availability (tools, workflow entries).
+'  - Resolve explicit vs. auto-detected memory grounding modes (None, Optional, Required).
+'  - Enforce explicit stored-memory demand when necessary.
+'  - Manage memory exposure to the model (recent stubs injection).
+'  - Handle sub-agent memory isolation (no memory access in delegated execution).
+'
+' External Dependencies:
+'  - SharedLibrary.Agents.ToolCallSequencing for memory classification logic.
+'  - SharedLibrary.Agents.MemoryTools and SessionMemory for tool/memory availability.
+'  - LLM() for intent classification.
+' =============================================================================
 
 Option Explicit On
 Option Strict Off

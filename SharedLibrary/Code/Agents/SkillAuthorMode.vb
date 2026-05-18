@@ -3,24 +3,15 @@
 '
 ' =============================================================================
 ' File: SkillAuthorMode.vb
-' Purpose: Process-wide flag + helpers for "skill author" mode. When active, the
-'          agent layer is allowed to read AND write inside any discovered skill's
-'          own folder (so the model can create/edit SKILL.md, references/, scripts/).
+' Purpose: Process-wide flag + helpers for "skill author" mode. When active,
+'          the agent layer is allowed to read AND write inside any discovered
+'          skill's own folder (so the model can create/edit SKILL.md and scripts/).
 '
 ' Activation:
-'   SkillAuthorMode.Enable()          ' persists until Disable() or process exit
-'   SkillAuthorMode.Disable()
-'
-' Scoped activation (preferred for tool calls):
-'   Using SkillAuthorMode.BeginScope()
-'       ... await router.TryHandleAsync(...)
-'   End Using
-'
-' Notes:
-'   - The flag is consumed by PathPolicy (read path) and SkillAuthorPathPolicy
-'     (write path) below.
-'   - Active mode is reflected in the agent-layer system-prompt addendum so the
-'     model is aware it may author skills.
+'  - SkillAuthorMode.Enable() / .Disable() for persistent activation.
+'  - BeginScope() for scoped, per-call activation (preferred for tool calls).
+'  - IsActive property reflects both persistent and scoped states.
+'  - Consumed by PathPolicy and SkillAuthorPathPolicy for read/write enforcement.
 ' =============================================================================
 
 Option Strict On

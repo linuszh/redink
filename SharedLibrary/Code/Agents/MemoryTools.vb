@@ -3,11 +3,17 @@
 '
 ' =============================================================================
 ' File: MemoryTools.vb
-' Purpose: ModelConfig factories for the session-memory tools.
-'          The actual dispatch (mapping ToolCall → SessionMemory) is performed
-'          by ExecuteMemoryToolCall(), which the future shared runner / the
-'          existing tooling loops will route to when they encounter a memory_*
-'          tool name.
+' Purpose: ModelConfig factories and dispatcher for the session-memory tools.
+'          The actual execution (mapping ToolCall → SessionMemory) is performed
+'          by Execute(), which existing tooling loops route to when they encounter
+'          a memory_* tool call.
+'
+' Tools:
+'  - memory_put: Write a key/value pair with summary, tags, and metadata.
+'  - memory_get: Retrieve a stored entry by key.
+'  - memory_list: Enumerate all entries with summaries.
+'  - memory_delete: Remove an entry by key.
+'  - All use SessionMemory for persistence across restarts.
 ' =============================================================================
 
 Option Strict On

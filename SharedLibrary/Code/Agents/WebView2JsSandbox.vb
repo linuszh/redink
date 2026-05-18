@@ -4,21 +4,17 @@
 ' =============================================================================
 ' File: WebView2JsSandbox.vb
 ' Purpose: Runs untrusted JavaScript inside a hidden, pooled WebView2 instance.
-'          Pool size = 1 (reused across calls; per-call lifecycle is just a
-'          semaphore + script execution; the underlying control is long-lived).
+'          Pool size = 1 (reused across calls; per-call lifecycle is semaphore +
+'          script execution; underlying control is long-lived).
 '
-' Threading:
-'   - WebView2 lives on the host UI (STA) thread.
-'   - Initialize(...) MUST be called by the host once, on the UI thread,
-'     supplying a SynchronizationContext bound to that thread.
-'
-' Security:
-'   - Network is DISABLED by default (all WebResourceRequested are short-circuited
-'     with 403). Set allow_network=true on the tool to permit fetch().
-'   - DevTools/context-menus/host-objects disabled.
-'   - User code is wrapped: console.log is captured into a JSON 'logs' field,
-'     exceptions become 'ok:false / error', and timeouts return 'error:timeout'.
-'   - Return value is JSON-stringified by the wrapper, then unwrapped here.
+' Threading & Security:
+'  - WebView2 lives on host UI (STA) thread; Initialize(...) called once by host.
+'  - Network DISABLED by default (all WebResourceRequested => 403).
+'    Set allow_network=true on tool to permit fetch().
+'  - DevTools/context-menus/host-objects disabled.
+'  - User code wrapped: console.log captured, exceptions become error, timeouts
+'    return timeout error.
+'  - Return value JSON-stringified by wrapper, then unwrapped here.
 ' =============================================================================
 
 Option Strict On

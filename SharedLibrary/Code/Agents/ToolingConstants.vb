@@ -1,10 +1,21 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/ToolingConstants.vb
-' Purpose: Central constants for the tooling pipeline shared by Outlook, Word and Excel.
-'          These replace the per-host scattered defaults (e.g. MaxToolIterations = 10/30 etc.).
+' File: ToolingConstants.vb
+' Purpose: Central constants for the tooling pipeline shared by Outlook, Word
+'          and Excel. These replace the per-host scattered defaults.
+'
+' Constants:
+'  - DefaultMaxToolIterations = 50 (unified across all hosts).
+'  - LlmTimeoutBufferSeconds = 60 (added per iteration).
+'  - MaxContinuationRetries = 5 (repair attempts for recovery).
+'  - SubAgentLargeToolResponseThresholdChars = 30000 (compaction trigger).
+'  - SubAgentLargeToolResponseExcerptChars = 8000 (excerpt size when compacted).
+'  - MaxLocalizableBlockedFinalChars = 1500 (host post-translation willing threshold).
+'  - MaxFallbackToolsListedInGuard = 6 (fallback tools listed in guard prompts).
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict On

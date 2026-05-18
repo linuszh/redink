@@ -8,7 +8,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 Imports Newtonsoft.Json.Linq
 
-Namespace Agents
+Namespace AgentsXX
 
     Public NotInheritable Class WorkflowContinuitySelfTests
 

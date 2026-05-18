@@ -1,4 +1,23 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ToolCallSequencing.vb
+' Purpose: Validates tool call sequences and final turn acceptance:
+'           - Blocks dependent batches (ensure tool call ordering).
+'           - Enforces <TASK_STATUS> footer contract (Q13).
+'           - Guards against action promises without invocation (Q10).
+'           - Manages memory grounding modes (required/optional/none).
+'           - Detects unresolved tool failures and orchestrates repair prompts.
+'
+' Architecture:
+'  - Validates ActiveToolingTurn sequences (tool calls vs. finals).
+'  - TaskStatusKind: Complete, Blocked, ContinueTurn, or Missing.
+'  - MemoryGroundingMode: None, OptionalMode, Required.
+'  - MemoryGroundingStage: progression from ListRequired through FullMemoryAvailable.
+' =============================================================================
+
+Option Strict On
 Option Explicit On
 
 

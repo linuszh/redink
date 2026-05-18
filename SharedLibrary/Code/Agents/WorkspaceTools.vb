@@ -7,21 +7,17 @@
 '          useful subset of the Outlook chat-agent workspace tools but is
 '          host-agnostic. Permissions are taken from the active WorkspaceState.
 '
-' Tools (all names prefixed "workspace_"):
-'   workspace_get        — return current workspace info and permissions
-'   workspace_inventory  — list files in the workspace (glob + recursive)
-'   workspace_read       — read a UTF-8 text file inside the workspace
-'   workspace_write      — write/append/create_new a UTF-8 text file inside ws
-'   workspace_search     — search content across files (substring or regex)
-'   workspace_copy       — copy file/folder inside the workspace
-'   workspace_move       — move file/folder inside the workspace
-'   workspace_rename     — rename a file/folder inside the workspace
-'   workspace_delete     — delete to Recycle Bin (or permanent on request)
-'   workspace_make_dir   — create a folder inside the workspace
-'   workspace_read             — read one UTF-8 text file inside the workspace
-'   workspace_read_many        — read many UTF-8 text files inside the workspace
-'   workspace_extract_text     — extract readable text from one supported file
-'   workspace_extract_text_many — extract readable text from many supported files
+' Tools (all prefixed "workspace_"):
+'  - workspace_get: return current workspace info and permissions.
+'  - workspace_inventory: list files in workspace (glob + recursive).
+'  - workspace_read / workspace_read_many: read UTF-8 text files in workspace.
+'  - workspace_write: write/append/create_new UTF-8 text file in workspace.
+'  - workspace_search: search content across files (substring or regex).
+'  - workspace_copy / workspace_move / workspace_rename / workspace_delete:
+'    file/folder operations (delete to Recycle Bin or permanent on request).
+'  - workspace_make_dir: create a folder in workspace.
+'  - workspace_extract_text / workspace_extract_text_many: extract readable text
+'    from supported file formats (PDF, Word, Excel, etc.).
 ' =============================================================================
 
 Option Strict On

@@ -1,4 +1,22 @@
-﻿#If DEBUG Then
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SubAgentRunner.Tests.vb
+' Purpose: Self-tests for SubAgentRunner envelope handling, retry behavior,
+'          and memory grounding. Tests verify correct parsing of sub-agent output
+'          (envelope vs. direct JSON vs. plain text) and retry-on-empty logic.
+'
+' Tests:
+'  - Envelope format: {summary, result} preserved as-is.
+'  - Direct JSON objects/arrays: preserved as structured results.
+'  - Plain text fallback: auto-generates summary when jsonRequired=false.
+'  - Empty output: triggers agent_empty_result, retries exactly once.
+'  - Retry success: second attempt recovers from empty first attempt.
+'  - Model empty response: retry carries compact recovery prompt.
+' =============================================================================
+
+#If DEBUG Then
 
 Option Strict On
 Option Explicit On
@@ -7,7 +25,7 @@ Imports System.Threading
 Imports System.Threading.Tasks
 Imports Newtonsoft.Json.Linq
 
-Namespace Agents
+Namespace AgentsXX
 
     Friend NotInheritable Class SubAgentRunnerTests
 

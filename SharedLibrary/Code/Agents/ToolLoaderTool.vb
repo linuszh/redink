@@ -7,6 +7,12 @@
 '          small. The model first sees only a compact index plus this loader.
 '          When it asks for one or more tools by name, the host materializes
 '          them and exposes their full definitions on the next iteration.
+'
+' Architecture:
+'  - Lazy-loading trigger: ShouldUseLazyLoading(selectedTools) returns true
+'    when tool count exceeds DefaultLazyLoadThreshold (8).
+'  - Build(manifests) creates the loader config with tool index.
+'  - ExtractRequestedToolNames(arguments) parses tool/tools array from request.
 ' =============================================================================
 
 Option Strict On

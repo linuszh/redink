@@ -7,18 +7,15 @@
 '          to and read from. Persists to disk under the user-local agent resources
 '          path so it survives Outlook/Word restarts until the user clears it.
 '
-' Storage layout:
-'   <INI_AgentResourcesPathLocal>\.session\memory.json
-'   (Falls back to %LOCALAPPDATA%\RedInk\.session\memory.json if the local path is unset.)
+' Storage Layout:
+'  <INI_AgentResourcesPathLocal>\.session\memory.json
+'  (Falls back to %LOCALAPPDATA%\RedInk\.session\memory.json if unset.)
 '
-' Each entry has:
-'   key       - opaque, stable identifier (assistant-chosen or auto-generated)
-'   summary   - short textual stub the model sees in subsequent turns
-'   value     - the actual payload (any JSON value or string)
-'   createdAt - UTC ISO-8601
-'   tags      - optional list of tags
-'
-' Thread-safety: a coarse SyncLock protects all mutations and the on-disk write.
+' Entry Structure:
+'  - key: opaque, stable identifier (assistant-chosen or auto-generated).
+'  - summary: short textual stub (model sees this in subsequent turns).
+'  - value: actual payload (any JSON value or string).
+'  - createdAt, updatedAt, tags, metadata: operational fields.
 ' =============================================================================
 
 Option Strict On

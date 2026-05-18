@@ -8,13 +8,14 @@
 '          host (Word, Outlook, future Excel) can use it.
 '
 ' Storage:
-'   <localagentresources>\.session\workspace_<hostKey>.json
-'   (Fallback to %LOCALAPPDATA%\RedInk\.session\ if no local agent resources path.)
+'  <localagentresources>\.session\workspace_<hostKey>.json
+'  (Fallback to %LOCALAPPDATA%\RedInk\.session\ if no local agent resources path.)
 '
-' Use:
-'   Dim st = WorkspaceStore.Load("word")
-'   st.RootPath = "C:\Users\me\Documents\AgentBox"
-'   WorkspaceStore.Save("word", st)
+' Properties:
+'  - RootPath: workspace directory for agent file operations.
+'  - Permissions: AllowRead, AllowWrite, AllowMoveCopyRename, AllowDelete.
+'  - PersistUntilRevoked: survives host restarts until user clears it.
+'  - IncludeHiddenSystem: whether hidden/system files are visible.
 ' =============================================================================
 
 Option Strict On

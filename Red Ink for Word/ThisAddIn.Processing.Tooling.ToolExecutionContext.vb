@@ -1,8 +1,34 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.Tooling.ToolExecutionContext.vb
+' Purpose: Execution state container for tool session lifecycle and diagnostics.
+'
+' Responsibilities:
+'  - Hold per-session state: selected tools, allowed registries, iteration counts.
+'  - Track all tool responses (successful and failed) during session.
+'  - Manage continuation guards and retry prompts for failed turns.
+'  - Log session events with optional UI window display.
+'  - Track duplicate tool execution detection (signature + repeat count).
+'  - Track consecutive tool failures for abort thresholds.
+'  - Hold premature text response retry state.
+'  - Maintain sequencing state (tool ordering, deliverable requirements, memory grounding).
+'  - Expose finalization blocked state and reason codes.
+'  - Integrate with workflow continuity (WorkflowId, RuntimeState).
+'  - Provide diagnostic snapshots for logs.
+'
+' Architecture:
+'  - Mutable state container passed through ExecuteToolingLoop iterations.
+'  - Nested logging via optional LogWindow (WinForms Form).
+'  - External log sink support for sub-agent integration.
+'  - Exposes SequencingState for complex orchestration decisions.
+'
+' External Dependencies:
+'  - SharedLibrary.Agents.ToolCallSequencing for sequencing state.
+'  - SharedLibrary.Agents.WorkflowContinuity for workflow state.
+'  - LogWindow for optional UI logging display.
+' =============================================================================
 
 Option Explicit On
 Option Strict Off

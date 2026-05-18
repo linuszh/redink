@@ -2,7 +2,31 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.Processing.Tooling.Log.vb
+' File: ThisAddIn.Processing.Tooling.Logging.vb
+' Purpose: File-based logging and diagnostics for tooling sessions.
+'
+' Responsibilities:
+'  - Write tooling session logs to stable filename on Desktop.
+'  - Track session depth to handle nested sub-agent runs.
+'  - Write session headers with timestamp, version, configuration.
+'  - Log steps, warnings, errors, and raw response stubs.
+'  - Capture pre-LLM call snapshots (system prompt, model config).
+'  - Write task status parsing results and model turn classifications.
+'  - Format log entries with level/category tags (STEP, WARN, ERROR, etc.).
+'  - Support thread-safe concurrent logging via SyncLock.
+'  - Conditionally enable/disable based on INI_APIDebug setting.
+'  - Provide LogFilePath access for user reference.
+'
+' Architecture:
+'  - Singleton ToolingFileLogger class with static methods.
+'  - Single overwrite file per run (stable filename).
+'  - Nested session tracking (prevent premature session teardown).
+'  - Level-based filtering (optional).
+'
+' External Dependencies:
+'  - System.IO for file writing.
+'  - INI_APIDebug setting for conditional enabling.
+' =============================================================================
 
 
 Option Explicit On

@@ -3,7 +3,17 @@
 '
 ' =============================================================================
 ' File: AgentResourcesViewerForm.vb
-' Purpose: Read-only inspector for discovered Skills and Agents (central + local).
+' Purpose: Read-only inspector form for discovered Skills and Agents (central +
+'          local resources). Allows filtering, viewing details, opening folders,
+'          and toggling skill author mode for resource management.
+'
+' UI Features:
+'  - Lists discovered skills and agents with descriptions.
+'  - Filter textbox for searching by name.
+'  - "View" button to inspect resource details.
+'  - "Open Folder" button to browse the resource directory.
+'  - "Refresh" to rescan the discovery paths.
+'  - "Author Mode" checkbox to enable/disable skill authoring.
 ' =============================================================================
 
 Option Strict On

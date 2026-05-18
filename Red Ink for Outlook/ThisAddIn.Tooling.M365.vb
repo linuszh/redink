@@ -2,19 +2,34 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.Processing.Tooling.M365.vb (Outlook host adapter)
-' Purpose: Bridges Outlook's host-local ToolCall / ToolResponse / ToolExecutionContext
-'          to the host-neutral SharedLibrary.M365ToolService.
+' File: ThisAddIn.Tooling.M365.vb
+' Purpose: Bridges host-local ToolCall/ToolResponse/ToolExecutionContext to SharedLibrary.M365ToolService.
+'          Manages M365 tool execution, source link extraction from responses, and result aggregation.
 '
-'   Wire-up in ThisAddin.Tooling.vb:
-'      In ExecuteToolCall (after the existing knowledge dispatch arm):
-'          ElseIf SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
-'              response = Await ExecuteInternalM365Tool(toolCall, context)
-'              ToolingFileLogger.LogRawResponseStub(
-'                  $"Internal tool ({toolCall.ToolName})", response.Response)
-'
-'      In GetAvailableTools (after the knowledge tools registration):
-'          tools.AddRange(SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
+' Architecture:
+'  - M365 Tool Execution:
+'      - ExecuteInternalM365Tool(): Async bridge to SharedLibrary.M365ToolService.ExecuteAsync.
+'      - Maps ToolCall arguments to service API, collects result in ToolResponse.
+'      - Supports logging via context.Log() callback.
+'  - Tool Response Snapshots:
+'      - GetLastCompletedToolResponsesSnapshot(): Shallow-copies _lastCompletedToolResponses.
+'      - Used by external integrations to query recent M365 tool execution results.
+'  - Source Link Extraction:
+'      - AppendM365SourcesFooter(): Extracts and formats source links from all tool responses.
+'      - Builds markdown footer section "### Sources" with deduplicated links.
+'      - ExtractM365SourceLinks(): Routes m365_search and M365 retrieval tool responses to extractors.
+'      - ExtractM365SearchLinks(): Parses JSON "hits" array from m365_search tool response.
+'      - ExtractM365WrappedContentLink(): Extracts URL from <WEB_URL> XML tags in retrieval responses.
+'  - Source Link Processing:
+'      - ToolSourceLink: Holds url, title, source metadata.
+'      - TryAddSourceLink(): Deduplicates links via seenUrls HashSet, skips if already in answer text.
+'      - BuildSourceLinkLabel(): Formats link display text (title or URL).
+'      - EscapeMarkdownLinkText(): Escapes special characters for markdown.
+'      - GetM365SourceFromToolName(): Maps tool name to source label (e.g., "Outlook", "Teams").
+'      - IsM365RetrievalToolName(): Identifies M365-retrieval-specific tool names.
+'  - Wire-up Points:
+'      - ExecuteToolCall: After knowledge dispatch, call ExecuteInternalM365Tool.
+'      - GetAvailableTools: After knowledge tools, call M365ToolService.GetTools(..., InternalToolSuffix).
 ' =============================================================================
 
 Option Explicit On

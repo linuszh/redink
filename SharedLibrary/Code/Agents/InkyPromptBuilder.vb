@@ -5,11 +5,14 @@
 ' File: InkyPromptBuilder.vb
 ' Purpose: Composes the system-prompt addendum that the MAIN tooling loop (not
 '          sub-agents) prepends to its existing system prompt:
-'            1. Inky.md (central, then local; local overrides via concatenation).
-'            2. A short notice listing skills/agents the user has activated and
-'               how to invoke them (only when those tools are actually selected).
+'            1. Inky.md content (central, then local; local overrides via concat).
+'            2. Brief listing of active skills/agents with invocation instructions.
 '
-' Sub-agents NEVER use this builder (locked decision B).
+' Architecture:
+'  - Sub-agents NEVER use this builder (locked decision B).
+'  - Called once per main-loop initialization with selected skill/agent tool names.
+'  - Returns empty string when nothing is configured or active.
+'  - Includes skill author mode notice when SkillAuthorMode.IsActive.
 ' =============================================================================
 
 Option Strict On

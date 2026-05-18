@@ -1,10 +1,17 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/LanguageContract.vb
-' Purpose: Centralizes (1) a hard system-prompt rule that final user-facing prose must
-'          be in the detected user language, and (2) a host-agnostic "should we
-'          post-localize this blocked final?" decision (per Q3: only blocked finals).
+' File: LanguageContract.vb
+' Purpose: Centralizes (1) hard system-prompt rule that final user-facing
+'          prose must be in the detected user language, and (2) post-localization
+'          decision for blocked finals (per Q3: only blocked finals are eligible).
+'
+' Rules:
+'  - System prompt fragment mandates all FINAL prose be in user's language.
+'  - Tool arguments and JSON envelopes remain in English.
+'  - Only BLOCKED finals are post-localized (if short enough); COMPLETE finals trust.
+'  - Heuristic detection of target language in prose (accents, common words).
 ' =============================================================================
 
 Option Explicit On

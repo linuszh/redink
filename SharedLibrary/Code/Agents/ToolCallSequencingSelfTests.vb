@@ -1,4 +1,23 @@
-﻿#If DEBUG Then
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: ToolCallSequencingSelfTests.vb
+' Purpose: Comprehensive self-tests for ToolCallSequencing validation logic.
+'          Tests cover tool call batching, task status parsing, memory grounding,
+'          workflow continuation, and error recovery across main loop and sub-agents.
+'
+' Test Categories:
+'  - Batching: independent read-only calls batch; dependent or mutating calls stop.
+'  - Task status: Complete/Blocked/ContinueTurn parsing and validation.
+'  - Memory grounding: required vs. optional modes; subset disclosure logic.
+'  - Continuation: retry exhaustion produces host-generated blocked message.
+'  - Workflow: sub-agent failures don't poison later invocations.
+'  - Workspace tools: write modes, overwrite aliases, missing text validation.
+'  - Note: Tests are currently disabled (xRunAll); see RunAll() for status.
+' =============================================================================
+
+#If DEBUG Then
 
 Option Strict On
 Option Explicit On
@@ -6,7 +25,7 @@ Option Explicit On
 Imports System.IO
 Imports Newtonsoft.Json.Linq
 
-Namespace Agents
+Namespace AgentsXX
 
     Public NotInheritable Class ToolCallSequencingSelfTests
 

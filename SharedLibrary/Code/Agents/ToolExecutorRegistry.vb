@@ -1,26 +1,18 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/ToolExecutorRegistry.vb
-' Purpose: Per-host advertise/execute coupling. Solves problem #2 from the user
-'          report — "Tool has no APICall template defined" — by ensuring that a
-'          tool can only be ADVERTISED to the model if a host-side EXECUTOR has
-'          been registered for it on the current host (or the tool is a remote
-'          MCP/HTTP tool with a populated APICall template).
+' File: ToolExecutorRegistry.vb
+' Purpose: Per-host advertise/execute coupling. Solves problem #2 from user
+'          report ("Tool has no APICall template defined") by ensuring a tool
+'          can only be ADVERTISED if a host-side EXECUTOR is registered for it
+'          (or it's a remote MCP/HTTP tool with populated APICall template).
 '
-' Usage pattern (Tier 2):
-'   1. At host startup each host registers its internal tools:
-'        ToolExecutorRegistry.RegisterInternal(host, "create_word_document", host_kind)
-'        ToolExecutorRegistry.RegisterInternal(host, "workspace_write", host_kind)
-'      External MCP/HTTP tools register their endpoint:
-'        ToolExecutorRegistry.RegisterExternal(host, tool.ToolName, host_kind)
-'   2. Before publishing a tool to the model the host calls:
-'        If Not ToolExecutorRegistry.IsAdvertisable(host, name) Then Continue For
-'   3. Before dispatching the host calls:
-'        Dim kind = ToolExecutorRegistry.GetExecutorKind(host, name)
-'        If kind = ExecutorKind.Internal Then ... internal handler
-'        ElseIf kind = ExecutorKind.External Then ... existing ExecuteExternalTool
-'        Else ... return structured "tool_not_executable" error and DO NOT advertise next round.
+' Registry Pattern:
+'  1. Host registers internal/external tools at startup.
+'  2. Before advertising, host calls IsAdvertisable(host, name).
+'  3. Before dispatching, host calls GetExecutorKind(host, name).
+'  4. Thread-safe for typical startup-register + runtime-read pattern.
 ' =============================================================================
 
 Option Explicit On

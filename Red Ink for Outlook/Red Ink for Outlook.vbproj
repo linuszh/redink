@@ -513,10 +513,15 @@
     <Compile Include="ThisAddIn.Tooling.Logging.vb" />
     <Compile Include="ThisAddIn.Tooling.M365.vb" />
     <Compile Include="ThisAddIn.Tooling.Memory.vb" />
+    <Compile Include="ThisAddIn.Tooling.Parameterhandling.vb" />
+    <Compile Include="ThisAddIn.Tooling.ToolExecution.vb" />
+    <Compile Include="ThisAddIn.Tooling.PromptBuilding.vb" />
     <Compile Include="ThisAddIn.Tooling.ToolExecutionContext.vb" />
+    <Compile Include="ThisAddIn.Tooling.ToolResponse.vb" />
     <Compile Include="ThisAddIn.Tooling.Tools.vb" />
+    <Compile Include="ThisAddIn.Tooling.UserRequestResolution.vb" />
     <Compile Include="ThisAddIn.Tooling.vb" />
-    <Compile Include="ThisAddIn.Tools.Sources.vb" />
+    <Compile Include="ThisAddIn.Tooling.Sources.vb" />
     <Compile Include="ThisAddIn.VarHelpers.vb" />
     <Compile Include="ThisAddIn.Helpers.vb" />
     <Compile Include="ThisAddIn.Processing.vb" />

@@ -4,19 +4,17 @@
 ' =============================================================================
 ' File: WordDocTools.vb
 ' Purpose: Agent tools that address the currently open Word document(s) via the
-'          IWordDocumentHost bridge. Read-only by default (WordHostPolicy).
+'          IWordDocumentHost bridge. Read-only by default (WordHostPolicy);
+'          write verbs registered only when ActiveDocReadOnly = False.
 '
-' Naming:
-'   worddoc_list_open
-'   worddoc_get_active
-'   worddoc_extract_text
-'   worddoc_search
-'   worddoc_list_comments
-'   (write verbs registered only when WordHostPolicy.ActiveDocReadOnly = False):
-'     worddoc_insert_text
-'     worddoc_replace
-'     worddoc_comment_add
-'     worddoc_format
+' Tools:
+'  - worddoc_list_open: list all open documents.
+'  - worddoc_get_active: metadata for the active document.
+'  - worddoc_extract_text: return plain text of document.
+'  - worddoc_search: substring/regex search within document.
+'  - worddoc_list_comments: list all comments on document.
+'  - (write verbs when not read-only): worddoc_insert_text, worddoc_replace,
+'    worddoc_comment_add, worddoc_format.
 ' =============================================================================
 
 Option Strict On

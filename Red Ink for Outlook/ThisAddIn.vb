@@ -84,7 +84,7 @@ Partial Public Class ThisAddIn
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
-    Private Const ToolTrigger As String = "(s)"
+    Private Const ToolTrigger As String = "(a)"
     Private Const KBTrigger As String = "(kb)"
     Private Const AddmailTrigger As String = "(addmail)"
 

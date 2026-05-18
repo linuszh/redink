@@ -1,14 +1,19 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/ToolingOrchestrator.vb
+' File: ToolingOrchestrator.vb
 ' Purpose: Host-agnostic decision helpers used by Outlook, Word and Excel
-'          tooling loops. Concentrates the rules for (a) accepting or rejecting
-'          a final-turn candidate, (b) language-contract injection, and (c) the
-'          canonical TASK_STATUS footer instruction text.
-'          Hosts call into this module from their existing host loops; the loops
-'          themselves remain in the host files (they are intentionally not moved
-'          here for this iteration to keep the diff small).
+'          tooling loops. Concentrates rules for (a) accepting/rejecting final-turn
+'          candidates, (b) language-contract injection, and (c) the canonical
+'          TASK_STATUS footer instruction text.
+'
+' Final Turn Decisions:
+'  - Accept: candidate is valid, return to user.
+'  - RejectMalformedFooter: no/invalid TASK_STATUS, force strict-format guard.
+'  - RejectActionPromiseWithoutInvocation: prose announced future work not done.
+'  - RejectDeliverableFallbackRequired: request requires deliverable, untried fallbacks exist.
+'  - Hosts call EvaluateFinalTurn(...) from existing loops; minimal integration.
 ' =============================================================================
 
 Option Explicit On

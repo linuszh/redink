@@ -4,22 +4,18 @@
 ' =============================================================================
 ' File: SubAgentRunner.vb
 ' Purpose: Orchestrates invocation of a sub-agent (Claude-style AGENT.md):
-'           1. Locks the global AgentGate as the OWNER for the whole run so
-'              nested LLM()/MCP calls inside this sub-agent's loop are
-'              re-entrant against the same logical owner.
-'           2. Composes a clean system prompt from the AGENT.md body
-'              (no Inky.md, no parent system prompt) and runs ONE isolated
-'              tooling-loop pass via the host (ISubAgentHost).
-'           3. Parses the assistant's final text as {summary, result} JSON;
-'              if missing, preserves direct JSON objects/arrays as structured
-'              results instead of stringifying them.
-'           4. Validates that the final output is not semantically empty.
-'           5. Retries agent_empty_result exactly once with a stricter reminder.
-'           6. Optionally stores the result in SessionMemory and returns a
-'              compact tool-response JSON that includes the memory stub.
+'           1. Locks AgentGate as OWNER for the whole run (nested LLM/MCP calls
+'              are re-entrant against the same logical owner).
+'           2. Composes clean system prompt from AGENT.md body (no Inky.md,
+'              no parent system prompt) and runs ONE isolated tooling-loop via host.
+'           3. Parses final text as {summary, result} JSON; preserves direct JSON
+'              objects/arrays as structured results instead of stringifying.
+'           4. Validates final output is not semantically empty.
+'           5. Retries agent_empty_result exactly once with stricter reminder.
+'           6. Optionally stores result in SessionMemory and returns compact
+'              tool-response JSON with memory stub.
 '
-' Concurrency: The owner-scope on AgentGate means only one sub-agent can run
-' globally at any moment, satisfying the "no parallel model calls" requirement.
+' Concurrency: Owner-scope on AgentGate ensures only one sub-agent runs globally.
 ' =============================================================================
 
 Option Strict On

@@ -1,10 +1,17 @@
-﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: SharedLibrary/Code/Agents/ActionPromiseValidator.vb
-' Purpose: Detects model prose that ANNOUNCES a future action ("I will try to create
-'          a text file instead...") but never invokes the corresponding tool.
-'          This was exactly the failure mode in problem #3 of the user report.
+' File: ActionPromiseValidator.vb
+' Purpose: Detects model prose that ANNOUNCES a future action ("I will try to
+'          create a text file instead...") but never invokes the corresponding tool.
+'          This addresses failure mode #3 from the user report: promised but
+'          unexecuted fallbacks.
+'
+' Patterns:
+'  - Bilingual EN/DE/FR matching "I will/I'll/let me/ich werde/je vais <verb>"
+'  - Captures fallback promises and alternative action announcements
+'  - Used by ToolingOrchestrator to enforce guard prompts (Q10)
 ' =============================================================================
 
 Option Explicit On

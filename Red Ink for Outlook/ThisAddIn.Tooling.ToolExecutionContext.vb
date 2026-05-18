@@ -1,8 +1,42 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+'
 ' =============================================================================
 ' File: ThisAddIn.Tooling.ToolExecutionContext.vb
+' Purpose: Encapsulates per-run tooling state, execution tracking, logging, and workflow metadata.
+'          Serves as central context object passed through entire tooling loop lifecycle.
+'
+' Data Structure:
+'  - Tool & Registry State:
+'      - SelectedTools: ModelConfig instances for this session.
+'      - AllowedToolRegistry/AuthoritativeToolRegistry: Tool availability constraints.
+'      - AuthoritativeToolRegistrySnapshot: Parent registry snapshot for sub-agents.
+'      - LazyToolLoadingEnabled: Lightweight index initially exposed to model.
+'  - Execution Tracking:
+'      - AllToolResponses: All ToolResponse objects (success and failure) for session.
+'      - CurrentIteration/MaxIterations: Loop counters and abort thresholds.
+'      - IsCancelled: UI-driven cancellation flag.
+'  - Failure Management:
+'      - FailedToolCallCounts: Per-tool failure counter (OrdinalIgnoreCase).
+'      - DuplicateFailureAbortThreshold: Abort when same tool fails N times.
+'      - ConsecutiveFailedToolName/Count/AbortThreshold: Abort on N consecutive failures.
+'      - LastToolExecutionSignature/RepeatCount/DuplicateToolExecutionAbortThreshold: Detect duplicate-tool loops.
+'  - Logging & UI:
+'      - LogEntries: In-memory timestamped log lines.
+'      - LogWindowForm: Optional UI window for user-visible progress.
+'      - ExternalLogSink: Optional callback for external log forwarding.
+'      - Log(message, level): Central log method routing to file, UI, and external sinks.
+'  - Workflow & Sequencing:
+'      - WorkflowId/RuntimeState: Workflow metadata for continuity logging.
+'      - LatestUserRequestRaw/HostTaskSummary: User request and task context.
+'      - SequencingState: Tool call sequencing decisions (memory grounding, tool priority).
+'      - RunId: Unique run identifier (GUID without hyphens).
+'  - Sub-Agent Tracking:
+'      - SubAgentInvocationCount: Total sub-agent invocation counter.
+'      - SubAgentInvocationCountsByAgent: Per-agent invocation counter dict.
+'  - State Finalization:
+'      - FinalizationBlocked: Prevents early completion.
+'      - FinalizationBlockedReason: Human-readable explanation for block.
 ' =============================================================================
 
 Option Explicit On

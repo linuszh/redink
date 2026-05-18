@@ -1,4 +1,22 @@
-﻿Option Strict On
+﻿' Part of "Red Ink" (SharedLibrary)
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+'
+' =============================================================================
+' File: SubAgentToolScopeInitializer.vb
+' Purpose: Initializes tool scope for a sub-agent by:
+'           1. Building an authoritative tool registry (via ToolRegistry).
+'           2. Materializing requested tools (by name) from the registry.
+'           3. Resolving missing/requested tools and reporting gaps.
+'           4. Producing final selected tools and callable tool names.
+'
+' Architecture:
+'  - Takes an authoritative registry and requested tool name list.
+'  - Returns InitializationResult with resolved, missing, and selected tools.
+'  - Handles null/empty requested lists (all tools available).
+'  - Tool name normalization and deduplication built-in.
+' =============================================================================
+
+Option Strict On
 Option Explicit On
 
 Imports System.Linq

@@ -1332,7 +1332,7 @@ Partial Public Class ThisAddIn
         End Try
 
         If toolTriggerAvailable Then
-            hintParts.Add(ToolTrigger & "=use sources with tool model")
+            hintParts.Add(ToolTrigger & "=process this in agent mode")
         End If
 
         html.AppendLine("  <div class=""hint"">" & String.Join(" • ", hintParts) & "</div>")

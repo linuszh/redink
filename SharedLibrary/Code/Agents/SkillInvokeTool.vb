@@ -4,20 +4,15 @@
 ' =============================================================================
 ' File: SkillInvokeTool.vb
 ' Purpose: Implements the universal "skill_use" tool. The model calls
-'             skill_use(name, input?)
-'          and receives the SKILL.md body (loaded lazily) along with an
-'          inventory of the skill's scripts/ and references/ directories.
+'          skill_use(name, input?) and receives the SKILL.md body (loaded lazily)
+'          along with an inventory of the skill's scripts/ and references/ dirs.
 '
-' The model is then expected to follow those instructions in subsequent turns,
-' optionally reading individual referenced files via text.read (step 8) or
-' executing scripts via js.run (step 8).
-'
-' Security:
-'   - allowed-tools (Claude frontmatter) is communicated to the model in the
-'     response so it knows which tools the skill expects. Enforcement of the
-'     narrowing happens in the host runner (step 8).
-'   - Script bodies are NOT auto-loaded; only an inventory (names + sizes) is
-'     returned. The model fetches what it needs.
+' Architecture:
+'  - Lazy-loads skill bodies on first access via AgentResources.FindSkill().
+'  - Returns skill instructions + inventory (names + sizes) as JSON.
+'  - Model follows those instructions in subsequent turns.
+'  - Script bodies are NOT auto-loaded; model fetches what it needs.
+'  - Security: allowed-tools communicated; enforcement by host runner.
 ' =============================================================================
 
 Option Strict On

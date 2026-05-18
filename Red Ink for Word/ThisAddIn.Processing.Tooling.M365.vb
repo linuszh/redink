@@ -2,19 +2,31 @@
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
-' File: ThisAddIn.Processing.Tooling.M365.vb (Word host adapter)
-' Purpose: Bridges Word's host-local ToolCall / ToolResponse / ToolExecutionContext
-'          to the host-neutral SharedLibrary.M365ToolService.
+' File: ThisAddIn.Processing.Tooling.M365.vb
+' Purpose: Word host adapter bridging to shared M365 (Microsoft 365) tool service.
 '
-'   Wire-up:
-'      ExecuteToolCall, after the InternalKnowledge dispatch arm:
-'          ElseIf SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
-'              response = Await ExecuteInternalM365Tool(toolCall, context)
-'              ToolingFileLogger.LogRawResponseStub(
-'                  $"Internal tool ({toolCall.ToolName})", response.Response)
+' Responsibilities:
+'  - Adapt Word host ToolCall/ToolResponse to SharedLibrary.M365ToolService contract.
+'  - Execute M365 tools (Outlook search, Teams, OneDrive, SharePoint access).
+'  - Extract source links (URLs, titles) from M365 tool responses.
+'  - Build markdown footnote footer with source citations.
+'  - Construct ToolSourceLink objects (URL, title, source label).
+'  - Deduplicate source links by URL.
+'  - Append formatted sources section to final user-facing responses.
+'  - Escape markdown special characters in link labels.
 '
-'      GetAvailableTools, after GetInternalKnowledgeTools:
-'          tools.AddRange(SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
+' Architecture:
+'  - ExecuteInternalM365Tool routes Word ToolCall -> M365ToolService -> ToolResponse.
+'  - Logging integration via context.Log().
+'  - Post-processing of tool responses to extract and format source metadata.
+'
+' Wire-up Points (in ThisAddIn.Processing.Tooling.vb):
+'  - ExecuteToolCall: agent-layer dispatch (after InternalKnowledge).
+'  - GetAvailableTools: tool registration (after GetInternalKnowledgeTools).
+'
+' External Dependencies:
+'  - SharedLibrary.M365ToolService for host-neutral M365 execution.
+'  - Newtonsoft.Json for structured response parsing.
 ' =============================================================================
 
 Option Explicit On
