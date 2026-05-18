@@ -110,7 +110,7 @@
     <FriendlyName>Red Ink for Word %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.4.20.200</ApplicationVersion>
+    <ApplicationVersion>1.4.21.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\word\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/word/</InstallUrl>
     <ProductName>Red Ink for Word %28Preview%29</ProductName>
@@ -714,6 +714,7 @@
     <Compile Include="Ribbon1.vb">
       <SubType>Component</SubType>
     </Compile>
+    <Compile Include="ThisAddIn.AgentHost.vb" />
     <Compile Include="ThisAddIn.AssembleDocuments.vb" />
     <Compile Include="ThisAddIn.Commands.Freestyle.vb" />
     <Compile Include="ThisAddIn.Commands.vb" />
@@ -736,7 +737,18 @@
     <Compile Include="ThisAddIn.Processing.FormatSaveAndRestore.vb" />
     <Compile Include="ThisAddIn.Processing.HTMLToWord.vb" />
     <Compile Include="ThisAddIn.Processing.KnowledgeRAG.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Logging.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.M365.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Memory.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Parameterhandling.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.PromptBuilding.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Selection.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Sources.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.ToolExecution.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.ToolExecutionContext.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.ToolResponse.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.Tools.vb" />
+    <Compile Include="ThisAddIn.Processing.Tooling.UserRequestResolution.vb" />
     <Compile Include="ThisAddIn.Processing.Tooling.vb" />
     <Compile Include="ThisAddIn.Processing.SearchGrounding.vb" />
     <Compile Include="ThisAddIn.Processing.vb" />
@@ -757,12 +769,16 @@
     <Compile Include="ThisAddIn.WebAgent.vb" />
     <Compile Include="ThisAddIn.WebExtension.vb" />
     <Compile Include="ThisAddIn.TranslateDocuments.vb" />
+    <Compile Include="ThisAddIn.WordDocHost.vb" />
     <Compile Include="ThisAddIn.WordHelpers,ImageGeneration.vb" />
     <Compile Include="ThisAddIn.WordHelpers.DrawioConverter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Snapshotter.vb" />
     <Compile Include="ThisAddIn.WordHelpers.Stamper.vb" />
     <Compile Include="ThisAddIn.WordHelpers.vb" />
     <Compile Include="ThisAddIn.WordSearchHelper.vb" />
+    <Compile Include="WordWorkspaceForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <None Include="Resources\Red_Ink_Logo_Large.png" />
     <None Include="Resources\Red_Ink_Logo_Medium.png" />
     <Content Include="VBA Helper\RI_Helper_Code_Word.bas" />

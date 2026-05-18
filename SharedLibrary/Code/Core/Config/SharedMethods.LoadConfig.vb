@@ -367,6 +367,11 @@ Namespace SharedLibrary
 
                 context.INI_FormulaInstruction = My.Settings.FormulaInstruction
 
+                context.INI_AgentResourcesPath = If(configDict.ContainsKey("AgentResourcesPath"), configDict("AgentResourcesPath"), "")
+                context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
+                Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
+
+
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")
                 context.INI_LogoPathMedium = If(configDict.ContainsKey("LogoPathMedium"), configDict("LogoPathMedium"), "")

@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 17.5.2026
+' 18.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -37,6 +37,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Runtime.InteropServices
 Imports System.Threading
@@ -59,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.170526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.180526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -83,7 +84,7 @@ Partial Public Class ThisAddIn
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
-    Private Const ToolTrigger As String = "(s)"
+    Private Const ToolTrigger As String = "(a)"
     Private Const KBTrigger As String = "(kb)"
     Private Const AddmailTrigger As String = "(addmail)"
 
@@ -169,6 +170,16 @@ Partial Public Class ThisAddIn
     Private startupFallbackTimer As System.Windows.Forms.Timer
 
     ''' <summary>
+    ''' Shared UI synchronization context used by the shared tooling loop.
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+
+    ''' <summary>
+    ''' Managed thread id of the Outlook UI thread captured at startup.
+    ''' </summary>
+    Public Shared UiThreadId As Integer
+
+    ''' <summary>
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -189,6 +200,10 @@ Partial Public Class ThisAddIn
             _uiContext = New WindowsFormsSynchronizationContext()
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
+
+        UiSyncContext = _uiContext
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
@@ -231,7 +246,35 @@ Partial Public Class ThisAddIn
         Catch
             activeChatId = 1
         End Try
+
+        '#If DEBUG Then
+        '        RunToolCallSequencingSelfTestsAtStartup()
+        '#End If
+
     End Sub
+
+
+    '#If DEBUG Then
+    '    Private Shared _toolCallSequencingSelfTestsRan As Boolean = False
+
+    'Private Sub RunToolCallSequencingSelfTestsAtStartup()
+    'If _toolCallSequencingSelfTestsRan Then Return
+    '    _toolCallSequencingSelfTestsRan = True
+
+    '    Debug.WriteLine("[Startup] Queueing ToolCallSequencing self-tests...")
+
+    '   System.Threading.Tasks.Task.Run(
+    'Sub()
+    'Try
+    '               Debug.WriteLine("[Startup] Running ToolCallSequencing self-tests...")
+    'Dim status = SharedLibrary.Agents.ToolCallSequencingSelfTests.RunAllAndReturnStatus()
+    '               Debug.WriteLine("[Startup] " & status)
+    'Catch ex As System.Exception
+    '               Debug.WriteLine("[Startup] ToolCallSequencing self-tests failed: " & ex.ToString())
+    'End Try
+    'End Sub)
+    'End Sub
+    '#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.
@@ -339,6 +382,22 @@ Partial Public Class ThisAddIn
 
             ' Initialize Knowledge Store background indexing service
             InitializeKnowledgeStoreService()
+
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
 
         Catch ex As System.Exception
             ' Handling errors gracefully

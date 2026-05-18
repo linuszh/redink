@@ -70,7 +70,7 @@ Namespace SharedLibrary
         Public Const DefaultMaxChars As Integer = 200000
         Public Const HardMaxChars As Integer = 1000000
 
-        Private Const DefaultSuffix As String = " (internal)"
+        Private Const DefaultSuffix As String = ""
 
         ' ════════════════════════════════════════════════════════════════════
         '  PUBLIC API
@@ -547,7 +547,10 @@ Namespace SharedLibrary
                                                log As Action(Of String),
                                                ct As CancellationToken) As Task(Of M365ToolExecutionResult)
             Dim r As New M365ToolExecutionResult()
-            Dim msgId = GetArgString(args, "message_id").Trim()
+
+            Dim rawMsgId = GetArgString(args, "message_id").Trim()
+            Dim msgId = M365Service.ToGraphUrlSafeId(rawMsgId)
+
             If String.IsNullOrEmpty(msgId) Then
                 r.Success = False : r.ErrorMessage = "Missing required parameter: message_id" : Return r
             End If
@@ -558,15 +561,15 @@ Namespace SharedLibrary
                 .AskUserForOcr = False,
                 .MaxChars = ClampMaxChars(GetArgInt(args, "max_chars", DefaultMaxChars))
             }
+
+            If Not String.Equals(rawMsgId, msgId, StringComparison.Ordinal) Then
+                log("  Normalized M365 mail id for Graph URL safety.")
+            End If
+
             log($"  Reading M365 mail: {msgId}")
             Dim text = Await M365Service.GetMessageAsTextAsync(context, msgId, opts, ct).ConfigureAwait(False)
             r.Response = WrapContent("MAIL", msgId, text)
             r.Success = True
-
-            Debug.WriteLine("[M365Tool][Execute_GetMail] TEXT:")
-            Debug.WriteLine(If(text?.Text, "(null)"))
-            Debug.WriteLine("[M365Tool][Execute_GetMail] FINAL RESPONSE:")
-            Debug.WriteLine(r.Response)
 
             Return r
         End Function

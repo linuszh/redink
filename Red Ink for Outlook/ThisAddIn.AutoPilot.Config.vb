@@ -455,7 +455,7 @@ Partial Public Class ThisAddIn
 
         ' ── Step 6: Source selection (only if model supports tooling) ──
         If modelSupportsTools Then
-            Dim availableTools = GetAvailableTools()
+            Dim availableTools = GetAvailableToolsForAutoPilotSelection()
             If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
                 ' Load previously persisted tool names for pre-selection
                 Dim previousToolNames As New List(Of String)()

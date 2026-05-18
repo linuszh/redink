@@ -605,5 +605,37 @@ Namespace SharedLibrary
             End Try
         End Function
 
+        Public Structure ModelConfigScopeSnapshot
+            Public ActiveConfig As ModelConfig
+            Public OriginalConfigSnapshot As ModelConfig
+            Public OriginalConfigLoadedSnapshot As Boolean
+        End Structure
+
+        Public Shared Function CaptureModelConfigScope(ByVal context As ISharedContext) As ModelConfigScopeSnapshot
+            Dim snapshot As New ModelConfigScopeSnapshot()
+
+            If context IsNot Nothing Then
+                snapshot.ActiveConfig = GetCurrentConfig(context)
+            End If
+
+            snapshot.OriginalConfigSnapshot = originalConfig
+            snapshot.OriginalConfigLoadedSnapshot = originalConfigLoaded
+
+            Return snapshot
+        End Function
+
+        Public Shared Sub RestoreModelConfigScope(ByVal context As ISharedContext,
+                                                  ByVal snapshot As ModelConfigScopeSnapshot)
+            Try
+                If context IsNot Nothing AndAlso snapshot.ActiveConfig IsNot Nothing Then
+                    RestoreDefaults(context, snapshot.ActiveConfig)
+                End If
+            Catch
+            End Try
+
+            originalConfig = snapshot.OriginalConfigSnapshot
+            originalConfigLoaded = snapshot.OriginalConfigLoadedSnapshot
+        End Sub
+
     End Class
 End Namespace
