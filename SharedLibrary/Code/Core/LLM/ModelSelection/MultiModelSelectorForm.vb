@@ -242,42 +242,52 @@ Namespace SharedLibrary
             UpdatePreferredDialogWidth()
         End Sub
 
+        Private Shared Function StripTrailingDisplaySuffix(value As String, suffix As String) As String
+            Dim result As String = If(value, "")
+
+            If suffix = "" Then
+                Return result
+            End If
+
+            Do While result.EndsWith(suffix, System.StringComparison.OrdinalIgnoreCase)
+                result = result.Substring(0, result.Length - suffix.Length).TrimEnd()
+            Loop
+
+            Return result
+        End Function
+
+        Private Shared Function RemoveLegacyInternalDisplaySuffixes(value As String) As String
+            Dim result As String = If(value, "").Trim()
+
+            result = StripTrailingDisplaySuffix(result, " (Outlook only)")
+            result = StripTrailingDisplaySuffix(result, " (Word only)")
+            result = StripTrailingDisplaySuffix(result, " (local only)")
+            result = StripTrailingDisplaySuffix(result, " (built-in)")
+            result = StripTrailingDisplaySuffix(result, " (internal)")
+
+            Return result
+        End Function
+
         Private Shared Function GetDisplayTextForList(m As ModelConfig) As System.String
             If m Is Nothing Then
                 Return "(Unnamed model)"
             End If
 
             Dim display As System.String =
-        If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model)
+                If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model)
 
-            If IsBuiltInAgentToolForDisplay(m) AndAlso
-       Not display.EndsWith(" (internal)", System.StringComparison.OrdinalIgnoreCase) Then
-                display &= " (internal)"
+            If String.IsNullOrWhiteSpace(m.ToolName) Then
+                Return display
             End If
 
-            Return display
-        End Function
+            Dim suffix As String =
+                Global.SharedLibrary.Agents.HostToolRegistration.GetSelectorDisplaySuffix(m.ToolName)
 
-        Private Shared Function IsBuiltInAgentToolForDisplay(m As ModelConfig) As Boolean
-            If m Is Nothing OrElse String.IsNullOrWhiteSpace(m.ToolName) Then
-                Return False
+            If suffix = "" Then
+                Return display
             End If
 
-            Dim toolName As System.String = m.ToolName.Trim()
-
-            If toolName.StartsWith("skill_", System.StringComparison.OrdinalIgnoreCase) OrElse
-       toolName.StartsWith("agent_", System.StringComparison.OrdinalIgnoreCase) Then
-                Return False
-            End If
-
-            Return toolName.Equals("skill_use", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.Equals("js_run", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("memory_", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("text_", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("workspace_", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("word_", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("worddoc_", System.StringComparison.OrdinalIgnoreCase) OrElse
-           toolName.StartsWith("word_doc_", System.StringComparison.OrdinalIgnoreCase)
+            Return RemoveLegacyInternalDisplaySuffixes(display) & suffix
         End Function
 
         Private Sub UpdateInstructionLabelLayout()

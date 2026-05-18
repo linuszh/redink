@@ -70,7 +70,7 @@ Namespace SharedLibrary
         Public Const DefaultMaxChars As Integer = 200000
         Public Const HardMaxChars As Integer = 1000000
 
-        Private Const DefaultSuffix As String = " (internal)"
+        Private Const DefaultSuffix As String = ""
 
         ' ════════════════════════════════════════════════════════════════════
         '  PUBLIC API

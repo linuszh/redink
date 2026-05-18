@@ -423,11 +423,7 @@ Partial Public Class ThisAddIn
 
             If config.SelectedExternalTools IsNot Nothing Then
                 _apSelectedTools.AddRange(
-                    config.SelectedExternalTools.
-                        Where(Function(tool)
-                                  Return tool IsNot Nothing AndAlso
-                                         Not SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
-                              End Function))
+                    NormalizeAutoPilotSelectableExternalTools(config.SelectedExternalTools))
             End If
 
             _apSelectedTools =

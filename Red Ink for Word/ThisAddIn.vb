@@ -247,7 +247,7 @@ Partial Public Class ThisAddIn
 
     Public Const ToolingLog_AutoCloseDefaultSeconds As Integer = 20
 
-    Public Const InternalToolSuffix As String = " (internal)"  ' Suffix displayed for the internal web tool in selection dialogs.
+    Public Const InternalToolSuffix As String = ""  ' Suffix displayed for the internal web tool in selection dialogs.
 
     Public Const InternalWebToolName As String = "web_content_retriever"
     Public Const InternalWebToolDescription As String =

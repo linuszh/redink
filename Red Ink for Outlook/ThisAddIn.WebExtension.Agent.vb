@@ -1007,7 +1007,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
-            .ModelDescription = "Agent Workspace: Write File (local only)",
+            .ModelDescription = "Agent Workspace: Write File",
             .ToolPriority = 123,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
@@ -1028,7 +1028,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceRead,
-            .ModelDescription = "Agent Workspace: Read File (local only)",
+            .ModelDescription = "Agent Workspace: Read File",
             .ToolPriority = 122,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
@@ -1046,7 +1046,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceWrite,
-            .ModelDescription = "Agent Workspace: Write File (local only)",
+            .ModelDescription = "Agent Workspace: Write File",
             .ToolPriority = 123,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
@@ -1065,7 +1065,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceSaveSessionFile,
-            .ModelDescription = "Agent Workspace: Save Session File (local only)",
+            .ModelDescription = "Agent Workspace: Save Session File",
             .ToolPriority = 124,
             .ToolErrorHandling = "abort",
             .ToolInstructionsPrompt =
@@ -1083,7 +1083,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceFileOp,
-            .ModelDescription = "Agent Workspace: File Operations (local only)",
+            .ModelDescription = "Agent Workspace: File Operations",
             .ToolPriority = 125,
             .ToolErrorHandling = "abort",
             .ToolInstructionsPrompt =
@@ -1112,7 +1112,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = CA_Tool_WorkspaceSearch,
-            .ModelDescription = "Agent Workspace: Search (local only)",
+            .ModelDescription = "Agent Workspace: Search",
             .ToolPriority = 126,
             .ToolErrorHandling = "skip",
             .ToolInstructionsPrompt =
@@ -1857,7 +1857,7 @@ Partial Public Class ThisAddIn
     Private Sub AddWorkspaceMoreTools(tools As List(Of ModelConfig))
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceFindFiles,
-            "Agent Workspace: Find Files (local only)",
+            "Agent Workspace: Find Files",
             127,
             "skip",
             CA_Tool_WorkspaceFindFiles & ": Find files inside the granted workspace by filename/path text, extension, size, and modified date. " &
@@ -1883,7 +1883,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceMoveTo,
-            "Agent Workspace: Move To Folder (local only)",
+            "Agent Workspace: Move To Folder",
             128,
             "abort",
             CA_Tool_WorkspaceMoveTo & ": Move one or more files/folders into another workspace folder. Create the target folder if needed. Prefer dry_run first for batch moves when ambiguity exists.",
@@ -1905,7 +1905,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceCopyTo,
-            "Agent Workspace: Copy To Folder (local only)",
+            "Agent Workspace: Copy To Folder",
             129,
             "abort",
             CA_Tool_WorkspaceCopyTo & ": Copy one or more files/folders into another workspace folder. Never deletes the source. Show collisions clearly. Create the target folder if needed.",
@@ -1927,7 +1927,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceRename,
-            "Agent Workspace: Rename Item (local only)",
+            "Agent Workspace: Rename Item",
             130,
             "abort",
             CA_Tool_WorkspaceRename & ": Rename one file or folder in place. new_name must be a leaf name only, and the item stays in the same parent folder unless a move is explicitly requested.",
@@ -1948,7 +1948,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceBulkRename,
-            "Agent Workspace: Bulk Rename (local only)",
+            "Agent Workspace: Bulk Rename",
             131,
             "abort",
             CA_Tool_WorkspaceBulkRename & ": Rename many files by prefix, suffix, replace, or pattern. Dry run is recommended by default, and the response returns old → new mappings before commit.",
@@ -1976,7 +1976,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceFileDetails,
-            "Agent Workspace: File Details (local only)",
+            "Agent Workspace: File Details",
             132,
             "skip",
             CA_Tool_WorkspaceFileDetails & ": Return detailed metadata for a file or folder, including timestamps, size, attributes, and optionally a SHA-256 hash for files.",
@@ -1995,7 +1995,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceRecentFiles,
-            "Agent Workspace: Recent Files (local only)",
+            "Agent Workspace: Recent Files",
             133,
             "skip",
             CA_Tool_WorkspaceRecentFiles & ": List recently changed files to help the user resume work quickly.",
@@ -2015,7 +2015,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceCreateFolderStructure,
-            "Agent Workspace: Create Folder Structure (local only)",
+            "Agent Workspace: Create Folder Structure",
             134,
             "abort",
             CA_Tool_WorkspaceCreateFolderStructure & ": Create multiple folders in one operation under a base path. Supports dry_run preview.",
@@ -2035,7 +2035,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceTrash,
-            "Agent Workspace: Move To Recycle Bin (local only)",
+            "Agent Workspace: Move To Recycle Bin",
             135,
             "abort",
             CA_Tool_WorkspaceTrash & ": Move files/folders to the Windows Recycle Bin instead of permanently deleting them. Prefer this over delete for office-user cleanup.",
@@ -2054,7 +2054,7 @@ Partial Public Class ThisAddIn
 
         tools.Add(CreateWorkspaceToolConfig(
             CA_Tool_WorkspaceInventoryReport,
-            "Agent Workspace: Inventory Report (local only)",
+            "Agent Workspace: Inventory Report",
             136,
             "abort",
             CA_Tool_WorkspaceInventoryReport & ": Create an Excel or Word report of files in a workspace folder. Use this when the user asks for an overview, list, register, or handover inventory.",

@@ -90,7 +90,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Suffix appended to internal tool descriptions when shown to the user.
     ''' </summary>
-    Private Const InternalToolSuffix As String = " (built-in)"
+    Private Const InternalToolSuffix As String = ""
 
     ''' <summary>
     ''' Maximum tool loop iterations used by prompt-building helpers.
@@ -3819,9 +3819,8 @@ __AfterDispatch:
             Return New List(Of ModelConfig)()
         End If
 
-        ' Note: Do NOT add ToolingSuffix here. ToolingSuffix is for models that CAN USE tools/sources,
-        ' not for the tools/sources themselves. The tools in this list ARE the sources.
-        ' InternalToolSuffix is already applied to the internal web tool in GetInternalWebTool().
+        ' Note: do NOT add built-in/internal suffixes here.
+        ' MultiModelSelectorForm renders those labels centrally via HostToolRegistration.
 
         Dim selector As New MultiModelSelectorForm(
         availableTools,
@@ -4044,6 +4043,51 @@ __AfterDispatch:
         Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
         Return DeduplicateToolsByName(
             availableTools.Where(Function(t) IsLocalChatMainSelectableTool(t)))
+    End Function
+
+
+    Public Function GetAvailableToolsForAutoPilotSelection() As List(Of ModelConfig)
+        Dim tools As New List(Of ModelConfig)()
+
+        If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
+            tools.AddRange(LoadToolingServices(INI_SpecialServicePath, True))
+        End If
+
+        tools.Add(GetInternalWebTool())
+        tools.Add(GetInternalDownloadWebFilesTool())
+
+        If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
+            tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
+        End If
+
+        tools.AddRange(GetInternalKnowledgeTools())
+
+        Return DeduplicateToolsByName(tools)
+    End Function
+
+    Private Function NormalizeAutoPilotSelectableExternalTools(tools As IEnumerable(Of ModelConfig)) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
+
+        Dim allowedByName As Dictionary(Of String, ModelConfig) =
+            GetAvailableToolsForAutoPilotSelection().
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName.Trim(), StringComparer.OrdinalIgnoreCase).
+                ToDictionary(Function(g) g.Key, Function(g) g.First(), StringComparer.OrdinalIgnoreCase)
+
+        If tools Is Nothing Then
+            Return result
+        End If
+
+        For Each tool In tools
+            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+
+            Dim normalized As ModelConfig = Nothing
+            If allowedByName.TryGetValue(tool.ToolName.Trim(), normalized) Then
+                result.Add(normalized)
+            End If
+        Next
+
+        Return DeduplicateToolsByName(result)
     End Function
 
     Private Function NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames As IEnumerable(Of String),

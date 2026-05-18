@@ -1273,6 +1273,11 @@ Partial Public Class ThisAddIn
                 "},""required"":[""reason""]}}"
         })
 
+        For Each tool As ModelConfig In tools
+            If tool Is Nothing Then Continue For
+            tool.ModelDescription = StripSelectorOwnedToolSuffixes(tool.ModelDescription)
+        Next
+
         Return tools
 
     End Function
@@ -8337,6 +8342,28 @@ Partial Public Class ThisAddIn
             Case Else
                 Return False
         End Select
+    End Function
+
+    Private Shared Function StripSelectorOwnedToolSuffixes(value As String) As String
+        Dim result As String = If(value, "").Trim()
+
+        If result.EndsWith(" (Outlook only)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (Outlook only)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (Word only)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (Word only)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (built-in)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (built-in)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (internal)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (internal)".Length).TrimEnd()
+        End If
+
+        Return result
     End Function
 
 End Class
