@@ -2034,6 +2034,26 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property INI_AgentResourcesPath As String
+        Get
+            Return _context.INI_AgentResourcesPath
+        End Get
+        Set(value As String)
+            _context.INI_AgentResourcesPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AgentResourcesPathLocal As String
+        Get
+            Return _context.INI_AgentResourcesPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_AgentResourcesPathLocal = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_WebAgentPath As String
         Get
             Return _context.INI_WebAgentPath

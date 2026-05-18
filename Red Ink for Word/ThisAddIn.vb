@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 17.5.2026
+' 18.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -53,7 +53,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.170526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.180526" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -120,7 +120,7 @@ Partial Public Class ThisAddIn
     Private Const RefreshTrigger As String = "(refresh)"
     Private Const ToolSelectionTrigger As String = "(sources)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
     Private Const ToolTrigger As String = "(s)"
-    Public Const ToolFriendlyName As String = "Sources"  ' How to refer to tools (e.g., sources) towards the user
+    Public Const ToolFriendlyName As String = "Agents"  ' How to refer to tools (e.g., sources) towards the user
     Private Const KbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger          ' "(kb)"
     Private Const KbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix ' "(kb:"
 
@@ -247,23 +247,43 @@ Partial Public Class ThisAddIn
 
     Public Const ToolingLog_AutoCloseDefaultSeconds As Integer = 20
 
-    Public Const InternalToolSuffix As String = " (internal)"  ' Suffix displayed for the internal web tool in selection dialogs.
+    Public Const InternalToolSuffix As String = ""  ' Suffix displayed for the internal web tool in selection dialogs.
 
     Public Const InternalWebToolName As String = "web_content_retriever"
     Public Const InternalWebToolDescription As String =
-        "Retrieves readable text from one or more web pages. Use this tool when you need to access the content behind a URL instead of relying on summaries or excerpts."
+        "Retrieves readable text from one or more web pages. By default it returns text only. " &
+        "Optionally, the caller can request structured link extraction for any linked content."
 
     Public Const InternalWebToolDefinition As String =
         "{""name"":""web_content_retriever"",""description"":""Fetches and returns readable text from one or more web URLs. " &
+        "By default this tool returns text only. " &
+        "Optional behavior: set include_links=true to also extract structured hyperlinks; set expand_interactive_sections=true " &
+        "to attempt opening accordions, tabs, details elements, and similar collapsed UI before extraction; set link_extensions " &
+        "to filter extracted links to specific extensions such as pdf, docx, xlsx, zip, html, or any other extension. " &
         "IMPORTANT: Cannot access SharePoint, OneDrive, Teams, or other authenticated cloud storage URLs " &
         "(sharepoint.com, onedrive.com, 1drv.ms, teams.microsoft.com, :f:/). " &
-        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""},""url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}}}}" ' Note: do not require urls; code validates at runtime.
+        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{" &
+        """urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""}," &
+        """url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}," &
+        """include_links"":{""type"":""boolean"",""description"":""Optional. Default false. When true, include a structured <LINKS_n> JSON block for each URL.""}," &
+        """link_extensions"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional. Restrict extracted links to these extensions, for example ['pdf','docx']. Ignored unless include_links=true.""}," &
+        """expand_interactive_sections"":{""type"":""boolean"",""description"":""Optional. Default false for tooling calls. When true, attempts to expand accordions, tabs, details sections, and similar collapsed UI before extraction.""}}}}" ' Runtime validates url/urls.
 
     Public Const InternalWebToolInstructionsPrompt As String =
         "web_content_retriever: Fetches readable text from web pages. " &
         "Call this tool when you need the actual page content behind a link. " &
         "Provide either urls (array of strings) or url (single string). " &
-        "Return value is plain text content for each URL (or an error per URL if retrieval fails). " &
+        "By default, this tool returns readable text only. " &
+        "If you also need structured links to downloadable or linked content, explicitly set include_links=true. " &
+        "If linked content may be hidden behind accordions, tabs, or collapsed sections, explicitly set expand_interactive_sections=true. " &
+        "Optionally set link_extensions to restrict extracted links to specific extensions such as ['pdf'], ['docx'], or any other extension. " &
+        "Return value is plain text content for each URL, optionally followed by a structured <LINKS_n> JSON block for each URL. " &
+        "IMPORTANT BOUNDARY: This tool retrieves readable text and link metadata only. It does NOT download or preserve original binary file bytes. " &
+        "If you call this tool on a direct PDF, DOCX, XLSX, PPTX, ZIP, image, audio, or other binary URL, the result is text extraction or page content — not a real downloadable file object. " &
+        "Therefore, NEVER use this tool as a file-downloader and NEVER save its returned text as if it were the original PDF or other binary file. " &
+        "If the user wants the actual remote file saved into the workspace, use a dedicated binary download tool if available; otherwise explain that the current toolset can analyze the content but cannot save the original remote binary file. " &
+        "IMPORTANT FALLBACK RULE: If include_links=true returns zero matching links, and the page may be dynamically computing or revealing links client-side, then use js_run as a fallback with allow_network=true and navigate_url set to that page. " &
+        "In js_run, the code is already the body of an async function, so it must return the final value explicitly at top level. " &
         "SHAREPOINT/ONEDRIVE LIMITATION: This tool CANNOT access SharePoint, OneDrive, Microsoft Teams, or any other " &
         "authenticated cloud storage URLs. URLs containing 'sharepoint.com', 'onedrive.com', '1drv.ms', " &
         "'teams.microsoft.com', or ':f:/' point to resources that require authentication and will NOT return " &
@@ -271,6 +291,24 @@ Partial Public Class ThisAddIn
         "If the user asks you to retrieve content from such a link, do NOT call this tool. Instead, explain " &
         "that you cannot remotely log into authenticated cloud storage and ask the user to download the file(s) " &
         "and provide them as direct attachments."
+
+    Public Const InternalDownloadWebFilesToolName As String = "download_web_files"
+
+    Public Const InternalDownloadWebFilesToolDefinition As String =
+        "{""name"":""download_web_files"",""description"":""Downloads one or more remote files and saves the original binary bytes to disk. " &
+        "Use this for real file downloads, not for text extraction. Only absolute HTTP/HTTPS URLs are allowed. " &
+        "Authenticated SharePoint, OneDrive, Teams, and similar cloud storage URLs are not supported.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of absolute HTTP/HTTPS URLs to download.""}," &
+        """target_directory"":{""type"":""string"",""description"":""Optional relative target folder. If a writable workspace is active, this is resolved under the workspace root; otherwise under the safe download root.""}," &
+        """overwrite"":{""type"":""boolean"",""description"":""Optional. Default false. If false, existing files are not overwritten; unique names are created instead.""}}" &
+        ",""required"":[""urls""]}}"
+
+    Public Const InternalDownloadWebFilesToolInstructionsPrompt As String =
+        "download_web_files: Downloads one or more remote files and saves the original binary bytes to disk. " &
+        "Use this only when the user wants the actual file saved locally. " &
+        "Provide urls (required array). Optionally provide target_directory (relative subfolder under the current workspace when available; otherwise under the safe download root) and overwrite (boolean, default false). " &
+        "Use this tool instead of web_content_retriever when the user wants the actual PDF or other binary file, not merely extracted text."
 
     ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
 
@@ -345,7 +383,7 @@ Partial Public Class ThisAddIn
     Public OtherPrompt As String = ""
     Public OtherPromptUnfilled As String = ""
     Public OutputLanguage As String = ""
-    Public MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = SharedLibrary.Agents.ToolingConstants.DefaultMaxToolIterations
     Public InsertDocs As String = ""
     Public MyStyleInsert As String = ""
     Public FormatInstruction As String = ""
@@ -389,6 +427,13 @@ Partial Public Class ThisAddIn
     ' UI threading context and scheduler (captured at Startup)
     Private Shared _uiContext As SynchronizationContext
     Private Shared _uiScheduler As TaskScheduler
+    ''' <summary>
+    ''' Captured WindowsFormsSynchronizationContext for the Word UI/STA thread.
+    ''' Used to marshal LogWindow creation and updates back to the UI thread,
+    ''' regardless of whether the caller awaited with ConfigureAwait(False).
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+    Public Shared UiThreadId As Integer
 
 
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -397,6 +442,14 @@ Partial Public Class ThisAddIn
 
         ' 1) Force the creation of the Control's handle on the Office UI thread
         Dim dummy = mainThreadControl.Handle
+
+        ' Ensure a WinForms sync context exists on the UI thread, then capture it.
+        If System.Threading.SynchronizationContext.Current Is Nothing Then
+            System.Threading.SynchronizationContext.SetSynchronizationContext(
+        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+        End If
+        UiSyncContext = System.Threading.SynchronizationContext.Current
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
 
         ' 2) Capture synchronization context & scheduler after handle exists
         _uiContext = SynchronizationContext.Current
@@ -422,6 +475,8 @@ Partial Public Class ThisAddIn
         ' Other tasks that need to be done at startup
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
+
+        SharedLibrary.Agents.WordHostPolicy.Host = Me
 
         If System.Threading.SynchronizationContext.Current Is Nothing Then
             System.Threading.SynchronizationContext.SetSynchronizationContext(
@@ -536,6 +591,23 @@ Partial Public Class ThisAddIn
             StartupHttpListener()
             ' Initialize Knowledge Store background indexing service
             InitializeKnowledgeStoreService()
+
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
+
         Catch ex As System.Exception
             ' Handle exceptions gracefully.
         End Try
@@ -596,7 +668,9 @@ Partial Public Class ThisAddIn
     End Function
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True) As Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution)
-        If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
+        If EnsureUI Then
+            Await EnsureUIThread().ConfigureAwait(False)
+        End If
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))

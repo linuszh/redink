@@ -212,17 +212,17 @@ Namespace SharedLibrary
             allDisplayItems.Clear()
 
             For Each m In altModels
-                Dim display As System.String = If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model)
+                Dim display As System.String = GetDisplayTextForList(m)
                 Dim unique As System.String = MakeUniqueDisplay(display)
                 displayToModel(unique) = m
                 allDisplayItems.Add(unique)
 
                 If preselectKeys.Count > 0 Then
                     If preselectKeys.Contains(unique) OrElse
-                       preselectKeys.Contains(display) OrElse
-                       preselectKeys.Contains(m.Model) OrElse
-                       preselectKeys.Contains(m.ModelDescription) OrElse
-                       preselectKeys.Contains(m.ToolName) Then
+               preselectKeys.Contains(display) OrElse
+               preselectKeys.Contains(m.Model) OrElse
+               preselectKeys.Contains(m.ModelDescription) OrElse
+               preselectKeys.Contains(m.ToolName) Then
                         selectedLabels.Add(unique)
                     End If
                 End If
@@ -239,8 +239,69 @@ Namespace SharedLibrary
             End Try
 
             UpdateToggleAllButtonText()
+            UpdatePreferredDialogWidth()
         End Sub
 
+        Private Shared Function StripTrailingDisplaySuffix(value As String, suffix As String) As String
+            Dim result As String = If(value, "")
+
+            If suffix = "" Then
+                Return result
+            End If
+
+            Do While result.EndsWith(suffix, System.StringComparison.OrdinalIgnoreCase)
+                result = result.Substring(0, result.Length - suffix.Length).TrimEnd()
+            Loop
+
+            Return result
+        End Function
+
+        Private Shared Function RemoveLegacyInternalDisplaySuffixes(value As String) As String
+            Dim result As String = If(value, "").Trim()
+
+            result = StripTrailingDisplaySuffix(result, " (Outlook only)")
+            result = StripTrailingDisplaySuffix(result, " (Word only)")
+            result = StripTrailingDisplaySuffix(result, " (local only)")
+            result = StripTrailingDisplaySuffix(result, " (built-in)")
+            result = StripTrailingDisplaySuffix(result, " (internal)")
+
+            Return result
+        End Function
+
+        Private Shared Function GetDisplayTextForList(m As ModelConfig) As System.String
+            If m Is Nothing Then
+                Return "(Unnamed model)"
+            End If
+
+            Dim display As System.String =
+                If(Not String.IsNullOrWhiteSpace(m.ModelDescription), m.ModelDescription, m.Model)
+
+            If String.IsNullOrWhiteSpace(m.ToolName) Then
+                Return display
+            End If
+
+            Dim suffix As String =
+                Global.SharedLibrary.Agents.HostToolRegistration.GetSelectorDisplaySuffix(m.ToolName)
+
+            If suffix = "" Then
+                Return display
+            End If
+
+            Return RemoveLegacyInternalDisplaySuffixes(display) & suffix
+        End Function
+
+        Private Sub UpdateInstructionLabelLayout()
+            If Me.lblTitle Is Nothing OrElse Me.outer Is Nothing Then
+                Return
+            End If
+
+            Dim width As Integer = Math.Max(320, Me.ClientSize.Width - Me.outer.Padding.Left - Me.outer.Padding.Right - 6)
+            Me.lblTitle.MaximumSize = New System.Drawing.Size(width, 0)
+        End Sub
+
+        ''' <summary>
+        ''' Creates and configures all UI controls and event handlers for the dialog.
+        ''' </summary>
         ''' <summary>
         ''' Creates and configures all UI controls and event handlers for the dialog.
         ''' </summary>
@@ -251,9 +312,9 @@ Namespace SharedLibrary
             Me.MinimizeBox = True
             Me.MaximizeBox = True
             Me.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable
-            Me.Width = 520
-            Me.Height = 460
-            Me.MinimumSize = New System.Drawing.Size(520, 460)
+            Me.Width = 640
+            Me.Height = 600
+            Me.MinimumSize = New System.Drawing.Size(640, 600)
             Me.TopMost = True
 
             Me.outer = New System.Windows.Forms.TableLayoutPanel() With {
@@ -271,8 +332,10 @@ Namespace SharedLibrary
             Me.lblTitle = New System.Windows.Forms.Label() With {
                 .Text = instruction,
                 .Dock = System.Windows.Forms.DockStyle.Top,
-                .Height = 28,
-                .TextAlign = System.Drawing.ContentAlignment.MiddleLeft
+                .AutoSize = True,
+                .MaximumSize = New System.Drawing.Size(580, 0),
+                .TextAlign = System.Drawing.ContentAlignment.MiddleLeft,
+                .Margin = New System.Windows.Forms.Padding(0, 0, 0, 8)
             }
 
             Me.txtFilter = New System.Windows.Forms.TextBox() With {
@@ -306,29 +369,26 @@ Namespace SharedLibrary
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .FlowDirection = System.Windows.Forms.FlowDirection.RightToLeft,
                 .Padding = New System.Windows.Forms.Padding(0, 8, 0, 0),
-                .AutoSize = True
+                .AutoSize = True,
+                .WrapContents = False
             }
 
             Me.btnOK = New System.Windows.Forms.Button() With {
                 .Text = "OK",
-                .DialogResult = System.Windows.Forms.DialogResult.OK,
-                .AutoSize = True,
-                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+                .DialogResult = System.Windows.Forms.DialogResult.OK
             }
+            ConfigureStandardButton(Me.btnOK)
+
             Me.btnCancel = New System.Windows.Forms.Button() With {
                 .Text = "Cancel",
-                .DialogResult = System.Windows.Forms.DialogResult.Cancel,
-                .AutoSize = True,
-                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+                .DialogResult = System.Windows.Forms.DialogResult.Cancel
             }
+            ConfigureStandardButton(Me.btnCancel)
+
             Me.btnToggleAll = New System.Windows.Forms.Button() With {
-                .Text = "Select All",
-                .AutoSize = True,
-                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
-                .Padding = New System.Windows.Forms.Padding(10, 5, 10, 5)
+                .Text = "Select All"
             }
+            ConfigureStandardButton(Me.btnToggleAll)
 
             AddHandler Me.btnToggleAll.Click, AddressOf OnToggleAllClicked
 
@@ -343,8 +403,61 @@ Namespace SharedLibrary
             Me.outer.Controls.Add(Me.pnlButtons, 0, 4)
             Me.Controls.Add(Me.outer)
 
+            AddHandler Me.Shown,
+                    Sub()
+                        UpdateInstructionLabelLayout()
+                    End Sub
+
+            AddHandler Me.Resize,
+                Sub()
+                    UpdateInstructionLabelLayout()
+                End Sub
+
             Me.AcceptButton = Me.btnOK
             Me.CancelButton = Me.btnCancel
+
+            AddHandler Me.Shown,
+                Sub()
+                    UpdatePreferredDialogWidth()
+                End Sub
+        End Sub
+
+        Private Sub UpdatePreferredDialogWidth()
+            If Me.chkList Is Nothing OrElse Me.pnlButtons Is Nothing Then Return
+
+            Dim buttonsWidth As Integer = Me.pnlButtons.PreferredSize.Width
+
+            Dim widestItemWidth As Integer = 0
+            For Each itemText In allDisplayItems
+                Dim itemWidth = TextRenderer.MeasureText(itemText, Me.chkList.Font).Width
+                If itemWidth > widestItemWidth Then
+                    widestItemWidth = itemWidth
+                End If
+            Next
+
+            Dim listChromeWidth As Integer = 40 ' checkbox + list padding + scrollbar margin
+            Dim contentWidth As Integer = Math.Max(buttonsWidth, widestItemWidth + listChromeWidth)
+
+            Dim outerPaddingWidth As Integer = Me.outer.Padding.Left + Me.outer.Padding.Right
+            Dim formNonClientWidth As Integer = Me.Width - Me.ClientSize.Width
+            Dim smallMarginWidth As Integer = 24
+
+            Dim preferredWidth As Integer = contentWidth + outerPaddingWidth + formNonClientWidth + smallMarginWidth
+            Dim maxWidth As Integer = Screen.FromControl(Me).WorkingArea.Width - 80
+
+            preferredWidth = Math.Max(640, Math.Min(preferredWidth, maxWidth))
+
+            Me.Width = preferredWidth
+            Me.MinimumSize = New Size(preferredWidth, 600)
+        End Sub
+
+        Private Shared Sub ConfigureStandardButton(button As Button)
+            button.AutoSize = True
+            button.AutoSizeMode = AutoSizeMode.GrowAndShrink
+            button.UseVisualStyleBackColor = True
+            button.Padding = New Padding(10, 4, 10, 4)
+            button.MinimumSize = New Size(0, 0)
+            button.Margin = New Padding(6, 0, 0, 0)
         End Sub
 
         ''' <summary>
@@ -443,6 +556,7 @@ Namespace SharedLibrary
             End Try
 
             UpdateToggleAllButtonText()
+            UpdatePreferredDialogWidth()
         End Sub
 
         ''' <summary>
@@ -512,6 +626,27 @@ Namespace SharedLibrary
 
             UpdateToggleAllButtonText()
         End Sub
+
+        ''' <summary>
+        ''' Adds an extra button (left-aligned next to Select-All/OK/Cancel) that invokes
+        ''' the supplied handler when clicked. Use this to surface secondary actions such
+        ''' as "Manage Skills &amp; Agents…" or "Memory…" from the source-selection window
+        ''' without subclassing the form.
+        ''' </summary>
+        Public Sub AddExtraButton(text As String, handler As EventHandler)
+            If String.IsNullOrWhiteSpace(text) OrElse handler Is Nothing Then Return
+
+            Dim btn As New Button() With {
+                .Text = text
+            }
+            ConfigureStandardButton(btn)
+
+            AddHandler btn.Click, handler
+
+            Me.pnlButtons.Controls.Add(btn)
+            UpdatePreferredDialogWidth()
+        End Sub
+
     End Class
 
 End Namespace

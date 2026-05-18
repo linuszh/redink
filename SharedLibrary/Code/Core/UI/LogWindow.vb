@@ -437,7 +437,7 @@ Namespace SharedLibrary
             Public Sub AppendLogEntry(message As String, level As String)
                 If String.IsNullOrEmpty(message) Then Return
 
-                Dim timestamp = DateTime.Now.ToString("HH:mm:ss.fff")
+                Dim timestamp = DateTime.Now.ToString("HH:mm:ss")
                 Dim prefix = $"[{timestamp}] "
 
                 ' Determine color based on level

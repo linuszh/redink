@@ -132,7 +132,7 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
-    Private Const ToolTrigger As String = "(s)"
+    Private Const ToolTrigger As String = "(a)"
     Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured
@@ -244,6 +244,7 @@ Public Class DiscussInky
     Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort It Out", .AutoSize = True}
     Private ReadOnly _btnTools As Button = New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
     Private ReadOnly _chkEnableTooling As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}", .AutoSize = True}
+    Private ReadOnly _chkAdvancedTools As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Advanced tools", .AutoSize = True}
     Private ReadOnly _chkShowToolingLog As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Tooling log", .AutoSize = True, .Checked = True}
     Private ReadOnly _chkInkyMemory As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Inky Memory", .AutoSize = True, .Checked = My.Settings.DiscussInkyMemory}
     Private ReadOnly _lnkEditMemory As New LinkLabel() With {
@@ -394,6 +395,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnSortOut)
         pnlButtons.Controls.Add(_btnTools)
         pnlButtons.Controls.Add(_chkEnableTooling)
+        pnlButtons.Controls.Add(_chkAdvancedTools)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
         pnlButtons.Controls.Add(_chkShowToolingLog)
@@ -433,6 +435,7 @@ Public Class DiscussInky
         AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
         AddHandler _btnTools.Click, AddressOf OnToolsClick
         AddHandler _chkEnableTooling.CheckedChanged, AddressOf OnEnableToolingChanged
+        AddHandler _chkAdvancedTools.CheckedChanged, AddressOf OnAdvancedToolsChanged
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
         AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
         AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
@@ -747,6 +750,7 @@ Public Class DiscussInky
 
         ' Restore tooling checkbox state
         Try : _chkEnableTooling.Checked = My.Settings.DiscussEnableTooling : Catch : _chkEnableTooling.Checked = False : End Try
+        _chkAdvancedTools.Checked = Globals.ThisAddIn.GetDiscussInkyAdvancedToolsEnabled()
 
         ' Tooling log checkbox always reflects the INI setting (not persisted separately)
         _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
@@ -1103,6 +1107,11 @@ Public Class DiscussInky
             End If
             My.Settings.DiscussKnowledgePath = pathToSave
 
+            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
+                _chkAdvancedTools.Checked)
+
             My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
             My.Settings.Save()
         Catch
@@ -1302,6 +1311,7 @@ Public Class DiscussInky
 
         _chkEnableTooling.Enabled = toolingUiAvailable
         _btnTools.Enabled = toolingUiAvailable
+        _chkAdvancedTools.Enabled = toolingUiAvailable AndAlso _chkEnableTooling.Checked
         _chkShowToolingLog.Enabled = toolingUiAvailable
 
         If Not toolingUiAvailable Then
@@ -1347,7 +1357,8 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnToolsClick(sender As Object, e As EventArgs)
         Try
-            Dim selectedTools = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True, Globals.ThisAddIn.ToolFriendlyName)
+            Dim selectedTools = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
+
             If selectedTools IsNot Nothing Then
                 _selectedToolsForChat = selectedTools
             End If
@@ -1360,11 +1371,27 @@ Public Class DiscussInky
     ''' Handles the Enable Tooling checkbox change.
     ''' </summary>
     Private Sub OnEnableToolingChanged(sender As Object, e As EventArgs)
-        If Not _chkEnableTooling.Checked Then
-            _selectedToolsForChat = Nothing
-        End If
+        Try
+            My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
+            My.Settings.Save()
+        Catch
+        End Try
 
+        _selectedToolsForChat = Nothing
+        _chkAdvancedTools.Enabled = _chkEnableTooling.Checked
         UpdateToolingControlsState()
+    End Sub
+
+    Private Sub OnAdvancedToolsChanged(sender As Object, e As EventArgs)
+        Try
+            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
+                _chkAdvancedTools.Checked)
+        Catch
+        End Try
+
+        _selectedToolsForChat = Nothing
     End Sub
 
     ''' <summary>
@@ -1391,7 +1418,7 @@ Public Class DiscussInky
             Return True
         End If
 
-        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=False)
+        _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=False)
         Return _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
     End Function
 
@@ -2773,7 +2800,7 @@ Public Class DiscussInky
 
                 ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True)
+                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
 
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         RemoveAssistantThinking()
