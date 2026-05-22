@@ -822,8 +822,37 @@ Partial Public Class ThisAddIn
         return (value || '').replace(/\s+/g, ' ').trim();
     }
 
+      function isAllowedResolvedUrl(url) {
+        if (!url) {
+            return false;
+        }
+
+        try {
+            var parsed = new URL(url, document.baseURI);
+            var protocol = (parsed.protocol || '').toLowerCase();
+            var hostname = (parsed.hostname || '').toLowerCase();
+
+            if (protocol !== 'http:' && protocol !== 'https:') {
+                return false;
+            }
+
+            if (hostname === 'localhost' ||
+                hostname === '::1' ||
+                hostname === '[::1]' ||
+                /^127(?:\.\d{1,3}){3}$/.test(hostname)) {
+                return false;
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function resolveUrl(value) {
-        if (!value) return '';
+        if (!value) {
+            return '';
+        }
 
         value = String(value).trim();
 
@@ -832,7 +861,8 @@ Partial Public Class ThisAddIn
         }
 
         try {
-            return new URL(value, document.baseURI).href;
+            var resolved = new URL(value, document.baseURI).href;
+            return isAllowedResolvedUrl(resolved) ? resolved : '';
         } catch (e) {
             return '';
         }
@@ -1485,10 +1515,16 @@ Partial Public Class ThisAddIn
             Dim expandInteractiveSections As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "expand_interactive_sections", False)
             Dim linkExtensions As List(Of String) = NormalizeLinkExtensions(GetToolArgumentStringList(toolCall.Arguments, "link_extensions"))
 
+            Dim invalidUrls As New List(Of String)()
             Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
             Dim blockedUrls As New List(Of String)()
 
             For Each url In urls
+                If Not IsSafeWebUrl(url) Then
+                    invalidUrls.Add(url)
+                    Continue For
+                End If
+
                 Dim lowerUrl = url.ToLowerInvariant()
                 For Each pattern In sharepointPatterns
                     If lowerUrl.Contains(pattern) Then
@@ -1497,6 +1533,16 @@ Partial Public Class ThisAddIn
                     End If
                 Next
             Next
+
+            If invalidUrls.Count > 0 Then
+                Dim invalidList = String.Join(", ", invalidUrls)
+                response.Success = False
+                response.ErrorMessage =
+                    "Only absolute non-loopback HTTP/HTTPS URLs are allowed. Blocked URL(s): " & invalidList
+                context.Log($"Blocked unsafe URL(s): {invalidList}", "warn")
+                ToolingFileLogger.LogWarn("Internal web tool: Unsafe URL blocked.", details:=$"urls={invalidList}")
+                Return response
+            End If
 
             If blockedUrls.Count > 0 Then
                 Dim blockedList = String.Join(", ", blockedUrls)
@@ -1511,6 +1557,7 @@ Partial Public Class ThisAddIn
             End If
 
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
+
             If includeLinks Then
                 context.Log($"  Structured link extraction enabled (extensions: {If(linkExtensions.Count = 0, "all", String.Join(", ", linkExtensions))}; expand interactive sections: {expandInteractiveSections})")
             End If

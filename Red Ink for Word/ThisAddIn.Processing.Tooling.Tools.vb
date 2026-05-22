@@ -683,10 +683,16 @@ Partial Public Class ThisAddIn
             Dim expandInteractiveSections As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "expand_interactive_sections", False)
             Dim linkExtensions As List(Of String) = NormalizeLinkExtensions(GetToolArgumentStringList(toolCall.Arguments, "link_extensions"))
 
+            Dim invalidUrls As New List(Of String)()
             Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
             Dim blockedUrls As New List(Of String)()
 
             For Each url In urls
+                If Not IsSafeWebUrl(url) Then
+                    invalidUrls.Add(url)
+                    Continue For
+                End If
+
                 Dim lowerUrl = url.ToLowerInvariant()
                 For Each pattern In sharepointPatterns
                     If lowerUrl.Contains(pattern) Then
@@ -695,6 +701,16 @@ Partial Public Class ThisAddIn
                     End If
                 Next
             Next
+
+            If invalidUrls.Count > 0 Then
+                Dim invalidList = String.Join(", ", invalidUrls)
+                response.Success = False
+                response.ErrorMessage =
+                    "Only absolute non-loopback HTTP/HTTPS URLs are allowed. Blocked URL(s): " & invalidList
+                context.Log($"Blocked unsafe URL(s): {invalidList}", "warn")
+                ToolingFileLogger.LogWarn("Internal web tool: Unsafe URL blocked.", details:=$"urls={invalidList}")
+                Return response
+            End If
 
             If blockedUrls.Count > 0 Then
                 Dim blockedList = String.Join(", ", blockedUrls)
@@ -707,7 +723,6 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
                 Return response
             End If
-
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()
