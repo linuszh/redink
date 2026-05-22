@@ -489,4 +489,54 @@ Partial Public Class ThisAddIn
     End Class
 
 
+    Private Sub LogFinalResponseContractDiagnostics(context As ToolExecutionContext,
+                                                    systemPrompt As String)
+        If context Is Nothing Then
+            Return
+        End If
+
+        Dim requiresTaskStatusFooter As Boolean =
+            SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(
+                context.FinalResponseContract)
+
+        Dim normalizedSystemPrompt As String = If(systemPrompt, "")
+
+        Dim hasActiveToolingContractHeader As Boolean =
+            normalizedSystemPrompt.IndexOf(
+                "ACTIVE-TOOLING CONTRACT:",
+                StringComparison.OrdinalIgnoreCase) >= 0
+
+        Dim hasUserFacingFinalAnswerContract As Boolean =
+            normalizedSystemPrompt.IndexOf(
+                "a user-facing final answer ending with exactly one <TASK_STATUS>",
+                StringComparison.OrdinalIgnoreCase) >= 0
+
+        Dim hasUserFacingFinalProseContract As Boolean =
+            normalizedSystemPrompt.IndexOf(
+                "a user-facing final prose answer ending with exactly one valid <TASK_STATUS>",
+                StringComparison.OrdinalIgnoreCase) >= 0
+
+        Dim hasUserFacingBlockedExplanationContract As Boolean =
+            normalizedSystemPrompt.IndexOf(
+                "a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>",
+                StringComparison.OrdinalIgnoreCase) >= 0
+
+        Dim systemPromptContainsTaskStatusContract As Boolean =
+            Not String.IsNullOrWhiteSpace(normalizedSystemPrompt) AndAlso
+            ((hasActiveToolingContractHeader AndAlso hasUserFacingFinalAnswerContract) OrElse
+             hasUserFacingFinalProseContract OrElse
+             hasUserFacingBlockedExplanationContract)
+
+        context.Log(
+            $"finalResponseContract={SharedLibrary.Agents.ToolingFinalResponseContractHelpers.FormatToolingFinalResponseContract(context.FinalResponseContract)}; requiresTaskStatusFooter={If(requiresTaskStatusFooter, "true", "false")}; systemPromptContainsTaskStatusContract={If(systemPromptContainsTaskStatusContract, "true", "false")}",
+            "diag")
+
+        If requiresTaskStatusFooter <> systemPromptContainsTaskStatusContract Then
+            context.LogWarn(
+                "Final-response contract/prompt mismatch detected.",
+                details:=$"host={context.HostKind}; finalResponseContract={SharedLibrary.Agents.ToolingFinalResponseContractHelpers.FormatToolingFinalResponseContract(context.FinalResponseContract)}; requiresTaskStatusFooter={If(requiresTaskStatusFooter, "true", "false")}; systemPromptContainsTaskStatusContract={If(systemPromptContainsTaskStatusContract, "true", "false")}")
+        End If
+    End Sub
+
+
 End Class

@@ -3576,6 +3576,10 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Public Sub ApplySurgicalReplacement(originalText As String, newText As String, targetRange As Range, Optional trailingCR As Boolean = False)
+        CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
+    End Sub
+
     ''' <summary>
     ''' Represents one candidate surgical edit operation for a diff cluster.
     ''' Stores the text to delete, the text to insert, the search start position,

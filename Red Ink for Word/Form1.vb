@@ -3890,18 +3890,15 @@ Public Class frmAIChat
                         doc.Application.Selection.SetRange(mStart, mEnd)
                         Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                        ' Atomic replacement
-                        Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
-                        doc.Application.Selection.Text = newText
-                        Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
-
-                        Dim actionEnd As Integer = If(newText.Length > 0,
-                              Math.Min(mStart + newText.Length, doc.Content.End),
-                              mEnd)
-                        RememberLastActionRange(mStart, actionEnd)
-
-                        ' Apply Markdown conversion if enabled and text was inserted
                         If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                            ' Old replacement path so Markdown can be converted afterwards.
+                            Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
+                            doc.Application.Selection.Text = newText
+                            Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                            Dim actionEnd As Integer = Math.Min(mStart + newText.Length, doc.Content.End)
+                            RememberLastActionRange(mStart, actionEnd)
+
                             Try
                                 Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
                                 Globals.ThisAddIn.ConvertMarkdownToWord()
@@ -3909,6 +3906,22 @@ Public Class frmAIChat
                             Catch ex As Exception
                                 Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
                             End Try
+                        Else
+                            ' Surgical replacement path for plain-text tracked edits.
+                            Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
+                            Dim originalPatchText As String = patchRange.Text
+                            Dim preserveTrailingCr As Boolean =
+                                originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
+
+                            Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
+                            Globals.ThisAddIn.ApplySurgicalReplacement(
+                                originalPatchText,
+                                newText,
+                                patchRange,
+                                preserveTrailingCr)
+
+                            RememberLastActionRange(patchRange.Start, patchRange.End)
                         End If
 
                         replaceCount += 1

@@ -100,6 +100,11 @@ Partial Public Class ThisAddIn
         Public Property PrematureTextRetryCount As Integer = 0
         Public Property PendingContinuationGuardPrompt As String = ""
         Public Property PendingRejectedAssistantTurn As String = ""
+        Public Property LastInvalidAssistantTurnSignature As String = ""
+        Public Property LastInvalidTurnReason As String = ""
+        Public Property LastInvalidTurnRepeatCount As Integer = 0
+        Public Property ForceNoToolFinalizationRequested As Boolean
+        Public Property ForceNoToolFinalizationReason As String = ""
         Public Property PendingGuardTitle As String = ""
         Public Property PendingRejectedTurnExplanation As String = ""
 
@@ -126,6 +131,9 @@ Partial Public Class ThisAddIn
         Public Property RuntimeState As SharedLibrary.Agents.WorkflowRuntimeState
         Public Property LatestUserRequestRaw As String
         Public Property HostTaskSummary As String
+
+        Public Property FinalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract =
+            SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus
 
         ''' <summary>
         ''' Initializes a new tool execution context with default collections and limits.
@@ -155,6 +163,11 @@ Partial Public Class ThisAddIn
             AuthoritativeToolRegistry = Nothing
             AuthoritativeToolRegistrySnapshot = Nothing
             SubAgentEmptyResponseRetryCount = 0
+            LastInvalidAssistantTurnSignature = ""
+            LastInvalidTurnReason = ""
+            LastInvalidTurnRepeatCount = 0
+            ForceNoToolFinalizationRequested = False
+            ForceNoToolFinalizationReason = ""
         End Sub
 
         Public Property LogPrefix As String

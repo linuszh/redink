@@ -1741,6 +1741,14 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Public Function GetInternalWebGroundingTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
+        Return SharedLibrary.Agents.WebGroundingTool.Build(
+        _context,
+        enforcePrivacy:=enforcePrivacy,
+        toolPriority:=997,
+        displaySuffix:=InternalToolSuffix)
+    End Function
+
 
     ''' <summary>
     ''' Creates a built-in internal web retrieval tool configuration as a <see cref="ModelConfig"/>.

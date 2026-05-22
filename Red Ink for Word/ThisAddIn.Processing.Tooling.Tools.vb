@@ -583,6 +583,63 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Public Function GetInternalWebGroundingTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
+        Return SharedLibrary.Agents.WebGroundingTool.Build(
+        _context,
+        enforcePrivacy:=enforcePrivacy,
+        toolPriority:=997,
+        displaySuffix:=InternalToolSuffix)
+    End Function
+
+
+    Private Async Function ExecuteWebGroundingTool(
+        toolCall As ToolCall,
+        context As ToolExecutionContext,
+        Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
+
+        Try
+            response.Response =
+            Await SharedLibrary.Agents.WebGroundingTool.ExecuteAsync(
+                _context,
+                toolCall.Arguments,
+                cancellationToken,
+                logStep:=Sub(message)
+                             context.Log(message)
+                         End Sub,
+                logInfo:=Sub(message)
+                             context.Log(message)
+                         End Sub,
+                logWarn:=Sub(message)
+                             context.Log(message, "warn")
+                         End Sub)
+
+            response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+            If Not response.Success Then
+                response.ErrorMessage = "web_grounding returned no usable result."
+                response.Response = response.ErrorMessage
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during web grounding: {ex.Message}"
+            context.Log(response.Response, "warn")
+        End Try
+
+        Return response
+    End Function
+
     ''' <summary>
     ''' Executes the internal web retrieval tool by fetching content for one or more URLs and returning tagged content blocks.
     ''' </summary>

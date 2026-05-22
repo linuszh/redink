@@ -3436,21 +3436,21 @@ Partial Public Class ThisAddIn
     '  DASHBOARD LOG — date+time, no duplicate timestamp
     ' ═══════════════════════════════════════════════════════════════════════════
 
+
     ''' <summary>
     ''' Appends a log entry to the AutoPilot dashboard.
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
-    ''' already adds [HH:mm:ss.fff]. Instead we prepend the date-only portion
-    ''' so the dashboard shows [HH:mm:ss.fff] [dd-MMM] message.
-    ''' When the Chat Agent is active, also routes to the tooling LogWindow
-    ''' so internal tool detail appears in the web agent dashboard.
+    ''' already adds [HH:mm:ss]. Instead we prepend the date-only portion so the
+    ''' dashboard shows [HH:mm:ss] [dd-MMM] message.
     ''' </summary>
     Private Sub ApDashboardLog(message As String, level As String)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
+
         Try
             If _apDashboard IsNot Nothing Then
-                ' Prepend date portion only — LogWindow adds the time
                 Dim dateTag = DateTime.Now.ToString("dd-MMM", Globalization.CultureInfo.InvariantCulture)
                 Dim taggedMessage = $"[{dateTag}] {message}"
+
                 If _apDashboard.InvokeRequired Then
                     _apDashboard.BeginInvoke(New MethodInvoker(Sub() _apDashboard.AppendLog(taggedMessage, level)))
                 Else
@@ -3460,13 +3460,9 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Route to the Chat Agent's tooling LogWindow (no date tag needed)
-        If _chatAgentActive AndAlso _activeToolingContext IsNot Nothing Then
-            Try
-                _activeToolingContext.Log(message, level)
-            Catch
-            End Try
-        End If
+        ' Intentionally do not mirror AutoPilot dashboard entries into the Local Chat
+        ' tooling log. Local Chat already receives direct context.Log(...) messages,
+        ' and mirroring here creates duplicate entries such as web_grounding progress.
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>

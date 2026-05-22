@@ -170,16 +170,20 @@ Namespace Agents
             Return LanguageContract.BuildSystemPromptFragment(userLanguage)
         End Function
 
+
         ''' <summary>
-        ''' Convenience: post-egress decision for blocked-final localization (Q3 — only blocked finals).
+        ''' Convenience: post-egress decision for final-response localization when the
+        ''' final prose does not match the detected user language.
         ''' </summary>
-        Public Function ShouldPostLocalizeBlockedFinal(prose As String, userLanguage As String) As Boolean
-            Return LanguageContract.ShouldPostLocalizeBlockedFinal(
+        Public Function ShouldPostLocalizeFinal(prose As String,
+                                                userLanguage As String,
+                                                finalStatus As String) As Boolean
+            Return LanguageContract.ShouldPostLocalizeFinal(
                 prose,
                 userLanguage,
+                finalStatus,
                 ToolingConstants.MaxLocalizableBlockedFinalChars)
         End Function
-
     End Module
 
 End Namespace

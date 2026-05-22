@@ -71,7 +71,7 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>User-friendly name for the tooling feature.</summary>
-    Public Const ToolFriendlyName As String = "Sources"
+    Public Const ToolFriendlyName As String = "Agents"
 
     ''' <summary>Auto-close delay for tooling log window.</summary>
     Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
@@ -449,7 +449,8 @@ Partial Public Class ThisAddIn
         Optional userLanguage As String = "",
         Optional workflowId As String = "",
         Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
-        Optional memoryGroundingModeIsExplicit As Boolean = False) As Task(Of String)
+        Optional memoryGroundingModeIsExplicit As Boolean = False,
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -489,6 +490,12 @@ Partial Public Class ThisAddIn
         Dim context As New ToolExecutionContext() With {
             .MaxIterations = INI_ToolingMaximumIterations
         }
+
+        context.FinalResponseContract = finalResponseContract
+        context.Log(
+            "Final response contract initialized: " &
+            SharedLibrary.Agents.ToolingFinalResponseContractHelpers.FormatToolingFinalResponseContract(context.FinalResponseContract),
+            "diag")
 
         context.SequencingState.UserLanguage =
             If(Not String.IsNullOrWhiteSpace(userLanguage),
@@ -568,6 +575,20 @@ Partial Public Class ThisAddIn
                context.SequencingState.UserLanguage)
         context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
         context.WorkflowId = ResolveToolingWorkflowId(workflowId, subAgentMode, parentToolingContext)
+
+        If Not subAgentMode Then
+            Dim clearedCount As Integer =
+                SharedLibrary.Agents.SessionMemory.ClearTransientEntriesForHost(
+                    context.HostKind,
+                    context.WorkflowId)
+
+            If clearedCount > 0 Then
+                context.Log(
+                    $"Cleared {clearedCount} transient session-memory entr{If(clearedCount = 1, "y", "ies")} for host '{context.HostKind}'.",
+                    "diag")
+            End If
+        End If
+
         context.RuntimeState =
     If(subAgentMode,
        SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind),
@@ -627,14 +648,14 @@ Partial Public Class ThisAddIn
         End If
 
         If subAgentMode Then
-            context.LazyToolLoadingEnabled = True
+            context.LazyToolLoadingEnabled = False
 
             Dim scopeInit = SharedLibrary.Agents.SubAgentToolScopeInitializer.Initialize(
     context.AuthoritativeToolRegistrySnapshot,
     context.AllowedToolNames)
 
             context.AllowedToolRegistry = scopeInit.NarrowedRegistry
-            context.SelectedTools = New List(Of ModelConfig)(scopeInit.SelectedTools)
+            context.SelectedTools = New List(Of ModelConfig)(scopeInit.ResolvedTools)
 
             Dim requestedNamesText As String =
                 If(scopeInit.RequestedToolNames Is Nothing OrElse scopeInit.RequestedToolNames.Count = 0,
@@ -652,9 +673,9 @@ Partial Public Class ThisAddIn
                    String.Join(", ", scopeInit.MissingToolNames))
 
             Dim finalSelectedNamesText As String =
-                If(scopeInit.FinalSelectedToolNames.Count = 0,
+                If(scopeInit.FinalCallableToolNames.Count = 0,
                    "(none)",
-                   String.Join(", ", scopeInit.FinalSelectedToolNames))
+                   String.Join(", ", scopeInit.FinalCallableToolNames))
 
             Dim repeatedInvocationLabel As String =
                 If(subAgentAgentInvocationCount > 1, "later", "first")
@@ -691,8 +712,15 @@ Partial Public Class ThisAddIn
                 Return payload
             End If
         Else
-            context.LazyToolLoadingEnabled = False
             context.SelectedTools = BuildInitialToolExposure(fullAllowedTools, context.AllowedToolRegistry, toolSelectionHintText)
+            context.LazyToolLoadingEnabled =
+                context.SelectedTools IsNot Nothing AndAlso
+                context.SelectedTools.Any(
+                    Function(t)
+                        Return t IsNot Nothing AndAlso
+                               Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                               t.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
+                    End Function)
         End If
 
         selectedTools = New List(Of ModelConfig)(context.SelectedTools)
@@ -782,6 +810,19 @@ Partial Public Class ThisAddIn
                 memoryGroundingModeIsExplicit,
                 subAgentMode)
 
+            If Not subAgentMode Then
+                Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
+                Await TryForceRequiredMemoryGetsAsync(context, cancellationToken)
+
+                If context.AllToolResponses.Count > 0 Then
+                    INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        context.AllToolResponses,
+                        context.ToolingModel,
+                        compactForSubAgent:=False)
+                    context.Log("Initial tool responses prepared for model", "diag")
+                End If
+            End If
+
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             Dim baseSysPrompt As String = sysCommand
 
@@ -839,15 +880,22 @@ Partial Public Class ThisAddIn
             ' Language contract — Mandatory rule that the model must produce final
             ' user-facing prose in the detected user language regardless of the
             ' language of guard prompts, host messages, or tool output (P1 fix).
-            Dim languageContractFragment As String =
-                Agents.ToolingOrchestrator.BuildLanguageContractSystemPromptFragment(
-                    If(context.SequencingState IsNot Nothing,
-                       context.SequencingState.UserLanguage,
-                       userLanguage))
+            Dim languageContractFragment As String = ""
+
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                languageContractFragment =
+                    Agents.ToolingOrchestrator.BuildLanguageContractSystemPromptFragment(
+                        If(context.SequencingState IsNot Nothing,
+                           context.SequencingState.UserLanguage,
+                           userLanguage))
+            End If
 
             Dim enhancedSysPrompt As String =
                 baseSysPrompt & Environment.NewLine & Environment.NewLine &
-                BuildToolInstructionsPromptForSession(context.SelectedTools, subAgentMode)
+                BuildToolInstructionsPromptForSession(
+                    context.SelectedTools,
+                    subAgentMode,
+                    context.FinalResponseContract)
 
             If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
                 enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
@@ -859,6 +907,20 @@ Partial Public Class ThisAddIn
             INI_APICall_ToolResponses_2 = ""
 
             context.Log("Tool definitions prepared for model", "diag")
+
+            If Not subAgentMode Then
+                Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
+
+                If context.AllToolResponses.Count > 0 Then
+                    INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        context.AllToolResponses,
+                        context.ToolingModel,
+                        compactForSubAgent:=False)
+                    context.Log("Initial tool responses prepared for model", "diag")
+                End If
+            End If
+
+
             If INI_ToolingDryRun Then
                 Dim preview = $"The following tools will be made available to the model:{Environment.NewLine}{Environment.NewLine}"
                 For Each tool In selectedTools
@@ -938,7 +1000,15 @@ Partial Public Class ThisAddIn
 
                 enhancedSysPrompt =
                     baseSysPrompt & Environment.NewLine & Environment.NewLine &
-                    BuildToolInstructionsPromptForSession(context.SelectedTools, subAgentMode)
+                    BuildToolInstructionsPromptForSession(
+                        context.SelectedTools,
+                        subAgentMode,
+                        context.FinalResponseContract)
+
+                If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
+                    enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                                        languageContractFragment
+                End If
 
                 INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
 
@@ -951,12 +1021,14 @@ Partial Public Class ThisAddIn
                         effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & runtimeContextBlock
                     End If
 
-                    Dim postToolContinuationBlock As String =
-                        BuildPostToolContinuationBlock(context)
+                    If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                        Dim postToolContinuationBlock As String =
+                            BuildPostToolContinuationBlock(context)
 
-                    If Not String.IsNullOrWhiteSpace(postToolContinuationBlock) Then
-                        effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & postToolContinuationBlock
-                        LogLatestUserRequestDiagnostic(context, "continuation")
+                        If Not String.IsNullOrWhiteSpace(postToolContinuationBlock) Then
+                            effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & postToolContinuationBlock
+                            LogLatestUserRequestDiagnostic(context, "continuation")
+                        End If
                     End If
                 End If
 
@@ -994,7 +1066,7 @@ Partial Public Class ThisAddIn
                     context.PendingRejectedTurnExplanation = ""
                 End If
 
-                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+                LogFinalResponseContractDiagnostics(context, effectiveSysPrompt)
 
                 ' Create linked cancellation with timeout (matches RunLlmAsync pattern)
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
@@ -1227,6 +1299,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     Dim stopCurrentBatchAfterTool As Boolean = False
+                    Dim restartForRequiredMemoryGrounding As Boolean = False
 
                     For Each plannedCall In sequencingPlan.Calls
                         If context.IsCancelled OrElse cancellationToken.IsCancellationRequested Then Exit For
@@ -1248,6 +1321,46 @@ Partial Public Class ThisAddIn
 
                         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
                             context.LogWarn("Power transition detected during tool execution")
+                            Exit For
+                        End If
+
+                        If Not subAgentMode AndAlso
+                           SharedLibrary.Agents.ToolCallSequencing.RequiresRequiredMemoryGroundingBeforeNonMemoryTool(
+                               context.SequencingState,
+                               tc.ToolName) Then
+
+                            If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                context.PrematureTextRetryCount += 1
+                                context.PendingContinuationGuardPrompt =
+                                    SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState)
+                                context.PendingGuardTitle = "HOST REQUIRED MEMORY GROUNDING"
+                                context.PendingRejectedTurnExplanation =
+                                    "Your previous turn attempted a non-memory tool before required Memory grounding was completed."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+
+                                context.LogWarn(
+                                    "Blocked non-memory tool before required Memory grounding.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+
+                                restartForRequiredMemoryGrounding = True
+                                Exit For
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                "The tooling run required Memory access before continuing, but Memory was not accessed successfully.", useSecondAPI, hideSplash, cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                "Blocked tooling loop after repeated attempts to bypass required Memory grounding.",
+                                details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
                             Exit For
                         End If
 
@@ -1389,6 +1502,11 @@ Partial Public Class ThisAddIn
                             toolResponse.Response,
                             toolResponse.Success)
 
+                        If Not subAgentMode AndAlso
+                           tc.ToolName.Equals(SharedLibrary.Agents.MemoryTools.ToolList, StringComparison.OrdinalIgnoreCase) Then
+                            Await TryForceRequiredMemoryGetsAsync(context, cancellationToken)
+                        End If
+
                         context.Log("Memory grounding state updated: " &
                             SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState), "diag")
 
@@ -1515,6 +1633,12 @@ Partial Public Class ThisAddIn
                                 context.FailedToolCallCounts.Remove(toolCallSignature)
                             End If
 
+                            context.LastInvalidAssistantTurnSignature = ""
+                            context.LastInvalidTurnReason = ""
+                            context.LastInvalidTurnRepeatCount = 0
+                            context.ForceNoToolFinalizationRequested = False
+                            context.ForceNoToolFinalizationReason = ""
+
                             context.PrematureTextRetryCount = 0
                             context.Log($"Tool completed successfully ({toolResponse.Response?.Length} chars)", "success")
                         End If
@@ -1542,6 +1666,20 @@ Partial Public Class ThisAddIn
                         End If
                     Next
 
+                    If restartForRequiredMemoryGrounding Then
+                        Dim preparedToolResponses As String = BuildToolResponsesForModel(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+                        INI_APICall_ToolResponses_2 = preparedToolResponses
+                        context.Log("Tool responses prepared for next iteration", "diag")
+                        Continue While
+                    End If
+
+                    If context.FinalizationBlocked Then
+                        Exit While
+                    End If
+
                     If abortDueToRepeatedToolLoop Then
                         Exit While
                     End If
@@ -1561,6 +1699,18 @@ Partial Public Class ThisAddIn
                     If subAgentMode Then
                         currentResponse = StripTaskStatus(currentResponse)
                         context.Log("Sub-agent final text response accepted (no tool calls)")
+                        Exit While
+                    End If
+
+                    If context.FinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText Then
+                        context.PrematureTextRetryCount = 0
+
+                        If context.SequencingState IsNot Nothing Then
+                            context.SequencingState.HasOpenToolWorkflow = False
+                            context.SequencingState.FinalResponseOrigin = "model_provided"
+                        End If
+
+                        context.Log($"Final raw-text response accepted for caller-defined non-user-facing contract ({currentResponse.Length} chars).")
                         Exit While
                     End If
 
@@ -1727,6 +1877,38 @@ Partial Public Class ThisAddIn
                                 SharedLibrary.Agents.ToolCallSequencing.IsMemoryGroundingRejectionReason(
                                     turnValidation.InvalidReason)
 
+                            Dim invalidTurnSignature As String =
+                                BuildInvalidTurnSignature(
+                                    currentResponse,
+                                    turnValidation.InvalidReason)
+
+                            If String.Equals(
+                                context.LastInvalidAssistantTurnSignature,
+                                invalidTurnSignature,
+                                StringComparison.Ordinal) Then
+
+                                context.LastInvalidTurnRepeatCount += 1
+                            Else
+                                context.LastInvalidAssistantTurnSignature = invalidTurnSignature
+                                context.LastInvalidTurnReason = If(turnValidation.InvalidReason, "")
+                                context.LastInvalidTurnRepeatCount = 1
+                            End If
+
+                            Dim repeatedInvalidTurnAfterSuccessfulTool As Boolean =
+                                Not memoryGroundingRepairRequired AndAlso
+                                HasSuccessfulToolResponses(context) AndAlso
+                                context.LastInvalidTurnRepeatCount >= 2
+
+                            If repeatedInvalidTurnAfterSuccessfulTool Then
+                                context.ForceNoToolFinalizationRequested = True
+                                context.ForceNoToolFinalizationReason = If(turnValidation.InvalidReason, "invalid_turn")
+
+                                context.LogWarn(
+                                    $"Repeated identical invalid active-tooling turn detected; escalating to forced no-tool finalization. invalidTurnReason={context.ForceNoToolFinalizationReason}; repeatCount={context.LastInvalidTurnRepeatCount}; signature={invalidTurnSignature}; host={context.HostKind}")
+
+                                Exit While
+                            End If
+
                             If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
                                 context.PrematureTextRetryCount += 1
                                 context.PendingContinuationGuardPrompt =
@@ -1781,6 +1963,80 @@ Partial Public Class ThisAddIn
 
             End While
 
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) AndAlso
+               context.ForceNoToolFinalizationRequested AndAlso
+               Not context.IsCancelled AndAlso
+               Not cancellationToken.IsCancellationRequested AndAlso
+               Not context.FinalizationBlocked Then
+
+                Dim forcedFinalResponse As String =
+                    Await RunForcedNoToolFinalizationAfterRepeatedInvalidTurnAsync(
+                        context,
+                        enhancedSysPrompt,
+                        fullUserPrompt,
+                        otherPrompt,
+                        fileObject,
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken,
+                        effectiveTimeout,
+                        binaryOutputDirectory)
+
+                If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
+                    currentResponse = forcedFinalResponse
+
+                    Dim forcedValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
+                        currentResponse,
+                        hasToolCalls:=False,
+                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
+                        runState:=context.SequencingState)
+
+                    Select Case forcedValidation.TurnKind
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                            acceptedFinalStatus = "complete"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.Log("Forced no-tool final response accepted as complete.")
+
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                            acceptedFinalStatus = "blocked"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.Log("Forced no-tool final response accepted as blocked.")
+
+                        Case Else
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = If(forcedValidation.InvalidReason, "invalid_forced_final")
+
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                                "The tooling run ended because the forced finalization response was still not valid.",
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                $"Forced no-tool finalization returned an invalid turn; invalidTurnReason={If(forcedValidation.InvalidReason, "invalid_turn")}; host={context.HostKind}")
+                    End Select
+                Else
+                    context.EmptyMainModelResponse = True
+                End If
+            End If
+
             ' If we hit max iterations and the last response was a tool call, force a final text response.
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
             If iteration >= context.MaxIterations AndAlso
@@ -1794,9 +2050,12 @@ Partial Public Class ThisAddIn
                 INI_APICall_ToolInstructions_2 = ""
 
                 ' Append instruction to force synthesis
-                Dim finalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
-                    "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. " &
-                    "Based on all the information gathered from the tools so far, provide your final answer now."
+                Dim finalSysPrompt As String =
+                    enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    If(
+                        SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract),
+                        "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, provide your final answer now.",
+                        "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, return only the final raw text payload in the exact caller-defined format.")
 
                 ToolingFileLogger.LogStep("Forcing final LLM call without tools")
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
@@ -2009,31 +2268,70 @@ Partial Public Class ThisAddIn
             context.Log($"Successful: {successCount}", If(failedCount = 0, "success", "step"))
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
 
-            currentResponse =
-    SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
-        StripTaskStatus(currentResponse))
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                currentResponse =
+                    SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                        StripTaskStatus(currentResponse))
 
-            ' Post-egress localization of BLOCKED finals only (Q3). Sub-agents never localize.
-            If Not subAgentMode AndAlso String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase) Then
-                Dim _userLanguage As String =
-        If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
-                If Agents.ToolingOrchestrator.ShouldPostLocalizeBlockedFinal(currentResponse, _userLanguage) Then
-                    Try
-                        currentResponse = Await LocalizeHostMessageIfNeededAsync(
-                currentResponse,
-                _userLanguage,
-                useSecondAPI,
-                hideSplash,
-                cancellationToken)
-                    Catch ex As Exception
-                        context.LogWarn(
-                "Blocked-final localization failed; returning original prose.",
-                details:=ex.Message)
-                    End Try
+                If Not context.FinalizationBlocked AndAlso
+                   Not String.IsNullOrWhiteSpace(acceptedFinalStatus) AndAlso
+                   Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) Then
+
+                    Dim previousAcceptedFinalStatus As String = acceptedFinalStatus
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "non_user_facing_final_text"
+
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                        "The tooling run ended because the accepted final response did not contain valid user-facing text.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+
+                    acceptedFinalStatus = "blocked"
+
+                    context.LogWarn(
+                        "Accepted final response contained no substantive user-facing text after stripping the TASK_STATUS footer; converted to blocked message.",
+                        details:=$"host={context.HostKind}; previousFinalStatus={previousAcceptedFinalStatus}")
                 End If
-            End If
 
-            currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
+                ' Post-egress localization of final prose when it does not match the
+                ' detected user language. Sub-agents never localize.
+                If Not subAgentMode Then
+                    Dim _userLanguage As String =
+                        If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
+
+                    If Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
+                        currentResponse,
+                        _userLanguage,
+                        acceptedFinalStatus) Then
+
+                        Try
+                            currentResponse = Await LocalizeHostMessageIfNeededAsync(
+                                currentResponse,
+                                _userLanguage,
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+                        Catch ex As Exception
+                            context.LogWarn(
+                                "Final-response localization failed; returning original prose.",
+                                details:=ex.Message)
+                        End Try
+                    End If
+                End If
+
+                currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
+            Else
+                context.Log("Returning raw caller-defined final response without user-facing post-processing.", "diag")
+            End If
 
             If Not subAgentMode Then
                 Dim isBlockedFinal As Boolean =
@@ -2051,6 +2349,20 @@ Partial Public Class ThisAddIn
                 context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
                 context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
             End If
+
+            Dim finalResponseLength As Integer = If(currentResponse, "").Length
+            Dim finalResponseOrigin As String =
+    If(context.SequencingState IsNot Nothing AndAlso
+       Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin),
+       context.SequencingState.FinalResponseOrigin,
+       "model_provided")
+
+            context.Log(
+    $"Returning final response to host: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}",
+    "diag")
+
+            ToolingFileLogger.LogStep(
+    $"Host final response prepared: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}")
 
             Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
             Dim sessionSummary As String =
@@ -2233,7 +2545,7 @@ Partial Public Class ThisAddIn
         context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
 
         context.Log(
-            $"Runtime state updated: tool={toolCall.ToolName}; success={If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "true", "false")}; checkpointWritten={If(checkpointWritten OrElse skillCheckpointWritten, "true", "false")}; memoryRefWritten={If(Not String.IsNullOrWhiteSpace(resultRef), "true", "false")}; sourceRefWritten={If(sourceRefs IsNot Nothing AndAlso sourceRefs.Count > 0, "true", "false")}")
+            $"Runtime state updated: tool={toolCall.ToolName}; success={If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "true", "false")}; checkpointWritten={If(checkpointWritten OrElse skillCheckpointWritten, "true", "false")}; memoryRefWritten={If(Not String.IsNullOrWhiteSpace(resultRef), "true", "false")}; sourceRefWritten={If(sourceRefs IsNot Nothing AndAlso sourceRefs.Count > 0, "true", "false")}", "diag")
     End Sub
 
     Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
@@ -3051,13 +3363,25 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="selectedTools">Tools to include, sorted by <see cref="ModelConfig.ToolPriority"/>.</param>
     ''' <returns>System prompt fragment describing tooling usage and available tools.</returns>
-    Public Function BuildToolInstructionsPrompt(selectedTools As List(Of ModelConfig)) As String
+    Public Function BuildToolInstructionsPrompt(
+        selectedTools As List(Of ModelConfig),
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As String
+
         Dim sb As New StringBuilder()
 
         MaxToolIterations = INI_ToolingMaximumIterations
-        sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
-        sb.AppendLine()
-        sb.AppendLine(Agents.ToolingOrchestrator.TaskStatusFooterInstruction)
+
+        If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(finalResponseContract) Then
+            sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
+            sb.AppendLine()
+            sb.AppendLine(Agents.ToolingOrchestrator.TaskStatusFooterInstruction)
+        Else
+            sb.AppendLine("ACTIVE-TOOLING CONTRACT: During this active tooling session, every response must be exactly one of: (1) the next required tool call and nothing else; or (2) the final raw text payload requested elsewhere in the prompt and nothing else.")
+            sb.AppendLine("Do NOT append any <TASK_STATUS> footer unless the caller explicitly requested one.")
+            sb.AppendLine("Do NOT convert the final output into user-facing prose unless the caller explicitly requested prose.")
+            sb.AppendLine("When tool work is complete, return only the final raw text payload in the exact caller-defined format.")
+        End If
+
         sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
 
         Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
@@ -3112,12 +3436,47 @@ Partial Public Class ThisAddIn
             Return result
         End If
 
-        result.AddRange(
+        Dim deduplicatedTools As List(Of ModelConfig) =
             allowedTools.
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                 GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
-                Select(Function(g) g.First()))
+                Select(Function(g) g.First()).
+                ToList()
 
+        If Not SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(deduplicatedTools) Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        If allowedRegistry Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loaderManifests As List(Of SharedLibrary.Agents.ToolManifest) =
+            allowedRegistry.ListManifests().
+                Where(Function(m)
+                          Return m IsNot Nothing AndAlso
+                                 Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                                 Not m.Name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
+                      End Function).
+                OrderBy(Function(m) m.Name, StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+        If loaderManifests.Count = 0 Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loader As ModelConfig =
+            SharedLibrary.Agents.ToolLoaderTool.Build(loaderManifests)
+
+        If loader Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        result.Add(loader)
         Return result
     End Function
 
@@ -3157,10 +3516,13 @@ Partial Public Class ThisAddIn
         Return result
     End Function
 
-    Private Function BuildToolInstructionsPromptForSession(selectedTools As List(Of ModelConfig),
-                                                           subAgentMode As Boolean) As String
+    Private Function BuildToolInstructionsPromptForSession(
+        selectedTools As List(Of ModelConfig),
+        subAgentMode As Boolean,
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As String
+
         If Not subAgentMode Then
-            Return BuildToolInstructionsPrompt(selectedTools)
+            Return BuildToolInstructionsPrompt(selectedTools, finalResponseContract)
         End If
 
         Dim sb As New StringBuilder()
@@ -3877,6 +4239,17 @@ __AfterDispatch:
         tools.Add(GetInternalWebTool())
         tools.Add(GetInternalDownloadWebFilesTool())
 
+        Dim webGroundingTool =
+        SharedLibrary.Agents.WebGroundingTool.Build(
+            _context,
+            enforcePrivacy:=INI_EnablePrivacyForSearch,
+            toolPriority:=997,
+            displaySuffix:=InternalToolSuffix)
+
+        If webGroundingTool IsNot Nothing Then
+            tools.Add(webGroundingTool)
+        End If
+
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
             tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
         End If
@@ -3983,26 +4356,14 @@ __AfterDispatch:
     End Function
 
 
-    Private Function IsLocalChatAdvancedAutoPilotToolName(toolName As String) As Boolean
-        If String.IsNullOrWhiteSpace(toolName) Then Return False
-
-        Try
-            For Each tool In GetAutoPilotInternalTools()
-                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
-                If tool.ToolName.Equals(AP_Tool_SummarizeThread, StringComparison.OrdinalIgnoreCase) Then Continue For
-
-                If tool.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase) Then
-                    Return True
-                End If
-            Next
-        Catch
-        End Try
-
-        Return False
-    End Function
-
     Private Function IsLocalChatAdvancedToolName(toolName As String) As Boolean
         If String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        ' web_grounding must remain user-visible in the main selector even though
+        ' it is also an AutoPilot internal tool.
+        If SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolName) Then
+            Return False
+        End If
 
         If IsChatAgentWorkspaceTool(toolName) Then
             Return True
@@ -4027,12 +4388,13 @@ __AfterDispatch:
            SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
            SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
            toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
-           IsLocalChatAdvancedAutoPilotToolName(toolName) Then
+           IsAutoPilotInternalTool(toolName) Then
             Return True
         End If
 
         Return False
     End Function
+
 
     Private Function IsLocalChatMainSelectableTool(tool As ModelConfig) As Boolean
         If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Return False
@@ -4255,6 +4617,100 @@ __AfterDispatch:
         Return Nothing
     End Function
 
+    Private Function HasSuccessfulToolResponses(context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then
+            Return False
+        End If
+
+        For Each tr In context.AllToolResponses
+            If tr IsNot Nothing AndAlso tr.Success Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    Private Function BuildInvalidTurnSignature(responseText As String, invalidReason As String) As String
+        Dim raw As String = If(responseText, "")
+        Dim reason As String = If(invalidReason, "").Trim().ToLowerInvariant()
+        Dim hashText As String
+
+        Using sha = System.Security.Cryptography.SHA256.Create()
+            Dim bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw))
+            hashText = BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant()
+        End Using
+
+        Return reason & "|" & hashText
+    End Function
+
+    Private Async Function RunForcedNoToolFinalizationAfterRepeatedInvalidTurnAsync(
+        context As ToolExecutionContext,
+        enhancedSysPrompt As String,
+        fullUserPrompt As String,
+        otherPrompt As String,
+        fileObject As Object,
+        useSecondAPI As Boolean,
+        hideSplash As Boolean,
+        cancellationToken As System.Threading.CancellationToken,
+        effectiveTimeout As Integer,
+        binaryOutputDirectory As String) As Task(Of String)
+
+        INI_APICall_ToolInstructions_2 = ""
+
+        Dim forcedSysPrompt As String =
+            enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+            "IMPORTANT: A successful tool step already completed, but the model then repeated an invalid non-final response. " &
+            "Do NOT call any more tools in this turn. " &
+            "Do NOT repeat the previous invalid response format. " &
+            "Do NOT output internal protocol content, intermediate control text, raw structured data, or non-final status text. " &
+            "Based only on the tool results already gathered, produce a concise user-facing answer now and append exactly one valid TASK_STATUS footer with status 'complete' or 'blocked'."
+
+        context.LogWarn(
+            "Escalating to forced no-tool finalization after repeated identical invalid turn.",
+            details:=$"invalidTurnReason={If(context.ForceNoToolFinalizationReason, "")}; host={context.HostKind}")
+
+        ToolingFileLogger.LogStep("Forcing final LLM call without tools after repeated invalid turn")
+        ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+        Using timeoutCts As New System.Threading.CancellationTokenSource()
+            Dim totalTimeout = effectiveTimeout + 60
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+
+            Using combinedCts As System.Threading.CancellationTokenSource =
+                System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+
+                Try
+                    Dim forcedFinalResponse As String = Await LLM(
+                        forcedSysPrompt,
+                        fullUserPrompt,
+                        "", "", 0,
+                        useSecondAPI,
+                        hideSplash,
+                        otherPrompt,
+                        fileObject,
+                        combinedCts.Token,
+                        True, True, binaryOutputDirectory:=binaryOutputDirectory)
+
+                    If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
+                        ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final After Invalid Turn", forcedFinalResponse)
+                    Else
+                        ToolingFileLogger.LogWarn(
+                            "Empty forced-final response after repeated invalid turn.",
+                            details:=$"host={context.HostKind}")
+                    End If
+
+                    Return If(forcedFinalResponse, "")
+                Catch ex As OperationCanceledException
+                    context.LogWarn("Forced no-tool finalization call was cancelled")
+                    Return ""
+                Catch ex As Exception
+                    context.LogError($"Error during forced no-tool finalization: {ex.Message}", ex:=ex)
+                    Return ""
+                End Try
+            End Using
+        End Using
+    End Function
 
 
 End Class

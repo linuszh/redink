@@ -129,6 +129,15 @@ Namespace Agents
                     End If
                 End If
 
+                Dim hostPipeline As String = If(WorkflowContinuity.CurrentHostPipeline, "").Trim().ToLowerInvariant()
+
+                If hostPipeline <> "" Then
+                    Dim hostTag As String = "host:" & hostPipeline
+                    If Not tagList.Any(Function(t) t.Equals(hostTag, StringComparison.OrdinalIgnoreCase)) Then
+                        tagList.Add(hostTag)
+                    End If
+                End If
+
                 Dim existing As SessionMemoryEntry = Nothing
                 _entries.TryGetValue(key, existing)
 
@@ -342,6 +351,74 @@ Namespace Agents
                         End Function).
                     Take(Math.Max(1, maxItems)).
                     ToList()
+            End SyncLock
+        End Function
+
+        Private Shared Function IsTransientContentKind(contentKind As String) As Boolean
+            Select Case If(contentKind, "").Trim().ToLowerInvariant()
+                Case "runtime_state", "tool_result", "draft", "source_record"
+                    Return True
+                Case Else
+                    Return False
+            End Select
+        End Function
+
+        Public Shared Function ClearTransientEntriesForHost(hostPipeline As String,
+                                                            Optional keepWorkflowId As String = "") As Integer
+            EnsureLoaded()
+
+            Dim normalizedHost As String = If(hostPipeline, "").Trim().ToLowerInvariant()
+            Dim normalizedKeepWorkflowId As String = If(keepWorkflowId, "").Trim()
+
+            If normalizedHost = "" Then
+                Return 0
+            End If
+
+            Dim hostTag As String = "host:" & normalizedHost
+
+            SyncLock _sync
+                Dim keysToRemove As List(Of String) =
+                    _entries.Values.
+                        Where(
+                            Function(entry)
+                                If entry Is Nothing OrElse String.IsNullOrWhiteSpace(entry.Key) Then
+                                    Return False
+                                End If
+
+                                If Not IsTransientContentKind(If(entry.Metadata?.ContentKind, "")) Then
+                                    Return False
+                                End If
+
+                                If entry.Tags Is Nothing OrElse
+                                   Not entry.Tags.Any(
+                                       Function(tag)
+                                           Return Not String.IsNullOrWhiteSpace(tag) AndAlso
+                                                  tag.Trim().Equals(hostTag, StringComparison.OrdinalIgnoreCase)
+                                       End Function) Then
+                                    Return False
+                                End If
+
+                                Dim entryWorkflowId As String = If(entry.Metadata?.WorkflowId, "").Trim()
+
+                                If normalizedKeepWorkflowId <> "" AndAlso
+                                   entryWorkflowId.Equals(normalizedKeepWorkflowId, StringComparison.OrdinalIgnoreCase) Then
+                                    Return False
+                                End If
+
+                                Return True
+                            End Function).
+                        Select(Function(entry) entry.Key).
+                        ToList()
+
+                For Each key As String In keysToRemove
+                    _entries.Remove(key)
+                Next
+
+                If keysToRemove.Count > 0 Then
+                    SaveUnlocked()
+                End If
+
+                Return keysToRemove.Count
             End SyncLock
         End Function
 

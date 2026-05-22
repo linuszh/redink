@@ -131,7 +131,10 @@ Partial Public Class ThisAddIn
                 do2ndModel = CType(Nothing, Boolean?)
             End If
 
-            Dim p0 As New SLib.InputParameter("Prompt for analysis (leave empty for multiline)", promptDefault)
+            Dim p0 As New SLib.InputParameter("Prompt for analysis", promptDefault) With {
+                .Multiline = True,
+                .MultilineHeight = 150
+            }
             Dim p1 As New SLib.InputParameter("Chunk size (number of files per LLM call)", chunkDefault)
             Dim p2 As New SLib.InputParameter("Max characters per file (0 = no limit)", maxCharsDefault)
             Dim p3 As New SLib.InputParameter("Starting file number (0 = from beginning)", startFileDefault)
@@ -168,23 +171,6 @@ Partial Public Class ThisAddIn
             UseSecondAPI = False
             If TypeOf prms(8).Value Is Boolean Then
                 UseSecondAPI = CBool(prms(8).Value)
-            End If
-
-            ' If the prompt field was left empty or too short, open the multiline input box
-            ' so the user can compose a detailed, multi-line prompt comfortably.
-            If OtherPrompt.Trim().Length < 5 Then
-                Dim multilinePrompt As String = ShowCustomInputBox(
-                    "Please enter your analysis prompt (multiline supported):",
-                    $"{AN} Text File Analyzer",
-                    SimpleInput:=False,
-                    DefaultValue:=GetSetting("DIR_Prompt", OtherPrompt))
-
-                If multilinePrompt = "ESC" OrElse String.IsNullOrWhiteSpace(multilinePrompt) Then
-                    ShowCustomMessageBox("No prompt provided — aborting.")
-                    Return
-                End If
-
-                OtherPrompt = multilinePrompt
             End If
 
             SaveSetting("DIR_Prompt", OtherPrompt)

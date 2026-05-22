@@ -118,7 +118,7 @@ Namespace Agents
             AddHandler Me.lstItems.DoubleClick, AddressOf OnViewClicked
             AddHandler Me.lstItems.SelectedIndexChanged, AddressOf OnSelectionChanged
 
-            Me.btnView = New Button() With {.Text = "View"}
+            Me.btnView = New Button() With {.Text = "Edit"}
             ConfigureStandardButton(Me.btnView)
             AddHandler Me.btnView.Click, AddressOf OnViewClicked
 
@@ -290,8 +290,14 @@ Namespace Agents
             End If
 
             Try
-                Dim psi As New ProcessStartInfo(sel.Path) With {.UseShellExecute = True}
-                Process.Start(psi)
+                Dim headerText As String =
+                    "Edit agent resource file:" & Environment.NewLine &
+                    sel.Path
+
+                SharedLibrary.SharedMethods.ShowTextFileEditor(
+                    sel.Path,
+                    headerText,
+                    ownerHandle:=Me.Handle)
             Catch ex As Exception
                 SharedLibrary.SharedMethods.ShowCustomMessageBox("Failed to open file: " & ex.Message)
             End Try
