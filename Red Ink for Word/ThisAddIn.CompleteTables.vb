@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink for Word"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddIn.CompleteTables.vb
@@ -14,8 +13,8 @@
 '    response JSON, and applies changes back to XML preserving all formatting.
 '  - Form Field Support: Detects and exposes structured document tags (SDTs)
 '    including dropdown/comboBox selections and checkbox states. The LLM can
-'    select dropdown items by value and toggle checkboxes. Content control
-'    plain-text fields are also extracted and modifiable.
+'    select dropdown items by exact option value and toggle checkboxes.
+'    Content control plain-text fields are also extracted and modifiable.
 '    Legacy form fields (w:ffData) with dropdown lists and checkboxes are
 '    also extracted and can be set by the LLM.
 '  - Full Document Context: The LLM receives the entire document body text
@@ -55,19 +54,14 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 Partial Public Class ThisAddIn
 
     ''' <summary>
-    ''' Maximum characters of JSON per LLM batch for table completion.
-    ''' </summary>
-    Private Const TableCompleteMaxCharsPerBatch As Integer = 12000
-
-    ''' <summary>
-    ''' Maximum tables per LLM batch.
-    ''' </summary>
-    Private Const TableCompleteMaxTablesPerBatch As Integer = 3
-
-    ''' <summary>
     ''' Maximum characters of document context to include per batch.
     ''' </summary>
-    Private Const TableCompleteMaxContextChars As Integer = 4000
+    Private Const TableCompleteMaxContextChars As Integer = 12000
+
+    ''' <summary>
+    ''' Maximum characters of the generated form-consistency summary included in the final prompt.
+    ''' </summary>
+    Private Const TableCompleteMaxConsistencySummaryChars As Integer = 4000
 
     ''' <summary>
     ''' XML namespace URI for w14 extensions (checkbox content controls).
@@ -80,12 +74,49 @@ Partial Public Class ThisAddIn
     Private Const WNs As String = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
     ''' <summary>
+    ''' Enables verbose table-completion debugging.
+    ''' </summary>
+    Private Const TableCompleteDebugEnabled As Boolean = True
+
+    ''' <summary>
+    ''' Includes raw XML payloads in debug logs.
+    ''' </summary>
+    Private Const TableCompleteDebugIncludeXml As Boolean = False
+
+    ''' <summary>
+    ''' Includes full DOCX package diagnostics in debug logs.
+    ''' </summary>
+    Private Const TableCompleteDebugIncludePackageDump As Boolean = False
+
+    ''' <summary>
+    ''' Logs detailed diagnostics for plain table-cell apply operations.
+    ''' </summary>
+    Private Const TableCompleteDebugLogCellApply As Boolean = False
+
+    ''' <summary>
+    ''' Reopens the saved DOCX after repacking and verifies that requested cell updates are present.
+    ''' </summary>
+    Private Const TableCompleteDebugVerifySavedDocx As Boolean = True
+
+    ''' <summary>
+    ''' Reopens the saved DOCX in hidden Word and logs what Word sees in the target table.
+    ''' </summary>
+    Private Const TableCompleteDebugVerifySavedDocxWithWordInterop As Boolean = False
+
+    ''' <summary>
+    ''' Desktop log filename for table-completion debugging.
+    ''' </summary>
+    Private Const TableCompleteDebugLogFileName As String = "RI_TableCompletion_Debug.log"
+
+    Private Shared ReadOnly TableCompleteDebugSyncRoot As New Object()
+
+    ''' <summary>
     ''' Regex pattern matching common placeholder content in table cells.
     ''' Matches: [...], [TBD], ___, …, TBD, N/A, n/a, &lt;enter ...&gt;, {placeholder}, etc.
     ''' </summary>
     Private Shared ReadOnly PlaceholderPattern As New Regex(
-        "^\s*(\[.*\]|\{.*\}|<[^>]*>|_{3,}|\.{3,}|…+|TBD|TBC|N/?A|TODO|FIXME|XXX|INSERT|ENTER)\s*$",
-        RegexOptions.IgnoreCase Or RegexOptions.Compiled)
+        "^\s*(\[(?!\s*\d+\s*\]$)[^\]\r\n]+\]|\{[^}\r\n]*\}|<[^>\r\n]*>|_{3,}|\.{3,}|…+|TBD|TBC|N/?A|TODO|FIXME|XXX|INSERT|ENTER)\s*$",
+        RegexOptions.IgnoreCase Or RegexOptions.Compiled Or RegexOptions.CultureInvariant)
 
 #Region "Data Classes"
 
@@ -102,7 +133,13 @@ Partial Public Class ThisAddIn
         Public Property IsHeader As Boolean
         Public Property IsPlaceholder As Boolean
         Public Property WidthPct As Double
-        ''' <summary>Form fields (SDT and legacy) found inside this cell.</summary>
+        ''' <summary>The effective w:tc node for this cell, whether direct or wrapper-owned.</summary>
+        Public Property XmlNode As System.Xml.XmlNode
+        ''' <summary>Whether the cell content may be modified.</summary>
+        Public Property IsWritable As Boolean
+        ''' <summary>Optional reason why the cell is not writable.</summary>
+        Public Property ProtectionReason As String
+        ''' <summary>Form fields (SDT and legacy) found inside or owning this cell.</summary>
         Public Property FormFields As List(Of FormFieldInfo)
     End Class
 
@@ -113,6 +150,11 @@ Partial Public Class ThisAddIn
         Public Property RowIndex As Integer
         Public Property Cells As List(Of TableCellInfo)
         Public Property XmlNode As System.Xml.XmlNode
+    End Class
+
+    Private Class CompletionBatchesResult
+        Public Property TableUpdates As List(Of TableUpdateResponse)
+        Public Property BodySectionUpdates As List(Of BodySectionUpdateResponse)
     End Class
 
     ''' <summary>
@@ -164,6 +206,14 @@ Partial Public Class ThisAddIn
     End Enum
 
     ''' <summary>
+    ''' Represents one selectable option for a dropdown or combo box.
+    ''' </summary>
+    Private Class FormFieldOptionInfo
+        Public Property DisplayText As String
+        Public Property StoredValue As String
+    End Class
+
+    ''' <summary>
     ''' Extracted information about a form field (SDT or legacy).
     ''' </summary>
     Private Class FormFieldInfo
@@ -172,12 +222,18 @@ Partial Public Class ThisAddIn
         Public Property FieldType As FormFieldType
         ''' <summary>Tag or alias of the content control (w:sdtPr/w:tag or w:sdtPr/w:alias), or legacy field name.</summary>
         Public Property Name As String
-        ''' <summary>Current value: selected item text for dropdowns, "true"/"false" for checkboxes, text for text inputs.</summary>
+        ''' <summary>Current display value shown in Word.</summary>
         Public Property CurrentValue As String
-        ''' <summary>Available options for dropdown fields (display values).</summary>
-        Public Property Options As List(Of String)
+        ''' <summary>Current stored/internal value used by dropdown-like controls.</summary>
+        Public Property CurrentOptionValue As String
+        ''' <summary>Available selectable options for the field.</summary>
+        Public Property Options As List(Of FormFieldOptionInfo)
         ''' <summary>The w:sdt node (for SDTs) or the w:fldChar node (for legacy fields).</summary>
         Public Property XmlNode As System.Xml.XmlNode
+        ''' <summary>Whether the field may be modified.</summary>
+        Public Property IsWritable As Boolean
+        ''' <summary>Optional reason why the field is not writable.</summary>
+        Public Property ProtectionReason As String
     End Class
 
     ''' <summary>
@@ -188,6 +244,9 @@ Partial Public Class ThisAddIn
         Public Property Col As Integer
         Public Property FieldId As String
         Public Property Value As String
+        Public Property OptionText As String
+        Public Property OptionValue As String
+        Public Property OptionIndex As Integer
     End Class
 
     ''' <summary>
@@ -234,6 +293,9 @@ Partial Public Class ThisAddIn
     Private Class BodyFieldUpdate
         Public Property FieldId As String
         Public Property Value As String
+        Public Property OptionText As String
+        Public Property OptionValue As String
+        Public Property OptionIndex As Integer
     End Class
 
 #End Region
@@ -243,7 +305,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Entry point: prompts for file and user instructions, then completes tables.
     ''' </summary>
-    Public Async Sub CompleteWordDocumentTables()
+    Public Async Sub directCompleteWordDocumentTables()
         Dim selectedPath As String = ""
 
         If INI_AllowLegacyDocFiles Then
@@ -324,6 +386,8 @@ Partial Public Class ThisAddIn
         ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Complete Tables", "Starting...")
 
         Try
+            StartTableCompletionDebugSession(selectedPath, outputPath, userInstructions)
+
             Dim success As Boolean = Await ProcessTableCompletion(selectedPath, outputPath, userInstructions)
 
             If success Then
@@ -332,13 +396,119 @@ Partial Public Class ThisAddIn
                 ShowCustomMessageBox("Table completion failed or was cancelled.", AN & " Complete Tables")
             End If
         Catch ex As Exception
+            WriteTableCompletionDebug("Unhandled exception", ex.ToString())
             ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
         Finally
             ProgressBarModule.CancelOperation = True
         End Try
     End Sub
 
-    Private Async Function ProcessTableCompletion(inputPath As String, outputPath As String, userInstructions As String) As Task(Of Boolean)
+    Public Async Function CompleteWordDocumentTables(Optional promptOverride As String = Nothing,
+                                                 Optional useSecondAPI As Boolean = False) As System.Threading.Tasks.Task
+        Dim selectedPath As String = ""
+
+        If INI_AllowLegacyDocFiles Then
+            Globals.ThisAddIn.DragDropFormLabel = "Select a Word document with tables to complete"
+            Globals.ThisAddIn.DragDropFormFilter = "Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc"
+        Else
+            Globals.ThisAddIn.DragDropFormLabel = "Select a Word document with tables to complete"
+            Globals.ThisAddIn.DragDropFormFilter = "Word Documents (*.docx)|*.docx"
+        End If
+
+        Try
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+        End Try
+
+        If String.IsNullOrWhiteSpace(selectedPath) Then Exit Function
+        If Not File.Exists(selectedPath) Then
+            ShowCustomMessageBox("The selected file does not exist.")
+            Exit Function
+        End If
+
+        Dim ext As String = Path.GetExtension(selectedPath).ToLowerInvariant()
+        If ext = ".doc" AndAlso Not INI_AllowLegacyDocFiles Then
+            ShowCustomMessageBox("The .doc format is disabled for security. Please convert to .docx first.")
+            Exit Function
+        End If
+        If ext <> ".doc" AndAlso ext <> ".docx" Then
+            ShowCustomMessageBox($"File type '{ext}' is not supported. Please select a .docx file.")
+            Exit Function
+        End If
+
+        Dim lastInstructions As String = ""
+        Try
+            lastInstructions = If(My.Settings.TableComplete_LastInstructions, "")
+        Catch
+        End Try
+
+        Dim userInstructions As String
+        If String.IsNullOrWhiteSpace(promptOverride) Then
+            userInstructions = ShowCustomInputBox(
+            "Describe how the tables should be completed:" & vbCrLf &
+            "(e.g., 'Fill in the empty cells based on headings and row labels. " &
+            "Add rows where the table appears incomplete.')",
+            AN & " Complete Tables", False, lastInstructions)
+
+            If String.IsNullOrWhiteSpace(userInstructions) Then Exit Function
+            userInstructions = userInstructions.Trim()
+        Else
+            userInstructions = InterpolateAtRuntime(promptOverride).Trim()
+            If String.IsNullOrWhiteSpace(userInstructions) Then
+                ShowCustomMessageBox("No form instructions were provided.", AN & " Complete Tables")
+                Exit Function
+            End If
+        End If
+
+        Try
+            My.Settings.TableComplete_LastInstructions = userInstructions
+            My.Settings.Save()
+        Catch
+        End Try
+
+        Dim dir As String = Path.GetDirectoryName(selectedPath)
+        Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(selectedPath)
+        Dim outputPath As String = Path.Combine(dir, $"{nameWithoutExt}_completed.docx")
+
+        If File.Exists(outputPath) Then
+            Dim overwrite As Integer = ShowCustomYesNoBox(
+            $"Output file already exists:{vbCrLf}{Path.GetFileName(outputPath)}{vbCrLf}{vbCrLf}Overwrite?",
+            "Yes, overwrite", "No, cancel")
+            If overwrite <> 1 Then Exit Function
+        End If
+
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressMax = 1
+        ProgressBarModule.GlobalProgressLabel = "Analyzing tables..."
+        ProgressBarModule.CancelOperation = False
+        ProgressBarModule.ShowProgressBarInSeparateThread(AN & " Complete Tables", "Starting...")
+
+        Try
+            StartTableCompletionDebugSession(selectedPath, outputPath, userInstructions)
+
+            Dim success As Boolean = Await ProcessTableCompletion(selectedPath, outputPath, userInstructions, useSecondAPI)
+
+            If success Then
+                ShowCustomMessageBox($"Completed document saved as:{vbCrLf}{outputPath}", AN & " Complete Tables")
+            End If
+        Catch ex As Exception
+            WriteTableCompletionDebug("Unhandled exception", ex.ToString())
+            ShowCustomMessageBox($"Error: {ex.Message}", AN & " Complete Tables")
+        Finally
+            ProgressBarModule.CancelOperation = True
+        End Try
+    End Function
+
+    Private Async Function ProcessTableCompletion(inputPath As String,
+                                              outputPath As String,
+                                              userInstructions As String,
+                                              Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
         Dim tempDocxPath As String = Nothing
         Dim wordApp As Word.Application = Nothing
         Dim doc As Word.Document = Nothing
@@ -358,7 +528,7 @@ Partial Public Class ThisAddIn
             End If
 
             File.Copy(tempDocxPath, outputPath, overwrite:=True)
-            Dim success As Boolean = Await ProcessDocxTables(outputPath, userInstructions)
+            Dim success As Boolean = Await ProcessDocxTables(outputPath, userInstructions, useSecondAPI)
             Return success
 
         Finally
@@ -371,11 +541,16 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
-    Private Async Function ProcessDocxTables(docxPath As String, userInstructions As String) As Task(Of Boolean)
+    Private Async Function ProcessDocxTables(docxPath As String,
+                                         userInstructions As String,
+                                         Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
+
         Dim tempDir As String = Path.Combine(Path.GetTempPath(), $"{AN2}_tbl_{Guid.NewGuid():N}")
 
         Try
             ZipFile.ExtractToDirectory(docxPath, tempDir)
+
+            If TableCompleteDebugIncludePackageDump Then DumpDocxPackageDiagnostics(docxPath)
 
             Dim documentXmlPath As String = Path.Combine(tempDir, "word", "document.xml")
             If Not File.Exists(documentXmlPath) Then
@@ -391,17 +566,20 @@ Partial Public Class ThisAddIn
             nsMgr.AddNamespace("w", WNs)
             nsMgr.AddNamespace("w14", W14Ns)
 
-            ' Phase 1: Extract full document context + all tables
             Dim documentContext As String = ExtractDocumentBodyContext(xmlDoc, nsMgr)
             Dim tables As List(Of TableInfo) = ExtractTablesFromXml(xmlDoc, nsMgr)
+            Dim bodySections As List(Of BodySectionInfo) = ExtractBodySectionsFromXml(xmlDoc, nsMgr)
 
-            If tables.Count = 0 Then
-                ShowCustomMessageBox("No tables found in the document.")
+            WriteTableCompletionDebug("Extracted fields", BuildFormFieldDebugReport(tables))
+
+            If tables.Count = 0 AndAlso bodySections.Count = 0 Then
+                ShowCustomMessageBox("No tables or body sections found in the document.")
                 Return False
             End If
 
             Dim placeholderCount As Integer = 0
             Dim formFieldCount As Integer = 0
+
             For Each tbl In tables
                 For Each row In tbl.Rows
                     For Each cell In row.Cells
@@ -411,27 +589,53 @@ Partial Public Class ThisAddIn
                 Next
             Next
 
+            For Each section In bodySections
+                If section.Paragraphs IsNot Nothing Then
+                    For Each para In section.Paragraphs
+                        If para.IsPlaceholder OrElse para.IsEmpty Then placeholderCount += 1
+                    Next
+                End If
+
+                If section.FormFields IsNot Nothing Then
+                    formFieldCount += section.FormFields.Count
+                End If
+            Next
+
             Dim confirmMsg As String = $"Found {tables.Count} table(s)"
-            If placeholderCount > 0 Then confirmMsg &= $", {placeholderCount} placeholder(s)"
+            If bodySections.Count > 0 Then confirmMsg &= $", {bodySections.Count} body section(s)"
+            If placeholderCount > 0 Then confirmMsg &= $", {placeholderCount} placeholder/empty target(s)"
             If formFieldCount > 0 Then confirmMsg &= $", {formFieldCount} form field(s)"
             confirmMsg &= ". Continue with AI completion?"
+
             Dim confirm As Integer = ShowCustomYesNoBox(confirmMsg, "Yes, continue", "No, cancel")
             If confirm <> 1 Then Return False
 
-            ' Phase 2: Send to LLM in batches
-            Dim allUpdates As List(Of TableUpdateResponse) = Await ProcessTableBatches(tables, userInstructions, documentContext)
-            If allUpdates Is Nothing Then Return False
+            Dim completionResult As CompletionBatchesResult =
+                Await ProcessCompletionBatches(tables, bodySections, userInstructions, documentContext, useSecondAPI)
 
-            ' Phase 3: Apply changes back to XML
-            ApplyTableUpdates(tables, allUpdates, nsMgr)
+            If completionResult Is Nothing Then Return False
 
-            ' Save and repack
+            ApplyTableUpdates(tables, completionResult.TableUpdates, nsMgr)
+            ApplyBodySectionUpdates(bodySections, completionResult.BodySectionUpdates, nsMgr)
+
             xmlDoc.Save(documentXmlPath)
             File.Delete(docxPath)
             ZipFile.CreateFromDirectory(tempDir, docxPath, CompressionLevel.Optimal, False)
 
+            If TableCompleteDebugVerifySavedDocx Then
+                VerifySavedDocxCellUpdates(docxPath, completionResult.TableUpdates)
+            End If
+
+            If TableCompleteDebugVerifySavedDocxWithWordInterop Then
+                VerifySavedDocxWithWordInterop(docxPath)
+            End If
+
+            WriteTableCompletionDebug("Completion finished", $"Saved output document: {docxPath}")
             Return True
 
+        Catch ex As Exception
+            WriteTableCompletionDebug("ProcessDocxTables exception", ex.ToString())
+            Throw
         Finally
             If Directory.Exists(tempDir) Then
                 Try : Directory.Delete(tempDir, recursive:=True) : Catch : End Try
@@ -443,41 +647,763 @@ Partial Public Class ThisAddIn
 
 #Region "Extraction"
 
-    Private Function ExtractDocumentBodyContext(xmlDoc As System.Xml.XmlDocument, nsMgr As System.Xml.XmlNamespaceManager) As String
-        Dim sb As New StringBuilder()
-        Dim bodyNode As System.Xml.XmlNode = xmlDoc.SelectSingleNode("//w:body", nsMgr)
-        If bodyNode Is Nothing Then Return ""
+    Private Function ExtractVisibleParagraphTextExcludingSdts(paragraphNode As System.Xml.XmlNode,
+                                                             nsMgr As System.Xml.XmlNamespaceManager,
+                                                             ByRef textNodes As List(Of System.Xml.XmlNode)) As String
+        textNodes = New List(Of System.Xml.XmlNode)()
+        If paragraphNode Is Nothing Then Return ""
 
-        Dim tableCounter As Integer = 0
+        Dim sb As New StringBuilder()
+        Dim allTextNodes As System.Xml.XmlNodeList = paragraphNode.SelectNodes(".//w:t", nsMgr)
+
+        For Each tNode As System.Xml.XmlNode In allTextNodes
+            Dim ancestor As System.Xml.XmlNode = tNode.ParentNode
+            Dim insideSdt As Boolean = False
+
+            While ancestor IsNot Nothing AndAlso ancestor IsNot paragraphNode
+                If ancestor.LocalName = "sdt" Then
+                    insideSdt = True
+                    Exit While
+                End If
+                ancestor = ancestor.ParentNode
+            End While
+
+            If insideSdt Then Continue For
+
+            textNodes.Add(tNode)
+            sb.Append(tNode.InnerText)
+        Next
+
+        Return sb.ToString()
+    End Function
+
+    Private Function ExtractBestContextParagraphTextFromNode(node As System.Xml.XmlNode,
+                                                             nsMgr As System.Xml.XmlNamespaceManager) As String
+        If node Is Nothing Then Return ""
+
+        Dim paragraphNodes As New List(Of System.Xml.XmlNode)()
+
+        If node.LocalName = "p" Then
+            paragraphNodes.Add(node)
+        Else
+            For Each pNode As System.Xml.XmlNode In node.SelectNodes(".//w:p[not(ancestor::w:tbl)]", nsMgr)
+                paragraphNodes.Add(pNode)
+            Next
+        End If
+
+        For Each pNode As System.Xml.XmlNode In paragraphNodes
+            Dim textNodes As List(Of System.Xml.XmlNode) = Nothing
+            Dim text As String = NormalizeTextForPlaceholderDetection(ExtractVisibleParagraphTextExcludingSdts(pNode, nsMgr, textNodes))
+            If Not String.IsNullOrWhiteSpace(text) AndAlso Not IsPlaceholderText(text) Then
+                Return text
+            End If
+        Next
+
+        Return ""
+    End Function
+
+    Private Function ExtractCandidateBodyParagraphsFromNode(node As System.Xml.XmlNode,
+                                                            nsMgr As System.Xml.XmlNamespaceManager) As List(Of BodyParagraphInfo)
+        Dim results As New List(Of BodyParagraphInfo)()
+        If node Is Nothing Then Return results
+
+        Dim paragraphNodes As New List(Of System.Xml.XmlNode)()
+
+        If node.LocalName = "p" Then
+            paragraphNodes.Add(node)
+        Else
+            For Each pNode As System.Xml.XmlNode In node.SelectNodes(".//w:p[not(ancestor::w:tbl)]", nsMgr)
+                paragraphNodes.Add(pNode)
+            Next
+        End If
+
+        Dim paragraphIndex As Integer = 0
+
+        For Each pNode As System.Xml.XmlNode In paragraphNodes
+            Dim textNodes As List(Of System.Xml.XmlNode) = Nothing
+            Dim rawText As String = ExtractVisibleParagraphTextExcludingSdts(pNode, nsMgr, textNodes)
+            Dim normalizedText As String = NormalizeTextForPlaceholderDetection(rawText)
+
+            Dim paraInfo As New BodyParagraphInfo() With {
+                .Index = paragraphIndex,
+                .Text = rawText,
+                .IsPlaceholder = IsPlaceholderText(rawText),
+                .IsEmpty = String.IsNullOrWhiteSpace(normalizedText),
+                .TextNodes = If(textNodes, New List(Of System.Xml.XmlNode)()),
+                .XmlNode = pNode
+            }
+
+            If paraInfo.IsPlaceholder OrElse paraInfo.IsEmpty Then
+                results.Add(paraInfo)
+                paragraphIndex += 1
+            End If
+        Next
+
+        Return results
+    End Function
+
+    Private Function ExtractFormFieldsFromNode(containerNode As System.Xml.XmlNode,
+                                               nsMgr As System.Xml.XmlNamespaceManager,
+                                               isWritable As Boolean,
+                                               protectionReason As String) As List(Of FormFieldInfo)
+        Dim results As New List(Of FormFieldInfo)()
+        If containerNode Is Nothing Then Return results
+
+        Dim fieldIndex As Integer = 0
+        Dim sdtNodes As New List(Of System.Xml.XmlNode)()
+
+        Dim owningSdtNode As System.Xml.XmlNode = GetOwningSdtNodeForCell(containerNode)
+        If owningSdtNode IsNot Nothing Then
+            sdtNodes.Add(owningSdtNode)
+        End If
+
+        Dim descendantSdtNodes As System.Xml.XmlNodeList = containerNode.SelectNodes(".//w:sdt", nsMgr)
+        For Each sdtNode As System.Xml.XmlNode In descendantSdtNodes
+            If Not sdtNodes.Any(Function(existingNode) existingNode Is sdtNode) Then
+                sdtNodes.Add(sdtNode)
+            End If
+        Next
+
+        For Each sdtNode As System.Xml.XmlNode In sdtNodes
+            Dim sdtPr As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr", nsMgr)
+            If sdtPr Is Nothing Then Continue For
+
+            Dim fieldProtectionReason As String = ""
+            Dim ff As New FormFieldInfo() With {
+                .FieldId = $"f{fieldIndex}",
+                .XmlNode = sdtNode,
+                .Options = New List(Of FormFieldOptionInfo)(),
+                .Name = "",
+                .CurrentValue = "",
+                .CurrentOptionValue = "",
+                .IsWritable = IsFormFieldWritable(sdtNode, nsMgr, fieldProtectionReason),
+                .ProtectionReason = fieldProtectionReason
+            }
+
+            Dim tagNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:tag/@w:val", nsMgr)
+            Dim aliasNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:alias/@w:val", nsMgr)
+            ff.Name = If(tagNode?.Value, If(aliasNode?.Value, ""))
+
+            Dim showingPlcHdr As Boolean = (sdtPr.SelectSingleNode("w:showingPlcHdr", nsMgr) IsNot Nothing)
+
+            Dim dropDownNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:dropDownList", nsMgr)
+            Dim comboBoxNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:comboBox", nsMgr)
+            Dim checkboxNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w14:checkbox", nsMgr)
+            Dim textNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:text", nsMgr)
+            Dim dateNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:date", nsMgr)
+
+            If dropDownNode IsNot Nothing OrElse comboBoxNode IsNot Nothing Then
+                ff.FieldType = FormFieldType.Dropdown
+
+                Dim listParent As System.Xml.XmlNode = If(dropDownNode, comboBoxNode)
+                Dim listItems As System.Xml.XmlNodeList = listParent.SelectNodes("w:listItem", nsMgr)
+                For Each li As System.Xml.XmlNode In listItems
+                    Dim displayAttr As System.Xml.XmlNode = li.Attributes("w:displayText")
+                    Dim valueAttr As System.Xml.XmlNode = li.Attributes("w:value")
+                    AddFormFieldOption(ff.Options, If(displayAttr?.Value, ""), If(valueAttr?.Value, ""))
+                Next
+
+                Dim rawDisplayValue As String = GetSdtContentText(sdtNode, nsMgr)
+                Dim lastValueAttr As System.Xml.XmlNode = listParent.Attributes("w:lastValue")
+                Dim rawStoredValue As String = If(lastValueAttr?.Value, "")
+
+                If showingPlcHdr Then
+                    ff.CurrentValue = ""
+                    ff.CurrentOptionValue = ""
+                Else
+                    Dim currentOption As FormFieldOptionInfo = ResolveCurrentDropdownOption(ff, rawDisplayValue, rawStoredValue)
+                    If currentOption IsNot Nothing Then
+                        ff.CurrentValue = currentOption.DisplayText
+                        ff.CurrentOptionValue = currentOption.StoredValue
+                    Else
+                        ff.CurrentValue = If(rawDisplayValue, "")
+                        ff.CurrentOptionValue = If(rawStoredValue, "")
+                    End If
+                End If
+
+            ElseIf checkboxNode IsNot Nothing Then
+                ff.FieldType = FormFieldType.Checkbox
+                AddFormFieldOption(ff.Options, "true", "true")
+                AddFormFieldOption(ff.Options, "false", "false")
+
+                Dim checkedNode As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:checked/@w14:val", nsMgr)
+                If checkedNode IsNot Nothing Then
+                    ff.CurrentValue = If(checkedNode.Value = "1" OrElse checkedNode.Value.ToLowerInvariant() = "true", "true", "false")
+                Else
+                    ff.CurrentValue = "false"
+                End If
+                ff.CurrentOptionValue = ff.CurrentValue
+
+            ElseIf textNode IsNot Nothing OrElse dateNode IsNot Nothing Then
+                ff.FieldType = FormFieldType.TextInput
+                Dim rawValue As String = GetSdtContentText(sdtNode, nsMgr)
+                ff.CurrentValue = If(showingPlcHdr, "", rawValue)
+                ff.CurrentOptionValue = ff.CurrentValue
+
+            Else
+                ff.FieldType = FormFieldType.TextInput
+                Dim rawValue As String = GetSdtContentText(sdtNode, nsMgr)
+                ff.CurrentValue = If(showingPlcHdr, "", rawValue)
+                ff.CurrentOptionValue = ff.CurrentValue
+            End If
+
+            results.Add(ff)
+            fieldIndex += 1
+        Next
+
+        Dim fldCharNodes As System.Xml.XmlNodeList = containerNode.SelectNodes(".//w:r[w:fldChar[@w:fldCharType='begin']]", nsMgr)
+        For Each fldRunNode As System.Xml.XmlNode In fldCharNodes
+            Dim fldChar As System.Xml.XmlNode = fldRunNode.SelectSingleNode("w:fldChar", nsMgr)
+            If fldChar Is Nothing Then Continue For
+
+            Dim ffData As System.Xml.XmlNode = fldChar.SelectSingleNode("w:ffData", nsMgr)
+            If ffData Is Nothing Then Continue For
+
+            Dim ff As New FormFieldInfo() With {
+                .FieldId = $"f{fieldIndex}",
+                .XmlNode = fldChar,
+                .Options = New List(Of FormFieldOptionInfo)(),
+                .CurrentValue = "",
+                .CurrentOptionValue = "",
+                .IsWritable = isWritable,
+                .ProtectionReason = protectionReason
+            }
+
+            Dim nameNode As System.Xml.XmlNode = ffData.SelectSingleNode("w:name/@w:val", nsMgr)
+            ff.Name = If(nameNode?.Value, "")
+
+            Dim ddList As System.Xml.XmlNode = ffData.SelectSingleNode("w:ddList", nsMgr)
+            If ddList IsNot Nothing Then
+                ff.FieldType = FormFieldType.LegacyDropdown
+
+                Dim listEntries As System.Xml.XmlNodeList = ddList.SelectNodes("w:listEntry/@w:val", nsMgr)
+                For Each entry As System.Xml.XmlNode In listEntries
+                    AddFormFieldOption(ff.Options, entry.Value, entry.Value)
+                Next
+
+                Dim resultNode As System.Xml.XmlNode = ddList.SelectSingleNode("w:result/@w:val", nsMgr)
+                Dim selectedIdx As Integer = 0
+                If resultNode IsNot Nothing Then Integer.TryParse(resultNode.Value, selectedIdx)
+
+                If selectedIdx >= 0 AndAlso selectedIdx < ff.Options.Count Then
+                    ff.CurrentValue = ff.Options(selectedIdx).DisplayText
+                    ff.CurrentOptionValue = ff.Options(selectedIdx).StoredValue
+                End If
+
+                results.Add(ff)
+                fieldIndex += 1
+                Continue For
+            End If
+
+            Dim checkBox As System.Xml.XmlNode = ffData.SelectSingleNode("w:checkBox", nsMgr)
+            If checkBox IsNot Nothing Then
+                ff.FieldType = FormFieldType.LegacyCheckbox
+                AddFormFieldOption(ff.Options, "true", "true")
+                AddFormFieldOption(ff.Options, "false", "false")
+
+                Dim checkedNode As System.Xml.XmlNode = checkBox.SelectSingleNode("w:checked/@w:val", nsMgr)
+                If checkedNode IsNot Nothing Then
+                    ff.CurrentValue = If(checkedNode.Value = "1" OrElse checkedNode.Value.ToLowerInvariant() = "true", "true", "false")
+                Else
+                    Dim defaultNode As System.Xml.XmlNode = checkBox.SelectSingleNode("w:default/@w:val", nsMgr)
+                    ff.CurrentValue = If(defaultNode IsNot Nothing AndAlso (defaultNode.Value = "1" OrElse defaultNode.Value.ToLowerInvariant() = "true"), "true", "false")
+                End If
+
+                ff.CurrentOptionValue = ff.CurrentValue
+                results.Add(ff)
+                fieldIndex += 1
+            End If
+        Next
+
+        Return results
+    End Function
+
+    Private Function TryBuildBodySection(node As System.Xml.XmlNode,
+                                         sectionIndex As Integer,
+                                         headingText As String,
+                                         nsMgr As System.Xml.XmlNamespaceManager) As BodySectionInfo
+        If node Is Nothing Then Return Nothing
+        If node.LocalName = "tbl" Then Return Nothing
+
+        Dim paragraphs As List(Of BodyParagraphInfo) = ExtractCandidateBodyParagraphsFromNode(node, nsMgr)
+
+        Dim protectionReason As String = ""
+        Dim isWritable As Boolean = IsCellWritable(node, nsMgr, protectionReason)
+        Dim fields As List(Of FormFieldInfo) = ExtractFormFieldsFromNode(node, nsMgr, isWritable, protectionReason)
+
+        Dim hasEmptyWritableField As Boolean =
+            fields.Any(Function(f) f.IsWritable AndAlso String.IsNullOrWhiteSpace(f.CurrentValue) AndAlso String.IsNullOrWhiteSpace(f.CurrentOptionValue))
+
+        If paragraphs.Count = 0 AndAlso Not hasEmptyWritableField Then
+            Return Nothing
+        End If
+
+        Return New BodySectionInfo() With {
+            .SectionIndex = sectionIndex,
+            .HeadingText = If(headingText, ""),
+            .Paragraphs = paragraphs,
+            .FormFields = fields
+        }
+    End Function
+
+    Private Function ExtractBodySectionsFromXml(xmlDoc As System.Xml.XmlDocument,
+                                                nsMgr As System.Xml.XmlNamespaceManager) As List(Of BodySectionInfo)
+        Dim results As New List(Of BodySectionInfo)()
+        Dim bodyNode As System.Xml.XmlNode = xmlDoc.SelectSingleNode("//w:body", nsMgr)
+        If bodyNode Is Nothing Then Return results
+
+        Dim sectionIndex As Integer = 0
+        Dim lastContextText As String = ""
 
         For Each child As System.Xml.XmlNode In bodyNode.ChildNodes
             If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
 
-            If child.LocalName = "p" Then
-                Dim text As String = GetParagraphPlainText(child, nsMgr)
-                If Not String.IsNullOrWhiteSpace(text) Then
-                    sb.AppendLine(text)
-                End If
-            ElseIf child.LocalName = "tbl" Then
-                sb.AppendLine($"[Table {tableCounter}]")
-                tableCounter += 1
+            If child.LocalName = "tbl" Then Continue For
+
+            Dim section As BodySectionInfo = TryBuildBodySection(child, sectionIndex, lastContextText, nsMgr)
+            If section IsNot Nothing Then
+                results.Add(section)
+                sectionIndex += 1
             End If
 
-            If sb.Length > TableCompleteMaxContextChars * 2 Then Exit For
+            Dim contextText As String = ExtractBestContextParagraphTextFromNode(child, nsMgr)
+            If Not String.IsNullOrWhiteSpace(contextText) Then
+                lastContextText = contextText
+            End If
         Next
 
-        Dim result As String = sb.ToString()
-        If result.Length > TableCompleteMaxContextChars Then
-            Dim halfLen As Integer = TableCompleteMaxContextChars \ 2
-            result = result.Substring(0, halfLen) &
-                     vbCrLf & "[... document content truncated ...]" & vbCrLf &
-                     result.Substring(result.Length - halfLen)
-        End If
+        Return results
+    End Function
+
+    Private Function NormalizeTextForPlaceholderDetection(value As String) As String
+        If value Is Nothing Then Return ""
+
+        Dim normalized As String = value.Normalize()
+        normalized = normalized.Replace(ChrW(&HA0), " ")
+        normalized = normalized.Replace(ChrW(&H2007), " ")
+        normalized = normalized.Replace(ChrW(&H202F), " ")
+        normalized = normalized.Replace(ChrW(&H200B), "")
+        normalized = normalized.Replace(ChrW(&H200C), "")
+        normalized = normalized.Replace(ChrW(&H200D), "")
+        normalized = normalized.Replace(ChrW(&HFEFF), "")
+        normalized = normalized.Replace(vbTab, " ")
+        normalized = normalized.Replace(vbCr, " ")
+        normalized = normalized.Replace(vbLf, " ")
+        normalized = Regex.Replace(normalized, "\s+", " ").Trim()
+
+        Return normalized
+    End Function
+
+    Private Function IsPlaceholderText(value As String) As Boolean
+        Dim normalized As String = NormalizeTextForPlaceholderDetection(value)
+        If String.IsNullOrWhiteSpace(normalized) Then Return False
+        Return PlaceholderPattern.IsMatch(normalized)
+    End Function
+
+    Private Function IsTextNodeInsideSdt(textNode As System.Xml.XmlNode, tcNode As System.Xml.XmlNode) As Boolean
+        Dim current As System.Xml.XmlNode = textNode.ParentNode
+
+        While current IsNot Nothing AndAlso current IsNot tcNode
+            If current.LocalName = "sdt" Then Return True
+            current = current.ParentNode
+        End While
+
+        Return False
+    End Function
+
+    Private Function TryGetCellOverrideWidthPct(tcNode As System.Xml.XmlNode,
+                                                totalGridWidth As Double,
+                                                nsMgr As System.Xml.XmlNamespaceManager,
+                                                ByRef widthPct As Double) As Boolean
+        widthPct = 0
+
+        If tcNode Is Nothing OrElse nsMgr Is Nothing Then Return False
+
+        Dim tcWidthValueNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:tcPr/w:tcW/@w:w", nsMgr)
+        If tcWidthValueNode Is Nothing Then Return False
+
+        Dim tcWidthTypeNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:tcPr/w:tcW/@w:type", nsMgr)
+        Dim tcWidthType As String = If(tcWidthTypeNode?.Value, "").Trim().ToLowerInvariant()
+
+        Dim rawWidth As Double
+        If Not Double.TryParse(tcWidthValueNode.Value, rawWidth) OrElse rawWidth <= 0 Then Return False
+
+        Select Case tcWidthType
+            Case "pct"
+                widthPct = Math.Round(rawWidth / 50.0R, 1)
+                Return widthPct > 0
+
+            Case "dxa", ""
+                If totalGridWidth > 0 Then
+                    widthPct = Math.Round(rawWidth / totalGridWidth * 100.0R, 1)
+                    Return widthPct > 0
+                End If
+        End Select
+
+        Return False
+    End Function
+
+    Private Function GetDocumentOrderTableIndexMap(xmlDoc As System.Xml.XmlDocument,
+                                                   nsMgr As System.Xml.XmlNamespaceManager) As Dictionary(Of System.Xml.XmlNode, Integer)
+        Dim result As New Dictionary(Of System.Xml.XmlNode, Integer)()
+        Dim tblNodes As System.Xml.XmlNodeList = xmlDoc.SelectNodes("//w:tbl", nsMgr)
+        Dim index As Integer = 0
+
+        For Each tblNode As System.Xml.XmlNode In tblNodes
+            result(tblNode) = index
+            index += 1
+        Next
 
         Return result
     End Function
 
-    Private Function ExtractTablesFromXml(xmlDoc As System.Xml.XmlDocument, nsMgr As System.Xml.XmlNamespaceManager) As List(Of TableInfo)
+    Private Sub AppendBodyContextNode(node As System.Xml.XmlNode,
+                                      nsMgr As System.Xml.XmlNamespaceManager,
+                                      sb As StringBuilder,
+                                      tableIndexMap As Dictionary(Of System.Xml.XmlNode, Integer))
+        If node Is Nothing Then Exit Sub
+        If node.NodeType <> System.Xml.XmlNodeType.Element Then Exit Sub
+
+        Select Case node.LocalName
+            Case "p"
+                Dim text As String = GetParagraphPlainText(node, nsMgr)
+                If Not String.IsNullOrWhiteSpace(text) Then
+                    sb.AppendLine(text)
+                End If
+
+            Case "tbl"
+                Dim tableIndex As Integer = -1
+                If tableIndexMap IsNot Nothing AndAlso tableIndexMap.ContainsKey(node) Then
+                    tableIndex = tableIndexMap(node)
+                End If
+
+                If tableIndex >= 0 Then
+                    sb.AppendLine($"[Table {tableIndex}]")
+                End If
+
+            Case "sdt", "customXml", "smartTag", "ins", "moveTo", "hyperlink", "Choice", "Fallback"
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    AppendBodyContextNode(child, nsMgr, sb, tableIndexMap)
+                Next
+
+            Case "AlternateContent"
+                Dim branch As System.Xml.XmlNode = Nothing
+
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    If child.LocalName = "Choice" Then
+                        branch = child
+                        Exit For
+                    End If
+                Next
+
+                If branch Is Nothing Then
+                    For Each child As System.Xml.XmlNode In node.ChildNodes
+                        If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                        If child.LocalName = "Fallback" Then
+                            branch = child
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                If branch IsNot Nothing Then
+                    AppendBodyContextNode(branch, nsMgr, sb, tableIndexMap)
+                End If
+        End Select
+    End Sub
+
+    Private Function TruncateContextAtLineBoundaries(text As String, maxChars As Integer) As String
+        If String.IsNullOrEmpty(text) OrElse text.Length <= maxChars Then Return text
+
+        Dim normalized As String = text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim lines As List(Of String) = normalized.Split({vbLf}, StringSplitOptions.None).ToList()
+
+        Dim separator As String = vbCrLf
+        Dim marker As String = "[... document content truncated ...]"
+        Dim halfBudget As Integer = Math.Max(1, (maxChars - marker.Length - (separator.Length * 2)) \ 2)
+
+        Dim head As New List(Of String)()
+        Dim tail As New List(Of String)()
+
+        Dim currentHeadLength As Integer = 0
+        For Each line In lines
+            Dim addLen As Integer = If(head.Count = 0, 0, separator.Length) + line.Length
+            If currentHeadLength + addLen > halfBudget Then Exit For
+            head.Add(line)
+            currentHeadLength += addLen
+        Next
+
+        Dim currentTailLength As Integer = 0
+        For i As Integer = lines.Count - 1 To 0 Step -1
+            Dim line As String = lines(i)
+            Dim addLen As Integer = If(tail.Count = 0, 0, separator.Length) + line.Length
+            If currentTailLength + addLen > halfBudget Then Exit For
+            tail.Insert(0, line)
+            currentTailLength += addLen
+        Next
+
+        Return String.Join(separator, head) &
+               separator & marker & separator &
+               String.Join(separator, tail)
+    End Function
+
+    Private Function GetRowStructureSignature(row As TableRowInfo) As String
+        If row Is Nothing OrElse row.Cells Is Nothing Then Return ""
+
+        Dim parts As New List(Of String)()
+        parts.Add(row.Cells.Count.ToString())
+
+        For Each cell In row.Cells.OrderBy(Function(c) c.Col)
+            Dim fieldCount As Integer = If(cell.FormFields IsNot Nothing, cell.FormFields.Count, 0)
+            parts.Add($"{cell.Col}:{cell.GridSpan}:{cell.VMerge}:{fieldCount}")
+        Next
+
+        Return String.Join("|", parts)
+    End Function
+
+    Private Function FindTemplateRowForInsertion(tbl As TableInfo, insertAfterRow As Integer) As TableRowInfo
+        If tbl Is Nothing OrElse tbl.Rows Is Nothing OrElse tbl.Rows.Count = 0 Then Return Nothing
+
+        Dim anchor As TableRowInfo = Nothing
+        If insertAfterRow >= 0 Then
+            anchor = tbl.Rows.FirstOrDefault(Function(r) r.RowIndex = insertAfterRow)
+        End If
+        If anchor Is Nothing Then
+            anchor = tbl.Rows.LastOrDefault(Function(r) Not r.Cells.All(Function(c) c.IsHeader))
+        End If
+        If anchor Is Nothing Then
+            anchor = tbl.Rows.Last()
+        End If
+
+        Dim targetSignature As String = GetRowStructureSignature(anchor)
+
+        Dim candidates As IEnumerable(Of TableRowInfo) =
+            tbl.Rows.
+                Where(Function(r) Not r.Cells.All(Function(c) c.IsHeader)).
+                OrderBy(Function(r) Math.Abs(r.RowIndex - anchor.RowIndex))
+
+        Dim signatureMatch As TableRowInfo =
+            candidates.FirstOrDefault(Function(r) GetRowStructureSignature(r) = targetSignature)
+
+        If signatureMatch IsNot Nothing Then Return signatureMatch
+
+        Dim sameCellCount As TableRowInfo =
+            candidates.FirstOrDefault(Function(r) r.Cells.Count = anchor.Cells.Count)
+
+        If sameCellCount IsNot Nothing Then Return sameCellCount
+
+        Return candidates.LastOrDefault()
+    End Function
+
+    Private Function CloneTemplateRowBeforeApply(tbl As TableInfo, insertAfterRow As Integer) As System.Xml.XmlNode
+        Dim templateRow As TableRowInfo = FindTemplateRowForInsertion(tbl, insertAfterRow)
+        If templateRow Is Nothing OrElse templateRow.XmlNode Is Nothing Then Return Nothing
+        Return templateRow.XmlNode.CloneNode(deep:=True)
+    End Function
+
+    Private Function RowContainsVerticalMerge(rowNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As Boolean
+        If rowNode Is Nothing Then Return False
+        Return rowNode.SelectSingleNode(".//w:tcPr/w:vMerge", nsMgr) IsNot Nothing
+    End Function
+
+    Private Function ExtractJsonArrayPayload(response As String) As String
+        If String.IsNullOrWhiteSpace(response) Then Return ""
+
+        Dim normalized As String = response.Trim()
+
+        If normalized.StartsWith("```", StringComparison.Ordinal) Then
+            Dim firstNewline As Integer = normalized.IndexOf(vbLf)
+            If firstNewline >= 0 Then
+                normalized = normalized.Substring(firstNewline + 1)
+            End If
+            If normalized.EndsWith("```", StringComparison.Ordinal) Then
+                normalized = normalized.Substring(0, normalized.Length - 3)
+            End If
+            normalized = normalized.Trim()
+        End If
+
+        If normalized.StartsWith("<json>", StringComparison.OrdinalIgnoreCase) AndAlso
+           normalized.EndsWith("</json>", StringComparison.OrdinalIgnoreCase) Then
+            normalized = normalized.Substring(6, normalized.Length - 13).Trim()
+        End If
+
+        Dim startIdx As Integer = normalized.IndexOf("["c)
+        If startIdx < 0 Then Return normalized
+
+        Dim depth As Integer = 0
+        Dim inString As Boolean = False
+        Dim escapeNext As Boolean = False
+
+        For i As Integer = startIdx To normalized.Length - 1
+            Dim ch As Char = normalized(i)
+
+            If escapeNext Then
+                escapeNext = False
+                Continue For
+            End If
+
+            If ch = "\"c AndAlso inString Then
+                escapeNext = True
+                Continue For
+            End If
+
+            If ch = """"c Then
+                inString = Not inString
+                Continue For
+            End If
+
+            If inString Then Continue For
+
+            If ch = "["c Then
+                depth += 1
+            ElseIf ch = "]"c Then
+                depth -= 1
+                If depth = 0 Then
+                    Return normalized.Substring(startIdx, i - startIdx + 1).Trim()
+                End If
+            End If
+        Next
+
+        Return normalized
+    End Function
+
+    Private Sub ApplySdtDefaultRunProperties(sdtNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager)
+        If sdtNode Is Nothing Then Exit Sub
+
+        Dim sdtPrRunProps As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr/w:rPr", nsMgr)
+        Dim firstRun As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent//w:r", nsMgr)
+
+        If firstRun Is Nothing Then Exit Sub
+
+        Dim existingRpr As System.Xml.XmlNode = firstRun.SelectSingleNode("w:rPr", nsMgr)
+        If existingRpr IsNot Nothing Then
+            firstRun.RemoveChild(existingRpr)
+        End If
+
+        If sdtPrRunProps Is Nothing Then Exit Sub
+
+        Dim clonedRpr As System.Xml.XmlNode = sdtPrRunProps.CloneNode(deep:=True)
+
+        Dim placeholderStyles As System.Xml.XmlNodeList = clonedRpr.SelectNodes("w:rStyle[@w:val='PlaceholderText' or @w:val='Platzhaltertext']", nsMgr)
+        For Each styleNode As System.Xml.XmlNode In placeholderStyles
+            clonedRpr.RemoveChild(styleNode)
+        Next
+
+        firstRun.PrependChild(clonedRpr)
+    End Sub
+
+
+    Private Function BodySectionToJson(section As BodySectionInfo) As String
+        Dim jObj As New JObject()
+        jObj("sectionIndex") = section.SectionIndex
+
+        If Not String.IsNullOrWhiteSpace(section.HeadingText) Then
+            jObj("headingText") = section.HeadingText
+        End If
+
+        Dim jParagraphs As New JArray()
+        If section.Paragraphs IsNot Nothing Then
+            For Each para In section.Paragraphs
+                Dim jPara As New JObject()
+                jPara("index") = para.Index
+                jPara("text") = If(para.Text, "")
+                If para.IsPlaceholder Then jPara("ph") = True
+                If para.IsEmpty Then jPara("empty") = True
+                jParagraphs.Add(jPara)
+            Next
+        End If
+        jObj("paragraphs") = jParagraphs
+
+        Dim jFields As New JArray()
+        If section.FormFields IsNot Nothing Then
+            For Each ff In section.FormFields
+                Dim jFF As New JObject()
+                jFF("id") = ff.FieldId
+                jFF("type") = ff.FieldType.ToString().ToLowerInvariant()
+                If Not String.IsNullOrWhiteSpace(ff.Name) Then jFF("name") = ff.Name
+                jFF("val") = If(ff.CurrentValue, "")
+                If Not String.IsNullOrWhiteSpace(ff.CurrentOptionValue) Then
+                    jFF("storedVal") = ff.CurrentOptionValue
+                End If
+                If Not ff.IsWritable Then jFF("ro") = True
+                If ff.IsWritable AndAlso String.IsNullOrWhiteSpace(ff.CurrentValue) AndAlso String.IsNullOrWhiteSpace(ff.CurrentOptionValue) Then
+                    jFF("empty") = True
+                End If
+
+                If ff.Options IsNot Nothing AndAlso ff.Options.Count > 0 Then
+                    Dim jOpts As New JArray()
+
+                    If ff.FieldType = FormFieldType.Dropdown OrElse ff.FieldType = FormFieldType.LegacyDropdown Then
+                        For Each opt In ff.Options
+                            Dim jOpt As New JObject()
+                            jOpt("text") = If(opt.DisplayText, "")
+                            jOpt("value") = If(opt.StoredValue, "")
+                            jOpts.Add(jOpt)
+                        Next
+                    Else
+                        For Each opt In ff.Options
+                            jOpts.Add(If(opt.DisplayText, ""))
+                        Next
+                    End If
+
+                    jFF("opts") = jOpts
+                End If
+
+                jFields.Add(jFF)
+            Next
+        End If
+        jObj("fields") = jFields
+
+        Return jObj.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+    Private Function BuildAllBodySectionsJson(bodySections As List(Of BodySectionInfo)) As String
+        Dim jArr As New JArray()
+
+        If bodySections Is Nothing Then Return "[]"
+
+        For Each section In bodySections
+            jArr.Add(JObject.Parse(BodySectionToJson(section)))
+        Next
+
+        Return jArr.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+
+    Private Function BuildAllTablesJson(tables As List(Of TableInfo)) As String
+        Dim jArr As New JArray()
+
+        If tables Is Nothing Then Return "[]"
+
+        For Each tbl In tables
+            jArr.Add(JObject.Parse(TableToJson(tbl)))
+        Next
+
+        Return jArr.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+    Private Function ExtractDocumentBodyContext(xmlDoc As System.Xml.XmlDocument,
+                                                nsMgr As System.Xml.XmlNamespaceManager) As String
+        Dim bodyNode As System.Xml.XmlNode = xmlDoc.SelectSingleNode("//w:body", nsMgr)
+        If bodyNode Is Nothing Then Return ""
+
+        Dim sb As New StringBuilder()
+        Dim tableIndexMap As Dictionary(Of System.Xml.XmlNode, Integer) = GetDocumentOrderTableIndexMap(xmlDoc, nsMgr)
+
+        For Each child As System.Xml.XmlNode In bodyNode.ChildNodes
+            If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+            AppendBodyContextNode(child, nsMgr, sb, tableIndexMap)
+
+            If sb.Length > TableCompleteMaxContextChars * 2 Then Exit For
+        Next
+
+        Return TruncateContextAtLineBoundaries(sb.ToString(), TableCompleteMaxContextChars)
+    End Function
+
+    Private Function ExtractTablesFromXml(xmlDoc As System.Xml.XmlDocument,
+                                          nsMgr As System.Xml.XmlNamespaceManager) As List(Of TableInfo)
         Dim tables As New List(Of TableInfo)()
         Dim tblNodes As System.Xml.XmlNodeList = xmlDoc.SelectNodes("//w:tbl", nsMgr)
         Dim tableIndex As Integer = 0
@@ -492,29 +1418,28 @@ Partial Public Class ThisAddIn
                 .ColumnWidths = New List(Of Double)()
             }
 
-            ' Extract column widths from w:tblGrid/w:gridCol
             Dim gridCols As System.Xml.XmlNodeList = tblNode.SelectNodes("w:tblGrid/w:gridCol", nsMgr)
             Dim rawWidths As New List(Of Double)()
-            Dim totalWidth As Double = 0
+            Dim totalGridWidth As Double = 0
 
             For Each gridCol As System.Xml.XmlNode In gridCols
                 Dim wAttr As System.Xml.XmlNode = gridCol.Attributes("w:w")
                 Dim colWidth As Double = 0
                 If wAttr IsNot Nothing Then Double.TryParse(wAttr.Value, colWidth)
                 rawWidths.Add(colWidth)
-                totalWidth += colWidth
+                totalGridWidth += colWidth
             Next
 
-            If totalWidth > 0 AndAlso rawWidths.Count > 0 Then
+            If totalGridWidth > 0 AndAlso rawWidths.Count > 0 Then
                 For Each w In rawWidths
-                    tblInfo.ColumnWidths.Add(Math.Round(w / totalWidth * 100, 1))
+                    tblInfo.ColumnWidths.Add(Math.Round(w / totalGridWidth * 100.0R, 1))
                 Next
             End If
 
-            ' Get context: text from preceding sibling paragraph(s)
             Dim prevSibling As System.Xml.XmlNode = tblNode.PreviousSibling
             Dim contextParts As New List(Of String)()
             Dim contextCount As Integer = 0
+
             While prevSibling IsNot Nothing AndAlso contextCount < 3
                 If prevSibling.NodeType = System.Xml.XmlNodeType.Element AndAlso prevSibling.LocalName = "p" Then
                     Dim paraText As String = GetParagraphPlainText(prevSibling, nsMgr)
@@ -525,9 +1450,9 @@ Partial Public Class ThisAddIn
                 End If
                 prevSibling = prevSibling.PreviousSibling
             End While
+
             tblInfo.ContextBefore = String.Join(" | ", contextParts)
 
-            ' Extract rows
             Dim trNodes As System.Xml.XmlNodeList = tblNode.SelectNodes("w:tr", nsMgr)
             Dim rowIndex As Integer = 0
 
@@ -539,10 +1464,10 @@ Partial Public Class ThisAddIn
                 }
 
                 Dim isHeaderRow As Boolean = (trNode.SelectSingleNode("w:trPr/w:tblHeader", nsMgr) IsNot Nothing)
-                Dim tcNodes As System.Xml.XmlNodeList = trNode.SelectNodes("w:tc", nsMgr)
+                Dim effectiveTcNodes As List(Of System.Xml.XmlNode) = GetEffectiveRowCellNodes(trNode, nsMgr)
                 Dim colIndex As Integer = 0
 
-                For Each tcNode As System.Xml.XmlNode In tcNodes
+                For Each tcNode As System.Xml.XmlNode In effectiveTcNodes
                     Dim cellInfo As New TableCellInfo() With {
                         .Row = rowIndex,
                         .Col = colIndex,
@@ -552,18 +1477,24 @@ Partial Public Class ThisAddIn
                         .VMerge = "",
                         .IsPlaceholder = False,
                         .WidthPct = 0,
+                        .XmlNode = tcNode,
+                        .IsWritable = True,
+                        .ProtectionReason = "",
                         .FormFields = New List(Of FormFieldInfo)()
                     }
 
-                    ' gridSpan
                     Dim gridSpanNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:tcPr/w:gridSpan/@w:val", nsMgr)
                     If gridSpanNode IsNot Nothing Then
                         Dim span As Integer
-                        If Integer.TryParse(gridSpanNode.Value, span) Then cellInfo.GridSpan = span
+                        If Integer.TryParse(gridSpanNode.Value, span) AndAlso span > 0 Then
+                            cellInfo.GridSpan = span
+                        End If
                     End If
 
-                    ' cell width
-                    If tblInfo.ColumnWidths.Count > 0 Then
+                    Dim overrideWidthPct As Double = 0
+                    If TryGetCellOverrideWidthPct(tcNode, totalGridWidth, nsMgr, overrideWidthPct) Then
+                        cellInfo.WidthPct = overrideWidthPct
+                    ElseIf tblInfo.ColumnWidths.Count > 0 Then
                         Dim widthSum As Double = 0
                         For gi As Integer = colIndex To Math.Min(colIndex + cellInfo.GridSpan - 1, tblInfo.ColumnWidths.Count - 1)
                             widthSum += tblInfo.ColumnWidths(gi)
@@ -571,59 +1502,38 @@ Partial Public Class ThisAddIn
                         cellInfo.WidthPct = widthSum
                     End If
 
-                    ' vMerge
                     Dim vMergeNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:tcPr/w:vMerge", nsMgr)
                     If vMergeNode IsNot Nothing Then
                         Dim vMergeVal As System.Xml.XmlNode = vMergeNode.Attributes("w:val")
                         cellInfo.VMerge = If(vMergeVal IsNot Nothing AndAlso vMergeVal.Value = "restart", "restart", "continue")
                     End If
 
-                    ' ── Extract form fields FIRST so we know which SDT nodes exist ──
+                    Dim cellProtectionReason As String = ""
+                    cellInfo.IsWritable = IsCellWritable(tcNode, nsMgr, cellProtectionReason)
+                    cellInfo.ProtectionReason = cellProtectionReason
+
                     ExtractFormFieldsFromCell(tcNode, cellInfo, nsMgr)
 
-                    ' ── Collect all w:sdt nodes owned by form fields ──
-                    Dim sdtAncestors As New HashSet(Of System.Xml.XmlNode)()
-                    If cellInfo.FormFields IsNot Nothing Then
-                        For Each ff In cellInfo.FormFields
-                            If ff.XmlNode IsNot Nothing AndAlso ff.XmlNode.LocalName = "sdt" Then
-                                sdtAncestors.Add(ff.XmlNode)
-                            End If
-                        Next
-                    End If
-
-                    ' ── Extract text from w:t nodes, EXCLUDING those inside any SDT ──
                     Dim textBuilder As New StringBuilder()
                     Dim allTextNodes As System.Xml.XmlNodeList = tcNode.SelectNodes(".//w:t", nsMgr)
+
                     For Each tNode As System.Xml.XmlNode In allTextNodes
-                        Dim insideSdt As Boolean = False
-                        If sdtAncestors.Count > 0 Then
-                            Dim ancestor As System.Xml.XmlNode = tNode.ParentNode
-                            While ancestor IsNot Nothing AndAlso ancestor IsNot tcNode
-                                If ancestor.LocalName = "sdt" AndAlso sdtAncestors.Contains(ancestor) Then
-                                    insideSdt = True
-                                    Exit While
-                                End If
-                                ancestor = ancestor.ParentNode
-                            End While
-                        End If
-
-                        If Not insideSdt Then
-                            cellInfo.TextNodes.Add(tNode)
-                            textBuilder.Append(tNode.InnerText)
-                        End If
+                        If IsTextNodeInsideSdt(tNode, tcNode) Then Continue For
+                        cellInfo.TextNodes.Add(tNode)
+                        textBuilder.Append(tNode.InnerText)
                     Next
-                    cellInfo.Text = textBuilder.ToString()
 
-                    ' Detect placeholder content
-                    If Not String.IsNullOrWhiteSpace(cellInfo.Text) Then
-                        cellInfo.IsPlaceholder = PlaceholderPattern.IsMatch(cellInfo.Text)
-                    End If
+                    cellInfo.Text = textBuilder.ToString()
+                    cellInfo.IsPlaceholder = IsPlaceholderText(cellInfo.Text)
 
                     rowInfo.Cells.Add(cellInfo)
                     colIndex += cellInfo.GridSpan
                 Next
 
-                If colIndex > tblInfo.ColumnCount Then tblInfo.ColumnCount = colIndex
+                If colIndex > tblInfo.ColumnCount Then
+                    tblInfo.ColumnCount = colIndex
+                End If
+
                 tblInfo.Rows.Add(rowInfo)
                 rowIndex += 1
             Next
@@ -635,173 +1545,264 @@ Partial Public Class ThisAddIn
         Return tables
     End Function
 
-    ''' <summary>
-    ''' Extracts SDT content controls and legacy form fields from a table cell node.
-    ''' For SDT dropdowns/comboBoxes: if the current display text does not match any
-    ''' defined listItem option, the field is treated as unselected (empty).
-    ''' </summary>
+    Private Function GetEffectiveRowCellNodes(trNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As List(Of System.Xml.XmlNode)
+        Dim results As New List(Of System.Xml.XmlNode)()
+
+        If trNode Is Nothing Then Return results
+
+        Dim expectedGridColumns As Integer = GetExpectedRowGridColumnCount(trNode, nsMgr)
+
+        For Each child As System.Xml.XmlNode In trNode.ChildNodes
+            If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+
+            CollectEffectiveRowCellNodesCore(child, nsMgr, results, expectedGridColumns)
+
+            If expectedGridColumns > 0 AndAlso GetAccumulatedGridSpan(results, nsMgr) >= expectedGridColumns Then
+                Exit For
+            End If
+        Next
+
+        Return results
+    End Function
+
+    Private Sub CollectEffectiveRowCellNodes(node As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager, results As List(Of System.Xml.XmlNode))
+        Dim expectedGridColumns As Integer = 0
+
+        If node IsNot Nothing Then
+            Dim rowNode As System.Xml.XmlNode = GetAncestorRowNode(node)
+            If rowNode IsNot Nothing Then
+                expectedGridColumns = GetExpectedRowGridColumnCount(rowNode, nsMgr)
+            End If
+        End If
+
+        CollectEffectiveRowCellNodesCore(node, nsMgr, results, expectedGridColumns)
+    End Sub
+
+    Private Sub CollectEffectiveRowCellNodes(node As System.Xml.XmlNode, results As List(Of System.Xml.XmlNode))
+        If node Is Nothing Then Exit Sub
+        If results Is Nothing Then Exit Sub
+        If node.NodeType <> System.Xml.XmlNodeType.Element Then Exit Sub
+
+        Select Case node.LocalName
+            Case "tc"
+                results.Add(node)
+                Exit Sub
+
+            Case "sdt", "customXml", "smartTag", "ins", "moveTo", "hyperlink", "Choice", "Fallback"
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    CollectEffectiveRowCellNodes(child, results)
+                Next
+
+            Case "AlternateContent"
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    If child.LocalName <> "Choice" AndAlso child.LocalName <> "Fallback" Then Continue For
+                    CollectEffectiveRowCellNodes(child, results)
+                    If results.Count > 0 Then Exit For
+                Next
+
+            Case "del", "moveFrom"
+                Exit Sub
+        End Select
+    End Sub
+
+    Private Sub CollectEffectiveRowCellNodesCore(node As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager, results As List(Of System.Xml.XmlNode), expectedGridColumns As Integer)
+        If node Is Nothing Then Exit Sub
+        If nsMgr Is Nothing Then Exit Sub
+        If results Is Nothing Then Exit Sub
+        If node.NodeType <> System.Xml.XmlNodeType.Element Then Exit Sub
+
+        If expectedGridColumns > 0 AndAlso GetAccumulatedGridSpan(results, nsMgr) >= expectedGridColumns Then
+            Exit Sub
+        End If
+
+        Select Case node.LocalName
+            Case "tc"
+                results.Add(node)
+                Exit Sub
+
+            Case "sdt"
+                Dim sdtContent As System.Xml.XmlNode = Nothing
+
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    If child.LocalName = "sdtContent" Then
+                        sdtContent = child
+                        Exit For
+                    End If
+                Next
+
+                If sdtContent Is Nothing Then Exit Sub
+
+                For Each child As System.Xml.XmlNode In sdtContent.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+
+                    CollectEffectiveRowCellNodesCore(child, nsMgr, results, expectedGridColumns)
+
+                    If expectedGridColumns > 0 AndAlso GetAccumulatedGridSpan(results, nsMgr) >= expectedGridColumns Then
+                        Exit For
+                    End If
+                Next
+
+            Case "customXml", "smartTag", "ins", "moveTo", "hyperlink", "Choice", "Fallback"
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+
+                    CollectEffectiveRowCellNodesCore(child, nsMgr, results, expectedGridColumns)
+
+                    If expectedGridColumns > 0 AndAlso GetAccumulatedGridSpan(results, nsMgr) >= expectedGridColumns Then
+                        Exit For
+                    End If
+                Next
+
+            Case "AlternateContent"
+                Dim branch As System.Xml.XmlNode = Nothing
+
+                For Each child As System.Xml.XmlNode In node.ChildNodes
+                    If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                    If child.LocalName = "Choice" Then
+                        branch = child
+                        Exit For
+                    End If
+                Next
+
+                If branch Is Nothing Then
+                    For Each child As System.Xml.XmlNode In node.ChildNodes
+                        If child.NodeType <> System.Xml.XmlNodeType.Element Then Continue For
+                        If child.LocalName = "Fallback" Then
+                            branch = child
+                            Exit For
+                        End If
+                    Next
+                End If
+
+                If branch IsNot Nothing Then
+                    CollectEffectiveRowCellNodesCore(branch, nsMgr, results, expectedGridColumns)
+                End If
+
+            Case "del", "moveFrom"
+                ' Non-visible tracked-change content. Ignore.
+
+            Case Else
+                ' Ignore unrelated row-level markup.
+        End Select
+    End Sub
+
+    Private Function GetAncestorRowNode(node As System.Xml.XmlNode) As System.Xml.XmlNode
+        Dim current As System.Xml.XmlNode = node
+
+        While current IsNot Nothing
+            If current.LocalName = "tr" Then Return current
+            If current.LocalName = "tbl" OrElse current.LocalName = "body" Then Exit While
+            current = current.ParentNode
+        End While
+
+        Return Nothing
+    End Function
+
+    Private Function GetExpectedRowGridColumnCount(trNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As Integer
+        If trNode Is Nothing Then Return 0
+        If nsMgr Is Nothing Then Return 0
+
+        Dim current As System.Xml.XmlNode = trNode
+
+        While current IsNot Nothing AndAlso current.LocalName <> "tbl"
+            current = current.ParentNode
+        End While
+
+        If current Is Nothing Then Return 0
+
+        Dim gridCols As System.Xml.XmlNodeList = current.SelectNodes("w:tblGrid/w:gridCol", nsMgr)
+        If gridCols Is Nothing Then Return 0
+
+        Return gridCols.Count
+    End Function
+
+    Private Function GetAccumulatedGridSpan(tcNodes As List(Of System.Xml.XmlNode), nsMgr As System.Xml.XmlNamespaceManager) As Integer
+        If tcNodes Is Nothing OrElse tcNodes.Count = 0 Then Return 0
+
+        Dim total As Integer = 0
+
+        For Each tcNode As System.Xml.XmlNode In tcNodes
+            total += GetGridSpanValue(tcNode, nsMgr)
+        Next
+
+        Return total
+    End Function
+
+    Private Function GetGridSpanValue(tcNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As Integer
+        If tcNode Is Nothing Then Return 1
+        If nsMgr Is Nothing Then Return 1
+
+        Dim spanNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:tcPr/w:gridSpan/@w:val", nsMgr)
+        If spanNode Is Nothing Then Return 1
+
+        Dim span As Integer
+        If Integer.TryParse(spanNode.Value, span) AndAlso span > 0 Then
+            Return span
+        End If
+
+        Return 1
+    End Function
+
+
+
+    Private Function GetOwningSdtNodeForCell(tcNode As System.Xml.XmlNode) As System.Xml.XmlNode
+        Dim ancestor As System.Xml.XmlNode = tcNode.ParentNode
+
+        While ancestor IsNot Nothing
+            If ancestor.LocalName = "sdt" Then Return ancestor
+            If ancestor.LocalName = "body" Then Exit While
+            ancestor = ancestor.ParentNode
+        End While
+
+        Return Nothing
+    End Function
+
+    Private Function TryGetLockedSdtReason(node As System.Xml.XmlNode,
+                                           nsMgr As System.Xml.XmlNamespaceManager,
+                                           ByRef reason As String) As Boolean
+        Dim current As System.Xml.XmlNode = node
+
+        While current IsNot Nothing
+            If current.NodeType = System.Xml.XmlNodeType.Element AndAlso current.LocalName = "sdt" Then
+                Dim lockAttr As System.Xml.XmlNode = current.SelectSingleNode("w:sdtPr/w:lock/@w:val", nsMgr)
+                If lockAttr IsNot Nothing Then
+                    Dim lockValue As String = lockAttr.Value.Trim().ToLowerInvariant()
+
+                    If lockValue = "contentlocked" OrElse
+                       lockValue = "sdtcontentlocked" OrElse
+                       lockValue = "sdtlocked" Then
+                        reason = $"SDT content is locked ({lockAttr.Value})."
+                        Return True
+                    End If
+                End If
+            End If
+
+            If current.LocalName = "body" Then Exit While
+            current = current.ParentNode
+        End While
+
+        reason = ""
+        Return False
+    End Function
+
+    Private Function IsCellWritable(tcNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager, ByRef reason As String) As Boolean
+        Return Not TryGetLockedSdtReason(tcNode, nsMgr, reason)
+    End Function
+
+    Private Function IsFormFieldWritable(fieldNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager, ByRef reason As String) As Boolean
+        Return Not TryGetLockedSdtReason(fieldNode, nsMgr, reason)
+    End Function
+
     Private Sub ExtractFormFieldsFromCell(tcNode As System.Xml.XmlNode, cellInfo As TableCellInfo, nsMgr As System.Xml.XmlNamespaceManager)
-        Dim fieldIndex As Integer = 0
+        If cellInfo Is Nothing Then Exit Sub
 
-        ' === SDT content controls (w:sdt) ===
-        Dim sdtNodes As System.Xml.XmlNodeList = tcNode.SelectNodes(".//w:sdt", nsMgr)
-        For Each sdtNode As System.Xml.XmlNode In sdtNodes
-            Dim sdtPr As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr", nsMgr)
-            If sdtPr Is Nothing Then Continue For
+        Dim protectionReason As String = If(cellInfo.ProtectionReason, "")
+        Dim writable As Boolean = cellInfo.IsWritable
 
-            Dim ff As New FormFieldInfo() With {
-                .FieldId = $"f{fieldIndex}",
-                .XmlNode = sdtNode,
-                .Options = New List(Of String)(),
-                .Name = "",
-                .CurrentValue = ""
-            }
-
-            ' Get tag or alias as name
-            Dim tagNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:tag/@w:val", nsMgr)
-            Dim aliasNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:alias/@w:val", nsMgr)
-            ff.Name = If(tagNode?.Value, If(aliasNode?.Value, ""))
-
-            ' Detect whether this SDT is still showing its placeholder text
-            Dim showingPlcHdr As Boolean = (sdtPr.SelectSingleNode("w:showingPlcHdr", nsMgr) IsNot Nothing)
-
-            ' Determine type
-            Dim dropDownNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:dropDownList", nsMgr)
-            Dim comboBoxNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:comboBox", nsMgr)
-            Dim checkboxNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w14:checkbox", nsMgr)
-            Dim textNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:text", nsMgr)
-            Dim dateNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:date", nsMgr)
-
-            If dropDownNode IsNot Nothing OrElse comboBoxNode IsNot Nothing Then
-                ' --- Dropdown / ComboBox ---
-                ff.FieldType = FormFieldType.Dropdown
-                Dim listParent As System.Xml.XmlNode = If(dropDownNode, comboBoxNode)
-
-                ' Extract options
-                Dim listItems As System.Xml.XmlNodeList = listParent.SelectNodes("w:listItem", nsMgr)
-                For Each li As System.Xml.XmlNode In listItems
-                    Dim displayVal As System.Xml.XmlNode = li.Attributes("w:displayText")
-                    Dim valueVal As System.Xml.XmlNode = li.Attributes("w:value")
-                    Dim optText As String = If(displayVal?.Value, If(valueVal?.Value, ""))
-                    If Not String.IsNullOrEmpty(optText) Then ff.Options.Add(optText)
-                Next
-
-                ' Current value = text inside w:sdtContent
-                Dim rawValue As String = GetSdtContentText(sdtNode, nsMgr)
-
-                ' The only reliable test: if the display text matches one of the
-                ' defined options, it was explicitly selected. Everything else
-                ' (locale-specific placeholder, showingPlcHdr flag, or any other
-                ' text that isn't an option) means "not yet selected".
-                If showingPlcHdr Then
-                    ff.CurrentValue = ""
-                ElseIf ff.Options.Count > 0 AndAlso
-                       ff.Options.Any(Function(o) o.Equals(rawValue, StringComparison.OrdinalIgnoreCase)) Then
-                    ff.CurrentValue = rawValue
-                Else
-                    ' Display text doesn't match any option → unselected
-                    ff.CurrentValue = ""
-                End If
-
-            ElseIf checkboxNode IsNot Nothing Then
-                ' --- Checkbox ---
-                ff.FieldType = FormFieldType.Checkbox
-                ff.Options.Add("true")
-                ff.Options.Add("false")
-
-                Dim checkedNode As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:checked/@w14:val", nsMgr)
-                If checkedNode IsNot Nothing Then
-                    ff.CurrentValue = If(checkedNode.Value = "1" OrElse checkedNode.Value.ToLowerInvariant() = "true", "true", "false")
-                Else
-                    ff.CurrentValue = "false"
-                End If
-
-            ElseIf textNode IsNot Nothing OrElse dateNode IsNot Nothing Then
-                ' --- Plain text input or date picker ---
-                ff.FieldType = FormFieldType.TextInput
-                Dim rawValue As String = GetSdtContentText(sdtNode, nsMgr)
-                If showingPlcHdr Then
-                    ff.CurrentValue = ""
-                Else
-                    ff.CurrentValue = rawValue
-                End If
-
-            Else
-                ' --- Rich-text or untyped content control ---
-                ff.FieldType = FormFieldType.TextInput
-                Dim rawValue As String = GetSdtContentText(sdtNode, nsMgr)
-                If showingPlcHdr Then
-                    ff.CurrentValue = ""
-                Else
-                    ff.CurrentValue = rawValue
-                End If
-            End If
-
-            cellInfo.FormFields.Add(ff)
-            fieldIndex += 1
-        Next
-
-        ' === Legacy form fields (w:ffData inside w:fldChar) ===
-        Dim fldCharNodes As System.Xml.XmlNodeList = tcNode.SelectNodes(".//w:r[w:fldChar[@w:fldCharType='begin']]", nsMgr)
-        For Each fldRunNode As System.Xml.XmlNode In fldCharNodes
-            Dim fldChar As System.Xml.XmlNode = fldRunNode.SelectSingleNode("w:fldChar", nsMgr)
-            If fldChar Is Nothing Then Continue For
-
-            Dim ffData As System.Xml.XmlNode = fldChar.SelectSingleNode("w:ffData", nsMgr)
-            If ffData Is Nothing Then Continue For
-
-            Dim ff As New FormFieldInfo() With {
-                .FieldId = $"f{fieldIndex}",
-                .XmlNode = fldChar,
-                .Options = New List(Of String)(),
-                .CurrentValue = ""
-            }
-
-            ' Get field name
-            Dim nameNode As System.Xml.XmlNode = ffData.SelectSingleNode("w:name/@w:val", nsMgr)
-            ff.Name = If(nameNode?.Value, "")
-
-            ' Check for legacy dropdown (w:ddList)
-            Dim ddList As System.Xml.XmlNode = ffData.SelectSingleNode("w:ddList", nsMgr)
-            If ddList IsNot Nothing Then
-                ff.FieldType = FormFieldType.LegacyDropdown
-
-                Dim listEntries As System.Xml.XmlNodeList = ddList.SelectNodes("w:listEntry/@w:val", nsMgr)
-                For Each entry As System.Xml.XmlNode In listEntries
-                    ff.Options.Add(entry.Value)
-                Next
-
-                Dim resultNode As System.Xml.XmlNode = ddList.SelectSingleNode("w:result/@w:val", nsMgr)
-                Dim selectedIdx As Integer = 0
-                If resultNode IsNot Nothing Then Integer.TryParse(resultNode.Value, selectedIdx)
-                If selectedIdx >= 0 AndAlso selectedIdx < ff.Options.Count Then
-                    ff.CurrentValue = ff.Options(selectedIdx)
-                End If
-
-                cellInfo.FormFields.Add(ff)
-                fieldIndex += 1
-                Continue For
-            End If
-
-            ' Check for legacy checkbox (w:checkBox)
-            Dim checkBox As System.Xml.XmlNode = ffData.SelectSingleNode("w:checkBox", nsMgr)
-            If checkBox IsNot Nothing Then
-                ff.FieldType = FormFieldType.LegacyCheckbox
-                ff.Options.Add("true")
-                ff.Options.Add("false")
-
-                Dim checkedNode As System.Xml.XmlNode = checkBox.SelectSingleNode("w:checked/@w:val", nsMgr)
-                If checkedNode IsNot Nothing Then
-                    ff.CurrentValue = If(checkedNode.Value = "1" OrElse checkedNode.Value.ToLowerInvariant() = "true", "true", "false")
-                Else
-                    Dim defaultNode As System.Xml.XmlNode = checkBox.SelectSingleNode("w:default/@w:val", nsMgr)
-                    ff.CurrentValue = If(defaultNode IsNot Nothing AndAlso (defaultNode.Value = "1" OrElse defaultNode.Value.ToLowerInvariant() = "true"), "true", "false")
-                End If
-
-                cellInfo.FormFields.Add(ff)
-                fieldIndex += 1
-            End If
-        Next
+        cellInfo.FormFields = ExtractFormFieldsFromNode(tcNode, nsMgr, writable, protectionReason)
     End Sub
 
     ''' <summary>
@@ -817,7 +1818,6 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
-
     Private Function GetParagraphPlainText(paraNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As String
         Dim sb As New StringBuilder()
         Dim textNodes As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:t", nsMgr)
@@ -825,6 +1825,47 @@ Partial Public Class ThisAddIn
             sb.Append(tNode.InnerText)
         Next
         Return sb.ToString()
+    End Function
+
+    Private Sub AddFormFieldOption(options As List(Of FormFieldOptionInfo), displayText As String, storedValue As String)
+        Dim normalizedDisplayText As String = If(displayText, "").Trim()
+        Dim normalizedStoredValue As String = If(storedValue, "").Trim()
+
+        If String.IsNullOrWhiteSpace(normalizedDisplayText) Then normalizedDisplayText = normalizedStoredValue
+        If String.IsNullOrWhiteSpace(normalizedStoredValue) Then normalizedStoredValue = normalizedDisplayText
+        If String.IsNullOrWhiteSpace(normalizedDisplayText) AndAlso String.IsNullOrWhiteSpace(normalizedStoredValue) Then Exit Sub
+
+        If options.Any(Function(o) o.DisplayText.Equals(normalizedDisplayText, StringComparison.OrdinalIgnoreCase) AndAlso
+                                 o.StoredValue.Equals(normalizedStoredValue, StringComparison.OrdinalIgnoreCase)) Then
+            Exit Sub
+        End If
+
+        options.Add(New FormFieldOptionInfo() With {
+            .DisplayText = normalizedDisplayText,
+            .StoredValue = normalizedStoredValue
+        })
+    End Sub
+
+    Private Function ResolveCurrentDropdownOption(ff As FormFieldInfo, rawDisplayValue As String, rawStoredValue As String) As FormFieldOptionInfo
+        If ff Is Nothing OrElse ff.Options Is Nothing OrElse ff.Options.Count = 0 Then Return Nothing
+
+        If Not String.IsNullOrWhiteSpace(rawStoredValue) Then
+            Dim optionByStoredValue As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.StoredValue.Equals(rawStoredValue, StringComparison.OrdinalIgnoreCase))
+            If optionByStoredValue IsNot Nothing Then Return optionByStoredValue
+        End If
+
+        If Not String.IsNullOrWhiteSpace(rawDisplayValue) Then
+            Dim optionByDisplayText As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.DisplayText.Equals(rawDisplayValue, StringComparison.OrdinalIgnoreCase))
+            If optionByDisplayText IsNot Nothing Then Return optionByDisplayText
+
+            Dim optionByDisplayedStoredValue As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.StoredValue.Equals(rawDisplayValue, StringComparison.OrdinalIgnoreCase))
+            If optionByDisplayedStoredValue IsNot Nothing Then Return optionByDisplayedStoredValue
+        End If
+
+        Return Nothing
     End Function
 
 #End Region
@@ -864,8 +1905,8 @@ Partial Public Class ThisAddIn
                 If cell.IsHeader Then jCell("hdr") = True
                 If cell.IsPlaceholder Then jCell("ph") = True
                 If cell.WidthPct > 0 Then jCell("w") = cell.WidthPct
+                If Not cell.IsWritable Then jCell("ro") = True
 
-                ' Serialize form fields
                 If cell.FormFields IsNot Nothing AndAlso cell.FormFields.Count > 0 Then
                     Dim jFields As New JArray()
                     For Each ff In cell.FormFields
@@ -874,14 +1915,33 @@ Partial Public Class ThisAddIn
                         jFF("type") = ff.FieldType.ToString().ToLowerInvariant()
                         If Not String.IsNullOrWhiteSpace(ff.Name) Then jFF("name") = ff.Name
                         jFF("val") = If(ff.CurrentValue, "")
-                        If String.IsNullOrWhiteSpace(ff.CurrentValue) Then jFF("empty") = True
+                        If Not String.IsNullOrWhiteSpace(ff.CurrentOptionValue) Then
+                            jFF("storedVal") = ff.CurrentOptionValue
+                        End If
+                        If Not ff.IsWritable Then jFF("ro") = True
+                        If ff.IsWritable AndAlso String.IsNullOrWhiteSpace(ff.CurrentValue) AndAlso String.IsNullOrWhiteSpace(ff.CurrentOptionValue) Then
+                            jFF("empty") = True
+                        End If
+
                         If ff.Options IsNot Nothing AndAlso ff.Options.Count > 0 Then
                             Dim jOpts As New JArray()
-                            For Each opt In ff.Options
-                                jOpts.Add(opt)
-                            Next
+
+                            If ff.FieldType = FormFieldType.Dropdown OrElse ff.FieldType = FormFieldType.LegacyDropdown Then
+                                For Each opt In ff.Options
+                                    Dim jOpt As New JObject()
+                                    jOpt("text") = If(opt.DisplayText, "")
+                                    jOpt("value") = If(opt.StoredValue, "")
+                                    jOpts.Add(jOpt)
+                                Next
+                            Else
+                                For Each opt In ff.Options
+                                    jOpts.Add(If(opt.DisplayText, ""))
+                                Next
+                            End If
+
                             jFF("opts") = jOpts
                         End If
+
                         jFields.Add(jFF)
                     Next
                     jCell("fields") = jFields
@@ -902,110 +1962,454 @@ Partial Public Class ThisAddIn
 
 #Region "LLM Batching"
 
-    Private Async Function ProcessTableBatches(tables As List(Of TableInfo), userInstructions As String, documentContext As String) As Task(Of List(Of TableUpdateResponse))
-        Dim allUpdates As New List(Of TableUpdateResponse)()
+    Private Function BuildTableBlocks(tables As List(Of TableInfo)) As List(Of List(Of TableInfo))
+        Const maxBlockChars As Integer = 16000
 
-        Dim systemPrompt As String =
-            "You are a professional document assistant that completes and fills in tables. " &
+        Dim blocks As New List(Of List(Of TableInfo))()
+        If tables Is Nothing OrElse tables.Count = 0 Then Return blocks
+
+        Dim currentBlock As New List(Of TableInfo)()
+        Dim currentLength As Integer = 2
+
+        For Each tbl In tables
+            Dim json As String = TableToJson(tbl)
+            Dim additionalLength As Integer = If(currentBlock.Count = 0, 0, 1) + json.Length
+
+            If currentBlock.Count > 0 AndAlso currentLength + additionalLength > maxBlockChars Then
+                blocks.Add(currentBlock)
+                currentBlock = New List(Of TableInfo)()
+                currentLength = 2
+            End If
+
+            currentBlock.Add(tbl)
+            currentLength += additionalLength
+        Next
+
+        If currentBlock.Count > 0 Then
+            blocks.Add(currentBlock)
+        End If
+
+        Return blocks
+    End Function
+
+    Private Function BuildBodySectionBlocks(bodySections As List(Of BodySectionInfo)) As List(Of List(Of BodySectionInfo))
+        Const maxBlockChars As Integer = 14000
+
+        Dim blocks As New List(Of List(Of BodySectionInfo))()
+        If bodySections Is Nothing OrElse bodySections.Count = 0 Then Return blocks
+
+        Dim currentBlock As New List(Of BodySectionInfo)()
+        Dim currentLength As Integer = 2
+
+        For Each section In bodySections
+            Dim json As String = BodySectionToJson(section)
+            Dim additionalLength As Integer = If(currentBlock.Count = 0, 0, 1) + json.Length
+
+            If currentBlock.Count > 0 AndAlso currentLength + additionalLength > maxBlockChars Then
+                blocks.Add(currentBlock)
+                currentBlock = New List(Of BodySectionInfo)()
+                currentLength = 2
+            End If
+
+            currentBlock.Add(section)
+            currentLength += additionalLength
+        Next
+
+        If currentBlock.Count > 0 Then
+            blocks.Add(currentBlock)
+        End If
+
+        Return blocks
+    End Function
+
+    Private Async Function BuildConsistencySummaryJson(tables As List(Of TableInfo),
+                                                       bodySections As List(Of BodySectionInfo),
+                                                       userInstructions As String,
+                                                       documentContext As String,
+                                                       Optional useSecondAPI As Boolean = False) As Task(Of String)
+        Dim summaryPromptBuilder As New StringBuilder()
+        summaryPromptBuilder.AppendLine($"USER INSTRUCTIONS: {userInstructions}")
+        summaryPromptBuilder.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(documentContext) Then
+            summaryPromptBuilder.AppendLine("[DOCUMENT CONTEXT]")
+            summaryPromptBuilder.AppendLine(documentContext)
+            summaryPromptBuilder.AppendLine("[/DOCUMENT CONTEXT]")
+            summaryPromptBuilder.AppendLine()
+        End If
+
+        summaryPromptBuilder.AppendLine("[ALL TABLES]")
+        summaryPromptBuilder.AppendLine(BuildAllTablesJson(tables))
+        summaryPromptBuilder.AppendLine("[/ALL TABLES]")
+        summaryPromptBuilder.AppendLine()
+
+        summaryPromptBuilder.AppendLine("[BODY SECTIONS]")
+        summaryPromptBuilder.AppendLine(BuildAllBodySectionsJson(bodySections))
+        summaryPromptBuilder.AppendLine("[/BODY SECTIONS]")
+
+        Dim summaryResponse As String = Await SharedMethods.LLM(
+            _context, BuildConsistencySummarySystemPrompt(), summaryPromptBuilder.ToString(),
+            "", "", 0, useSecondAPI, True)
+
+        Return NormalizeConsistencySummaryJson(summaryResponse)
+    End Function
+
+    Private Async Function ProcessCompletionBatches(tables As List(Of TableInfo),
+                                                    bodySections As List(Of BodySectionInfo),
+                                                    userInstructions As String,
+                                                    documentContext As String,
+                                                    Optional useSecondAPI As Boolean = False) As Task(Of CompletionBatchesResult)
+        Dim tableBlocks As List(Of List(Of TableInfo)) = BuildTableBlocks(tables)
+        Dim bodyBlocks As List(Of List(Of BodySectionInfo)) = BuildBodySectionBlocks(bodySections)
+
+        Dim totalWorkBlocks As Integer = tableBlocks.Count + bodyBlocks.Count
+        ProgressBarModule.GlobalProgressMax = Math.Max(1, totalWorkBlocks + 1)
+        ProgressBarModule.GlobalProgressValue = 0
+        ProgressBarModule.GlobalProgressLabel = "Building form consistency summary"
+
+        If ProgressBarModule.CancelOperation Then Return Nothing
+
+        Dim consistencySummaryJson As String =
+            Await BuildConsistencySummaryJson(tables, bodySections, userInstructions, documentContext, useSecondAPI)
+
+        ProgressBarModule.GlobalProgressValue = 1
+
+        Dim result As New CompletionBatchesResult() With {
+            .TableUpdates = New List(Of TableUpdateResponse)(),
+            .BodySectionUpdates = New List(Of BodySectionUpdateResponse)()
+        }
+
+        Dim processedBlocks As Integer = 0
+
+        For i As Integer = 0 To tableBlocks.Count - 1
+            If ProgressBarModule.CancelOperation Then Return Nothing
+
+            ProgressBarModule.GlobalProgressLabel = $"Processing block {processedBlocks + 1} of {totalWorkBlocks} (tables)"
+            Dim blockUpdates As List(Of TableUpdateResponse) =
+                Await ProcessSingleTableBlock(tableBlocks(i), userInstructions, documentContext, consistencySummaryJson, useSecondAPI)
+
+            If blockUpdates Is Nothing Then Return Nothing
+            result.TableUpdates.AddRange(blockUpdates)
+
+            processedBlocks += 1
+            ProgressBarModule.GlobalProgressValue = 1 + processedBlocks
+        Next
+
+        For i As Integer = 0 To bodyBlocks.Count - 1
+            If ProgressBarModule.CancelOperation Then Return Nothing
+
+            ProgressBarModule.GlobalProgressLabel = $"Processing block {processedBlocks + 1} of {totalWorkBlocks} (body)"
+            Dim blockUpdates As List(Of BodySectionUpdateResponse) =
+                Await ProcessSingleBodyBlock(bodyBlocks(i), userInstructions, documentContext, consistencySummaryJson, useSecondAPI)
+
+            If blockUpdates Is Nothing Then Return Nothing
+            result.BodySectionUpdates.AddRange(blockUpdates)
+
+            processedBlocks += 1
+            ProgressBarModule.GlobalProgressValue = 1 + processedBlocks
+        Next
+
+        Return result
+    End Function
+
+    Private Async Function ProcessSingleTableBlock(tableBlock As List(Of TableInfo),
+                                                   userInstructions As String,
+                                                   documentContext As String,
+                                                   consistencySummaryJson As String,
+                                                   Optional useSecondAPI As Boolean = False) As Task(Of List(Of TableUpdateResponse))
+        Dim promptBuilder As New StringBuilder()
+        promptBuilder.AppendLine($"USER INSTRUCTIONS: {userInstructions}")
+        promptBuilder.AppendLine()
+
+        promptBuilder.AppendLine("[CONSISTENCY SUMMARY]")
+        promptBuilder.AppendLine(consistencySummaryJson)
+        promptBuilder.AppendLine("[/CONSISTENCY SUMMARY]")
+        promptBuilder.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(documentContext) Then
+            promptBuilder.AppendLine("[DOCUMENT CONTEXT]")
+            promptBuilder.AppendLine(documentContext)
+            promptBuilder.AppendLine("[/DOCUMENT CONTEXT]")
+            promptBuilder.AppendLine()
+        End If
+
+        promptBuilder.AppendLine("[ALL TABLES]")
+        promptBuilder.AppendLine(BuildAllTablesJson(tableBlock))
+        promptBuilder.AppendLine("[/ALL TABLES]")
+
+        Dim response As String = Await SharedMethods.LLM(
+            _context, BuildTableCompletionSystemPrompt(), promptBuilder.ToString(),
+            "", "", 0, useSecondAPI, True)
+
+        If String.IsNullOrWhiteSpace(response) Then
+            ShowCustomMessageBox("LLM returned empty response for a table block.")
+            Return Nothing
+        End If
+
+        Return ParseTableCompletionResponse(response)
+    End Function
+
+    Private Async Function ProcessSingleBodyBlock(bodyBlock As List(Of BodySectionInfo),
+                                                  userInstructions As String,
+                                                  documentContext As String,
+                                                  consistencySummaryJson As String,
+                                                  Optional useSecondAPI As Boolean = False) As Task(Of List(Of BodySectionUpdateResponse))
+        Dim promptBuilder As New StringBuilder()
+        promptBuilder.AppendLine($"USER INSTRUCTIONS: {userInstructions}")
+        promptBuilder.AppendLine()
+
+        promptBuilder.AppendLine("[CONSISTENCY SUMMARY]")
+        promptBuilder.AppendLine(consistencySummaryJson)
+        promptBuilder.AppendLine("[/CONSISTENCY SUMMARY]")
+        promptBuilder.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(documentContext) Then
+            promptBuilder.AppendLine("[DOCUMENT CONTEXT]")
+            promptBuilder.AppendLine(documentContext)
+            promptBuilder.AppendLine("[/DOCUMENT CONTEXT]")
+            promptBuilder.AppendLine()
+        End If
+
+        promptBuilder.AppendLine("[BODY SECTIONS]")
+        promptBuilder.AppendLine(BuildAllBodySectionsJson(bodyBlock))
+        promptBuilder.AppendLine("[/BODY SECTIONS]")
+
+        Dim response As String = Await SharedMethods.LLM(
+            _context, BuildBodyCompletionSystemPrompt(), promptBuilder.ToString(),
+            "", "", 0, useSecondAPI, True)
+
+        If String.IsNullOrWhiteSpace(response) Then
+            ShowCustomMessageBox("LLM returned empty response for a body block.")
+            Return Nothing
+        End If
+
+        Return ParseBodyCompletionResponse(response)
+    End Function
+
+    Private Function BuildBodyCompletionSystemPrompt() As String
+        Return "You are a professional document assistant that completes body-level placeholders and form fields in a Word document." & vbCrLf &
             "You will receive:" & vbCrLf &
+            "- CONSISTENCY SUMMARY" & vbCrLf &
+            "- DOCUMENT CONTEXT" & vbCrLf &
+            "- BODY SECTIONS: a JSON array of body sections that contain empty or placeholder paragraphs and/or empty form fields." & vbCrLf & vbCrLf &
+            "Each body section has:" & vbCrLf &
+            "- ""sectionIndex"": unique identifier" & vbCrLf &
+            "- ""headingText"": nearby context heading" & vbCrLf &
+            "- ""paragraphs"": array with:" & vbCrLf &
+            "  - ""index"": paragraph identifier within the section" & vbCrLf &
+            "  - ""text"": current plain visible text" & vbCrLf &
+            "  - ""ph"": placeholder flag" & vbCrLf &
+            "  - ""empty"": empty flag" & vbCrLf &
+            "- ""fields"": array with the same field schema used for tables" & vbCrLf & vbCrLf &
+            "Rules:" & vbCrLf &
+            "- Only return paragraph updates you want to change." & vbCrLf &
+            "- Only return field updates you want to change." & vbCrLf &
+            "- Do not modify meaningful existing non-placeholder text unless clearly required." & vbCrLf &
+            "- For dropdowns/legacydropdowns prefer optionValue, then optionText, then optionIndex." & vbCrLf &
+            "- For checkboxes use val=true/false." & vbCrLf &
+            "- For text inputs use val=text." & vbCrLf & vbCrLf &
+            "Return ONLY a JSON array:" & vbCrLf &
+            "[" & vbCrLf &
+            "  {" & vbCrLf &
+            "    ""sectionIndex"": <int>," & vbCrLf &
+            "    ""paragraphUpdates"": [{""index"": <int>, ""text"": ""new text""}]," & vbCrLf &
+            "    ""fieldUpdates"": [{""id"": ""f0"", ""val"": ""text"", ""optionText"": ""display text"", ""optionValue"": ""stored value"", ""optionIndex"": <int>}]" & vbCrLf &
+            "  }" & vbCrLf &
+            "]"
+    End Function
+
+    Private Function ParseBodyCompletionResponse(response As String) As List(Of BodySectionUpdateResponse)
+        Dim results As New List(Of BodySectionUpdateResponse)()
+
+        Try
+            Dim payload As String = ExtractJsonArrayPayload(response)
+            If String.IsNullOrWhiteSpace(payload) Then
+                Throw New InvalidOperationException("No JSON array payload found.")
+            End If
+
+            Dim parsed As JArray = JArray.Parse(payload)
+
+            For Each item As JToken In parsed
+                If item.Type <> JTokenType.Object Then Continue For
+                Dim jObj As JObject = CType(item, JObject)
+
+                If jObj("sectionIndex") Is Nothing Then Continue For
+
+                Dim update As New BodySectionUpdateResponse() With {
+                    .SectionIndex = CInt(jObj("sectionIndex")),
+                    .ParagraphUpdates = New List(Of BodyParagraphUpdate)(),
+                    .FieldUpdates = New List(Of BodyFieldUpdate)()
+                }
+
+                Dim paragraphUpdatesToken As JToken = jObj("paragraphUpdates")
+                If paragraphUpdatesToken IsNot Nothing AndAlso paragraphUpdatesToken.Type = JTokenType.Array Then
+                    For Each paraItem As JToken In CType(paragraphUpdatesToken, JArray)
+                        If paraItem.Type <> JTokenType.Object Then Continue For
+                        Dim paraObj As JObject = CType(paraItem, JObject)
+
+                        If paraObj("index") Is Nothing Then Continue For
+
+                        update.ParagraphUpdates.Add(New BodyParagraphUpdate() With {
+                            .Index = CInt(paraObj("index")),
+                            .Text = If(paraObj("text")?.ToString(), "")
+                        })
+                    Next
+                End If
+
+                Dim fieldUpdatesToken As JToken = jObj("fieldUpdates")
+                If fieldUpdatesToken IsNot Nothing AndAlso fieldUpdatesToken.Type = JTokenType.Array Then
+                    For Each fuItem As JToken In CType(fieldUpdatesToken, JArray)
+                        If fuItem.Type <> JTokenType.Object Then Continue For
+                        Dim fuObj As JObject = CType(fuItem, JObject)
+
+                        If fuObj("id") Is Nothing Then Continue For
+
+                        Dim fu As New BodyFieldUpdate() With {
+                            .FieldId = CStr(fuObj("id")),
+                            .Value = If(fuObj("val")?.ToString(), Nothing),
+                            .OptionText = If(fuObj("optionText")?.ToString(), Nothing),
+                            .OptionValue = If(fuObj("optionValue")?.ToString(), Nothing),
+                            .OptionIndex = -1
+                        }
+
+                        If fuObj("optionIndex") IsNot Nothing Then
+                            fu.OptionIndex = CInt(fuObj("optionIndex"))
+                        End If
+
+                        update.FieldUpdates.Add(fu)
+                    Next
+                End If
+
+                results.Add(update)
+            Next
+
+        Catch ex As Exception
+            ShowCustomMessageBox($"Failed to parse body completion response as JSON: {ex.Message}")
+            Return Nothing
+        End Try
+
+        Return results
+    End Function
+
+    Private Function BuildConsistencySummarySystemPrompt() As String
+        Return "You are a professional document analyst. " &
+            "Your task is to read the full document context and all extracted tables, then produce a compact JSON summary " &
+            "that captures the consistency rules the table-completion model should follow across the entire form." & vbCrLf & vbCrLf &
+            "Return ONLY a single JSON object, no markdown fences, no commentary." & vbCrLf & vbCrLf &
+            "The JSON object should be compact and may contain these properties:" & vbCrLf &
+            "- ""documentType"": short description of the form/document type" & vbCrLf &
+            "- ""theme"": short description of the project or business topic" & vbCrLf &
+            "- ""terminology"": array of canonical terms that should be used consistently" & vbCrLf &
+            "- ""entities"": array of important names/roles/concepts inferred from the form" & vbCrLf &
+            "- ""styleRules"": array of rules about tone, wording, brevity, and formatting conventions" & vbCrLf &
+            "- ""crossTableRules"": array of consistency rules that should apply across multiple tables" & vbCrLf &
+            "- ""dropdownConventions"": array of preferred selection patterns for dropdowns when the form implies a consistent choice pattern" & vbCrLf &
+            "- ""dateConventions"": array of rules for date style or scheduling consistency" & vbCrLf &
+            "- ""numericConventions"": array of rules for numbers, priorities, scales, or scoring" & vbCrLf &
+            "- ""warnings"": array of cautions about ambiguity or places where consistency matters" & vbCrLf & vbCrLf &
+            "Keep the summary concise, practical, and reusable by a second model pass. " &
+            "Do not include raw table data. Do not repeat the full input."
+    End Function
+
+    Private Function BuildTableCompletionSystemPrompt() As String
+        Return "You are a professional document assistant that completes and fills in tables across an entire form or document. " &
+            "You will receive:" & vbCrLf &
+            "- CONSISTENCY SUMMARY: a compact JSON summary of rules and conventions inferred from the full form." & vbCrLf &
             "- DOCUMENT CONTEXT: the full document body text with [Table N] markers showing where each table sits." & vbCrLf &
-            "- TABLE DATA: one or more tables as JSON." & vbCrLf & vbCrLf &
+            "- ALL TABLES: a JSON array containing every extracted table in the document." & vbCrLf & vbCrLf &
+            "GLOBAL CONSISTENCY REQUIREMENT:" & vbCrLf &
+            "- You must consider ALL TABLES together before deciding any updates." & vbCrLf &
+            "- You must follow the CONSISTENCY SUMMARY unless the actual table content or document context clearly requires otherwise." & vbCrLf &
+            "- Keep terminology, names, classifications, priorities, dates, assumptions, and dropdown selections consistent across the entire form." & vbCrLf &
+            "- If one table implies a project type, governance style, risk posture, or naming convention, apply that same logic consistently in the other tables unless the document clearly requires otherwise." & vbCrLf & vbCrLf &
             "JSON SCHEMA for each table:" & vbCrLf &
             "- ""tableIndex"": which table in the document (matches [Table N] in context)" & vbCrLf &
             "- ""colWidthsPct"": array of relative column widths as percentages — narrow columns (< 15%) need short text" & vbCrLf &
             "- ""contextBefore"": paragraphs immediately before the table" & vbCrLf &
-            "- Each cell has: ""c"" (column index), ""t"" (text), optionally ""span"" (column span), " &
-            """vm"" (vertical merge), ""hdr"" (header), ""ph"" (placeholder to replace), ""w"" (cell width %)" & vbCrLf &
+            "- Each cell has: ""c"" (column index), ""t"" (text), optionally ""span"" (column span), ""vm"" (vertical merge), ""hdr"" (header), ""ph"" (placeholder), ""w"" (cell width %), ""ro"" (read-only)" & vbCrLf &
             "- Cells may contain ""fields"": an array of form fields:" & vbCrLf &
             "  - ""id"": field identifier for your response (e.g. ""f0"")" & vbCrLf &
             "  - ""type"": ""dropdown"", ""checkbox"", ""textinput"", ""legacydropdown"", or ""legacycheckbox""" & vbCrLf &
             "  - ""name"": field label/tag (may be empty)" & vbCrLf &
-            "  - ""val"": current value" & vbCrLf &
-            "  - ""opts"": available options (for dropdowns: selectable items; for checkboxes: [""true"",""false""])" & vbCrLf & vbCrLf &
+            "  - ""val"": current display value" & vbCrLf &
+            "  - ""storedVal"": current stored/internal value for dropdown-like fields when available" & vbCrLf &
+            "  - ""opts"": exact selectable options for dropdowns" & vbCrLf &
+            "  - ""empty"": true means the field has no current value" & vbCrLf &
+            "  - ""ro"": true means the field is protected/read-only and must not be changed" & vbCrLf & vbCrLf &
+            "ROW INDEX RULE:" & vbCrLf &
+            "- Row indices in ""updates"" and ""fieldUpdates"" always refer to the ORIGINAL extracted rows shown in the input JSON for that table, before any ""newRows"" are inserted." & vbCrLf &
+            "- ""insertAfterRow"" also refers to the ORIGINAL extracted row index." & vbCrLf & vbCrLf &
             "YOUR TASK:" & vbCrLf &
-            "1. Use the DOCUMENT CONTEXT to understand the document's purpose, terminology, and style." & vbCrLf &
-            "2. Fill in empty cells (""t"": """") with appropriate content based on column headings, row labels, and document context." & vbCrLf &
-            "3. Replace ALL placeholder cells (""ph"": true) with real content." & vbCrLf &
-            "4. For form fields: select the most appropriate dropdown option or set the correct checkbox state based on context." & vbCrLf &
-            "   - For dropdowns: set ""val"" to one of the strings from ""opts""." & vbCrLf &
-            "   - For checkboxes: set ""val"" to ""true"" or ""false""." & vbCrLf &
-            "   - For text inputs: set ""val"" to the appropriate text." & vbCrLf &
-            "   - Fields with ""empty"":true MUST be filled — they are blank content controls waiting for a value." & vbCrLf &
-            "   - IMPORTANT: Every field that has ""empty"":true or whose ""val"" is a placeholder like ""Choose an item."" or ""Click or tap here..."" MUST appear in your ""fieldUpdates"" response." & vbCrLf & "5. Keep text length proportional to column width (""w"" field)." & vbCrLf &
-            "6. If the table appears incomplete, add new rows." & vbCrLf &
-            "7. Do NOT modify cells that already have meaningful non-placeholder content unless the user specifically asks." & vbCrLf &
-            "8. Maintain consistent terminology, tone, and style with the rest of the document." & vbCrLf & vbCrLf &
+            "1. Review the complete form and infer a single coherent interpretation before producing updates." & vbCrLf &
+            "2. Use the CONSISTENCY SUMMARY to keep decisions aligned across all tables." & vbCrLf &
+            "3. Use the DOCUMENT CONTEXT to understand the document's purpose, terminology, and style." & vbCrLf &
+            "4. Fill in empty cells (""t"": """") with appropriate content based on headings, row labels, and the full-form context." & vbCrLf &
+            "5. Replace ALL placeholder cells (""ph"": true) with real content." & vbCrLf &
+            "6. For dropdowns and legacydropdowns, select one exact option from ""opts""." & vbCrLf &
+            "7. Prefer returning ""optionValue""; otherwise return exact ""optionText""; use ""val"" only for text inputs and checkboxes; use ""optionIndex"" only as a last resort." & vbCrLf &
+            "8. Every field with ""empty"": true MUST appear in ""fieldUpdates"" unless it is read-only." & vbCrLf &
+            "9. Keep text length proportional to column width (""w"" field)." & vbCrLf &
+            "10. If a table appears incomplete, add new rows." & vbCrLf &
+            "11. NEVER modify any cell or field where ""ro"": true." & vbCrLf &
+            "12. Do NOT modify cells that already have meaningful non-placeholder content unless the user specifically asks." & vbCrLf &
+            "13. If an existing meaningful cell should remain unchanged, omit it from ""updates""." & vbCrLf &
+            "14. Ensure the final answers are globally consistent across all tables in the form." & vbCrLf & vbCrLf &
             "RESPONSE FORMAT — return ONLY a JSON array. Each element:" & vbCrLf &
             "{" & vbCrLf &
             "  ""tableIndex"": <int>," & vbCrLf &
             "  ""updates"": [{""r"": <row>, ""c"": <col>, ""t"": ""new text""}]," & vbCrLf &
-            "  ""fieldUpdates"": [{""r"": <row>, ""c"": <col>, ""id"": ""f0"", ""val"": ""selected option""}]," & vbCrLf &
+            "  ""fieldUpdates"": [{""r"": <row>, ""c"": <col>, ""id"": ""f0"", ""val"": ""text"", ""optionText"": ""display text"", ""optionValue"": ""stored value"", ""optionIndex"": <int>}]," & vbCrLf &
             "  ""newRows"": [[""cell1"", ""cell2"", ...]]," & vbCrLf &
-            "  ""insertAfterRow"": <int>    // -1 = append at end" & vbCrLf &
+            "  ""insertAfterRow"": <int>" & vbCrLf &
             "}" & vbCrLf & vbCrLf &
-            "Include ""fieldUpdates"" only for fields you want to change." & vbCrLf &
             "If a table needs no changes, include it with empty arrays." & vbCrLf &
-            "Return ONLY the JSON array, no explanations or markdown fences."
+            "Return ONLY the JSON array, no explanations or markdown fences." &
+            " {Ignore} {Location} {CurrentDate}"
+    End Function
 
-        Dim batchStart As Integer = 0
-        Dim totalBatches As Integer = CInt(Math.Ceiling(tables.Count / TableCompleteMaxTablesPerBatch))
-        ProgressBarModule.GlobalProgressMax = totalBatches
-        ProgressBarModule.GlobalProgressValue = 0
 
-        While batchStart < tables.Count
-            If ProgressBarModule.CancelOperation Then Return Nothing
+    Private Function NormalizeConsistencySummaryJson(response As String) As String
+        If String.IsNullOrWhiteSpace(response) Then Return "{}"
 
-            Dim batchEnd As Integer = Math.Min(batchStart + TableCompleteMaxTablesPerBatch - 1, tables.Count - 1)
+        Try
+            Dim normalized As String = response.Trim()
 
-            Dim batchChars As Integer = 0
-            For j As Integer = batchStart To batchEnd
-                batchChars += TableToJson(tables(j)).Length
-                If batchChars > TableCompleteMaxCharsPerBatch AndAlso j > batchStart Then
-                    batchEnd = j - 1
-                    Exit For
+            If normalized.StartsWith("```") Then
+                Dim firstNewline As Integer = normalized.IndexOf(vbLf)
+                If firstNewline > 0 Then normalized = normalized.Substring(firstNewline + 1)
+                If normalized.EndsWith("```") Then normalized = normalized.Substring(0, normalized.Length - 3)
+                normalized = normalized.Trim()
+            End If
+
+            Dim parsed As JObject = JObject.Parse(normalized)
+            Dim compactJson As String = parsed.ToString(Newtonsoft.Json.Formatting.None)
+
+            If compactJson.Length > TableCompleteMaxConsistencySummaryChars Then
+                Dim trimmed As New JObject()
+
+                If parsed("documentType") IsNot Nothing Then trimmed("documentType") = parsed("documentType")
+                If parsed("theme") IsNot Nothing Then trimmed("theme") = parsed("theme")
+                If parsed("terminology") IsNot Nothing Then trimmed("terminology") = parsed("terminology")
+                If parsed("entities") IsNot Nothing Then trimmed("entities") = parsed("entities")
+                If parsed("styleRules") IsNot Nothing Then trimmed("styleRules") = parsed("styleRules")
+                If parsed("crossTableRules") IsNot Nothing Then trimmed("crossTableRules") = parsed("crossTableRules")
+                If parsed("dropdownConventions") IsNot Nothing Then trimmed("dropdownConventions") = parsed("dropdownConventions")
+                If parsed("dateConventions") IsNot Nothing Then trimmed("dateConventions") = parsed("dateConventions")
+                If parsed("numericConventions") IsNot Nothing Then trimmed("numericConventions") = parsed("numericConventions")
+                If parsed("warnings") IsNot Nothing Then trimmed("warnings") = parsed("warnings")
+
+                compactJson = trimmed.ToString(Newtonsoft.Json.Formatting.None)
+
+                If compactJson.Length > TableCompleteMaxConsistencySummaryChars Then
+                    compactJson = compactJson.Substring(0, TableCompleteMaxConsistencySummaryChars)
                 End If
-            Next
-
-            Dim promptBuilder As New StringBuilder()
-            promptBuilder.AppendLine($"USER INSTRUCTIONS: {userInstructions}")
-            promptBuilder.AppendLine()
-
-            If Not String.IsNullOrWhiteSpace(documentContext) Then
-                promptBuilder.AppendLine("[DOCUMENT CONTEXT]")
-                promptBuilder.AppendLine(documentContext)
-                promptBuilder.AppendLine("[/DOCUMENT CONTEXT]")
-                promptBuilder.AppendLine()
             End If
 
-            promptBuilder.AppendLine("[TABLES]")
-            For j As Integer = batchStart To batchEnd
-                promptBuilder.AppendLine(TableToJson(tables(j)))
-                If j < batchEnd Then promptBuilder.AppendLine(",")
-            Next
-            promptBuilder.AppendLine("[/TABLES]")
-
-            Dim currentBatch As Integer = CInt(Math.Floor(batchStart / TableCompleteMaxTablesPerBatch)) + 1
-            ProgressBarModule.GlobalProgressLabel = $"Processing table batch {currentBatch}/{totalBatches}"
-
-            Dim response As String = Await SharedMethods.LLM(
-                _context, systemPrompt, promptBuilder.ToString(),
-                "", "", 0, False, True)
-
-            If String.IsNullOrWhiteSpace(response) Then
-                ShowCustomMessageBox("LLM returned empty response. Table completion incomplete.")
-                Return Nothing
-            End If
-
-            Dim batchUpdates As List(Of TableUpdateResponse) = ParseTableCompletionResponse(response)
-            If batchUpdates IsNot Nothing Then
-                allUpdates.AddRange(batchUpdates)
-            End If
-
-            batchStart = batchEnd + 1
-            ProgressBarModule.GlobalProgressValue = currentBatch
-        End While
-
-        Return allUpdates
+            Return compactJson
+        Catch ex As Exception
+            WriteTableCompletionDebug("NormalizeConsistencySummaryJson error", ex.ToString() & vbCrLf & vbCrLf & response)
+            Return "{}"
+        End Try
     End Function
 
 #End Region
@@ -1016,15 +2420,12 @@ Partial Public Class ThisAddIn
         Dim results As New List(Of TableUpdateResponse)()
 
         Try
-            response = response.Trim()
-            If response.StartsWith("```") Then
-                Dim firstNewline As Integer = response.IndexOf(vbLf)
-                If firstNewline > 0 Then response = response.Substring(firstNewline + 1)
-                If response.EndsWith("```") Then response = response.Substring(0, response.Length - 3)
-                response = response.Trim()
+            Dim payload As String = ExtractJsonArrayPayload(response)
+            If String.IsNullOrWhiteSpace(payload) Then
+                Throw New InvalidOperationException("No JSON array payload found.")
             End If
 
-            Dim parsed As JArray = JArray.Parse(response)
+            Dim parsed As JArray = JArray.Parse(payload)
 
             For Each item As JToken In parsed
                 If item.Type <> JTokenType.Object Then Continue For
@@ -1040,44 +2441,60 @@ Partial Public Class ThisAddIn
                 If jObj("tableIndex") IsNot Nothing Then update.TableIndex = CInt(jObj("tableIndex"))
                 If jObj("insertAfterRow") IsNot Nothing Then update.InsertAfterRow = CInt(jObj("insertAfterRow"))
 
-                ' Parse cell text updates
                 Dim updatesToken As JToken = jObj("updates")
                 If updatesToken IsNot Nothing AndAlso updatesToken.Type = JTokenType.Array Then
                     For Each updItem As JToken In CType(updatesToken, JArray)
                         If updItem.Type <> JTokenType.Object Then Continue For
                         Dim updObj As JObject = CType(updItem, JObject)
-                        Dim cellUpdate As New TableCellUpdate()
-                        If updObj("r") IsNot Nothing Then cellUpdate.Row = CInt(updObj("r"))
-                        If updObj("c") IsNot Nothing Then cellUpdate.Col = CInt(updObj("c"))
-                        If updObj("t") IsNot Nothing Then cellUpdate.Text = CStr(updObj("t"))
+
+                        If updObj("r") Is Nothing OrElse updObj("c") Is Nothing Then Continue For
+
+                        Dim cellUpdate As New TableCellUpdate() With {
+                            .Row = CInt(updObj("r")),
+                            .Col = CInt(updObj("c")),
+                            .Text = If(updObj("t")?.ToString(), "")
+                        }
+
                         update.Updates.Add(cellUpdate)
                     Next
                 End If
 
-                ' Parse form field updates
                 Dim fieldUpdatesToken As JToken = jObj("fieldUpdates")
                 If fieldUpdatesToken IsNot Nothing AndAlso fieldUpdatesToken.Type = JTokenType.Array Then
                     For Each fuItem As JToken In CType(fieldUpdatesToken, JArray)
                         If fuItem.Type <> JTokenType.Object Then Continue For
                         Dim fuObj As JObject = CType(fuItem, JObject)
-                        Dim fu As New FormFieldUpdate()
-                        If fuObj("r") IsNot Nothing Then fu.Row = CInt(fuObj("r"))
-                        If fuObj("c") IsNot Nothing Then fu.Col = CInt(fuObj("c"))
-                        If fuObj("id") IsNot Nothing Then fu.FieldId = CStr(fuObj("id"))
-                        If fuObj("val") IsNot Nothing Then fu.Value = CStr(fuObj("val"))
+
+                        If fuObj("r") Is Nothing OrElse fuObj("c") Is Nothing OrElse fuObj("id") Is Nothing Then Continue For
+
+                        Dim fu As New FormFieldUpdate() With {
+                            .Row = CInt(fuObj("r")),
+                            .Col = CInt(fuObj("c")),
+                            .FieldId = CStr(fuObj("id")),
+                            .Value = If(fuObj("val")?.ToString(), Nothing),
+                            .OptionText = If(fuObj("optionText")?.ToString(), Nothing),
+                            .OptionValue = If(fuObj("optionValue")?.ToString(), Nothing),
+                            .OptionIndex = -1
+                        }
+
+                        If fuObj("optionIndex") IsNot Nothing Then
+                            fu.OptionIndex = CInt(fuObj("optionIndex"))
+                        End If
+
                         update.FieldUpdates.Add(fu)
                     Next
                 End If
 
-                ' Parse new rows
                 Dim newRowsToken As JToken = jObj("newRows")
                 If newRowsToken IsNot Nothing AndAlso newRowsToken.Type = JTokenType.Array Then
                     For Each rowItem As JToken In CType(newRowsToken, JArray)
                         If rowItem.Type <> JTokenType.Array Then Continue For
+
                         Dim rowTexts As New List(Of String)()
                         For Each cellVal As JToken In CType(rowItem, JArray)
                             rowTexts.Add(If(cellVal IsNot Nothing, cellVal.ToString(), ""))
                         Next
+
                         update.NewRows.Add(rowTexts)
                     Next
                 End If
@@ -1086,7 +2503,6 @@ Partial Public Class ThisAddIn
             Next
 
         Catch ex As Exception
-            Debug.WriteLine($"ParseTableCompletionResponse error: {ex.Message}")
             ShowCustomMessageBox($"Failed to parse LLM response as JSON: {ex.Message}")
             Return Nothing
         End Try
@@ -1098,87 +2514,209 @@ Partial Public Class ThisAddIn
 
 #Region "Apply Updates"
 
-    Private Sub ApplyTableUpdates(tables As List(Of TableInfo), updates As List(Of TableUpdateResponse), nsMgr As System.Xml.XmlNamespaceManager)
+    Private Sub WriteTextIntoParagraph(paragraph As BodyParagraphInfo,
+                                       newText As String,
+                                       nsMgr As System.Xml.XmlNamespaceManager)
+        If paragraph Is Nothing OrElse paragraph.XmlNode Is Nothing Then Exit Sub
+
+        Dim normalized As String = If(newText, "")
+        Dim currentText As String = If(paragraph.Text, "")
+        If String.Equals(currentText, normalized, StringComparison.Ordinal) Then Exit Sub
+
+        Dim pNode As System.Xml.XmlNode = paragraph.XmlNode
+
+        ClearAllAncestorSdtPlaceholderStates(pNode, nsMgr)
+        SanitizeCellRunFormatting(pNode, nsMgr)
+        SanitizeParagraphProperties(pNode, nsMgr)
+
+        If paragraph.TextNodes IsNot Nothing AndAlso paragraph.TextNodes.Count > 0 Then
+            SetTextNodeWithSpacePreserve(paragraph.TextNodes(0), normalized)
+            For i As Integer = 1 To paragraph.TextNodes.Count - 1
+                SetTextNodeWithSpacePreserve(paragraph.TextNodes(i), "")
+            Next
+        Else
+            Dim toRemove As New List(Of System.Xml.XmlNode)()
+            For Each ch As System.Xml.XmlNode In pNode.ChildNodes
+                If ch.NodeType = System.Xml.XmlNodeType.Element AndAlso ch.LocalName = "pPr" Then Continue For
+                toRemove.Add(ch)
+            Next
+            For Each ch As System.Xml.XmlNode In toRemove
+                pNode.RemoveChild(ch)
+            Next
+
+            Dim newRun As System.Xml.XmlNode = CreateCleanTextRun(pNode, normalized, nsMgr)
+            pNode.AppendChild(newRun)
+
+            Dim newTextNode As System.Xml.XmlNode = newRun.SelectSingleNode("w:t", nsMgr)
+            paragraph.TextNodes = New List(Of System.Xml.XmlNode)()
+            If newTextNode IsNot Nothing Then
+                paragraph.TextNodes.Add(newTextNode)
+            End If
+        End If
+
+        paragraph.Text = normalized
+        paragraph.IsEmpty = String.IsNullOrWhiteSpace(NormalizeTextForPlaceholderDetection(normalized))
+        paragraph.IsPlaceholder = IsPlaceholderText(normalized)
+    End Sub
+
+    Private Sub ApplyBodySectionUpdates(bodySections As List(Of BodySectionInfo),
+                                        updates As List(Of BodySectionUpdateResponse),
+                                        nsMgr As System.Xml.XmlNamespaceManager)
+        If bodySections Is Nothing OrElse updates Is Nothing Then Exit Sub
+
         For Each update In updates
+            If ProgressBarModule.CancelOperation Then Exit Sub
+
+            Dim section As BodySectionInfo = bodySections.FirstOrDefault(Function(s) s.SectionIndex = update.SectionIndex)
+            If section Is Nothing Then Continue For
+
+            If update.ParagraphUpdates IsNot Nothing Then
+                For Each paragraphUpdate In update.ParagraphUpdates
+                    If ProgressBarModule.CancelOperation Then Exit Sub
+
+                    Dim paragraph As BodyParagraphInfo =
+                        section.Paragraphs.FirstOrDefault(Function(p) p.Index = paragraphUpdate.Index)
+
+                    If paragraph Is Nothing Then Continue For
+                    WriteTextIntoParagraph(paragraph, paragraphUpdate.Text, nsMgr)
+                Next
+            End If
+
+            If update.FieldUpdates IsNot Nothing AndAlso section.FormFields IsNot Nothing Then
+                For Each bodyFieldUpdate In update.FieldUpdates
+                    If ProgressBarModule.CancelOperation Then Exit Sub
+
+                    Dim ff As FormFieldInfo =
+                        section.FormFields.FirstOrDefault(Function(f) f.FieldId = bodyFieldUpdate.FieldId)
+
+                    If ff Is Nothing OrElse Not ff.IsWritable Then Continue For
+
+                    Dim mappedUpdate As New FormFieldUpdate() With {
+                        .FieldId = bodyFieldUpdate.FieldId,
+                        .Value = bodyFieldUpdate.Value,
+                        .OptionText = bodyFieldUpdate.OptionText,
+                        .OptionValue = bodyFieldUpdate.OptionValue,
+                        .OptionIndex = bodyFieldUpdate.OptionIndex
+                    }
+
+                    ApplyFormFieldUpdate(ff, mappedUpdate, nsMgr)
+                Next
+            End If
+        Next
+    End Sub
+
+    Private Function GetXmlNodeVisibleText(node As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As String
+        If node Is Nothing Then Return ""
+
+        Dim sb As New StringBuilder()
+        Dim textNodes As System.Xml.XmlNodeList = node.SelectNodes(".//w:t", nsMgr)
+
+        For Each tNode As System.Xml.XmlNode In textNodes
+            sb.Append(tNode.InnerText)
+        Next
+
+        Return sb.ToString()
+    End Function
+
+    Private Function BuildCellApplyDebugSummary(cell As TableCellInfo, nsMgr As System.Xml.XmlNamespaceManager) As String
+        If cell Is Nothing Then Return "[cell is Nothing]"
+
+        Dim sb As New StringBuilder()
+        Dim textNodeCount As Integer = If(cell.TextNodes IsNot Nothing, cell.TextNodes.Count, 0)
+
+        sb.AppendLine($"Row={cell.Row}, Col={cell.Col}, Writable={cell.IsWritable}, GridSpan={cell.GridSpan}, VMerge='{cell.VMerge}'")
+        sb.AppendLine($"StoredText='{If(cell.Text, "")}'")
+        sb.AppendLine($"XmlVisibleText='{GetXmlNodeVisibleText(cell.XmlNode, nsMgr)}'")
+        sb.AppendLine($"TextNodes.Count={textNodeCount}")
+
+        If cell.TextNodes IsNot Nothing AndAlso cell.TextNodes.Count > 0 Then
+            For i As Integer = 0 To cell.TextNodes.Count - 1
+                Dim textNode As System.Xml.XmlNode = cell.TextNodes(i)
+                sb.AppendLine($"  TextNode[{i}]='{If(textNode?.InnerText, "")}'")
+            Next
+        End If
+
+        If cell.XmlNode IsNot Nothing Then
+            sb.AppendLine(GetDebugXmlPayload(cell.XmlNode.OuterXml, "Cell XML"))
+        End If
+
+        Return sb.ToString()
+    End Function
+
+    Private Sub ApplyTableUpdates(tables As List(Of TableInfo),
+                                  updates As List(Of TableUpdateResponse),
+                                  nsMgr As System.Xml.XmlNamespaceManager)
+        If tables Is Nothing OrElse updates Is Nothing Then Exit Sub
+
+        For Each update In updates
+            If ProgressBarModule.CancelOperation Then Exit Sub
+
             Dim tbl As TableInfo = tables.FirstOrDefault(Function(t) t.TableIndex = update.TableIndex)
             If tbl Is Nothing Then Continue For
 
-            ' Apply cell text updates
-            For Each cellUpdate In update.Updates
-                Dim row As TableRowInfo = tbl.Rows.FirstOrDefault(Function(r) r.RowIndex = cellUpdate.Row)
-                If row Is Nothing Then Continue For
-                Dim cell As TableCellInfo = row.Cells.FirstOrDefault(Function(c) c.Col = cellUpdate.Col)
-                If cell Is Nothing Then Continue For
+            Dim templateRowClone As System.Xml.XmlNode = Nothing
+            If update.NewRows IsNot Nothing AndAlso update.NewRows.Count > 0 Then
+                templateRowClone = CloneTemplateRowBeforeApply(tbl, update.InsertAfterRow)
+            End If
 
-                If cell.TextNodes.Count = 0 Then
-                    Dim tcNode As System.Xml.XmlNode = Nothing
-                    Dim tcNodes As System.Xml.XmlNodeList = row.XmlNode.SelectNodes("w:tc", nsMgr)
-                    Dim cellIdx As Integer = row.Cells.IndexOf(cell)
-                    If cellIdx >= 0 AndAlso cellIdx < tcNodes.Count Then tcNode = tcNodes(cellIdx)
+            If update.Updates IsNot Nothing Then
+                For Each cellUpdate In update.Updates
+                    If ProgressBarModule.CancelOperation Then Exit Sub
 
-                    If tcNode IsNot Nothing Then
-                        Dim pNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:p", nsMgr)
-                        If pNode Is Nothing Then
-                            pNode = tcNode.OwnerDocument.CreateElement("w", "p", WNs)
-                            tcNode.AppendChild(pNode)
-                        End If
-                        Dim rNode As System.Xml.XmlNode = pNode.SelectSingleNode("w:r", nsMgr)
-                        If rNode Is Nothing Then
-                            rNode = tcNode.OwnerDocument.CreateElement("w", "r", WNs)
-                            pNode.AppendChild(rNode)
-                        End If
-                        Dim tNode As System.Xml.XmlNode = tcNode.OwnerDocument.CreateElement("w", "t", WNs)
-                        rNode.AppendChild(tNode)
-                        SetTextNodeWithSpacePreserve(tNode, cellUpdate.Text)
-                    End If
-                ElseIf cell.TextNodes.Count = 1 Then
-                    SetTextNodeWithSpacePreserve(cell.TextNodes(0), cellUpdate.Text)
-                Else
-                    SetTextNodeWithSpacePreserve(cell.TextNodes(0), cellUpdate.Text)
-                    For i As Integer = 1 To cell.TextNodes.Count - 1
-                        SetTextNodeWithSpacePreserve(cell.TextNodes(i), "")
-                    Next
-                End If
-            Next
+                    Dim row As TableRowInfo = tbl.Rows.FirstOrDefault(Function(r) r.RowIndex = cellUpdate.Row)
+                    If row Is Nothing Then Continue For
 
-            ' Apply form field updates
+                    Dim cell As TableCellInfo = row.Cells.FirstOrDefault(Function(c) c.Col = cellUpdate.Col)
+                    If cell Is Nothing Then Continue For
+                    If Not cell.IsWritable Then Continue For
+
+                    Dim currentText As String = If(cell.Text, "")
+                    Dim newText As String = If(cellUpdate.Text, "")
+                    If String.Equals(currentText, newText, StringComparison.Ordinal) Then Continue For
+
+                    WriteTextIntoCell(cell, newText, nsMgr)
+                Next
+            End If
+
             If update.FieldUpdates IsNot Nothing Then
                 For Each fu In update.FieldUpdates
+                    If ProgressBarModule.CancelOperation Then Exit Sub
+
                     Dim row As TableRowInfo = tbl.Rows.FirstOrDefault(Function(r) r.RowIndex = fu.Row)
                     If row Is Nothing Then Continue For
+
                     Dim cell As TableCellInfo = row.Cells.FirstOrDefault(Function(c) c.Col = fu.Col)
                     If cell Is Nothing OrElse cell.FormFields Is Nothing Then Continue For
 
                     Dim ff As FormFieldInfo = cell.FormFields.FirstOrDefault(Function(f) f.FieldId = fu.FieldId)
                     If ff Is Nothing Then Continue For
+                    If Not ff.IsWritable Then Continue For
 
-                    ApplyFormFieldUpdate(ff, fu.Value, nsMgr)
+                    ApplyFormFieldUpdate(ff, fu, nsMgr)
                 Next
             End If
 
-            ' Insert new rows
             If update.NewRows IsNot Nothing AndAlso update.NewRows.Count > 0 Then
-                InsertNewTableRows(tbl, update.NewRows, update.InsertAfterRow, nsMgr)
+                If tbl.Rows.Any(Function(r) r.Cells.Any(Function(c) Not c.IsWritable)) Then
+                    Continue For
+                End If
+
+                InsertNewTableRows(tbl, update.NewRows, update.InsertAfterRow, nsMgr, templateRowClone)
             End If
         Next
     End Sub
 
     ''' <summary>
     ''' Removes the w:showingPlcHdr element from w:sdtPr and strips the PlaceholderText
-    ''' run style from all runs inside w:sdtContent. This is REQUIRED when writing a real
-    ''' value into an SDT that was previously showing placeholder text, otherwise Word
-    ''' continues to render the grey placeholder and ignores the new value.
+    ''' run style from all runs inside w:sdtContent. This is required when writing a real
+    ''' value into an SDT that was previously showing placeholder text.
     ''' </summary>
     Private Sub ClearSdtPlaceholderState(sdtNode As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager)
-        ' 1. Remove w:showingPlcHdr from w:sdtPr
         Dim showingNode As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr/w:showingPlcHdr", nsMgr)
         If showingNode IsNot Nothing Then
             showingNode.ParentNode.RemoveChild(showingNode)
         End If
 
-        ' 2. Strip PlaceholderText run style from all runs inside w:sdtContent
-        '    The placeholder content has: <w:rPr><w:rStyle w:val="PlaceholderText"/></w:rPr>
-        '    If we leave this, the text renders in grey even after showingPlcHdr is removed.
         Dim sdtContent As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent", nsMgr)
         If sdtContent Is Nothing Then Exit Sub
 
@@ -1187,7 +2725,6 @@ Partial Public Class ThisAddIn
         For Each rStyleNode As System.Xml.XmlNode In rStyleNodes
             Dim rPr As System.Xml.XmlNode = rStyleNode.ParentNode
             rPr.RemoveChild(rStyleNode)
-            ' If rPr is now empty, remove it too
             If rPr.ChildNodes.Count = 0 Then
                 rPr.ParentNode.RemoveChild(rPr)
             End If
@@ -1196,69 +2733,39 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Applies a value change to a single form field (SDT or legacy).
-    ''' For SDTs, also clears the placeholder state so Word renders the new value.
     ''' </summary>
-    Private Sub ApplyFormFieldUpdate(ff As FormFieldInfo, newValue As String, nsMgr As System.Xml.XmlNamespaceManager)
-        If String.IsNullOrEmpty(newValue) Then Exit Sub
+    Private Sub ApplyFormFieldUpdate(ff As FormFieldInfo,
+                                     fieldUpdate As FormFieldUpdate,
+                                     nsMgr As System.Xml.XmlNamespaceManager)
+        If ff Is Nothing OrElse fieldUpdate Is Nothing Then Exit Sub
+        If Not ff.IsWritable Then Exit Sub
+
+        Dim newValue As String = fieldUpdate.Value
 
         Select Case ff.FieldType
 
             Case FormFieldType.Dropdown
-                Dim sdtNode As System.Xml.XmlNode = ff.XmlNode
-                Dim sdtContent As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent", nsMgr)
-                If sdtContent Is Nothing Then Exit Sub
+                Dim selectedOption As FormFieldOptionInfo = ResolveUpdatedDropdownOption(ff, fieldUpdate)
+                If selectedOption Is Nothing Then Exit Sub
 
-                ' Validate: only accept a value that exists in the options
-                If ff.Options.Count > 0 AndAlso Not ff.Options.Any(Function(o) o.Equals(newValue, StringComparison.OrdinalIgnoreCase)) Then
-                    Exit Sub
-                End If
+                WriteTextIntoSdtContent(ff.XmlNode, selectedOption.DisplayText, nsMgr)
+                ApplySdtDefaultRunProperties(ff.XmlNode, nsMgr)
 
-                ' CRITICAL: Remove placeholder state before writing new value
-                ClearSdtPlaceholderState(sdtNode, nsMgr)
-
-                ' Update the display text inside sdtContent
-                Dim contentTextNodes As System.Xml.XmlNodeList = sdtContent.SelectNodes(".//w:t", nsMgr)
-                If contentTextNodes.Count > 0 Then
-                    SetTextNodeWithSpacePreserve(contentTextNodes(0), newValue)
-                    For i As Integer = 1 To contentTextNodes.Count - 1
-                        SetTextNodeWithSpacePreserve(contentTextNodes(i), "")
-                    Next
-                Else
-                    ' No w:t node exists yet — create w:r > w:t inside sdtContent
-                    ' First clear any existing placeholder content
-                    sdtContent.InnerXml = ""
-                    Dim rNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "r", WNs)
-                    sdtContent.AppendChild(rNode)
-                    Dim tNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "t", WNs)
-                    rNode.AppendChild(tNode)
-                    SetTextNodeWithSpacePreserve(tNode, newValue)
-                End If
-
-                ' Update w:sdtPr to reflect the selected item via lastValue attribute
-                Dim sdtPr As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr", nsMgr)
+                Dim sdtPr As System.Xml.XmlNode = ff.XmlNode.SelectSingleNode("w:sdtPr", nsMgr)
                 If sdtPr IsNot Nothing Then
                     Dim listNode As System.Xml.XmlNode = sdtPr.SelectSingleNode("w:dropDownList", nsMgr)
                     If listNode Is Nothing Then listNode = sdtPr.SelectSingleNode("w:comboBox", nsMgr)
+
                     If listNode IsNot Nothing Then
-                        ' Find matching listItem by displayText or value
-                        For Each li As System.Xml.XmlNode In listNode.SelectNodes("w:listItem", nsMgr)
-                            Dim displayAttr As System.Xml.XmlNode = li.Attributes("w:displayText")
-                            Dim valueAttr As System.Xml.XmlNode = li.Attributes("w:value")
-                            Dim displayText As String = If(displayAttr?.Value, "")
-                            Dim valueText As String = If(valueAttr?.Value, "")
-                            If displayText.Equals(newValue, StringComparison.OrdinalIgnoreCase) OrElse
-                               valueText.Equals(newValue, StringComparison.OrdinalIgnoreCase) Then
-                                ' Set w:lastValue on the dropDownList/comboBox element
-                                Dim lastValAttr As System.Xml.XmlAttribute = listNode.OwnerDocument.CreateAttribute("w", "lastValue", WNs)
-                                lastValAttr.Value = valueText
-                                listNode.Attributes.SetNamedItem(lastValAttr)
-                                Exit For
-                            End If
-                        Next
+                        Dim lastValAttr As System.Xml.XmlAttribute = listNode.OwnerDocument.CreateAttribute("w", "lastValue", WNs)
+                        lastValAttr.Value = selectedOption.StoredValue
+                        listNode.Attributes.SetNamedItem(lastValAttr)
                     End If
                 End If
 
             Case FormFieldType.Checkbox
+                If String.IsNullOrEmpty(newValue) Then Exit Sub
+
                 Dim sdtNode As System.Xml.XmlNode = ff.XmlNode
                 Dim checkboxNode As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtPr/w14:checkbox", nsMgr)
                 If checkboxNode Is Nothing Then Exit Sub
@@ -1266,88 +2773,53 @@ Partial Public Class ThisAddIn
                 Dim isChecked As Boolean = (newValue.ToLowerInvariant() = "true" OrElse newValue = "1")
                 Dim xmlVal As String = If(isChecked, "1", "0")
 
-                ' Set w14:checked
                 Dim checkedEl As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:checked", nsMgr)
                 If checkedEl Is Nothing Then
                     checkedEl = checkboxNode.OwnerDocument.CreateElement("w14", "checked", W14Ns)
                     checkboxNode.AppendChild(checkedEl)
                 End If
+
                 Dim valAttr As System.Xml.XmlAttribute = checkedEl.OwnerDocument.CreateAttribute("w14", "val", W14Ns)
                 valAttr.Value = xmlVal
                 checkedEl.Attributes.SetNamedItem(valAttr)
 
-                ' Update the display character in w:sdtContent
-                ClearSdtPlaceholderState(sdtNode, nsMgr)
-                Dim sdtContent As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent", nsMgr)
-                If sdtContent IsNot Nothing Then
-                    Dim contentTextNodes As System.Xml.XmlNodeList = sdtContent.SelectNodes(".//w:t", nsMgr)
-                    If contentTextNodes.Count > 0 Then
-                        Dim charCode As String
-                        If isChecked Then
-                            Dim checkedState As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:checkedState/@w14:val", nsMgr)
-                            charCode = If(checkedState?.Value, "2612")
-                        Else
-                            Dim uncheckedState As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:uncheckedState/@w14:val", nsMgr)
-                            charCode = If(uncheckedState?.Value, "2610")
-                        End If
-                        Dim displayChar As String = ChrW(System.Convert.ToInt32(charCode, 16)).ToString()
-                        SetTextNodeWithSpacePreserve(contentTextNodes(0), displayChar)
-                    End If
+                Dim charCode As String
+                If isChecked Then
+                    Dim checkedState As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:checkedState/@w14:val", nsMgr)
+                    charCode = If(checkedState?.Value, "2612")
+                Else
+                    Dim uncheckedState As System.Xml.XmlNode = checkboxNode.SelectSingleNode("w14:uncheckedState/@w14:val", nsMgr)
+                    charCode = If(uncheckedState?.Value, "2610")
                 End If
+
+                WriteTextIntoSdtContent(sdtNode, ChrW(System.Convert.ToInt32(charCode, 16)).ToString(), nsMgr)
+                ApplySdtDefaultRunProperties(sdtNode, nsMgr)
 
             Case FormFieldType.TextInput
-                Dim sdtNode As System.Xml.XmlNode = ff.XmlNode
-
-                ' CRITICAL: Remove placeholder state before writing new value
-                ClearSdtPlaceholderState(sdtNode, nsMgr)
-
-                Dim sdtContent As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent", nsMgr)
-                If sdtContent Is Nothing Then Exit Sub
-                Dim contentTextNodes As System.Xml.XmlNodeList = sdtContent.SelectNodes(".//w:t", nsMgr)
-                If contentTextNodes.Count > 0 Then
-                    SetTextNodeWithSpacePreserve(contentTextNodes(0), newValue)
-                    For i As Integer = 1 To contentTextNodes.Count - 1
-                        SetTextNodeWithSpacePreserve(contentTextNodes(i), "")
-                    Next
-                Else
-                    ' No w:t exists — create structure
-                    sdtContent.InnerXml = ""
-                    ' Check if this is block-level (needs w:p > w:r > w:t) or inline (needs w:r > w:t)
-                    ' Block-level SDTs are direct children of w:tc or w:body
-                    Dim parentName As String = If(sdtNode.ParentNode?.LocalName, "")
-                    If parentName = "tc" OrElse parentName = "body" Then
-                        ' Block-level: needs paragraph wrapper
-                        Dim pNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "p", WNs)
-                        sdtContent.AppendChild(pNode)
-                        Dim rNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "r", WNs)
-                        pNode.AppendChild(rNode)
-                        Dim tNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "t", WNs)
-                        rNode.AppendChild(tNode)
-                        SetTextNodeWithSpacePreserve(tNode, newValue)
-                    Else
-                        ' Inline: just w:r > w:t
-                        Dim rNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "r", WNs)
-                        sdtContent.AppendChild(rNode)
-                        Dim tNode As System.Xml.XmlNode = sdtContent.OwnerDocument.CreateElement("w", "t", WNs)
-                        rNode.AppendChild(tNode)
-                        SetTextNodeWithSpacePreserve(tNode, newValue)
-                    End If
-                End If
+                If newValue Is Nothing Then Exit Sub
+                WriteTextIntoSdtContent(ff.XmlNode, newValue, nsMgr)
+                ApplySdtDefaultRunProperties(ff.XmlNode, nsMgr)
 
             Case FormFieldType.LegacyDropdown
+                Dim selectedOption As FormFieldOptionInfo = ResolveUpdatedDropdownOption(ff, fieldUpdate)
+                If selectedOption Is Nothing Then Exit Sub
+
                 Dim fldCharNode As System.Xml.XmlNode = ff.XmlNode
                 Dim ffData As System.Xml.XmlNode = fldCharNode.SelectSingleNode("w:ffData", nsMgr)
                 If ffData Is Nothing Then Exit Sub
+
                 Dim ddList As System.Xml.XmlNode = ffData.SelectSingleNode("w:ddList", nsMgr)
                 If ddList Is Nothing Then Exit Sub
 
                 Dim targetIdx As Integer = -1
                 For i As Integer = 0 To ff.Options.Count - 1
-                    If ff.Options(i).Equals(newValue, StringComparison.OrdinalIgnoreCase) Then
+                    If ff.Options(i).DisplayText.Equals(selectedOption.DisplayText, StringComparison.OrdinalIgnoreCase) AndAlso
+                       ff.Options(i).StoredValue.Equals(selectedOption.StoredValue, StringComparison.OrdinalIgnoreCase) Then
                         targetIdx = i
                         Exit For
                     End If
                 Next
+
                 If targetIdx < 0 Then Exit Sub
 
                 Dim resultNode As System.Xml.XmlNode = ddList.SelectSingleNode("w:result", nsMgr)
@@ -1355,16 +2827,20 @@ Partial Public Class ThisAddIn
                     resultNode = ddList.OwnerDocument.CreateElement("w", "result", WNs)
                     ddList.AppendChild(resultNode)
                 End If
+
                 Dim resultValAttr As System.Xml.XmlAttribute = resultNode.OwnerDocument.CreateAttribute("w", "val", WNs)
                 resultValAttr.Value = targetIdx.ToString()
                 resultNode.Attributes.SetNamedItem(resultValAttr)
 
-                UpdateLegacyFieldDisplayText(fldCharNode, newValue, nsMgr)
+                UpdateLegacyFieldDisplayText(fldCharNode, selectedOption.DisplayText, nsMgr)
 
             Case FormFieldType.LegacyCheckbox
+                If String.IsNullOrEmpty(newValue) Then Exit Sub
+
                 Dim fldCharNode As System.Xml.XmlNode = ff.XmlNode
                 Dim ffData As System.Xml.XmlNode = fldCharNode.SelectSingleNode("w:ffData", nsMgr)
                 If ffData Is Nothing Then Exit Sub
+
                 Dim checkBox As System.Xml.XmlNode = ffData.SelectSingleNode("w:checkBox", nsMgr)
                 If checkBox Is Nothing Then Exit Sub
 
@@ -1375,6 +2851,7 @@ Partial Public Class ThisAddIn
                     checkedNode = checkBox.OwnerDocument.CreateElement("w", "checked", WNs)
                     checkBox.AppendChild(checkedNode)
                 End If
+
                 Dim checkedValAttr As System.Xml.XmlAttribute = checkedNode.OwnerDocument.CreateAttribute("w", "val", WNs)
                 checkedValAttr.Value = If(isChecked, "1", "0")
                 checkedNode.Attributes.SetNamedItem(checkedValAttr)
@@ -1382,12 +2859,43 @@ Partial Public Class ThisAddIn
         End Select
     End Sub
 
+    Private Function ResolveUpdatedDropdownOption(ff As FormFieldInfo, fieldUpdate As FormFieldUpdate) As FormFieldOptionInfo
+        If ff Is Nothing OrElse ff.Options Is Nothing OrElse ff.Options.Count = 0 OrElse fieldUpdate Is Nothing Then Return Nothing
+
+        If Not String.IsNullOrWhiteSpace(fieldUpdate.OptionValue) Then
+            Dim optionByStoredValue As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.StoredValue.Equals(fieldUpdate.OptionValue, StringComparison.OrdinalIgnoreCase))
+            If optionByStoredValue IsNot Nothing Then Return optionByStoredValue
+        End If
+
+        If Not String.IsNullOrWhiteSpace(fieldUpdate.OptionText) Then
+            Dim optionByDisplayText As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.DisplayText.Equals(fieldUpdate.OptionText, StringComparison.OrdinalIgnoreCase))
+            If optionByDisplayText IsNot Nothing Then Return optionByDisplayText
+        End If
+
+        If Not String.IsNullOrWhiteSpace(fieldUpdate.Value) Then
+            Dim optionByValueAsStored As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.StoredValue.Equals(fieldUpdate.Value, StringComparison.OrdinalIgnoreCase))
+            If optionByValueAsStored IsNot Nothing Then Return optionByValueAsStored
+
+            Dim optionByValueAsDisplay As FormFieldOptionInfo =
+                ff.Options.FirstOrDefault(Function(o) o.DisplayText.Equals(fieldUpdate.Value, StringComparison.OrdinalIgnoreCase))
+            If optionByValueAsDisplay IsNot Nothing Then Return optionByValueAsDisplay
+        End If
+
+        If fieldUpdate.OptionIndex >= 0 AndAlso fieldUpdate.OptionIndex < ff.Options.Count Then
+            Return ff.Options(fieldUpdate.OptionIndex)
+        End If
+
+        Return Nothing
+    End Function
+
     ''' <summary>
     ''' Updates the display text for a legacy form field dropdown.
     ''' Walks sibling runs after the fldChar begin until fldChar separate/end is found.
     ''' </summary>
     Private Sub UpdateLegacyFieldDisplayText(fldCharBeginRun As System.Xml.XmlNode, newText As String, nsMgr As System.Xml.XmlNamespaceManager)
-        ' fldCharBeginRun is the w:fldChar node itself; its parent is the w:r containing begin
         Dim beginRun As System.Xml.XmlNode = fldCharBeginRun.ParentNode
         If beginRun Is Nothing Then Exit Sub
 
@@ -1397,7 +2905,6 @@ Partial Public Class ThisAddIn
 
         While currentNode IsNot Nothing
             If currentNode.LocalName = "r" Then
-                ' Check for fldChar separate or end
                 Dim fc As System.Xml.XmlNode = currentNode.SelectSingleNode("w:fldChar", nsMgr)
                 If fc IsNot Nothing Then
                     Dim fcType As System.Xml.XmlNode = fc.Attributes("w:fldCharType")
@@ -1409,7 +2916,6 @@ Partial Public Class ThisAddIn
                         End If
                     End If
                 ElseIf foundSeparate Then
-                    ' This run contains the display text — update it
                     Dim tNodes As System.Xml.XmlNodeList = currentNode.SelectNodes("w:t", nsMgr)
                     If tNodes.Count > 0 AndAlso Not textUpdated Then
                         SetTextNodeWithSpacePreserve(tNodes(0), newText)
@@ -1418,7 +2924,6 @@ Partial Public Class ThisAddIn
                             SetTextNodeWithSpacePreserve(tNodes(i), "")
                         Next
                     ElseIf tNodes.Count > 0 Then
-                        ' Clear additional runs after the first
                         For Each tn As System.Xml.XmlNode In tNodes
                             SetTextNodeWithSpacePreserve(tn, "")
                         Next
@@ -1429,18 +2934,23 @@ Partial Public Class ThisAddIn
         End While
     End Sub
 
-    Private Sub InsertNewTableRows(tbl As TableInfo, newRows As List(Of List(Of String)), insertAfterRow As Integer, nsMgr As System.Xml.XmlNamespaceManager)
-        Dim templateRow As TableRowInfo = Nothing
-        For i As Integer = tbl.Rows.Count - 1 To 0 Step -1
-            If Not tbl.Rows(i).Cells.All(Function(c) c.IsHeader) Then
-                templateRow = tbl.Rows(i)
-                Exit For
-            End If
-        Next
-        If templateRow Is Nothing AndAlso tbl.Rows.Count > 0 Then
-            templateRow = tbl.Rows(tbl.Rows.Count - 1)
+    Private Sub InsertNewTableRows(tbl As TableInfo,
+                                   newRows As List(Of List(Of String)),
+                                   insertAfterRow As Integer,
+                                   nsMgr As System.Xml.XmlNamespaceManager,
+                                   Optional templateRowClone As System.Xml.XmlNode = Nothing)
+        If tbl Is Nothing OrElse newRows Is Nothing OrElse newRows.Count = 0 Then Exit Sub
+        If ProgressBarModule.CancelOperation Then Exit Sub
+
+        Dim templateRowNode As System.Xml.XmlNode = templateRowClone
+        If templateRowNode Is Nothing Then
+            templateRowNode = CloneTemplateRowBeforeApply(tbl, insertAfterRow)
         End If
-        If templateRow Is Nothing Then Exit Sub
+        If templateRowNode Is Nothing Then Exit Sub
+
+        If RowContainsVerticalMerge(templateRowNode, nsMgr) Then
+            Exit Sub
+        End If
 
         Dim refNode As System.Xml.XmlNode
         If insertAfterRow >= 0 AndAlso insertAfterRow < tbl.Rows.Count Then
@@ -1448,48 +2958,729 @@ Partial Public Class ThisAddIn
         Else
             refNode = tbl.Rows(tbl.Rows.Count - 1).XmlNode
         End If
+        If refNode Is Nothing Then Exit Sub
+
+        Dim insertParent As System.Xml.XmlNode = refNode.ParentNode
+        If insertParent Is Nothing Then Exit Sub
 
         For Each rowTexts In newRows
-            Dim clonedRow As System.Xml.XmlNode = templateRow.XmlNode.CloneNode(deep:=True)
+            If ProgressBarModule.CancelOperation Then Exit Sub
+
+            Dim clonedRow As System.Xml.XmlNode = templateRowNode.CloneNode(deep:=True)
 
             Dim tblHeaderNode As System.Xml.XmlNode = clonedRow.SelectSingleNode("w:trPr/w:tblHeader", nsMgr)
-            If tblHeaderNode IsNot Nothing Then tblHeaderNode.ParentNode.RemoveChild(tblHeaderNode)
+            If tblHeaderNode IsNot Nothing Then
+                tblHeaderNode.ParentNode.RemoveChild(tblHeaderNode)
+            End If
 
             Dim vMergeNodes As System.Xml.XmlNodeList = clonedRow.SelectNodes(".//w:tcPr/w:vMerge", nsMgr)
             For Each vmNode As System.Xml.XmlNode In vMergeNodes
                 vmNode.ParentNode.RemoveChild(vmNode)
             Next
 
-            Dim tcNodes As System.Xml.XmlNodeList = clonedRow.SelectNodes("w:tc", nsMgr)
+            For Each innerSdt As System.Xml.XmlNode In clonedRow.SelectNodes(".//w:sdt", nsMgr)
+                ClearSdtPlaceholderState(innerSdt, nsMgr)
+            Next
+
+            Dim tcNodes As System.Xml.XmlNodeList = clonedRow.SelectNodes(".//w:tc", nsMgr)
             For ci As Integer = 0 To tcNodes.Count - 1
                 Dim tcNode As System.Xml.XmlNode = tcNodes(ci)
                 Dim cellText As String = If(ci < rowTexts.Count, rowTexts(ci), "")
 
-                Dim tNodes As System.Xml.XmlNodeList = tcNode.SelectNodes(".//w:t", nsMgr)
-                If tNodes.Count > 0 Then
-                    SetTextNodeWithSpacePreserve(tNodes(0), cellText)
-                    For ti As Integer = 1 To tNodes.Count - 1
-                        SetTextNodeWithSpacePreserve(tNodes(ti), "")
-                    Next
-                Else
-                    Dim pNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:p", nsMgr)
-                    If pNode Is Nothing Then
-                        pNode = tcNode.OwnerDocument.CreateElement("w", "p", WNs)
-                        tcNode.AppendChild(pNode)
-                    End If
-                    Dim rNode As System.Xml.XmlNode = pNode.SelectSingleNode("w:r", nsMgr)
-                    If rNode Is Nothing Then
-                        rNode = tcNode.OwnerDocument.CreateElement("w", "r", WNs)
-                        pNode.AppendChild(rNode)
-                    End If
-                    Dim tNode As System.Xml.XmlNode = tcNode.OwnerDocument.CreateElement("w", "t", WNs)
-                    rNode.AppendChild(tNode)
-                    SetTextNodeWithSpacePreserve(tNode, cellText)
+                Dim pNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:p", nsMgr)
+                If pNode Is Nothing Then
+                    pNode = tcNode.OwnerDocument.CreateElement("w", "p", WNs)
+                    tcNode.AppendChild(pNode)
                 End If
+
+                Dim toRemove As New List(Of System.Xml.XmlNode)()
+                For Each child As System.Xml.XmlNode In pNode.ChildNodes
+                    If child.NodeType = System.Xml.XmlNodeType.Element AndAlso child.LocalName = "pPr" Then Continue For
+                    toRemove.Add(child)
+                Next
+                For Each child As System.Xml.XmlNode In toRemove
+                    pNode.RemoveChild(child)
+                Next
+
+                pNode.AppendChild(CreateCleanTextRun(pNode, cellText, nsMgr))
             Next
 
-            tbl.XmlNode.InsertAfter(clonedRow, refNode)
+            insertParent.InsertAfter(clonedRow, refNode)
             refNode = clonedRow
+        Next
+    End Sub
+
+
+#End Region
+
+#Region "Debug Logging"
+
+    Private Sub StartTableCompletionDebugSession(inputPath As String, outputPath As String, userInstructions As String)
+        If Not TableCompleteDebugEnabled Then Exit Sub
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine(New String("="c, 80))
+        sb.AppendLine($"UTC: {Date.UtcNow:yyyy-MM-dd HH:mm:ss.fff}")
+        sb.AppendLine($"Input: {inputPath}")
+        sb.AppendLine($"Output: {outputPath}")
+        sb.AppendLine("User instructions:")
+        sb.AppendLine(userInstructions)
+        sb.AppendLine(New String("="c, 80))
+
+        WriteTableCompletionDebug("Session start", sb.ToString())
+    End Sub
+
+    Private Sub WriteTableCompletionDebug(sectionName As String, content As String)
+        If Not TableCompleteDebugEnabled Then Exit Sub
+
+        Try
+            Dim logPath As String = GetTableCompletionDebugLogPath()
+
+            SyncLock TableCompleteDebugSyncRoot
+                Dim sb As New StringBuilder()
+                sb.AppendLine()
+                sb.AppendLine($"[{Date.UtcNow:yyyy-MM-dd HH:mm:ss.fff}] {sectionName}")
+                sb.AppendLine(New String("-"c, 80))
+                sb.AppendLine(If(content, ""))
+                sb.AppendLine(New String("-"c, 80))
+                File.AppendAllText(logPath, sb.ToString(), Encoding.UTF8)
+            End SyncLock
+        Catch ex As Exception
+            Debug.WriteLine($"WriteTableCompletionDebug failed: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Function GetTableCompletionDebugLogPath() As String
+        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Return Path.Combine(desktopPath, TableCompleteDebugLogFileName)
+    End Function
+
+    Private Function BuildFormFieldDebugReport(tables As List(Of TableInfo)) As String
+        Dim sb As New StringBuilder()
+
+        For Each tbl In tables
+            sb.AppendLine($"Table {tbl.TableIndex}")
+
+            For Each row In tbl.Rows
+                For Each cell In row.Cells
+                    If cell.FormFields Is Nothing OrElse cell.FormFields.Count = 0 Then Continue For
+
+                    sb.AppendLine($"  Cell r={cell.Row}, c={cell.Col}, text='{cell.Text}'")
+
+                    For Each ff In cell.FormFields
+                        sb.AppendLine($"    Field {ff.FieldId} | type={ff.FieldType} | name='{ff.Name}' | display='{ff.CurrentValue}' | stored='{ff.CurrentOptionValue}'")
+
+                        If ff.Options IsNot Nothing AndAlso ff.Options.Count > 0 Then
+                            For i As Integer = 0 To ff.Options.Count - 1
+                                Dim opt As FormFieldOptionInfo = ff.Options(i)
+                                sb.AppendLine($"      [{i}] text='{opt.DisplayText}' | value='{opt.StoredValue}'")
+                            Next
+                        End If
+                    Next
+                Next
+            Next
+        Next
+
+        Return sb.ToString()
+    End Function
+
+    Private Sub DumpDocxPackageDiagnostics(docxPath As String)
+        If Not TableCompleteDebugEnabled Then Exit Sub
+        If String.IsNullOrWhiteSpace(docxPath) Then Exit Sub
+        If Not File.Exists(docxPath) Then Exit Sub
+
+        Try
+            Dim inventory As New StringBuilder()
+
+            Using archive As ZipArchive = ZipFile.OpenRead(docxPath)
+                inventory.AppendLine($"Package: {docxPath}")
+                inventory.AppendLine($"Entries: {archive.Entries.Count}")
+                inventory.AppendLine()
+
+                For Each entry As ZipArchiveEntry In archive.Entries
+                    inventory.AppendLine($"{entry.FullName} | Length={entry.Length} | CompressedLength={entry.CompressedLength}")
+                Next
+
+                WriteTableCompletionDebug("DOCX package inventory", inventory.ToString())
+
+                For Each entry As ZipArchiveEntry In archive.Entries
+                    Dim entryName As String = entry.FullName.Replace("\"c, "/"c)
+                    Dim lowerName As String = entryName.ToLowerInvariant()
+
+                    If lowerName.EndsWith(".xml") OrElse lowerName.EndsWith(".rels") Then
+                        WriteTableCompletionDebug(
+                            $"DOCX XML part: {entryName}",
+                            GetDebugXmlPayload(ReadZipEntryAsText(entry), $"DOCX XML part: {entryName}"))
+                    Else
+                        Dim binarySummary As String = BuildZipEntryBinarySummary(entry)
+                        If Not String.IsNullOrWhiteSpace(binarySummary) Then
+                            WriteTableCompletionDebug(
+                                $"DOCX binary part: {entryName}",
+                                binarySummary)
+                        End If
+                    End If
+                Next
+            End Using
+        Catch ex As Exception
+            WriteTableCompletionDebug("DumpDocxPackageDiagnostics error", ex.ToString())
+        End Try
+    End Sub
+
+    Private Function ReadZipEntryAsText(entry As ZipArchiveEntry) As String
+        Try
+            Using entryStream As Stream = entry.Open()
+                Using reader As New StreamReader(entryStream, Encoding.UTF8, detectEncodingFromByteOrderMarks:=True)
+                    Return reader.ReadToEnd()
+                End Using
+            End Using
+        Catch ex As Exception
+            Return $"[Failed to read entry as text: {ex.Message}]"
+        End Try
+    End Function
+
+    Private Function BuildZipEntryBinarySummary(entry As ZipArchiveEntry) As String
+        If entry Is Nothing Then Return ""
+        If entry.Length = 0 Then Return $"Length=0"
+
+        Dim lowerName As String = entry.FullName.ToLowerInvariant()
+        Dim shouldLogBinary As Boolean =
+            lowerName.Contains("activex") OrElse
+            lowerName.Contains("embedding") OrElse
+            lowerName.Contains("embeddings") OrElse
+            lowerName.Contains("ole") OrElse
+            lowerName.Contains("control") OrElse
+            lowerName.Contains("object") OrElse
+            lowerName.Contains("customxml") OrElse
+            lowerName.EndsWith(".bin")
+
+        If Not shouldLogBinary Then Return ""
+
+        Try
+            Dim previewLength As Integer = CInt(Math.Min(128, entry.Length))
+            Dim buffer(previewLength - 1) As Byte
+
+            Using entryStream As Stream = entry.Open()
+                Dim bytesRead As Integer = entryStream.Read(buffer, 0, previewLength)
+
+                Dim sb As New StringBuilder()
+                sb.AppendLine($"Length={entry.Length}")
+                sb.AppendLine($"PreviewBytes={bytesRead}")
+                sb.AppendLine("HexPreview:")
+                sb.AppendLine(ByteArrayToHex(buffer, bytesRead))
+                Return sb.ToString()
+            End Using
+        Catch ex As Exception
+            Return $"Length={entry.Length}{vbCrLf}[Failed to read binary preview: {ex.Message}]"
+        End Try
+    End Function
+
+    Private Function ByteArrayToHex(buffer As Byte(), count As Integer) As String
+        If buffer Is Nothing OrElse count <= 0 Then Return ""
+
+        Dim sb As New StringBuilder()
+
+        For i As Integer = 0 To count - 1
+            If i > 0 Then
+                If i Mod 16 = 0 Then
+                    sb.AppendLine()
+                Else
+                    sb.Append(" ")
+                End If
+            End If
+
+            sb.Append(buffer(i).ToString("X2"))
+        Next
+
+        Return sb.ToString()
+    End Function
+
+    Private Function GetDebugXmlPayload(xmlContent As String, xmlLabel As String) As String
+        If TableCompleteDebugIncludeXml Then Return If(xmlContent, "")
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine($"[{xmlLabel} omitted]")
+        sb.AppendLine($"Set TableCompleteDebugIncludeXml = True to include raw XML in this log.")
+        Return sb.ToString()
+    End Function
+
+#End Region
+
+#Region "Saved DOCX Verification"
+
+
+    Private Function NormalizeWordInteropCellText(text As String) As String
+        If text Is Nothing Then Return ""
+
+        Dim result As String = text
+
+        result = result.Replace(vbCr & ChrW(7), "")
+        result = result.Replace(ChrW(7).ToString(), "")
+        result = result.Replace(vbCr, "")
+        result = result.Replace(vbLf, "")
+
+        Return result
+    End Function
+
+    Private Sub VerifySavedDocxWithWordInterop(docxPath As String)
+        If Not TableCompleteDebugEnabled Then Exit Sub
+        If Not TableCompleteDebugVerifySavedDocxWithWordInterop Then Exit Sub
+        If String.IsNullOrWhiteSpace(docxPath) Then Exit Sub
+        If Not File.Exists(docxPath) Then Exit Sub
+
+        Dim wordApp As Word.Application = Nothing
+        Dim doc As Word.Document = Nothing
+        Dim oldScreenUpdating As Boolean = True
+
+        Try
+            wordApp = Globals.ThisAddIn.Application
+            oldScreenUpdating = wordApp.ScreenUpdating
+            wordApp.ScreenUpdating = False
+
+            doc = wordApp.Documents.Open(
+                docxPath,
+                ReadOnly:=True,
+                Visible:=False,
+                AddToRecentFiles:=False)
+
+            Dim sb As New StringBuilder()
+            sb.AppendLine($"SavedDocx='{docxPath}'")
+            sb.AppendLine($"Word.Tables.Count={doc.Tables.Count}")
+
+            Dim targetWordTableIndex As Integer = 8 ' tableIndex 7 => Word table 8
+
+            If doc.Tables.Count < targetWordTableIndex Then
+                sb.AppendLine($"Target Word table {targetWordTableIndex} does not exist.")
+                WriteTableCompletionDebug("Saved DOCX Word Interop verification", sb.ToString())
+                Exit Sub
+            End If
+
+            Dim tbl As Word.Table = doc.Tables(targetWordTableIndex)
+
+            sb.AppendLine($"Inspecting Word table {targetWordTableIndex}")
+            sb.AppendLine($"Rows.Count={tbl.Rows.Count}")
+            sb.AppendLine($"Columns.Count={tbl.Columns.Count}")
+            sb.AppendLine()
+
+            For r As Integer = 1 To Math.Min(tbl.Rows.Count, 8)
+                For c As Integer = 1 To Math.Min(tbl.Columns.Count, 3)
+                    Try
+                        Dim rawText As String = tbl.Cell(r, c).Range.Text
+                        Dim normalizedText As String = NormalizeWordInteropCellText(rawText)
+
+                        sb.AppendLine($"Cell({r},{c})='{normalizedText}'")
+                    Catch ex As Exception
+                        sb.AppendLine($"Cell({r},{c})=<error: {ex.Message}>")
+                    End Try
+                Next
+
+                sb.AppendLine()
+            Next
+
+            Try
+                Dim targetText As String = NormalizeWordInteropCellText(tbl.Cell(5, 2).Range.Text)
+                sb.AppendLine("Target check:")
+                sb.AppendLine($"tableIndex=7,row=4,col=1 => Word Cell(5,2)='{targetText}'")
+            Catch ex As Exception
+                sb.AppendLine("Target check:")
+                sb.AppendLine($"tableIndex=7,row=4,col=1 => Word Cell(5,2)=<error: {ex.Message}>")
+            End Try
+
+            WriteTableCompletionDebug("Saved DOCX Word Interop verification", sb.ToString())
+
+        Catch ex As Exception
+            WriteTableCompletionDebug("VerifySavedDocxWithWordInterop error", ex.ToString())
+
+        Finally
+            If doc IsNot Nothing Then
+                Try : doc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+            End If
+
+            If wordApp IsNot Nothing Then
+                Try : wordApp.ScreenUpdating = oldScreenUpdating : Catch : End Try
+            End If
+        End Try
+    End Sub
+
+    Private Function LoadTablesFromSavedDocx(docxPath As String) As List(Of TableInfo)
+        If String.IsNullOrWhiteSpace(docxPath) Then Return Nothing
+        If Not File.Exists(docxPath) Then Return Nothing
+
+        Dim tempDir As String = Path.Combine(Path.GetTempPath(), $"{AN2}_tblverify_{Guid.NewGuid():N}")
+
+        Try
+            ZipFile.ExtractToDirectory(docxPath, tempDir)
+
+            Dim documentXmlPath As String = Path.Combine(tempDir, "word", "document.xml")
+            If Not File.Exists(documentXmlPath) Then Return Nothing
+
+            Dim xmlDoc As New System.Xml.XmlDocument()
+            xmlDoc.PreserveWhitespace = True
+            xmlDoc.Load(documentXmlPath)
+
+            Dim nsMgr As New System.Xml.XmlNamespaceManager(xmlDoc.NameTable)
+            nsMgr.AddNamespace("w", WNs)
+            nsMgr.AddNamespace("w14", W14Ns)
+
+            Return ExtractTablesFromXml(xmlDoc, nsMgr)
+
+        Catch ex As Exception
+            WriteTableCompletionDebug("LoadTablesFromSavedDocx error", ex.ToString())
+            Return Nothing
+
+        Finally
+            If Directory.Exists(tempDir) Then
+                Try : Directory.Delete(tempDir, recursive:=True) : Catch : End Try
+            End If
+        End Try
+    End Function
+
+    Private Sub VerifySavedDocxCellUpdates(docxPath As String,
+                                           updates As List(Of TableUpdateResponse))
+        If Not TableCompleteDebugEnabled Then Exit Sub
+        If Not TableCompleteDebugVerifySavedDocx Then Exit Sub
+        If String.IsNullOrWhiteSpace(docxPath) Then Exit Sub
+        If Not File.Exists(docxPath) Then Exit Sub
+        If updates Is Nothing Then Exit Sub
+
+        Dim savedTables As List(Of TableInfo) = LoadTablesFromSavedDocx(docxPath)
+        If savedTables Is Nothing Then
+            WriteTableCompletionDebug("Saved DOCX verification",
+                                      "Could not reload saved DOCX for verification.")
+            Exit Sub
+        End If
+
+        Dim checkedCount As Integer = 0
+        Dim mismatchCount As Integer = 0
+        Dim missingCount As Integer = 0
+
+        For Each update In updates
+            If update Is Nothing OrElse update.Updates Is Nothing Then Continue For
+
+            Dim savedTable As TableInfo = savedTables.FirstOrDefault(Function(t) t.TableIndex = update.TableIndex)
+            If savedTable Is Nothing Then
+                WriteTableCompletionDebug("Saved DOCX verification missing table",
+                                          $"TableIndex={update.TableIndex}")
+                missingCount += 1
+                Continue For
+            End If
+
+            ' Updates reference pre-insertion row indices. The saved DOCX contains the
+            ' inserted rows, so any original row whose index is strictly greater than
+            ' InsertAfterRow has been shifted down by NewRows.Count.
+            Dim insertedCount As Integer = If(update.NewRows IsNot Nothing, update.NewRows.Count, 0)
+            Dim insertAfter As Integer = update.InsertAfterRow
+
+            For Each cellUpdate In update.Updates
+                checkedCount += 1
+
+                Dim expectedRowIndex As Integer = cellUpdate.Row
+                If insertedCount > 0 AndAlso insertAfter >= 0 AndAlso cellUpdate.Row > insertAfter Then
+                    expectedRowIndex = cellUpdate.Row + insertedCount
+                End If
+
+                Dim savedRow As TableRowInfo = savedTable.Rows.FirstOrDefault(Function(r) r.RowIndex = expectedRowIndex)
+                If savedRow Is Nothing Then
+                    WriteTableCompletionDebug("Saved DOCX verification missing row",
+                                              $"Table={update.TableIndex}, OriginalRow={cellUpdate.Row}, ShiftedRow={expectedRowIndex}")
+                    missingCount += 1
+                    Continue For
+                End If
+
+                Dim savedCell As TableCellInfo = savedRow.Cells.FirstOrDefault(Function(c) c.Col = cellUpdate.Col)
+                If savedCell Is Nothing Then
+                    WriteTableCompletionDebug("Saved DOCX verification missing cell",
+                                              $"Table={update.TableIndex}, Row={expectedRowIndex}, Col={cellUpdate.Col}")
+                    missingCount += 1
+                    Continue For
+                End If
+
+                Dim expectedText As String = If(cellUpdate.Text, "")
+                Dim actualText As String = If(savedCell.Text, "")
+
+                If Not String.Equals(expectedText, actualText, StringComparison.Ordinal) Then
+                    mismatchCount += 1
+                    WriteTableCompletionDebug("Saved DOCX verification mismatch",
+                        $"Table={update.TableIndex}, OriginalRow={cellUpdate.Row}, ShiftedRow={expectedRowIndex}, Col={cellUpdate.Col}" & vbCrLf &
+                        $"Expected='{expectedText}'" & vbCrLf &
+                        $"Actual='{actualText}'")
+                End If
+            Next
+        Next
+
+        WriteTableCompletionDebug("Saved DOCX verification summary",
+                                  $"CheckedUpdates={checkedCount}, MissingTargets={missingCount}, Mismatches={mismatchCount}, SavedDocx='{docxPath}'")
+    End Sub
+
+#End Region
+
+#Region "Cell Write Helpers"
+
+
+    ''' <summary>
+    ''' Returns the w:rPr of a run inside the given scope that is NOT carrying a
+    ''' placeholder character style. Used as a template for newly created runs so we
+    ''' do not inherit greyed-out placeholder formatting.
+    ''' </summary>
+    Private Function FindNonPlaceholderRunProperties(scope As System.Xml.XmlNode,
+                                                     nsMgr As System.Xml.XmlNamespaceManager) As System.Xml.XmlNode
+        If scope Is Nothing Then Return Nothing
+
+        Dim searchScope As System.Xml.XmlNode = scope
+        While searchScope IsNot Nothing AndAlso
+              searchScope.LocalName <> "tc" AndAlso
+              searchScope.LocalName <> "body"
+            searchScope = searchScope.ParentNode
+        End While
+        If searchScope Is Nothing Then searchScope = scope
+
+        Dim rPrNodes As System.Xml.XmlNodeList = searchScope.SelectNodes(".//w:r/w:rPr", nsMgr)
+        For Each rPr As System.Xml.XmlNode In rPrNodes
+            Dim rStyle As System.Xml.XmlNode = rPr.SelectSingleNode("w:rStyle/@w:val", nsMgr)
+            If rStyle IsNot Nothing Then
+                Dim val As String = rStyle.Value
+                If val.Equals("PlaceholderText", StringComparison.OrdinalIgnoreCase) OrElse
+                   val.Equals("Platzhaltertext", StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+            End If
+            Return rPr
+        Next
+
+        Return Nothing
+    End Function
+
+    ''' <summary>
+    ''' Creates a new clean w:r containing a single w:t with the given text, inheriting
+    ''' run properties from a non-placeholder run in the same cell when available.
+    ''' </summary>
+    Private Function CreateCleanTextRun(parentParagraph As System.Xml.XmlNode,
+                                        text As String,
+                                        nsMgr As System.Xml.XmlNamespaceManager) As System.Xml.XmlNode
+        Dim ownerDoc As System.Xml.XmlDocument = parentParagraph.OwnerDocument
+        Dim rNode As System.Xml.XmlElement = ownerDoc.CreateElement("w", "r", WNs)
+
+        Dim templateRpr As System.Xml.XmlNode = FindNonPlaceholderRunProperties(parentParagraph, nsMgr)
+        If templateRpr IsNot Nothing Then
+            rNode.AppendChild(templateRpr.CloneNode(deep:=True))
+        End If
+
+        Dim tNode As System.Xml.XmlElement = ownerDoc.CreateElement("w", "t", WNs)
+        rNode.AppendChild(tNode)
+        SetTextNodeWithSpacePreserve(tNode, If(text, ""))
+
+        Return rNode
+    End Function
+
+    ''' <summary>
+    ''' Single entry point for writing plain text into a table cell. Performs three
+    ''' deterministic invisibility-fix passes before writing:
+    ''' 1) Clears w:showingPlcHdr on every ancestor w:sdt up to the document root.
+    ''' 2) Strips w:vanish, w:webHidden and placeholder w:rStyle from every w:rPr
+    '''    inside the cell, including paragraph-mark rPr inside w:pPr.
+    ''' 3) Drops placeholder w:pStyle from the target paragraph.
+    ''' For previously-empty cells, all non-pPr children of the first paragraph are
+    ''' removed before inserting a fresh clean run, so leftover placeholder runs cannot
+    ''' keep the paragraph in placeholder presentation mode.
+    ''' </summary>
+    Private Sub WriteTextIntoCell(cell As TableCellInfo,
+                                  newText As String,
+                                  nsMgr As System.Xml.XmlNamespaceManager)
+        If cell Is Nothing OrElse cell.XmlNode Is Nothing Then Exit Sub
+
+        Dim normalized As String = If(newText, "")
+        Dim currentText As String = If(cell.Text, "")
+        If String.Equals(currentText, normalized, StringComparison.Ordinal) Then Exit Sub
+
+        Dim tcNode As System.Xml.XmlNode = cell.XmlNode
+
+        ' (1) Clear placeholder state on every enclosing SDT, all the way to the body.
+        ClearAllAncestorSdtPlaceholderStates(tcNode, nsMgr)
+
+        ' (2) Strip invisibility / placeholder run-properties from the whole cell subtree.
+        SanitizeCellRunFormatting(tcNode, nsMgr)
+
+        If cell.TextNodes IsNot Nothing AndAlso cell.TextNodes.Count > 0 Then
+            ' Update existing text nodes in place (preserves real run formatting).
+            SetTextNodeWithSpacePreserve(cell.TextNodes(0), normalized)
+            For i As Integer = 1 To cell.TextNodes.Count - 1
+                SetTextNodeWithSpacePreserve(cell.TextNodes(i), "")
+            Next
+            cell.Text = normalized
+            Exit Sub
+        End If
+
+        ' Previously-empty cell: rebuild the first paragraph deterministically.
+        Dim pNode As System.Xml.XmlNode = tcNode.SelectSingleNode("w:p", nsMgr)
+        If pNode Is Nothing Then
+            pNode = tcNode.OwnerDocument.CreateElement("w", "p", WNs)
+            tcNode.AppendChild(pNode)
+        End If
+
+        ' (3) Remove every child of the paragraph except w:pPr, so leftover empty runs
+        ' carrying placeholder w:rStyle (or w:vanish) cannot suppress our new text.
+        Dim childrenToRemove As New List(Of System.Xml.XmlNode)()
+        For Each ch As System.Xml.XmlNode In pNode.ChildNodes
+            If ch.NodeType = System.Xml.XmlNodeType.Element AndAlso ch.LocalName = "pPr" Then Continue For
+            childrenToRemove.Add(ch)
+        Next
+        For Each ch As System.Xml.XmlNode In childrenToRemove
+            pNode.RemoveChild(ch)
+        Next
+
+        ' (4) Drop placeholder paragraph style on the target paragraph.
+        SanitizeParagraphProperties(pNode, nsMgr)
+
+        ' (5) Insert a single fresh clean run. CreateCleanTextRun does not attach an
+        ' explicit w:rPr, which is correct: the run then inherits only from the
+        ' paragraph style (which we just sanitized), not from placeholder character
+        ' styling carried by leftover empty runs.
+        Dim newRun As System.Xml.XmlNode = CreateCleanTextRun(pNode, normalized, nsMgr)
+        pNode.AppendChild(newRun)
+
+        Dim newTextNode As System.Xml.XmlNode = newRun.SelectSingleNode("w:t", nsMgr)
+        If newTextNode IsNot Nothing Then
+            If cell.TextNodes Is Nothing Then cell.TextNodes = New List(Of System.Xml.XmlNode)()
+            cell.TextNodes.Add(newTextNode)
+        End If
+
+        cell.Text = normalized
+    End Sub
+
+    ''' <summary>
+    ''' Writes plain text into the w:sdtContent of an SDT. In addition to clearing
+    ''' w:showingPlcHdr, this sanitizes every w:rPr inside w:sdtContent so the dropdown /
+    ''' text-input value renders normally instead of inheriting the SDT's placeholder
+    ''' character style.
+    ''' </summary>
+    Private Sub WriteTextIntoSdtContent(sdtNode As System.Xml.XmlNode,
+                                        newText As String,
+                                        nsMgr As System.Xml.XmlNamespaceManager)
+        If sdtNode Is Nothing Then Exit Sub
+
+        ' Clear placeholder state on this SDT and on every SDT above it.
+        ClearAllAncestorSdtPlaceholderStates(sdtNode, nsMgr)
+
+        Dim sdtContent As System.Xml.XmlNode = sdtNode.SelectSingleNode("w:sdtContent", nsMgr)
+        If sdtContent Is Nothing Then Exit Sub
+
+        ' Strip invisibility / placeholder formatting from every run inside the SDT content.
+        SanitizeCellRunFormatting(sdtContent, nsMgr)
+
+        ' Also clear the paragraph-level placeholder style on any paragraphs inside.
+        For Each pInside As System.Xml.XmlNode In sdtContent.SelectNodes(".//w:p", nsMgr)
+            SanitizeParagraphProperties(pInside, nsMgr)
+        Next
+
+        Dim contentTextNodes As System.Xml.XmlNodeList = sdtContent.SelectNodes(".//w:t", nsMgr)
+        If contentTextNodes.Count > 0 Then
+            SetTextNodeWithSpacePreserve(contentTextNodes(0), If(newText, ""))
+            For i As Integer = 1 To contentTextNodes.Count - 1
+                SetTextNodeWithSpacePreserve(contentTextNodes(i), "")
+            Next
+            Exit Sub
+        End If
+
+        ' No existing text node: build one cleanly.
+        Dim ownerDoc As System.Xml.XmlDocument = sdtContent.OwnerDocument
+        Dim sdtParentName As String = If(sdtNode.ParentNode?.LocalName, "")
+
+        sdtContent.InnerXml = ""
+
+        If sdtParentName = "tc" OrElse sdtParentName = "body" Then
+            Dim pNode As System.Xml.XmlElement = ownerDoc.CreateElement("w", "p", WNs)
+            sdtContent.AppendChild(pNode)
+            pNode.AppendChild(CreateCleanTextRun(pNode, If(newText, ""), nsMgr))
+        Else
+            Dim hostParagraph As System.Xml.XmlNode = sdtNode.ParentNode
+            While hostParagraph IsNot Nothing AndAlso hostParagraph.LocalName <> "p"
+                hostParagraph = hostParagraph.ParentNode
+            End While
+            If hostParagraph Is Nothing Then hostParagraph = sdtContent
+            sdtContent.AppendChild(CreateCleanTextRun(hostParagraph, If(newText, ""), nsMgr))
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Walks from <paramref name="startNode"/> up to the document root and clears
+    ''' w:showingPlcHdr plus placeholder run styling on every enclosing w:sdt — including
+    ''' SDTs that wrap the entire row, the entire table, or a whole section. Stopping at
+    ''' w:tr / w:tbl (as the previous helper did) misses repeating-section / repeating-row
+    ''' content controls that keep the cell's text invisible.
+    ''' </summary>
+    Private Sub ClearAllAncestorSdtPlaceholderStates(startNode As System.Xml.XmlNode,
+                                                     nsMgr As System.Xml.XmlNamespaceManager)
+        If startNode Is Nothing Then Exit Sub
+
+        Dim current As System.Xml.XmlNode = startNode
+        While current IsNot Nothing
+            If current.NodeType = System.Xml.XmlNodeType.Element AndAlso current.LocalName = "sdt" Then
+                ClearSdtPlaceholderState(current, nsMgr)
+            End If
+            current = current.ParentNode
+        End While
+    End Sub
+
+    ''' <summary>
+    ''' Strips every invisibility / placeholder-styling source from every w:rPr inside the
+    ''' given cell (or any subtree): w:vanish, w:webHidden, and w:rStyle pointing to
+    ''' "Platzhaltertext" / "PlaceholderText". Also drops the rPr if it ends up empty so it
+    ''' cannot re-introduce inherited placeholder formatting later.
+    ''' </summary>
+    Private Sub SanitizeCellRunFormatting(scope As System.Xml.XmlNode,
+                                          nsMgr As System.Xml.XmlNamespaceManager)
+        If scope Is Nothing Then Exit Sub
+
+        Dim rPrNodes As System.Xml.XmlNodeList = scope.SelectNodes(".//w:rPr", nsMgr)
+        For Each rPr As System.Xml.XmlNode In rPrNodes
+            Dim toRemove As New List(Of System.Xml.XmlNode)()
+
+            For Each child As System.Xml.XmlNode In rPr.ChildNodes
+                Select Case child.LocalName
+                    Case "vanish", "webHidden"
+                        toRemove.Add(child)
+
+                    Case "rStyle"
+                        Dim valAttr As System.Xml.XmlNode = child.Attributes("w:val")
+                        If valAttr IsNot Nothing AndAlso
+                           (valAttr.Value.Equals("Platzhaltertext", StringComparison.OrdinalIgnoreCase) OrElse
+                            valAttr.Value.Equals("PlaceholderText", StringComparison.OrdinalIgnoreCase)) Then
+                            toRemove.Add(child)
+                        End If
+                End Select
+            Next
+
+            For Each n As System.Xml.XmlNode In toRemove
+                rPr.RemoveChild(n)
+            Next
+
+            If rPr.ChildNodes.Count = 0 AndAlso rPr.ParentNode IsNot Nothing Then
+                rPr.ParentNode.RemoveChild(rPr)
+            End If
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' Removes a placeholder paragraph style (w:pStyle val="Platzhaltertext"/"PlaceholderText")
+    ''' from a paragraph's w:pPr. Run-property sanitation inside w:pPr/w:rPr is handled by
+    ''' SanitizeCellRunFormatting.
+    ''' </summary>
+    Private Sub SanitizeParagraphProperties(pNode As System.Xml.XmlNode,
+                                            nsMgr As System.Xml.XmlNamespaceManager)
+        If pNode Is Nothing Then Exit Sub
+        Dim pPr As System.Xml.XmlNode = pNode.SelectSingleNode("w:pPr", nsMgr)
+        If pPr Is Nothing Then Exit Sub
+
+        Dim toRemove As New List(Of System.Xml.XmlNode)()
+        For Each pStyle As System.Xml.XmlNode In pPr.SelectNodes("w:pStyle", nsMgr)
+            Dim valAttr As System.Xml.XmlNode = pStyle.Attributes("w:val")
+            If valAttr Is Nothing Then Continue For
+            If valAttr.Value.Equals("Platzhaltertext", StringComparison.OrdinalIgnoreCase) OrElse
+               valAttr.Value.Equals("PlaceholderText", StringComparison.OrdinalIgnoreCase) Then
+                toRemove.Add(pStyle)
+            End If
+        Next
+        For Each n As System.Xml.XmlNode In toRemove
+            pPr.RemoveChild(n)
         Next
     End Sub
 

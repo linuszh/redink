@@ -1199,8 +1199,10 @@ Partial Public Class ThisAddIn
             Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models, and {ShowModel} to include the model name in the output"
             Dim ToolSelectionInstruct As String = $"; add '{ToolSelectionTrigger}' to permit {ToolFriendlyName.ToLower} selection"
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
+            Dim FormInstruct As String = $"; use '{FormPrefix}' for completing tables/form fields in a Word document"
             Dim FileObject As String = ""
             Dim SlideDeck As String = ""
+            Dim DoForm As Boolean = False
 
             Dim DefaultPrefix As String = INI_DefaultPrefix
             Dim DefaultPrefixText As String = ""
@@ -1211,7 +1213,7 @@ Partial Public Class ThisAddIn
             ' Check if no text is selected (insertion point only)
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
 
-            ' Check if the selected model supports tooling (can call tools)
+            ' Check if the selected model supports tooling (can call tools)f
             Dim modelSupportsTool As Boolean = False
             If UseSecondAPI Then
                 ' Check via SharedMethods - based on APICall_ToolInstructions
@@ -1310,7 +1312,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{FormInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -2193,7 +2195,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
-                CompleteWordDocumentTables()
+                directCompleteWordDocumentTables()
                 Return
             End If
 
@@ -2688,6 +2690,13 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(AssemblePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(AssemblePrefix.Length).Trim()
                 DoAssemble = True
+            ElseIf OtherPrompt.StartsWith(FormPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If Not NoText Then
+                    ShowCustomMessageBox($"The '{FormPrefix}' prefix is available only when no text is selected.")
+                    Return
+                End If
+                OtherPrompt = OtherPrompt.Substring(FormPrefix.Length).Trim()
+                DoForm = True
             End If
 
             ' (net) trigger: Enable internet search
@@ -2808,6 +2817,23 @@ Partial Public Class ThisAddIn
                     RestoreDefaults(_context, originalConfig)
                     originalConfigLoaded = False
                 End If
+                Return
+            End If
+
+            ' ======== COMPLETEFORMS mode (after all other processing, including file embedding, is done) ========
+
+            If DoForm Then
+                Try
+                    Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI)
+                Catch ex As System.Exception
+                    ShowCustomMessageBox("Error in Freestyle ('Form:'): " & ex.Message, "Error")
+                End Try
+
+                If UseSecondAPI AndAlso originalConfigLoaded Then
+                    RestoreDefaults(_context, originalConfig)
+                    originalConfigLoaded = False
+                End If
+
                 Return
             End If
 
