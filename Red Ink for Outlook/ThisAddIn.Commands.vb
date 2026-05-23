@@ -1355,9 +1355,10 @@ Partial Public Class ThisAddIn
 
                     If String.IsNullOrWhiteSpace(reviewed) Then Return
 
-                    ' Use the reviewed text for the normal insertion path; skip any markup append
+                    ' Use the reviewed text for the normal insertion path; replace the current selection.
                     LLMResult = reviewed
                     DoMarkup = False
+                    Inplace = True
                 End If
 
                 If KeepFormat Then
@@ -1367,14 +1368,21 @@ Partial Public Class ThisAddIn
                     SelectedText = selection.Text
                     SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR)
                     If DoMarkup Then
-                        LLMResult = SLib.RemoveHTML(LLMResult)
-                        If MarkupMethod <> 3 Then
+                        Dim markupCompareText As String = SLib.RemoveHTML(LLMResult)
+
+                        If MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             range.Text = vbCrLf & vbCrLf & "MARKUP:" & vbCrLf
                         End If
+
                         range.Collapse(WdCollapseDirection.wdCollapseEnd)
                         selection.SetRange(range.Start, selection.End)
 
-                        CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                        Select Case MarkupMethod
+                            Case 2, 3
+                                CompareAndInsertText(SelectedText, markupCompareText, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                            Case Else
+                                CompareAndInsertTextCompareDocs(SelectedText, markupCompareText)
+                        End Select
                     End If
 
                 Else
@@ -1382,7 +1390,7 @@ Partial Public Class ThisAddIn
                     If Inplace Then
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
-                        If DoMarkup And MarkupMethod <> 3 Then
+                        If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
@@ -1399,14 +1407,14 @@ Partial Public Class ThisAddIn
                         Dim newEnd As Integer = selRange.End
                         selection.SetRange(newStart, newEnd)
 
-                        If DoMarkup And MarkupMethod <> 3 Then
+                        If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
                         End If
 
                         Dim insertedRange As Microsoft.Office.Interop.Word.Range =
-                            wordEditor.Range(newStart, selection.Range.End)
+                                wordEditor.Range(newStart, selection.Range.End)
 
                         ApplyParagraphFormatting(insertedRange, sourceFormatting)
 
@@ -1425,11 +1433,12 @@ Partial Public Class ThisAddIn
 
                     ' Perform markup comparison and insertion if necessary
                     If DoMarkup Then
-                        If MarkupMethod = 2 Or MarkupMethod = 3 Then
-                            CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
-                        Else
-                            CompareAndInsertTextCompareDocs(SelectedText, LLMResult)
-                        End If
+                        Select Case MarkupMethod
+                            Case 2, 3
+                                CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                            Case Else
+                                CompareAndInsertTextCompareDocs(SelectedText, LLMResult)
+                        End Select
                     End If
 
                 End If
@@ -1587,7 +1596,7 @@ Partial Public Class ThisAddIn
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix),
-                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
+                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefix}' as a prefix.", MarkupPrefix)
                         }
                 OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
             Else
@@ -1658,6 +1667,10 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefix.Length).Trim()
                 DoMarkup = True
+            ElseIf OtherPrompt.StartsWith(MarkupPrefixApprove, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+                OtherPrompt = OtherPrompt.Substring(MarkupPrefixApprove.Length).Trim()
+                DoMarkup = True
+                MarkupMethod = 4
             ElseIf OtherPrompt.StartsWith(MarkupPrefixWord, StringComparison.OrdinalIgnoreCase) And Not NoText Then
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixWord.Length).Trim()
                 DoMarkup = True
@@ -1804,9 +1817,25 @@ Partial Public Class ThisAddIn
             If Not NoText Then
                 LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
             End If
-
             If INI_PostCorrection <> "" Then
                 LLMResult = Await PostCorrection(LLMResult)
+            End If
+
+            If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
+
+                Dim reviewed As String = Nothing
+                Using dlg As New ReviewChangesDialog(selectedText, LLMResult)
+                    If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                        Return
+                    End If
+                    reviewed = dlg.ReviewedText
+                End Using
+
+                If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+                LLMResult = reviewed
+                DoMarkup = False
+                DoInplace = True
             End If
 
             OtherPrompt = ""
@@ -1849,7 +1878,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Insert result
-                If DoMarkup And MarkupMethod <> 3 Then
+                If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                     SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR)
                 Else
                     If DoInplace Then
@@ -1872,11 +1901,12 @@ Partial Public Class ThisAddIn
 
                 ' Markup comparison if requested
                 If DoMarkup Then
-                    If MarkupMethod = 2 Or MarkupMethod = 3 Then
-                        CompareAndInsertText(selectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
-                    Else
-                        CompareAndInsertTextCompareDocs(selectedText, LLMResult)
-                    End If
+                    Select Case MarkupMethod
+                        Case 2, 3
+                            CompareAndInsertText(selectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                        Case Else
+                            CompareAndInsertTextCompareDocs(selectedText, LLMResult)
+                    End Select
                 End If
             End If
 

@@ -32,6 +32,9 @@ Namespace Agents
 
     Public NotInheritable Class ToolCallSequencing
 
+
+        Public Const TaskStatusReasonMaxChars As Integer = 160
+
         Private Sub New()
         End Sub
 
@@ -558,8 +561,8 @@ Namespace Agents
 
         Public Shared Function ParseStrictTaskStatus(text As String) As TaskStatusParseResult
             Dim result As New TaskStatusParseResult() With {
-                .Status = TaskStatusKind.None
-            }
+        .Status = TaskStatusKind.None
+    }
 
             Dim trimmedText As String = If(text, "")
             Dim trimmedEnd As String = trimmedText.TrimEnd()
@@ -570,10 +573,10 @@ Namespace Agents
             End If
 
             Dim matches As MatchCollection =
-                Regex.Matches(
-                    trimmedEnd,
-                    "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
-                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+        Regex.Matches(
+            trimmedEnd,
+            "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
 
             result.FooterCount = matches.Count
 
@@ -603,16 +606,11 @@ Namespace Agents
             Try
                 Dim obj As JObject = JObject.Parse(jsonText)
                 Dim statusText As String = If(obj.Value(Of String)("status"), "").Trim().ToLowerInvariant()
-                Dim reasonText As String = If(obj.Value(Of String)("reason"), "").Trim()
+                Dim rawReasonText As String = If(obj.Value(Of String)("reason"), "")
                 Dim memoryGroundingScopeText As String = If(obj.Value(Of String)("memoryGroundingScope"), "").Trim().ToLowerInvariant()
 
-                If reasonText = "" Then
+                If rawReasonText.Trim() = "" Then
                     result.FailureReason = "task_status_missing_reason"
-                    Return result
-                End If
-
-                If reasonText.Length > 160 Then
-                    result.FailureReason = "task_status_reason_too_long"
                     Return result
                 End If
 
@@ -633,7 +631,7 @@ Namespace Agents
                         Return result
                 End Select
 
-                result.Reason = reasonText
+                result.Reason = NormalizeFooterReason(rawReasonText, statusText)
                 result.MemoryGroundingScope = memoryGroundingScopeText
                 result.IsValid = True
                 Return result
@@ -642,8 +640,6 @@ Namespace Agents
                 Return result
             End Try
         End Function
-
-
 
 
         Public NotInheritable Class MemoryGroundingIntentDecision
@@ -1164,113 +1160,50 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildActiveToolingRepairPrompt(Optional runState As ToolingRunState = Nothing,
-                                                              Optional invalidReason As String = "") As String
+                                                      Optional invalidReason As String = "") As String
             Dim normalizedInvalidReason As String = If(invalidReason, "").Trim().ToLowerInvariant()
             Dim prompt As String
 
             Select Case normalizedInvalidReason
                 Case "task_status_reason_too_long",
-                     "task_status_missing_reason",
-                     "malformed_task_status"
+             "task_status_missing_reason",
+             "malformed_task_status"
                     prompt =
-                        "REPAIR: Your previous TASK_STATUS reason was too long or malformed. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""short""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""short""}</TASK_STATUS>. " &
-                        "The reason must be a very short plain phrase."
+                "REPAIR: Your previous TASK_STATUS footer was malformed. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
                 Case "non_user_facing_final_text"
                     prompt =
-                        "REPAIR: Your previous final text was not valid user-facing prose. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""short""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""short""}</TASK_STATUS>. " &
-                        "Do not return control blocks, reference lists, intermediate machine-readable payloads, or raw structured data as the final user-facing answer."
+                "REPAIR: Your previous final text was not valid user-facing prose. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
                 Case Else
                     prompt =
-                        "REPAIR: Your previous response was invalid for an active tooling session. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>. " &
-                                                "REPAIR: Your previous response was invalid for an active tooling session. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>. " &
-                        "Progress narration is invalid. Announcements of future work are invalid. Final prose without exactly one valid TASK_STATUS footer is invalid. TASK_STATUS continue is invalid during active tooling. Raw internal JSON is invalid as a user-facing answer. Do NOT repeat the previous invalid response format. If no further tool call is needed, return normal user-facing prose with exactly one valid TASK_STATUS footer."
+                "REPAIR: Your previous turn was not valid for the active tooling contract. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
             End Select
 
-            If runState IsNot Nothing AndAlso runState.HasUnresolvedToolFailure Then
-                prompt &= " Before giving up, reassess whether the failed tool was the right tool for the remaining work. If another available tool is more appropriate, use that tool instead. If the same tool is still appropriate, retry only with narrower or corrected arguments."
-            End If
-
             If runState IsNot Nothing AndAlso
-               runState.RequestRequiresCreatedDeliverable AndAlso
-               Not HasProducedUserDeliverable(runState) Then
+       runState.MemoryGroundingMode = MemoryGroundingMode.Required Then
 
-                prompt &= " The user request still requires a created deliverable artifact. " &
-                          "A preparatory extraction, read, or analysis result is not enough. " &
-                          "Do not finalize yet. Use an appropriate creation, write, export, or save tool before finalizing, or return a blocked answer only if the deliverable cannot be created reliably."
+                prompt &= " If the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer."
             End If
 
-            If runState IsNot Nothing AndAlso
-               (Not String.IsNullOrWhiteSpace(runState.LastSuccessfulToolCall) OrElse
-                Not String.IsNullOrWhiteSpace(runState.LastStructuredToolResult) OrElse
-                Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference)) Then
-
-                prompt &= " If some work was already completed but the task still cannot be finished reliably, the final user-facing response must briefly say what was completed and what remains incomplete or may be incomplete, in short non-technical task terms."
-            End If
-
-            If runState Is Nothing Then
-                Return prompt
-            End If
-
-            Dim additions As New List(Of String)()
-
-            If runState.HasUnresolvedToolFailure Then
-                Dim failedToolName As String = If(runState.LastToolName, "").Trim()
-                additions.Add(
-                    "A previous tool step failed." &
-                    If(failedToolName = "", " ", " The failed tool was '" & failedToolName & "'. ") &
-                    "First reassess whether that tool was the right tool for the remaining work. " &
-                    "If another available tool is more appropriate, use that tool instead. " &
-                    "If the same tool is still appropriate, retry only with narrower or corrected arguments. " &
-                    "If enough information is already available, provide the best possible final answer and state clearly if it may be incomplete.")
-            End If
-
-            If runState.RequestRequiresCreatedDeliverable AndAlso
-               Not HasProducedUserDeliverable(runState) Then
-
-                additions.Add(
-                    "The original request still requires a created deliverable artifact. " &
-                    "The latest successful result is not yet enough unless a tool has actually produced an artifact reference or output path. " &
-                    "Continue with the next appropriate creation, write, export, or save step before finalizing.")
-            End If
-
-            If Not String.IsNullOrWhiteSpace(runState.LastStructuredToolResult) Then
-                Dim toolLabel As String =
-                    If(String.IsNullOrWhiteSpace(runState.LastStructuredToolName),
-                       "the latest successful tool",
-                       "'" & runState.LastStructuredToolName & "'")
-
-                additions.Add(
-                    "The latest successful structured tool result from " & toolLabel & " remains available during repair. " &
-                    "Do not discard it, do not narrate it as progress, and do not surface it as raw JSON.")
-            End If
-
-            If Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference) Then
-                additions.Add("A generic output or state reference remains available: " & runState.LastKnownOutputReference & ".")
-            End If
-
-            If additions.Count = 0 Then
-                Return prompt
-            End If
-
-            Return prompt & " " & String.Join(" ", additions)
+            Return prompt
         End Function
-
 
         Public Shared Sub NoteMemoryGroundingToolResult(runState As ToolingRunState,
                                                         toolName As String,
@@ -2268,9 +2201,14 @@ Namespace Agents
         End Sub
 
         Public Shared Function BuildTaskStatusFooter(status As String, reason As String) As String
+            Dim normalizedStatus As String = If(status, "").Trim().ToLowerInvariant()
+            If normalizedStatus = "" Then
+                normalizedStatus = "blocked"
+            End If
+
             Dim footerObject As New JObject(
-                New JProperty("status", If(status, "").Trim().ToLowerInvariant()),
-                New JProperty("reason", NormalizeFooterReason(reason)))
+        New JProperty("status", normalizedStatus),
+        New JProperty("reason", NormalizeFooterReason(reason, normalizedStatus)))
 
             Return "<TASK_STATUS>" & footerObject.ToString(Formatting.None) & "</TASK_STATUS>"
         End Function
@@ -2335,14 +2273,31 @@ Namespace Agents
             End Try
         End Function
 
-        Private Shared Function NormalizeFooterReason(reason As String) As String
-            Dim normalized As String = If(reason, "").Trim()
-            If normalized = "" Then normalized = "blocked"
-            If normalized.Length > 80 Then normalized = normalized.Substring(0, 80).Trim()
+        Private Shared Function NormalizeFooterReason(reason As String, Optional status As String = "") As String
+            Dim normalized As String =
+        Regex.Replace(
+            If(reason, ""),
+            "\s+",
+            " ",
+            RegexOptions.CultureInvariant).Trim()
+
+            If normalized = "" Then
+                Select Case If(status, "").Trim().ToLowerInvariant()
+                    Case "complete"
+                        normalized = "answer ready"
+                    Case "blocked"
+                        normalized = "no safe completion path"
+                    Case Else
+                        normalized = "status recorded"
+                End Select
+            End If
+
+            If normalized.Length > TaskStatusReasonMaxChars Then
+                normalized = normalized.Substring(0, TaskStatusReasonMaxChars).Trim()
+            End If
+
             Return normalized
         End Function
-
-
 
 
         Private Shared Function ExtractFirstPathArgument(arguments As IDictionary(Of String, Object)) As String

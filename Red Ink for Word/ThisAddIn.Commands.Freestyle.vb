@@ -3034,9 +3034,8 @@ Partial Public Class ThisAddIn
                 If DoKB Then
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(OtherPrompt)
                     If kbRequest IsNot Nothing Then
-                        ' Strip the trigger from OtherPrompt so it doesn't reach the LLM.
-                        ' If the trigger itself carried the actual user query, preserve that intent.
                         Dim strippedPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+                        Dim knowledgeTaskPrompt As String = strippedPrompt.Trim()
 
                         If String.IsNullOrWhiteSpace(strippedPrompt) Then
                             If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
@@ -3054,14 +3053,22 @@ Partial Public Class ThisAddIn
                             OtherPrompt = strippedPrompt
                         End If
 
-                        ' Show splash while querying the Knowledge Store
+                        Dim kbResolveOptions As KnowledgeTriggerHelper.KnowledgeResolveOptions = Nothing
+                        If Not String.IsNullOrWhiteSpace(knowledgeTaskPrompt) Then
+                            kbResolveOptions = New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+                                .TaskPrompt = knowledgeTaskPrompt,
+                                .IncludeRelevantExtracts = True,
+                                .IncludeFullDocumentContent = False
+                            }
+                        End If
+
                         Dim kbSplash As New SLib.SplashScreen("Querying Knowledge Store...   ")
                         kbSplash.Show()
                         System.Windows.Forms.Application.DoEvents()
 
                         Dim kbResolved As (Content As String, StatusMessage As String)
                         Try
-                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
                         Finally
                             If kbSplash.InvokeRequired Then
                                 kbSplash.Invoke(Sub()
@@ -3075,7 +3082,6 @@ Partial Public Class ThisAddIn
                         End Try
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
-                            ' Inject knowledge context into system prompt
                             SysPrompt = SysPrompt & vbCrLf & vbCrLf &
                                 "The following documents from the user's knowledge store are provided as reference material. " &
                                 "Use them to answer the user's question. " &

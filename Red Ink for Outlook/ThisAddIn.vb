@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 22.5.2026
+' 23.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.220526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.230526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -70,7 +70,8 @@ Partial Public Class ThisAddIn
     Private Const MarkupPrefixDiff As String = "MarkupDiff:"
     Private Const MarkupPrefixDiffW As String = "MarkupDiffW:"
     Private Const MarkupPrefixWord As String = "MarkupWord:"
-    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word]:"
+    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word|Approve]:"
+    Private Const MarkupPrefixApprove As String = "MarkupApprove:"
     Private Const ClipboardPrefix As String = "Clipboard:"
     Private Const ClipboardPrefix2 As String = "Clip:"
     Private Const InsertPrefix As String = "Insert:"

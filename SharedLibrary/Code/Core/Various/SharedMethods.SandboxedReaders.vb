@@ -57,7 +57,7 @@ Namespace SharedLibrary
         ''' </summary>
         ''' <param name="docxPath">Absolute path to the .docx file.</param>
         ''' <returns>Extracted plain text, or an error string on failure.</returns>
-        Public Shared Function ReadDocxSandboxed(docxPath As String) As String
+        Public Shared Function oldReadDocxSandboxed(docxPath As String) As String
             If String.IsNullOrWhiteSpace(docxPath) OrElse Not File.Exists(docxPath) Then
                 Return "Error: File not found."
             End If
@@ -150,6 +150,385 @@ Namespace SharedLibrary
                 Catch : End Try
             End Try
         End Function
+
+
+        Public Shared Function ReadDocxSandboxed(docxPath As String) As String
+            If System.String.IsNullOrWhiteSpace(docxPath) OrElse Not System.IO.File.Exists(docxPath) Then
+                Return "Error: File not found."
+            End If
+
+            Dim tempDir As String =
+        System.IO.Path.Combine(
+            System.IO.Path.GetTempPath(),
+            "ri_docx_" & System.Guid.NewGuid().ToString("N")
+        )
+
+            Try
+                System.IO.Compression.ZipFile.ExtractToDirectory(docxPath, tempDir)
+
+                Dim wordDir As String = System.IO.Path.Combine(tempDir, "word")
+                Dim documentXmlPath As String = System.IO.Path.Combine(wordDir, "document.xml")
+
+                If Not System.IO.File.Exists(documentXmlPath) Then
+                    Return "Error: Not a valid .docx file (missing word/document.xml)."
+                End If
+
+                Dim xmlDoc As New System.Xml.XmlDocument()
+                xmlDoc.PreserveWhitespace = True
+                xmlDoc.Load(documentXmlPath)
+
+                Dim nsMgr As New System.Xml.XmlNamespaceManager(xmlDoc.NameTable)
+                nsMgr.AddNamespace("w", SB_WordNs)
+
+                Dim sb As New System.Text.StringBuilder(4096)
+
+                ' ── Main body content in original order: paragraphs and tables ──
+                Dim bodyNode As System.Xml.XmlNode = xmlDoc.SelectSingleNode("//w:body", nsMgr)
+                Dim tableIndex As Integer = 0
+
+                If bodyNode IsNot Nothing Then
+                    For Each childNode As System.Xml.XmlNode In bodyNode.ChildNodes
+
+                        If childNode.NamespaceURI <> SB_WordNs Then
+                            Continue For
+                        End If
+
+                        Select Case childNode.LocalName
+
+                            Case "p"
+                                Dim paraText As String = ExtractDocxParagraphText(childNode, nsMgr)
+
+                                If paraText.Length > 0 Then
+                                    sb.AppendLine(paraText)
+                                Else
+                                    ' Empty paragraph = blank line
+                                    sb.AppendLine()
+                                End If
+
+                            Case "tbl"
+                                tableIndex += 1
+                                AppendDocxTableForLlm(childNode, nsMgr, sb, tableIndex, 0)
+
+                        End Select
+                    Next
+                End If
+
+                ' ── Optional: headers, footers, footnotes, endnotes ──
+                If DocxIncludeHeaderFooterFootnotes AndAlso System.IO.Directory.Exists(wordDir) Then
+
+                    ' Headers
+                    ExtractDocxSubParts(wordDir, "header*.xml", "Header", sb)
+
+                    ' Footers
+                    ExtractDocxSubParts(wordDir, "footer*.xml", "Footer", sb)
+
+                    ' Footnotes, skip id="0" = separator, id="-1" = continuation separator
+                    ExtractDocxNotes(wordDir, "footnotes.xml", "w:footnote", "Footnote", sb)
+
+                    ' Endnotes, skip id="0" and id="-1"
+                    ExtractDocxNotes(wordDir, "endnotes.xml", "w:endnote", "Endnote", sb)
+                End If
+
+                Dim result As String = sb.ToString().TrimEnd()
+
+                Return If(
+            System.String.IsNullOrWhiteSpace(result),
+            "Error: No text content found in .docx.",
+            result
+        )
+
+            Catch ex As System.Exception
+                Return "Error reading .docx: " & ex.Message
+
+            Finally
+                Try
+                    If System.IO.Directory.Exists(tempDir) Then
+                        System.IO.Directory.Delete(tempDir, True)
+                    End If
+                Catch
+                End Try
+            End Try
+        End Function
+
+
+        Private Shared Function ExtractDocxParagraphText(
+    paraNode As System.Xml.XmlNode,
+    nsMgr As System.Xml.XmlNamespaceManager
+) As String
+
+            Dim paraText As New System.Text.StringBuilder()
+
+            Dim runs As System.Xml.XmlNodeList = paraNode.SelectNodes(".//w:r", nsMgr)
+
+            If runs IsNot Nothing Then
+                For Each runNode As System.Xml.XmlNode In runs
+
+                    If DocxIncludeHeaderFooterFootnotes Then
+                        Dim fnRef As System.Xml.XmlNode = runNode.SelectSingleNode("w:footnoteReference", nsMgr)
+
+                        If fnRef IsNot Nothing Then
+                            Dim fnId As String = GetWordAttributeValue(fnRef, "id")
+
+                            If Not System.String.IsNullOrWhiteSpace(fnId) AndAlso fnId <> "0" Then
+                                paraText.Append(" [Footnote " & fnId & "]")
+                            End If
+                        End If
+
+                        Dim enRef As System.Xml.XmlNode = runNode.SelectSingleNode("w:endnoteReference", nsMgr)
+
+                        If enRef IsNot Nothing Then
+                            Dim enId As String = GetWordAttributeValue(enRef, "id")
+
+                            If Not System.String.IsNullOrWhiteSpace(enId) AndAlso enId <> "0" Then
+                                paraText.Append(" [Endnote " & enId & "]")
+                            End If
+                        End If
+                    End If
+
+                    For Each runChild As System.Xml.XmlNode In runNode.ChildNodes
+
+                        If runChild.NamespaceURI <> SB_WordNs Then
+                            Continue For
+                        End If
+
+                        Select Case runChild.LocalName
+
+                            Case "t"
+                                paraText.Append(runChild.InnerText)
+
+                            Case "tab"
+                                paraText.Append(vbTab)
+
+                            Case "br", "cr"
+                                paraText.AppendLine()
+
+                            Case "noBreakHyphen"
+                                paraText.Append(ChrW(&H2011))
+
+                            Case "softHyphen"
+                                paraText.Append(ChrW(&HAD))
+
+                        End Select
+                    Next
+                Next
+            End If
+
+            Return paraText.ToString().Trim()
+        End Function
+
+
+        Private Shared Sub AppendDocxTableForLlm(
+    tableNode As System.Xml.XmlNode,
+    nsMgr As System.Xml.XmlNamespaceManager,
+    sb As System.Text.StringBuilder,
+    tableIndex As Integer,
+    nestingLevel As Integer
+)
+
+            Dim indent As String = New System.String(" "c, nestingLevel * 2)
+            Dim tableNumberText As String = tableIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+
+            sb.AppendLine()
+            sb.AppendLine(indent & "[Table " & tableNumberText & "]")
+
+            Dim rows As System.Xml.XmlNodeList = tableNode.SelectNodes("w:tr", nsMgr)
+
+            If rows Is Nothing OrElse rows.Count = 0 Then
+                sb.AppendLine(indent & "[Empty table]")
+                sb.AppendLine(indent & "[/Table " & tableNumberText & "]")
+                sb.AppendLine()
+                Return
+            End If
+
+            Dim rowIndex As Integer = 0
+
+            For Each rowNode As System.Xml.XmlNode In rows
+                rowIndex += 1
+
+                Dim cells As System.Xml.XmlNodeList = rowNode.SelectNodes("w:tc", nsMgr)
+
+                If cells Is Nothing OrElse cells.Count = 0 Then
+                    sb.AppendLine(
+                indent &
+                "Row " &
+                rowIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                ": [empty row]"
+            )
+
+                    Continue For
+                End If
+
+                Dim visualColumnIndex As Integer = 1
+                Dim physicalCellIndex As Integer = 0
+
+                For Each cellNode As System.Xml.XmlNode In cells
+                    physicalCellIndex += 1
+
+                    Dim gridSpan As Integer = GetDocxGridSpan(cellNode, nsMgr)
+                    Dim verticalMerge As String = GetDocxVerticalMerge(cellNode, nsMgr)
+                    Dim cellText As String = ExtractDocxCellText(cellNode, nsMgr, tableIndex, nestingLevel + 1)
+
+                    Dim rowText As String = rowIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    Dim physicalCellText As String = physicalCellIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    Dim startColumnText As String = visualColumnIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    Dim endColumnText As String = (visualColumnIndex + gridSpan - 1).ToString(System.Globalization.CultureInfo.InvariantCulture)
+
+                    Dim cellLabel As String =
+                indent &
+                "Row " &
+                rowText &
+                ", Cell " &
+                physicalCellText &
+                ", Column " &
+                startColumnText
+
+                    If gridSpan > 1 Then
+                        cellLabel &= "-" & endColumnText & " spanning " & gridSpan.ToString(System.Globalization.CultureInfo.InvariantCulture) & " columns"
+                    End If
+
+                    If Not System.String.IsNullOrWhiteSpace(verticalMerge) Then
+                        If verticalMerge = "restart" Then
+                            cellLabel &= ", starts vertical merge"
+                        Else
+                            cellLabel &= ", continues vertical merge from row above"
+                        End If
+                    End If
+
+                    sb.AppendLine(cellLabel & ": " & cellText)
+
+                    visualColumnIndex += gridSpan
+                Next
+            Next
+
+            sb.AppendLine(indent & "[/Table " & tableNumberText & "]")
+            sb.AppendLine()
+        End Sub
+
+
+        Private Shared Function ExtractDocxCellText(
+    cellNode As System.Xml.XmlNode,
+    nsMgr As System.Xml.XmlNamespaceManager,
+    tableIndex As Integer,
+    nestingLevel As Integer
+) As String
+
+            Dim parts As New System.Collections.Generic.List(Of String)()
+            Dim nestedTableIndex As Integer = 0
+
+            For Each childNode As System.Xml.XmlNode In cellNode.ChildNodes
+
+                If childNode.NamespaceURI <> SB_WordNs Then
+                    Continue For
+                End If
+
+                Select Case childNode.LocalName
+
+                    Case "p"
+                        Dim paragraphText As String = ExtractDocxParagraphText(childNode, nsMgr)
+
+                        If Not System.String.IsNullOrWhiteSpace(paragraphText) Then
+                            parts.Add(paragraphText)
+                        End If
+
+                    Case "tbl"
+                        nestedTableIndex += 1
+
+                        Dim nestedBuilder As New System.Text.StringBuilder()
+
+                        AppendDocxTableForLlm(
+                    childNode,
+                    nsMgr,
+                    nestedBuilder,
+                    tableIndex * 1000 + nestedTableIndex,
+                    nestingLevel
+                )
+
+                        parts.Add(nestedBuilder.ToString().Trim())
+
+                End Select
+            Next
+
+            If parts.Count = 0 Then
+                Return "[empty]"
+            End If
+
+            Return System.String.Join(" | ", parts)
+        End Function
+
+
+        Private Shared Function GetDocxGridSpan(
+    cellNode As System.Xml.XmlNode,
+    nsMgr As System.Xml.XmlNamespaceManager
+) As Integer
+
+            Dim gridSpanNode As System.Xml.XmlNode = cellNode.SelectSingleNode("w:tcPr/w:gridSpan", nsMgr)
+
+            If gridSpanNode Is Nothing Then
+                Return 1
+            End If
+
+            Dim valueText As String = GetWordAttributeValue(gridSpanNode, "val")
+            Dim result As Integer
+
+            If System.Int32.TryParse(valueText, result) AndAlso result > 1 Then
+                Return result
+            End If
+
+            Return 1
+        End Function
+
+
+        Private Shared Function GetDocxVerticalMerge(
+    cellNode As System.Xml.XmlNode,
+    nsMgr As System.Xml.XmlNamespaceManager
+) As String
+
+            Dim vMergeNode As System.Xml.XmlNode = cellNode.SelectSingleNode("w:tcPr/w:vMerge", nsMgr)
+
+            If vMergeNode Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Dim valueText As String = GetWordAttributeValue(vMergeNode, "val")
+
+            If System.String.IsNullOrWhiteSpace(valueText) Then
+                Return "continue"
+            End If
+
+            Return valueText
+        End Function
+
+
+        Private Shared Function GetWordAttributeValue(
+    node As System.Xml.XmlNode,
+    localName As String
+) As String
+
+            If node Is Nothing OrElse node.Attributes Is Nothing Then
+                Return System.String.Empty
+            End If
+
+            Dim attr As System.Xml.XmlNode = node.Attributes.GetNamedItem(localName, SB_WordNs)
+
+            If attr IsNot Nothing Then
+                Return attr.Value
+            End If
+
+            attr = node.Attributes.GetNamedItem("w:" & localName)
+
+            If attr IsNot Nothing Then
+                Return attr.Value
+            End If
+
+            attr = node.Attributes.GetNamedItem(localName)
+
+            If attr IsNot Nothing Then
+                Return attr.Value
+            End If
+
+            Return System.String.Empty
+        End Function
+
 
         ''' <summary>
         ''' Extracts text from DOCX sub-parts matching a file pattern (e.g., <c>header*.xml</c>, <c>footer*.xml</c>).
