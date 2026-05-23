@@ -76,7 +76,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Enables verbose table-completion debugging.
     ''' </summary>
-    Private Const TableCompleteDebugEnabled As Boolean = True
+    Private Const TableCompleteDebugEnabled As Boolean = False
 
     ''' <summary>
     ''' Includes raw XML payloads in debug logs.
@@ -96,7 +96,7 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Reopens the saved DOCX after repacking and verifies that requested cell updates are present.
     ''' </summary>
-    Private Const TableCompleteDebugVerifySavedDocx As Boolean = True
+    Private Const TableCompleteDebugVerifySavedDocx As Boolean = False
 
     ''' <summary>
     ''' Reopens the saved DOCX in hidden Word and logs what Word sees in the target table.
@@ -176,7 +176,9 @@ Partial Public Class ThisAddIn
         Public Property Row As Integer
         Public Property Col As Integer
         Public Property Text As String
+        Public Property Action As String
     End Class
+
 
     ''' <summary>
     ''' Represents the LLM's response for a single table.
@@ -288,7 +290,9 @@ Partial Public Class ThisAddIn
     Private Class BodyParagraphUpdate
         Public Property Index As Integer
         Public Property Text As String
+        Public Property Action As String
     End Class
+
 
     Private Class BodyFieldUpdate
         Public Property FieldId As String
@@ -506,9 +510,9 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Async Function ProcessTableCompletion(inputPath As String,
-                                              outputPath As String,
-                                              userInstructions As String,
-                                              Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
+                                                  outputPath As String,
+                                                  userInstructions As String,
+                                                  Optional useSecondAPI As Boolean = False) As Task(Of Boolean)
         Dim tempDocxPath As String = Nothing
         Dim wordApp As Word.Application = Nothing
         Dim doc As Word.Document = Nothing
@@ -528,8 +532,21 @@ Partial Public Class ThisAddIn
             End If
 
             File.Copy(tempDocxPath, outputPath, overwrite:=True)
+
             Dim success As Boolean = Await ProcessDocxTables(outputPath, userInstructions, useSecondAPI)
-            Return success
+            If Not success Then Return False
+
+            Dim compareSourcePath As String = tempDocxPath
+            If String.IsNullOrWhiteSpace(compareSourcePath) OrElse Not File.Exists(compareSourcePath) Then
+                compareSourcePath = inputPath
+            End If
+
+            Dim compareCreated As Boolean = TableCreateWordCompareDocument(compareSourcePath, outputPath)
+            If Not compareCreated Then
+                ShowCustomMessageBox("The completed document was created, but the compare document could not be generated.", AN & " Complete Tables")
+            End If
+
+            Return True
 
         Finally
             If doc IsNot Nothing Then
@@ -540,6 +557,7 @@ Partial Public Class ThisAddIn
             End If
         End Try
     End Function
+
 
     Private Async Function ProcessDocxTables(docxPath As String,
                                          userInstructions As String,
@@ -643,6 +661,91 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Function GetTableCompletionCompareFilePath(completedPath As String) As String
+        Dim dir As String = Path.GetDirectoryName(completedPath)
+        Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(completedPath)
+        Dim ext As String = Path.GetExtension(completedPath)
+
+        If nameWithoutExt.EndsWith("_completed", StringComparison.OrdinalIgnoreCase) Then
+            nameWithoutExt = nameWithoutExt.Substring(0, nameWithoutExt.Length - "_completed".Length) & "_completed_compare"
+        Else
+            nameWithoutExt &= "_compare"
+        End If
+
+        Return Path.Combine(dir, nameWithoutExt & ext)
+    End Function
+
+    Private Function TableCreateWordCompareDocument(originalPath As String, completedPath As String) As Boolean
+        Dim wordApp As Word.Application = Nothing
+        Dim originalDoc As Word.Document = Nothing
+        Dim completedDoc As Word.Document = Nothing
+        Dim compareDoc As Word.Document = Nothing
+        Dim wasScreenUpdating As Boolean = True
+
+        Try
+            If String.IsNullOrWhiteSpace(originalPath) OrElse String.IsNullOrWhiteSpace(completedPath) Then Return False
+            If Not File.Exists(originalPath) OrElse Not File.Exists(completedPath) Then Return False
+
+            wordApp = Globals.ThisAddIn.Application
+            wasScreenUpdating = wordApp.ScreenUpdating
+            wordApp.ScreenUpdating = False
+
+            Dim comparePath As String = GetTableCompletionCompareFilePath(completedPath)
+
+            originalDoc = wordApp.Documents.Open(originalPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+            completedDoc = wordApp.Documents.Open(completedPath, ReadOnly:=True, Visible:=False, AddToRecentFiles:=False)
+
+            compareDoc = wordApp.CompareDocuments(
+                OriginalDocument:=originalDoc,
+                RevisedDocument:=completedDoc,
+                Destination:=WdCompareDestination.wdCompareDestinationNew,
+                Granularity:=WdGranularity.wdGranularityWordLevel,
+                CompareFormatting:=True,
+                CompareCaseChanges:=True,
+                CompareWhitespace:=True,
+                CompareTables:=True,
+                CompareHeaders:=True,
+                CompareFootnotes:=True,
+                CompareTextboxes:=True,
+                CompareFields:=True,
+                CompareComments:=True,
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
+                IgnoreAllComparisonWarnings:=True
+            )
+
+            compareDoc.SaveAs2(GetTableCompletionCompareFilePath(completedPath), WdSaveFormat.wdFormatXMLDocument)
+
+            compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            compareDoc = Nothing
+
+            completedDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            completedDoc = Nothing
+
+            originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges)
+            originalDoc = Nothing
+
+            wordApp.ScreenUpdating = wasScreenUpdating
+            Return True
+
+        Catch
+            Return False
+        Finally
+            If compareDoc IsNot Nothing Then
+                Try : compareDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+            End If
+            If completedDoc IsNot Nothing Then
+                Try : completedDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+            End If
+            If originalDoc IsNot Nothing Then
+                Try : originalDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+            End If
+            If wordApp IsNot Nothing Then
+                Try : wordApp.ScreenUpdating = wasScreenUpdating : Catch : End Try
+            End If
+        End Try
+    End Function
+
+
 #End Region
 
 #Region "Extraction"
@@ -724,19 +827,16 @@ Partial Public Class ThisAddIn
             Dim rawText As String = ExtractVisibleParagraphTextExcludingSdts(pNode, nsMgr, textNodes)
             Dim normalizedText As String = NormalizeTextForPlaceholderDetection(rawText)
 
-            Dim paraInfo As New BodyParagraphInfo() With {
+            results.Add(New BodyParagraphInfo() With {
                 .Index = paragraphIndex,
                 .Text = rawText,
-                .IsPlaceholder = IsPlaceholderText(rawText),
+                .IsPlaceholder = False,
                 .IsEmpty = String.IsNullOrWhiteSpace(normalizedText),
                 .TextNodes = If(textNodes, New List(Of System.Xml.XmlNode)()),
                 .XmlNode = pNode
-            }
+            })
 
-            If paraInfo.IsPlaceholder OrElse paraInfo.IsEmpty Then
-                results.Add(paraInfo)
-                paragraphIndex += 1
-            End If
+            paragraphIndex += 1
         Next
 
         Return results
@@ -931,10 +1031,7 @@ Partial Public Class ThisAddIn
         Dim isWritable As Boolean = IsCellWritable(node, nsMgr, protectionReason)
         Dim fields As List(Of FormFieldInfo) = ExtractFormFieldsFromNode(node, nsMgr, isWritable, protectionReason)
 
-        Dim hasEmptyWritableField As Boolean =
-            fields.Any(Function(f) f.IsWritable AndAlso String.IsNullOrWhiteSpace(f.CurrentValue) AndAlso String.IsNullOrWhiteSpace(f.CurrentOptionValue))
-
-        If paragraphs.Count = 0 AndAlso Not hasEmptyWritableField Then
+        If paragraphs.Count = 0 AndAlso (fields Is Nothing OrElse fields.Count = 0) Then
             Return Nothing
         End If
 
@@ -945,6 +1042,7 @@ Partial Public Class ThisAddIn
             .FormFields = fields
         }
     End Function
+
 
     Private Function ExtractBodySectionsFromXml(xmlDoc As System.Xml.XmlDocument,
                                                 nsMgr As System.Xml.XmlNamespaceManager) As List(Of BodySectionInfo)
@@ -975,7 +1073,7 @@ Partial Public Class ThisAddIn
         Return results
     End Function
 
-    Private Function NormalizeTextForPlaceholderDetection(value As String) As String
+    Private Shared Function NormalizeTextForPlaceholderDetection(value As String) As String
         If value Is Nothing Then Return ""
 
         Dim normalized As String = value.Normalize()
@@ -994,7 +1092,7 @@ Partial Public Class ThisAddIn
         Return normalized
     End Function
 
-    Private Function IsPlaceholderText(value As String) As Boolean
+    Private Shared Function IsPlaceholderText(value As String) As Boolean
         Dim normalized As String = NormalizeTextForPlaceholderDetection(value)
         If String.IsNullOrWhiteSpace(normalized) Then Return False
         Return PlaceholderPattern.IsMatch(normalized)
@@ -1309,7 +1407,6 @@ Partial Public Class ThisAddIn
                 Dim jPara As New JObject()
                 jPara("index") = para.Index
                 jPara("text") = If(para.Text, "")
-                If para.IsPlaceholder Then jPara("ph") = True
                 If para.IsEmpty Then jPara("empty") = True
                 jParagraphs.Add(jPara)
             Next
@@ -1358,6 +1455,8 @@ Partial Public Class ThisAddIn
 
         Return jObj.ToString(Newtonsoft.Json.Formatting.None)
     End Function
+
+
 
     Private Function BuildAllBodySectionsJson(bodySections As List(Of BodySectionInfo)) As String
         Dim jArr As New JArray()
@@ -1898,12 +1997,19 @@ Partial Public Class ThisAddIn
             Dim jCells As New JArray()
             For Each cell In row.Cells
                 Dim jCell As New JObject()
+                Dim cellText As String = If(cell.Text, "")
+                Dim normalizedCellText As String = NormalizeTextForPlaceholderDetection(cellText)
+
                 jCell("c") = cell.Col
-                jCell("t") = If(cell.Text, "")
+                jCell("t") = cellText
+
+                If String.IsNullOrWhiteSpace(normalizedCellText) Then
+                    jCell("empty") = True
+                End If
+
                 If cell.GridSpan > 1 Then jCell("span") = cell.GridSpan
                 If cell.VMerge <> "" Then jCell("vm") = cell.VMerge
                 If cell.IsHeader Then jCell("hdr") = True
-                If cell.IsPlaceholder Then jCell("ph") = True
                 If cell.WidthPct > 0 Then jCell("w") = cell.WidthPct
                 If Not cell.IsWritable Then jCell("ro") = True
 
@@ -1961,6 +2067,231 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "LLM Batching"
+
+    Private Function BuildTableCellKey(tableIndex As Integer, rowIndex As Integer, colIndex As Integer) As String
+        Return $"{tableIndex}:{rowIndex}:{colIndex}"
+    End Function
+
+    Private Function BuildTableFieldKey(tableIndex As Integer, rowIndex As Integer, colIndex As Integer, fieldId As String) As String
+        Return $"{tableIndex}:{rowIndex}:{colIndex}:{fieldId}"
+    End Function
+
+    Private Function GetHandledTableCellKeys(updates As List(Of TableUpdateResponse)) As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If updates Is Nothing Then Return result
+
+        For Each update In updates
+            If update Is Nothing OrElse update.Updates Is Nothing Then Continue For
+
+            For Each cellUpdate In update.Updates
+                result.Add(BuildTableCellKey(update.TableIndex, cellUpdate.Row, cellUpdate.Col))
+            Next
+        Next
+
+        Return result
+    End Function
+
+    Private Function GetHandledTableFieldKeys(updates As List(Of TableUpdateResponse)) As HashSet(Of String)
+        Dim result As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If updates Is Nothing Then Return result
+
+        For Each update In updates
+            If update Is Nothing OrElse update.FieldUpdates Is Nothing Then Continue For
+
+            For Each fieldUpdate In update.FieldUpdates
+                result.Add(BuildTableFieldKey(update.TableIndex, fieldUpdate.Row, fieldUpdate.Col, fieldUpdate.FieldId))
+            Next
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildUnresolvedTableTargetsJson(tableBlock As List(Of TableInfo),
+                                                     updates As List(Of TableUpdateResponse)) As String
+        Dim handledCellKeys As HashSet(Of String) = GetHandledTableCellKeys(updates)
+        Dim handledFieldKeys As HashSet(Of String) = GetHandledTableFieldKeys(updates)
+        Dim jArr As New JArray()
+
+        If tableBlock Is Nothing Then Return "[]"
+
+        For Each tbl In tableBlock
+            Dim jTbl As New JObject()
+            jTbl("tableIndex") = tbl.TableIndex
+
+            Dim jCells As New JArray()
+            Dim jFields As New JArray()
+
+            For Each row In tbl.Rows
+                For Each cell In row.Cells
+                    If cell.IsWritable Then
+                        Dim normalizedText As String = NormalizeTextForPlaceholderDetection(If(cell.Text, ""))
+                        Dim hasFields As Boolean = (cell.FormFields IsNot Nothing AndAlso cell.FormFields.Count > 0)
+
+                        If String.IsNullOrWhiteSpace(normalizedText) AndAlso Not hasFields Then
+                            Dim key As String = BuildTableCellKey(tbl.TableIndex, row.RowIndex, cell.Col)
+                            If Not handledCellKeys.Contains(key) Then
+                                Dim jCell As New JObject()
+                                jCell("r") = row.RowIndex
+                                jCell("c") = cell.Col
+                                jCell("t") = If(cell.Text, "")
+                                If cell.WidthPct > 0 Then jCell("w") = cell.WidthPct
+                                jCells.Add(jCell)
+                            End If
+                        End If
+                    End If
+
+                    If cell.FormFields IsNot Nothing Then
+                        For Each ff In cell.FormFields
+                            If Not ff.IsWritable Then Continue For
+
+                            Dim isEmptyField As Boolean =
+                                String.IsNullOrWhiteSpace(ff.CurrentValue) AndAlso
+                                String.IsNullOrWhiteSpace(ff.CurrentOptionValue)
+
+                            If Not isEmptyField Then Continue For
+
+                            Dim key As String = BuildTableFieldKey(tbl.TableIndex, row.RowIndex, cell.Col, ff.FieldId)
+                            If handledFieldKeys.Contains(key) Then Continue For
+
+                            Dim jField As New JObject()
+                            jField("r") = row.RowIndex
+                            jField("c") = cell.Col
+                            jField("id") = ff.FieldId
+                            jField("type") = ff.FieldType.ToString().ToLowerInvariant()
+                            If Not String.IsNullOrWhiteSpace(ff.Name) Then jField("name") = ff.Name
+
+                            If ff.Options IsNot Nothing AndAlso ff.Options.Count > 0 Then
+                                Dim jOpts As New JArray()
+                                If ff.FieldType = FormFieldType.Dropdown OrElse ff.FieldType = FormFieldType.LegacyDropdown Then
+                                    For Each opt In ff.Options
+                                        Dim jOpt As New JObject()
+                                        jOpt("text") = If(opt.DisplayText, "")
+                                        jOpt("value") = If(opt.StoredValue, "")
+                                        jOpts.Add(jOpt)
+                                    Next
+                                Else
+                                    For Each opt In ff.Options
+                                        jOpts.Add(If(opt.DisplayText, ""))
+                                    Next
+                                End If
+                                jField("opts") = jOpts
+                            End If
+
+                            jFields.Add(jField)
+                        Next
+                    End If
+                Next
+            Next
+
+            If jCells.Count > 0 OrElse jFields.Count > 0 Then
+                jTbl("unresolvedCells") = jCells
+                jTbl("unresolvedFields") = jFields
+                jArr.Add(jTbl)
+            End If
+        Next
+
+        Return jArr.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+    Private Function MergeTableUpdateResponses(primaryUpdates As List(Of TableUpdateResponse),
+                                               secondaryUpdates As List(Of TableUpdateResponse)) As List(Of TableUpdateResponse)
+        Dim mergedByTable As New Dictionary(Of Integer, TableUpdateResponse)()
+
+        Dim allUpdates As New List(Of TableUpdateResponse)()
+        If primaryUpdates IsNot Nothing Then allUpdates.AddRange(primaryUpdates)
+        If secondaryUpdates IsNot Nothing Then allUpdates.AddRange(secondaryUpdates)
+
+        For Each update In allUpdates
+            If update Is Nothing Then Continue For
+
+            If Not mergedByTable.ContainsKey(update.TableIndex) Then
+                mergedByTable(update.TableIndex) = New TableUpdateResponse() With {
+                    .TableIndex = update.TableIndex,
+                    .Updates = New List(Of TableCellUpdate)(),
+                    .FieldUpdates = New List(Of FormFieldUpdate)(),
+                    .NewRows = New List(Of List(Of String))(),
+                    .InsertAfterRow = update.InsertAfterRow
+                }
+            End If
+
+            Dim target As TableUpdateResponse = mergedByTable(update.TableIndex)
+
+            If target.InsertAfterRow < 0 AndAlso update.InsertAfterRow >= 0 Then
+                target.InsertAfterRow = update.InsertAfterRow
+            End If
+
+            If update.Updates IsNot Nothing Then
+                For Each cellUpdate In update.Updates
+                    Dim existing As TableCellUpdate =
+                        target.Updates.FirstOrDefault(Function(u) u.Row = cellUpdate.Row AndAlso u.Col = cellUpdate.Col)
+
+                    If existing IsNot Nothing Then
+                        existing.Action = cellUpdate.Action
+                        existing.Text = cellUpdate.Text
+                    Else
+                        target.Updates.Add(New TableCellUpdate() With {
+                            .Row = cellUpdate.Row,
+                            .Col = cellUpdate.Col,
+                            .Action = cellUpdate.Action,
+                            .Text = cellUpdate.Text
+                        })
+                    End If
+                Next
+            End If
+
+            If update.FieldUpdates IsNot Nothing Then
+                For Each fieldUpdate In update.FieldUpdates
+                    Dim existing As FormFieldUpdate =
+                        target.FieldUpdates.FirstOrDefault(Function(f) f.Row = fieldUpdate.Row AndAlso
+                                                                     f.Col = fieldUpdate.Col AndAlso
+                                                                     String.Equals(f.FieldId, fieldUpdate.FieldId, StringComparison.OrdinalIgnoreCase))
+
+                    If existing IsNot Nothing Then
+                        existing.Value = fieldUpdate.Value
+                        existing.OptionText = fieldUpdate.OptionText
+                        existing.OptionValue = fieldUpdate.OptionValue
+                        existing.OptionIndex = fieldUpdate.OptionIndex
+                    Else
+                        target.FieldUpdates.Add(New FormFieldUpdate() With {
+                            .Row = fieldUpdate.Row,
+                            .Col = fieldUpdate.Col,
+                            .FieldId = fieldUpdate.FieldId,
+                            .Value = fieldUpdate.Value,
+                            .OptionText = fieldUpdate.OptionText,
+                            .OptionValue = fieldUpdate.OptionValue,
+                            .OptionIndex = fieldUpdate.OptionIndex
+                        })
+                    End If
+                Next
+            End If
+
+            If update.NewRows IsNot Nothing Then
+                For Each newRow In update.NewRows
+                    target.NewRows.Add(New List(Of String)(newRow))
+                Next
+            End If
+        Next
+
+        Return mergedByTable.Values.OrderBy(Function(u) u.TableIndex).ToList()
+    End Function
+
+    Private Function BuildTableCoverageSystemPrompt() As String
+        Return "You are performing a coverage pass for table completion." & vbCrLf &
+            "You will receive:" & vbCrLf &
+            "- CONSISTENCY SUMMARY" & vbCrLf &
+            "- DOCUMENT CONTEXT" & vbCrLf &
+            "- ALL TABLES" & vbCrLf &
+            "- UNRESOLVED TARGETS: writable empty cells and writable empty fields that were not explicitly addressed in the first pass." & vbCrLf & vbCrLf &
+            "Your task is to address every unresolved target." & vbCrLf &
+            "- For each unresolved empty cell, return an update with action=""complete"", ""clear"", or ""keep""." & vbCrLf &
+            "- For each unresolved empty field, return a field update." & vbCrLf &
+            "- Do not leave unresolved targets unanswered." & vbCrLf &
+            "- Prefer filling existing empty rows before suggesting newRows." & vbCrLf &
+            "- If additional logical entries are required and existing rows are exhausted, add newRows." & vbCrLf & vbCrLf &
+            "Return ONLY a JSON array in the same schema as the main table completion response."
+    End Function
 
     Private Function BuildTableBlocks(tables As List(Of TableInfo)) As List(Of List(Of TableInfo))
         Const maxBlockChars As Integer = 16000
@@ -2048,7 +2379,7 @@ Partial Public Class ThisAddIn
         summaryPromptBuilder.AppendLine("[/BODY SECTIONS]")
 
         Dim summaryResponse As String = Await SharedMethods.LLM(
-            _context, BuildConsistencySummarySystemPrompt(), summaryPromptBuilder.ToString(),
+            _context, InterpolateAtRuntime(BuildConsistencySummarySystemPrompt()), summaryPromptBuilder.ToString(),
             "", "", 0, useSecondAPI, True)
 
         Return NormalizeConsistencySummaryJson(summaryResponse)
@@ -2138,7 +2469,7 @@ Partial Public Class ThisAddIn
         promptBuilder.AppendLine("[/ALL TABLES]")
 
         Dim response As String = Await SharedMethods.LLM(
-            _context, BuildTableCompletionSystemPrompt(), promptBuilder.ToString(),
+            _context, InterpolateAtRuntime(BuildTableCompletionSystemPrompt()), promptBuilder.ToString(),
             "", "", 0, useSecondAPI, True)
 
         If String.IsNullOrWhiteSpace(response) Then
@@ -2146,8 +2477,55 @@ Partial Public Class ThisAddIn
             Return Nothing
         End If
 
-        Return ParseTableCompletionResponse(response)
+        Dim firstPassUpdates As List(Of TableUpdateResponse) = ParseTableCompletionResponse(response)
+        If firstPassUpdates Is Nothing Then Return Nothing
+
+        Dim unresolvedTargetsJson As String = BuildUnresolvedTableTargetsJson(tableBlock, firstPassUpdates)
+        If unresolvedTargetsJson = "[]" Then
+            Return firstPassUpdates
+        End If
+
+        Dim coveragePromptBuilder As New StringBuilder()
+        coveragePromptBuilder.AppendLine($"USER INSTRUCTIONS: {userInstructions}")
+        coveragePromptBuilder.AppendLine()
+
+        coveragePromptBuilder.AppendLine("[CONSISTENCY SUMMARY]")
+        coveragePromptBuilder.AppendLine(consistencySummaryJson)
+        coveragePromptBuilder.AppendLine("[/CONSISTENCY SUMMARY]")
+        coveragePromptBuilder.AppendLine()
+
+        If Not String.IsNullOrWhiteSpace(documentContext) Then
+            coveragePromptBuilder.AppendLine("[DOCUMENT CONTEXT]")
+            coveragePromptBuilder.AppendLine(documentContext)
+            coveragePromptBuilder.AppendLine("[/DOCUMENT CONTEXT]")
+            coveragePromptBuilder.AppendLine()
+        End If
+
+        coveragePromptBuilder.AppendLine("[ALL TABLES]")
+        coveragePromptBuilder.AppendLine(BuildAllTablesJson(tableBlock))
+        coveragePromptBuilder.AppendLine("[/ALL TABLES]")
+        coveragePromptBuilder.AppendLine()
+
+        coveragePromptBuilder.AppendLine("[UNRESOLVED TARGETS]")
+        coveragePromptBuilder.AppendLine(unresolvedTargetsJson)
+        coveragePromptBuilder.AppendLine("[/UNRESOLVED TARGETS]")
+
+        Dim coverageResponse As String = Await SharedMethods.LLM(
+            _context, InterpolateAtRuntime(BuildTableCoverageSystemPrompt()), coveragePromptBuilder.ToString(),
+            "", "", 0, useSecondAPI, True)
+
+        If String.IsNullOrWhiteSpace(coverageResponse) Then
+            Return firstPassUpdates
+        End If
+
+        Dim secondPassUpdates As List(Of TableUpdateResponse) = ParseTableCompletionResponse(coverageResponse)
+        If secondPassUpdates Is Nothing Then
+            Return firstPassUpdates
+        End If
+
+        Return MergeTableUpdateResponses(firstPassUpdates, secondPassUpdates)
     End Function
+
 
     Private Async Function ProcessSingleBodyBlock(bodyBlock As List(Of BodySectionInfo),
                                                   userInstructions As String,
@@ -2175,7 +2553,7 @@ Partial Public Class ThisAddIn
         promptBuilder.AppendLine("[/BODY SECTIONS]")
 
         Dim response As String = Await SharedMethods.LLM(
-            _context, BuildBodyCompletionSystemPrompt(), promptBuilder.ToString(),
+            _context, InterpolateAtRuntime(BuildBodyCompletionSystemPrompt()), promptBuilder.ToString(),
             "", "", 0, useSecondAPI, True)
 
         If String.IsNullOrWhiteSpace(response) Then
@@ -2187,36 +2565,45 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildBodyCompletionSystemPrompt() As String
-        Return "You are a professional document assistant that completes body-level placeholders and form fields in a Word document." & vbCrLf &
+        Return "You are a professional document assistant that completes and revises body-level content and form fields in a Word document." & vbCrLf &
             "You will receive:" & vbCrLf &
             "- CONSISTENCY SUMMARY" & vbCrLf &
             "- DOCUMENT CONTEXT" & vbCrLf &
-            "- BODY SECTIONS: a JSON array of body sections that contain empty or placeholder paragraphs and/or empty form fields." & vbCrLf & vbCrLf &
+            "- BODY SECTIONS: JSON sections containing nearby heading text, paragraphs, and body-level form fields." & vbCrLf & vbCrLf &
+            "IMPORTANT:" & vbCrLf &
+            "- Do NOT rely on heuristic placeholder flags. Decide from the actual paragraph text, nearby headings, and document context whether a paragraph contains a real value, a sample/example, instructional text, or content that should be completed/replaced." & vbCrLf &
+            "- Preserve meaningful existing text unless there is a clear reason to replace it." & vbCrLf &
+            "- Every writable empty paragraph and every writable empty field in the provided body sections must be explicitly addressed." & vbCrLf & vbCrLf &
             "Each body section has:" & vbCrLf &
             "- ""sectionIndex"": unique identifier" & vbCrLf &
             "- ""headingText"": nearby context heading" & vbCrLf &
             "- ""paragraphs"": array with:" & vbCrLf &
             "  - ""index"": paragraph identifier within the section" & vbCrLf &
             "  - ""text"": current plain visible text" & vbCrLf &
-            "  - ""ph"": placeholder flag" & vbCrLf &
             "  - ""empty"": empty flag" & vbCrLf &
             "- ""fields"": array with the same field schema used for tables" & vbCrLf & vbCrLf &
-            "Rules:" & vbCrLf &
-            "- Only return paragraph updates you want to change." & vbCrLf &
-            "- Only return field updates you want to change." & vbCrLf &
-            "- Do not modify meaningful existing non-placeholder text unless clearly required." & vbCrLf &
-            "- For dropdowns/legacydropdowns prefer optionValue, then optionText, then optionIndex." & vbCrLf &
-            "- For checkboxes use val=true/false." & vbCrLf &
-            "- For text inputs use val=text." & vbCrLf & vbCrLf &
+            "For each paragraph update include an ""action"":" & vbCrLf &
+            "- ""keep"": keep existing text unchanged" & vbCrLf &
+            "- ""replace"": replace existing text" & vbCrLf &
+            "- ""complete"": fill an empty/incomplete/example/sample paragraph with a final value" & vbCrLf &
+            "- ""clear"": clear the paragraph text" & vbCrLf & vbCrLf &
+            "Coverage requirements:" & vbCrLf &
+            "- Every writable empty paragraph must appear in ""paragraphUpdates""." & vbCrLf &
+            "- Every writable empty field must appear in ""fieldUpdates""." & vbCrLf &
+            "- If you intentionally leave an empty paragraph unchanged, return it with action=""keep""." & vbCrLf & vbCrLf &
+            "For dropdowns/legacydropdowns prefer optionValue, then optionText, then optionIndex." & vbCrLf &
+            "For checkboxes use val=true/false." & vbCrLf &
+            "For text inputs use val=text." & vbCrLf & vbCrLf &
             "Return ONLY a JSON array:" & vbCrLf &
             "[" & vbCrLf &
             "  {" & vbCrLf &
             "    ""sectionIndex"": <int>," & vbCrLf &
-            "    ""paragraphUpdates"": [{""index"": <int>, ""text"": ""new text""}]," & vbCrLf &
+            "    ""paragraphUpdates"": [{""index"": <int>, ""action"": ""replace|complete|clear|keep"", ""text"": ""new text""}]," & vbCrLf &
             "    ""fieldUpdates"": [{""id"": ""f0"", ""val"": ""text"", ""optionText"": ""display text"", ""optionValue"": ""stored value"", ""optionIndex"": <int>}]" & vbCrLf &
             "  }" & vbCrLf &
             "]"
     End Function
+
 
     Private Function ParseBodyCompletionResponse(response As String) As List(Of BodySectionUpdateResponse)
         Dim results As New List(Of BodySectionUpdateResponse)()
@@ -2251,6 +2638,7 @@ Partial Public Class ThisAddIn
 
                         update.ParagraphUpdates.Add(New BodyParagraphUpdate() With {
                             .Index = CInt(paraObj("index")),
+                            .Action = NormalizeRequestedTextAction(If(paraObj("action")?.ToString(), "replace")),
                             .Text = If(paraObj("text")?.ToString(), "")
                         })
                     Next
@@ -2291,6 +2679,7 @@ Partial Public Class ThisAddIn
         Return results
     End Function
 
+
     Private Function BuildConsistencySummarySystemPrompt() As String
         Return "You are a professional document analyst. " &
             "Your task is to read the full document context and all extracted tables, then produce a compact JSON summary " &
@@ -2312,61 +2701,58 @@ Partial Public Class ThisAddIn
     End Function
 
     Private Function BuildTableCompletionSystemPrompt() As String
-        Return "You are a professional document assistant that completes and fills in tables across an entire form or document. " &
+        Return "You are a professional document assistant that completes and revises tables across an entire form or document. " &
             "You will receive:" & vbCrLf &
             "- CONSISTENCY SUMMARY: a compact JSON summary of rules and conventions inferred from the full form." & vbCrLf &
             "- DOCUMENT CONTEXT: the full document body text with [Table N] markers showing where each table sits." & vbCrLf &
-            "- ALL TABLES: a JSON array containing every extracted table in the document." & vbCrLf & vbCrLf &
-            "GLOBAL CONSISTENCY REQUIREMENT:" & vbCrLf &
-            "- You must consider ALL TABLES together before deciding any updates." & vbCrLf &
-            "- You must follow the CONSISTENCY SUMMARY unless the actual table content or document context clearly requires otherwise." & vbCrLf &
-            "- Keep terminology, names, classifications, priorities, dates, assumptions, and dropdown selections consistent across the entire form." & vbCrLf &
-            "- If one table implies a project type, governance style, risk posture, or naming convention, apply that same logic consistently in the other tables unless the document clearly requires otherwise." & vbCrLf & vbCrLf &
-            "JSON SCHEMA for each table:" & vbCrLf &
-            "- ""tableIndex"": which table in the document (matches [Table N] in context)" & vbCrLf &
-            "- ""colWidthsPct"": array of relative column widths as percentages — narrow columns (< 15%) need short text" & vbCrLf &
-            "- ""contextBefore"": paragraphs immediately before the table" & vbCrLf &
-            "- Each cell has: ""c"" (column index), ""t"" (text), optionally ""span"" (column span), ""vm"" (vertical merge), ""hdr"" (header), ""ph"" (placeholder), ""w"" (cell width %), ""ro"" (read-only)" & vbCrLf &
-            "- Cells may contain ""fields"": an array of form fields:" & vbCrLf &
-            "  - ""id"": field identifier for your response (e.g. ""f0"")" & vbCrLf &
-            "  - ""type"": ""dropdown"", ""checkbox"", ""textinput"", ""legacydropdown"", or ""legacycheckbox""" & vbCrLf &
-            "  - ""name"": field label/tag (may be empty)" & vbCrLf &
-            "  - ""val"": current display value" & vbCrLf &
-            "  - ""storedVal"": current stored/internal value for dropdown-like fields when available" & vbCrLf &
-            "  - ""opts"": exact selectable options for dropdowns" & vbCrLf &
-            "  - ""empty"": true means the field has no current value" & vbCrLf &
-            "  - ""ro"": true means the field is protected/read-only and must not be changed" & vbCrLf & vbCrLf &
+            "- ALL TABLES: a JSON array containing extracted tables in the document." & vbCrLf & vbCrLf &
+            "IMPORTANT:" & vbCrLf &
+            "- Do NOT rely on heuristic placeholder flags. Decide from the actual content, context, headings, and consistency rules whether a cell contains a real value, a sample/example, instructional text, or content that should be completed/replaced." & vbCrLf &
+            "- Existing text may be meaningful, a sample value, or a placeholder. You must decide." & vbCrLf &
+            "- Preserve meaningful existing text unless there is a clear reason to replace it." & vbCrLf &
+            "- However, every writable empty cell and every writable empty form field in the provided tables must be explicitly addressed." & vbCrLf &
+            "- Do not leave empty gaps between populated data rows unless the table structure clearly requires a blank separator row." & vbCrLf &
+            "- Prefer filling existing empty rows before adding newRows." & vbCrLf &
+            "- Add newRows when the existing visible data rows are insufficient to complete the logical sequence of entries required by the table." & vbCrLf & vbCrLf &
+            "JSON SCHEMA FOR INPUT CELLS:" & vbCrLf &
+            "- ""c"": column index" & vbCrLf &
+            "- ""t"": current text" & vbCrLf &
+            "- ""empty"": true means the cell is empty after normalization" & vbCrLf &
+            "- ""span"": optional column span" & vbCrLf &
+            "- ""vm"": optional vertical merge indicator" & vbCrLf &
+            "- ""hdr"": header cell" & vbCrLf &
+            "- ""w"": approximate width percent" & vbCrLf &
+            "- ""ro"": read-only" & vbCrLf &
+            "- ""fields"": optional form field array" & vbCrLf & vbCrLf &
             "ROW INDEX RULE:" & vbCrLf &
             "- Row indices in ""updates"" and ""fieldUpdates"" always refer to the ORIGINAL extracted rows shown in the input JSON for that table, before any ""newRows"" are inserted." & vbCrLf &
             "- ""insertAfterRow"" also refers to the ORIGINAL extracted row index." & vbCrLf & vbCrLf &
-            "YOUR TASK:" & vbCrLf &
-            "1. Review the complete form and infer a single coherent interpretation before producing updates." & vbCrLf &
-            "2. Use the CONSISTENCY SUMMARY to keep decisions aligned across all tables." & vbCrLf &
-            "3. Use the DOCUMENT CONTEXT to understand the document's purpose, terminology, and style." & vbCrLf &
-            "4. Fill in empty cells (""t"": """") with appropriate content based on headings, row labels, and the full-form context." & vbCrLf &
-            "5. Replace ALL placeholder cells (""ph"": true) with real content." & vbCrLf &
-            "6. For dropdowns and legacydropdowns, select one exact option from ""opts""." & vbCrLf &
-            "7. Prefer returning ""optionValue""; otherwise return exact ""optionText""; use ""val"" only for text inputs and checkboxes; use ""optionIndex"" only as a last resort." & vbCrLf &
-            "8. Every field with ""empty"": true MUST appear in ""fieldUpdates"" unless it is read-only." & vbCrLf &
-            "9. Keep text length proportional to column width (""w"" field)." & vbCrLf &
-            "10. If a table appears incomplete, add new rows." & vbCrLf &
-            "11. NEVER modify any cell or field where ""ro"": true." & vbCrLf &
-            "12. Do NOT modify cells that already have meaningful non-placeholder content unless the user specifically asks." & vbCrLf &
-            "13. If an existing meaningful cell should remain unchanged, omit it from ""updates""." & vbCrLf &
-            "14. Ensure the final answers are globally consistent across all tables in the form." & vbCrLf & vbCrLf &
+            "TASK:" & vbCrLf &
+            "For each cell you choose to mention in ""updates"", include an ""action"":" & vbCrLf &
+            "- ""keep"": keep existing text unchanged" & vbCrLf &
+            "- ""replace"": replace existing text" & vbCrLf &
+            "- ""complete"": fill an empty/incomplete/example/sample cell with a final value" & vbCrLf &
+            "- ""clear"": clear the cell text" & vbCrLf & vbCrLf &
+            "Coverage requirements:" & vbCrLf &
+            "- Every writable empty cell in the provided tables must either appear in ""updates"" or be covered by a logically necessary ""newRows"" decision." & vbCrLf &
+            "- Every writable empty field must appear in ""fieldUpdates""." & vbCrLf &
+            "- If you intentionally leave an empty writable cell unchanged, return it in ""updates"" with action=""keep""." & vbCrLf &
+            "- If you populate a later empty row in a data table, do not leave earlier writable empty data rows blank unless they are intentionally blank; in that case return them with action=""keep""." & vbCrLf & vbCrLf &
+            "For dropdowns and legacydropdowns, prefer optionValue, then optionText, then optionIndex." & vbCrLf &
+            "For text inputs use val." & vbCrLf &
+            "For checkboxes use val=true/false." & vbCrLf &
+            "Never modify anything marked ro=true." & vbCrLf & vbCrLf &
             "RESPONSE FORMAT — return ONLY a JSON array. Each element:" & vbCrLf &
             "{" & vbCrLf &
             "  ""tableIndex"": <int>," & vbCrLf &
-            "  ""updates"": [{""r"": <row>, ""c"": <col>, ""t"": ""new text""}]," & vbCrLf &
+            "  ""updates"": [{""r"": <row>, ""c"": <col>, ""action"": ""replace|complete|clear|keep"", ""t"": ""new text""}]," & vbCrLf &
             "  ""fieldUpdates"": [{""r"": <row>, ""c"": <col>, ""id"": ""f0"", ""val"": ""text"", ""optionText"": ""display text"", ""optionValue"": ""stored value"", ""optionIndex"": <int>}]," & vbCrLf &
             "  ""newRows"": [[""cell1"", ""cell2"", ...]]," & vbCrLf &
             "  ""insertAfterRow"": <int>" & vbCrLf &
             "}" & vbCrLf & vbCrLf &
-            "If a table needs no changes, include it with empty arrays." & vbCrLf &
             "Return ONLY the JSON array, no explanations or markdown fences." &
             " {Ignore} {Location} {CurrentDate}"
     End Function
-
 
     Private Function NormalizeConsistencySummaryJson(response As String) As String
         If String.IsNullOrWhiteSpace(response) Then Return "{}"
@@ -2449,13 +2835,12 @@ Partial Public Class ThisAddIn
 
                         If updObj("r") Is Nothing OrElse updObj("c") Is Nothing Then Continue For
 
-                        Dim cellUpdate As New TableCellUpdate() With {
+                        update.Updates.Add(New TableCellUpdate() With {
                             .Row = CInt(updObj("r")),
                             .Col = CInt(updObj("c")),
+                            .Action = NormalizeRequestedTextAction(If(updObj("action")?.ToString(), "replace")),
                             .Text = If(updObj("t")?.ToString(), "")
-                        }
-
-                        update.Updates.Add(cellUpdate)
+                        })
                     Next
                 End If
 
@@ -2574,11 +2959,16 @@ Partial Public Class ThisAddIn
                 For Each paragraphUpdate In update.ParagraphUpdates
                     If ProgressBarModule.CancelOperation Then Exit Sub
 
+                    Dim action As String = NormalizeRequestedTextAction(paragraphUpdate.Action)
+                    If action = "keep" Then Continue For
+
                     Dim paragraph As BodyParagraphInfo =
                         section.Paragraphs.FirstOrDefault(Function(p) p.Index = paragraphUpdate.Index)
 
                     If paragraph Is Nothing Then Continue For
-                    WriteTextIntoParagraph(paragraph, paragraphUpdate.Text, nsMgr)
+
+                    Dim targetText As String = If(action = "clear", "", If(paragraphUpdate.Text, ""))
+                    WriteTextIntoParagraph(paragraph, targetText, nsMgr)
                 Next
             End If
 
@@ -2604,6 +2994,7 @@ Partial Public Class ThisAddIn
             End If
         Next
     End Sub
+
 
     Private Function GetXmlNodeVisibleText(node As System.Xml.XmlNode, nsMgr As System.Xml.XmlNamespaceManager) As String
         If node Is Nothing Then Return ""
@@ -2663,6 +3054,9 @@ Partial Public Class ThisAddIn
                 For Each cellUpdate In update.Updates
                     If ProgressBarModule.CancelOperation Then Exit Sub
 
+                    Dim action As String = NormalizeRequestedTextAction(cellUpdate.Action)
+                    If action = "keep" Then Continue For
+
                     Dim row As TableRowInfo = tbl.Rows.FirstOrDefault(Function(r) r.RowIndex = cellUpdate.Row)
                     If row Is Nothing Then Continue For
 
@@ -2670,11 +3064,12 @@ Partial Public Class ThisAddIn
                     If cell Is Nothing Then Continue For
                     If Not cell.IsWritable Then Continue For
 
+                    Dim targetText As String = If(action = "clear", "", If(cellUpdate.Text, ""))
                     Dim currentText As String = If(cell.Text, "")
-                    Dim newText As String = If(cellUpdate.Text, "")
-                    If String.Equals(currentText, newText, StringComparison.Ordinal) Then Continue For
 
-                    WriteTextIntoCell(cell, newText, nsMgr)
+                    If String.Equals(currentText, targetText, StringComparison.Ordinal) Then Continue For
+
+                    WriteTextIntoCell(cell, targetText, nsMgr)
                 Next
             End If
 
@@ -3414,6 +3809,17 @@ Partial Public Class ThisAddIn
 #End Region
 
 #Region "Cell Write Helpers"
+
+    Private Function NormalizeRequestedTextAction(action As String) As String
+        Dim normalized As String = If(action, "").Trim().ToLowerInvariant()
+
+        Select Case normalized
+            Case "keep", "replace", "complete", "clear"
+                Return normalized
+            Case Else
+                Return "replace"
+        End Select
+    End Function
 
 
     ''' <summary>
