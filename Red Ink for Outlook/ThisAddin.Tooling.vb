@@ -541,17 +541,44 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Replace the authoritative-registry setup block in ExecuteToolingLoop(...)
-
         Dim authoritativeRegistrySource As SharedLibrary.Agents.ToolRegistry = Nothing
 
         If subAgentMode AndAlso subAgentAuthoritativeRegistry IsNot Nothing Then
             authoritativeRegistrySource = subAgentAuthoritativeRegistry.Snapshot()
         Else
             authoritativeRegistrySource = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(fullAllowedTools, "selected")
+
+            ' Only register the skills/agents the user actually selected.
+            ' This fixes AutoPilot making unselected skills/agents available anyway.
             Try
-                SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, SharedLibrary.Agents.AgentResources.Skills)
-                SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(authoritativeRegistrySource, SharedLibrary.Agents.AgentResources.Agents)
+                SharedLibrary.Agents.AgentResources.Refresh()
+
+                Dim selectedToolNames As New HashSet(Of String)(
+                    If(fullAllowedTools, New List(Of ModelConfig)()).
+                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                        Select(Function(t) t.ToolName.Trim()),
+                    StringComparer.OrdinalIgnoreCase)
+
+                If selectedToolNames.Count > 0 Then
+                    Dim selectedSkills =
+                        SharedLibrary.Agents.AgentResources.Skills.
+                            Where(Function(sk)
+                                      Return sk IsNot Nothing AndAlso
+                                             Not String.IsNullOrWhiteSpace(sk.Name) AndAlso
+                                             selectedToolNames.Contains("skill_" & sk.Name.Trim())
+                                  End Function)
+
+                    Dim selectedAgents =
+                        SharedLibrary.Agents.AgentResources.Agents.
+                            Where(Function(ag)
+                                      Return ag IsNot Nothing AndAlso
+                                             Not String.IsNullOrWhiteSpace(ag.Name) AndAlso
+                                             selectedToolNames.Contains("agent_" & ag.Name.Trim())
+                                  End Function)
+
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, selectedSkills)
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(authoritativeRegistrySource, selectedAgents)
+                End If
             Catch
             End Try
         End If
@@ -4392,6 +4419,19 @@ __AfterDispatch:
         End If
 
         tools.AddRange(GetInternalKnowledgeTools())
+
+        ' AutoPilot should also let the user explicitly select discovered skills and agents.
+        Try
+            SharedLibrary.Agents.AgentResources.Refresh()
+
+            Dim agentRegistry As New SharedLibrary.Agents.ToolRegistry()
+            SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(agentRegistry, SharedLibrary.Agents.AgentResources.Skills)
+            SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(agentRegistry, SharedLibrary.Agents.AgentResources.Agents)
+
+            tools.AddRange(agentRegistry.MaterializeAll())
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("AutoPilot skill/agent discovery failed.", ex:=ex)
+        End Try
 
         Return DeduplicateToolsByName(tools)
     End Function

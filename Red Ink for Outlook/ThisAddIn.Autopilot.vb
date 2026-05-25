@@ -3499,37 +3499,80 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
-    ''' Builds an HTML "Sources used:" section from tool call entries.
-    ''' Only external tools (not internal document/attachment tools) are shown.
-    ''' Web retriever URLs are rendered as clickable hyperlinks.
+    ''' Returns True only for tool calls that represent real information sources
+    ''' for the "Sources used:" footer. Excludes helper/meta/classical tools.
+    ''' </summary>
+    Private Shared Function IsSourceEntryForFooter(entry As AutoPilotToolCallEntry) As Boolean
+        If entry Is Nothing OrElse Not entry.WasSuccessful Then Return False
+
+        Dim toolName As String = If(entry.ToolName, "").Trim()
+        If toolName = "" Then Return False
+
+        ' Never show loader/helper/meta tools.
+        If toolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        ' Real built-in source tools.
+        If toolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith(InternalKnowledgeToolNamePrefix, StringComparison.OrdinalIgnoreCase) OrElse
+           SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolName) OrElse
+           SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolName) Then
+            Return True
+        End If
+
+        ' Never show agent-layer or other classical/helper tools.
+        If toolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           SharedLibrary.Agents.MemoryTools.IsMemoryTool(toolName) OrElse
+           SharedLibrary.Agents.TextTools.IsTextTool(toolName) OrElse
+           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
+           SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
+           SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) Then
+            Return False
+        End If
+
+        ' External tools are treated as real sources by default
+        ' (e.g. Special Services tools), unless excluded above.
+        Return Not entry.IsInternalTool
+    End Function
+
+    ''' <summary>
+    ''' Builds an HTML "Sources used:" section from real source calls only.
+    ''' Includes source tools such as M365, Special Services, internet search,
+    ''' web grounding, web retrieval, and knowledge-store lookups.
+    ''' Excludes helper/meta/classical tools such as tool_loader, skills, agents,
+    ''' memory/text/workspace/js tools, and other non-source internals.
     ''' </summary>
     Private Shared Function BuildSourcesUsedHtml(toolCallLog As List(Of AutoPilotToolCallEntry)) As String
         If toolCallLog Is Nothing OrElse toolCallLog.Count = 0 Then Return ""
 
-        Dim externalCalls = toolCallLog.Where(Function(e) Not e.IsInternalTool).ToList()
-        If externalCalls.Count = 0 Then Return ""
+        Dim sourceCalls = toolCallLog.Where(Function(e) IsSourceEntryForFooter(e)).ToList()
+        If sourceCalls.Count = 0 Then Return ""
 
         Dim sb As New StringBuilder()
         sb.AppendLine("<div style='font-size:8pt;color:#999999;margin-top:16px;border-top:1px solid #eeeeee;padding-top:8px;'>")
         sb.AppendLine("<b style='color:#888888;'>Sources used:</b><br/>")
 
-        For Each entry In externalCalls
+        For Each entry In sourceCalls
             Dim toolLabel = If(Not String.IsNullOrEmpty(entry.ToolDisplayName), entry.ToolDisplayName, entry.ToolName)
             Dim icon = If(entry.WasSuccessful, "✓", "✗")
 
-            ' Check if this tool call has URLs (web retriever)
             If entry.Urls IsNot Nothing AndAlso entry.Urls.Count > 0 Then
-                ' Render each URL as a clickable link
                 For Each url In entry.Urls
                     Dim encodedUrl = System.Net.WebUtility.HtmlEncode(url)
                     sb.AppendLine($"&bull; {icon} <a href='{encodedUrl}' style='color:#4A90D9;text-decoration:underline;'>{encodedUrl}</a><br/>")
                 Next
             Else
-                ' Non-web tool: render as before with param summary
                 Dim paramInfo = ""
                 If Not String.IsNullOrEmpty(entry.ParamSummary) Then
                     paramInfo = $" — {System.Net.WebUtility.HtmlEncode(entry.ParamSummary)}"
                 End If
+
                 sb.AppendLine($"&bull; {icon} {System.Net.WebUtility.HtmlEncode(toolLabel)}{paramInfo}<br/>")
             End If
         Next
