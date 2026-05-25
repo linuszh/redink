@@ -213,9 +213,13 @@ Partial Public Class ThisAddIn
             Dim ws As Microsoft.Office.Interop.Excel.Worksheet = CType(Globals.ThisAddIn.Application.ActiveSheet, Microsoft.Office.Interop.Excel.Worksheet)
             Dim outRow As Integer = Math.Max(1, resultStartLine)
             Dim outCol As Integer = Math.Max(1, resultStartCol)
+
+            If Not PromptForFreshWorksheetIfNeeded(ws, outRow, outCol, $"{AN} CSV Analyzer") Then
+                Return
+            End If
+
             Dim headerInserted As Boolean = False
             Dim insertedRowsTotal As Integer = 0 ' track how many result rows were inserted
-
             ' Local action to insert Excel report header block (title, metadata, column headers, alignment).
 
             Dim InsertHeader As System.Action =

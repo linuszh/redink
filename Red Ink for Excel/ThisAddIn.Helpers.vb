@@ -357,4 +357,80 @@ Partial Public Class ThisAddIn
         Return False
     End Function
 
+    ''' <summary>
+    ''' Returns True if the worksheet already contains text or values in the intended output strip.
+    ''' </summary>
+    Private Function WorksheetHasExistingTextInWriteArea(ByVal ws As Excel.Worksheet, ByVal startRow As Integer, ByVal startCol As Integer) As Boolean
+        If ws Is Nothing Then Return False
+
+        startRow = Math.Max(1, startRow)
+        startCol = Math.Max(1, startCol)
+
+        Try
+            Dim usedRange As Excel.Range = ws.UsedRange
+            If usedRange Is Nothing Then Return False
+
+            Dim lastUsedRow As Integer = usedRange.Row + usedRange.Rows.Count - 1
+            Dim lastUsedCol As Integer = usedRange.Column + usedRange.Columns.Count - 1
+
+            If lastUsedRow < startRow OrElse lastUsedCol < startCol Then Return False
+
+            Dim checkEndCol As Integer = Math.Min(lastUsedCol, startCol + 1)
+            Dim checkRange As Excel.Range = CType(ws.Range(ws.Cells(startRow, startCol), ws.Cells(lastUsedRow, checkEndCol)), Excel.Range)
+            Dim values As Object = checkRange.Value2
+
+            If values Is Nothing Then Return False
+
+            If TypeOf values Is Object(,) Then
+                For Each value As Object In CType(values, Object(,))
+                    If value IsNot Nothing AndAlso value.ToString().Trim().Length > 0 Then
+                        Return True
+                    End If
+                Next
+            Else
+                Return values.ToString().Trim().Length > 0
+            End If
+        Catch
+        End Try
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Warns when the output area is already occupied and, if requested, creates a new worksheet.
+    ''' </summary>
+    Private Function PromptForFreshWorksheetIfNeeded(ByRef ws As Excel.Worksheet, ByVal startRow As Integer, ByVal startCol As Integer, ByVal dialogTitle As String) As Boolean
+        If ws Is Nothing Then Return False
+        If Not WorksheetHasExistingTextInWriteArea(ws, startRow, startCol) Then Return True
+
+        Dim targetCell As String = CType(ws.Cells(startRow, startCol), Excel.Range).Address(False, False)
+        Dim answer As Integer = SharedLibrary.SharedLibrary.SharedMethods.ShowCustomYesNoBox(
+            "The target output area starting at " & targetCell & " already contains text." & vbCrLf & vbCrLf &
+            "This may cause errors." & vbCrLf & vbCrLf &
+            "Run the analysis in a new worksheet instead?",
+            "Use new worksheet",
+            "Keep current worksheet",
+            dialogTitle
+        )
+
+        If answer <> 1 Then Return True
+
+        Dim app As Excel.Application = Globals.ThisAddIn.Application
+        Dim wb As Excel.Workbook = TryCast(app.ActiveWorkbook, Excel.Workbook)
+        If wb Is Nothing Then
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("No active workbook was found.")
+            Return False
+        End If
+
+        Try
+            Dim newWs As Excel.Worksheet = CType(wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count)), Excel.Worksheet)
+            newWs.Activate()
+            ws = newWs
+            Return True
+        Catch ex As Exception
+            SharedLibrary.SharedLibrary.SharedMethods.ShowCustomMessageBox("Could not create a new worksheet: " & ex.Message)
+            Return False
+        End Try
+    End Function
+
 End Class

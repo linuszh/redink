@@ -213,6 +213,11 @@ Partial Public Class ThisAddIn
             Dim ws As Microsoft.Office.Interop.Excel.Worksheet = CType(Globals.ThisAddIn.Application.ActiveSheet, Microsoft.Office.Interop.Excel.Worksheet)
             Dim outRow As Integer = Math.Max(1, resultStartLine)
             Dim outCol As Integer = Math.Max(1, resultStartCol)
+
+            If Not PromptForFreshWorksheetIfNeeded(ws, outRow, outCol, $"{AN} Text File Analyzer") Then
+                Return
+            End If
+
             Dim headerInserted As Boolean = False
             Dim insertedRowsTotal As Integer = 0
 
