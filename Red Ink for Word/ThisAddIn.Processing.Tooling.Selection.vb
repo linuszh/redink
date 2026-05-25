@@ -155,6 +155,17 @@ Partial Public Class ThisAddIn
         tools.Add(GetInternalWebTool())
         tools.Add(GetInternalDownloadWebFilesTool())
 
+        Dim webGroundingTool =
+        SharedLibrary.Agents.WebGroundingTool.Build(
+            _context,
+            enforcePrivacy:=INI_EnablePrivacyForSearch,
+            toolPriority:=997,
+            displaySuffix:=InternalToolSuffix)
+
+        If webGroundingTool IsNot Nothing Then
+            tools.Add(webGroundingTool)
+        End If
+
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
             tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
         End If
@@ -184,7 +195,6 @@ Partial Public Class ThisAddIn
 
         Return tools
     End Function
-
 
     ''' <summary>
     ''' Loads persisted tool selection from <c>My.Settings.SelectedToolNames</c> into <c>SelectedToolNames</c>.

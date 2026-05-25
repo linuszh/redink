@@ -583,6 +583,63 @@ Partial Public Class ThisAddIn
     End Function
 
 
+    Public Function GetInternalWebGroundingTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
+        Return SharedLibrary.Agents.WebGroundingTool.Build(
+        _context,
+        enforcePrivacy:=enforcePrivacy,
+        toolPriority:=997,
+        displaySuffix:=InternalToolSuffix)
+    End Function
+
+
+    Private Async Function ExecuteWebGroundingTool(
+        toolCall As ToolCall,
+        context As ToolExecutionContext,
+        Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
+
+        Try
+            response.Response =
+            Await SharedLibrary.Agents.WebGroundingTool.ExecuteAsync(
+                _context,
+                toolCall.Arguments,
+                cancellationToken,
+                logStep:=Sub(message)
+                             context.Log(message)
+                         End Sub,
+                logInfo:=Sub(message)
+                             context.Log(message)
+                         End Sub,
+                logWarn:=Sub(message)
+                             context.Log(message, "warn")
+                         End Sub)
+
+            response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+            If Not response.Success Then
+                response.ErrorMessage = "web_grounding returned no usable result."
+                response.Response = response.ErrorMessage
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during web grounding: {ex.Message}"
+            context.Log(response.Response, "warn")
+        End Try
+
+        Return response
+    End Function
+
     ''' <summary>
     ''' Executes the internal web retrieval tool by fetching content for one or more URLs and returning tagged content blocks.
     ''' </summary>
@@ -626,10 +683,16 @@ Partial Public Class ThisAddIn
             Dim expandInteractiveSections As Boolean = GetToolArgumentBoolean(toolCall.Arguments, "expand_interactive_sections", False)
             Dim linkExtensions As List(Of String) = NormalizeLinkExtensions(GetToolArgumentStringList(toolCall.Arguments, "link_extensions"))
 
+            Dim invalidUrls As New List(Of String)()
             Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
             Dim blockedUrls As New List(Of String)()
 
             For Each url In urls
+                If Not IsSafeWebUrl(url) Then
+                    invalidUrls.Add(url)
+                    Continue For
+                End If
+
                 Dim lowerUrl = url.ToLowerInvariant()
                 For Each pattern In sharepointPatterns
                     If lowerUrl.Contains(pattern) Then
@@ -638,6 +701,16 @@ Partial Public Class ThisAddIn
                     End If
                 Next
             Next
+
+            If invalidUrls.Count > 0 Then
+                Dim invalidList = String.Join(", ", invalidUrls)
+                response.Success = False
+                response.ErrorMessage =
+                    "Only absolute non-loopback HTTP/HTTPS URLs are allowed. Blocked URL(s): " & invalidList
+                context.Log($"Blocked unsafe URL(s): {invalidList}", "warn")
+                ToolingFileLogger.LogWarn("Internal web tool: Unsafe URL blocked.", details:=$"urls={invalidList}")
+                Return response
+            End If
 
             If blockedUrls.Count > 0 Then
                 Dim blockedList = String.Join(", ", blockedUrls)
@@ -650,7 +723,6 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
                 Return response
             End If
-
             context.Log($"Retrieving content from {urls.Count} URL(s)...")
 
             Dim results As New StringBuilder()

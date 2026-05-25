@@ -344,7 +344,8 @@ Partial Public Class ThisAddIn
         New JProperty("description",
             "Searches the user's local knowledge stores (their own curated document collections). " &
             "This tool mirrors the Freestyle knowledge trigger functionality. " &
-            "You can either use structured arguments (query/store/tag/max_results) or pass the exact Freestyle trigger syntax via raw_trigger. " &
+            "Use query for retrieval and task_prompt for the user's actual task if you want verbatim task-relevant excerpts from the retrieved source files. " &
+            "You can either use structured arguments (query/task_prompt/store/tag/max_results) or pass the exact Freestyle trigger syntax via raw_trigger. " &
             "Use this for the user's own materials, not for public-web lookup." & descriptionSuffix),
         New JProperty("parameters",
             New JObject(
@@ -354,13 +355,19 @@ Partial Public Class ThisAddIn
                         New JProperty("query",
                             New JObject(
                                 New JProperty("type", "string"),
-                                New JProperty("description", "Optional natural-language knowledge-store query. If omitted, the tool can still search broadly or within a given store/tag scope.")
+                                New JProperty("description", "Optional retrieval query for the Knowledge Store search.")
+                            )
+                        ),
+                        New JProperty("task_prompt",
+                            New JObject(
+                                New JProperty("type", "string"),
+                                New JProperty("description", $"Optional full user task/request. If supplied, the resolver may read up to {SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.MaxRelevantExtractDocuments} top matching source documents and return only verbatim passages relevant to this task. This is separate from the retrieval query.")
                             )
                         ),
                         New JProperty("store",
                             New JObject(
                                 New JProperty("type", "string"),
-                                New JProperty("description", "Optional knowledge store name. Use exactly one of the store names exposed in the tool instructions.")
+                                New JProperty("description", "Optional knowledge store name. Multi-word store names are supported.")
                             )
                         ),
                         New JProperty("tag",
@@ -372,13 +379,13 @@ Partial Public Class ThisAddIn
                         New JProperty("raw_trigger",
                             New JObject(
                                 New JProperty("type", "string"),
-                                New JProperty("description", "Optional exact Freestyle-style trigger. Examples: '(kb)', '(kb:termination without notice)', '(kb:store:Policies confidentiality)', '(kb:tag:NDA confidentiality)'. If supplied, this takes precedence over query/store/tag.")
+                                New JProperty("description", "Optional exact Freestyle-style trigger. Examples: '(kb)', '(kb:termination without notice)', '(kb:store:""My Store"" confidentiality)', '(kb:tag:NDA confidentiality)'. If supplied, this takes precedence over query/store/tag.")
                             )
                         ),
                         New JProperty("max_results",
                             New JObject(
                                 New JProperty("type", "integer"),
-                                New JProperty("description", "Optional maximum number of results to retrieve. Best effort; the resolver may still enforce its own cap.")
+                                New JProperty("description", "Optional maximum number of Knowledge Store matches to include. Best effort; the resolver still enforces its own hard cap.")
                             )
                         )
                     )
@@ -392,7 +399,6 @@ Partial Public Class ThisAddIn
     End Function
 
 
-
     Private Function BuildInternalKnowledgeToolInstructionsPrompt() As String
         Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
         Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
@@ -400,9 +406,10 @@ Partial Public Class ThisAddIn
         Dim sb As New StringBuilder()
         sb.Append("knowledge_search: Searches the user's local knowledge stores — the user's own curated document collections such as contracts, policies, briefs, manuals, templates, emails, and reference material. ")
         sb.Append("This tool supports the same search semantics as the Freestyle knowledge trigger. ")
-        sb.Append("Prefer structured arguments for normal calls: query (optional), store (optional), tag (optional), max_results (optional). ")
+        sb.Append("Prefer structured arguments for normal calls: query (retrieval hint), task_prompt (the user's actual task), store (optional), tag (optional), max_results (optional). ")
+        sb.Append($"If task_prompt is supplied, the resolver may read up to {SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.MaxRelevantExtractDocuments} top matching source documents and return only verbatim passages relevant to that task. ")
         sb.Append("If you need exact parity with Freestyle, pass raw_trigger using the literal syntax. ")
-        sb.Append($"Valid trigger forms include '{kbTrigger}', '{kbTriggerPrefix}your query)', '{kbTriggerPrefix}store:StoreName your query)', '{kbTriggerPrefix}tag:TagName your query)', and combinations such as '{kbTriggerPrefix}store:StoreName tag:TagName your query)'. ")
+        sb.Append($"Valid trigger forms include '{kbTrigger}', '{kbTriggerPrefix}your query)', '{kbTriggerPrefix}store:""My Store"" your query)', '{kbTriggerPrefix}tag:TagName your query)', and combinations such as '{kbTriggerPrefix}store:""My Store"" tag:TagName your query)'. ")
         sb.Append("If store is omitted, all stores are searched. If query is omitted but store and/or tag is provided, the tool still performs a scoped retrieval. If everything is omitted, it performs a broad cross-store retrieval. ")
 
         Dim storeInventory As String = BuildKnowledgeToolStoreInventoryLine()
@@ -416,7 +423,6 @@ Partial Public Class ThisAddIn
 
         Return sb.ToString()
     End Function
-
 
 
 
@@ -438,11 +444,29 @@ Partial Public Class ThisAddIn
         .ToolErrorHandling = "skip"
     }
     End Function
+
+
     Private Function BuildKnowledgeToolTrigger(query As String, storeName As String, tagName As String, rawTrigger As String) As String
         Dim kbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger
         Dim kbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix
 
-        ' raw_trigger takes precedence — normalize and return as-is
+        Dim QuoteIfNeeded As Func(Of String, String) =
+        Function(value As String) As String
+            Dim trimmed As String = If(value, "").Trim()
+            If trimmed = "" Then Return ""
+
+            If (trimmed.StartsWith("""", StringComparison.Ordinal) AndAlso trimmed.EndsWith("""", StringComparison.Ordinal)) OrElse
+               (trimmed.StartsWith("'", StringComparison.Ordinal) AndAlso trimmed.EndsWith("'", StringComparison.Ordinal)) Then
+                Return trimmed
+            End If
+
+            If trimmed.IndexOf(" "c) >= 0 OrElse trimmed.IndexOf(ControlChars.Tab) >= 0 Then
+                Return """" & trimmed.Replace("""", """""") & """"
+            End If
+
+            Return trimmed
+        End Function
+
         If Not String.IsNullOrWhiteSpace(rawTrigger) Then
             Dim normalized As String = rawTrigger.Trim()
 
@@ -467,18 +491,12 @@ Partial Public Class ThisAddIn
             Return kbTriggerPrefix & normalized.TrimEnd(")"c).Trim() & ")"
         End If
 
-        ' Query-only (no store, no tag): use bare (kb) trigger.
-        ' The search query will be handled separately via KnowledgeQueryService
-        ' semantic search in ExecuteInternalKnowledgeTool, NOT embedded in the trigger.
-        ' This matches Freestyle behavior where "Nudging (kb)" loads all docs
-        ' and the query is used as the LLM prompt, not as a metadata filter.
         If Not String.IsNullOrWhiteSpace(query) AndAlso
        String.IsNullOrWhiteSpace(storeName) AndAlso
        String.IsNullOrWhiteSpace(tagName) Then
 
             Dim normalizedQuery As String = query.Trim()
 
-            ' If the query already IS or contains a trigger, return it directly
             If String.Equals(normalizedQuery, kbTrigger, StringComparison.OrdinalIgnoreCase) Then
                 Return kbTrigger
             End If
@@ -498,19 +516,17 @@ Partial Public Class ThisAddIn
                 Return normalizedQuery
             End If
 
-            ' Query-only: return bare (kb) — semantic search handles the query separately
             Return kbTrigger
         End If
 
-        ' Store and/or tag specified: build parameterized trigger
         Dim parts As New List(Of String)()
 
         If Not String.IsNullOrWhiteSpace(storeName) Then
-            parts.Add("store:" & storeName.Trim())
+            parts.Add("store:" & QuoteIfNeeded(storeName))
         End If
 
         If Not String.IsNullOrWhiteSpace(tagName) Then
-            parts.Add("tag:" & tagName.Trim())
+            parts.Add("tag:" & QuoteIfNeeded(tagName))
         End If
 
         If Not String.IsNullOrWhiteSpace(query) Then
@@ -523,7 +539,6 @@ Partial Public Class ThisAddIn
 
         Return kbTriggerPrefix & String.Join(" ", parts).Trim() & ")"
     End Function
-
 
     Private Function GetToolArgumentString(arguments As Dictionary(Of String, Object), key As String) As String
         If arguments Is Nothing OrElse Not arguments.ContainsKey(key) OrElse arguments(key) Is Nothing Then
@@ -835,9 +850,9 @@ Partial Public Class ThisAddIn
     ''' <returns>Tool response containing relevant document content or an error.</returns>
     Private Async Function ExecuteInternalKnowledgeTool(toolCall As ToolCall, context As ToolExecutionContext) As Task(Of ToolResponse)
         Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
 
         Try
             Dim boundStore = GetKnowledgeStoreForToolName(toolCall.ToolName)
@@ -846,13 +861,26 @@ Partial Public Class ThisAddIn
                 response.Success = False
                 response.ErrorMessage = "The selected Knowledge Store source could not be resolved."
                 ToolingFileLogger.LogWarn("Internal knowledge tool: bound store could not be resolved.",
-                    details:=$"ToolName='{toolCall.ToolName}'")
+                details:=$"ToolName='{toolCall.ToolName}'")
                 Return response
             End If
 
             Dim storeLabel As String = KnowledgeStoreCatalog.GetDisplayLabel(boundStore)
             Dim query As String = GetToolArgumentString(toolCall.Arguments, "query")
+            Dim taskPrompt As String = GetToolArgumentString(toolCall.Arguments, "task_prompt")
             Dim tagName As String = GetToolArgumentString(toolCall.Arguments, "tag")
+            Dim rawTrigger As String = GetToolArgumentString(toolCall.Arguments, "raw_trigger")
+            Dim requestedStore As String = GetToolArgumentString(toolCall.Arguments, "store")
+
+            If String.IsNullOrWhiteSpace(taskPrompt) Then
+                If context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.LatestUserRequestRaw) Then
+                    taskPrompt = context.LatestUserRequestRaw.Trim()
+                ElseIf context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.HostTaskSummary) Then
+                    taskPrompt = context.HostTaskSummary.Trim()
+                ElseIf Not String.IsNullOrWhiteSpace(query) Then
+                    taskPrompt = query.Trim()
+                End If
+            End If
 
             Dim maxResults As Integer = 5
             If toolCall.Arguments.ContainsKey("max_results") Then
@@ -863,160 +891,81 @@ Partial Public Class ThisAddIn
             End If
 
             context.Log($"Knowledge store source: {storeLabel}")
-            ToolingFileLogger.LogStep($"Knowledge store source: '{storeLabel}'; query='{query}'; tag='{tagName}'; max_results={maxResults}")
+            ToolingFileLogger.LogStep(
+            $"Knowledge store source: '{storeLabel}'; query='{query}'; task_prompt='{taskPrompt}'; tag='{tagName}'; raw_trigger='{rawTrigger}'; max_results={maxResults}")
 
-            ' Build the query for KnowledgeQueryService.
-            ' IMPORTANT: Do NOT use "store:<name>" prefix — ResolveQueryAsync splits tokens
-            ' by whitespace, so multi-word store names like "VISCHER Compliance" get truncated
-            ' to just the first word, causing a name mismatch and zero results.
-            ' Instead, pass only the tag filter (single-word) and the free-text query,
-            ' then filter the returned matches to the bound store afterward.
-            Dim resolveQuery As String = ""
+            Dim kbRequest As KnowledgeTriggerHelper.KnowledgeRequest = Nothing
 
-            If Not String.IsNullOrWhiteSpace(tagName) Then
-                resolveQuery &= $"tag:{tagName} "
-            End If
+            If Not String.IsNullOrWhiteSpace(rawTrigger) Then
+                kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(rawTrigger)
 
-            If Not String.IsNullOrWhiteSpace(query) Then
-                resolveQuery &= query
-            End If
-
-            resolveQuery = resolveQuery.Trim()
-
-            If String.IsNullOrWhiteSpace(resolveQuery) Then
-                ' No query and no tag — pass just the store name as a broad keyword search
-                Dim storeName As String = If(boundStore.Name, "").Trim()
-                If Not String.IsNullOrWhiteSpace(storeName) Then
-                    resolveQuery = storeName
-                Else
+                If kbRequest Is Nothing Then
                     response.Success = True
-                    response.Response = $"No query provided for Knowledge Store '{storeLabel}'."
+                    response.Response = "The supplied raw_trigger could not be parsed."
                     Return response
+                End If
+            Else
+                kbRequest = New KnowledgeTriggerHelper.KnowledgeRequest() With {
+                .LoadAll = String.IsNullOrWhiteSpace(query) AndAlso String.IsNullOrWhiteSpace(tagName),
+                .SearchQuery = If(query, "").Trim(),
+                .RawTrigger = If(String.IsNullOrWhiteSpace(query) AndAlso String.IsNullOrWhiteSpace(tagName),
+                                 KnowledgeTriggerHelper.KbTrigger,
+                                 ""),
+                .OriginalParameter = If(query, "").Trim()
+            }
+
+                If Not String.IsNullOrWhiteSpace(tagName) Then
+                    kbRequest.Tags = tagName.Split(","c).
+                    Select(Function(t) t.Trim()).
+                    Where(Function(t) Not String.IsNullOrWhiteSpace(t)).
+                    ToArray()
+                    kbRequest.HasExplicitTagFilter = kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0
                 End If
             End If
 
-            context.Log($"Resolving knowledge query: '{resolveQuery}'")
-            ToolingFileLogger.LogStep($"KnowledgeQueryService query: '{resolveQuery}'")
+            Dim boundStoreName As String = If(boundStore.Name, "").Trim()
 
-            ' Use the same semantic search path that Freestyle uses.
-            ' Request extra results so we have enough after filtering to the bound store.
-            Dim matches = Await KnowledgeQueryService.ResolveQueryAsync(resolveQuery, _context, maxResults * 4).ConfigureAwait(False)
+            If Not String.IsNullOrWhiteSpace(requestedStore) AndAlso
+           Not String.IsNullOrWhiteSpace(boundStoreName) AndAlso
+           Not requestedStore.Equals(boundStoreName, StringComparison.OrdinalIgnoreCase) Then
 
-            ' Filter to only the bound store (by Name match, case-insensitive)
-            Dim storeName2 As String = If(boundStore.Name, "").Trim()
-            If Not String.IsNullOrWhiteSpace(storeName2) AndAlso matches IsNot Nothing Then
-                matches = matches.
-                    Where(Function(m) Not String.IsNullOrWhiteSpace(m.StoreName) AndAlso
-                                      m.StoreName.Equals(storeName2, StringComparison.OrdinalIgnoreCase)).
-                    ToList()
+                context.Log($"Ignoring requested store '{requestedStore}' because this tool is bound to '{boundStoreName}'.")
+                ToolingFileLogger.LogStep($"Ignoring requested store '{requestedStore}' because tool is bound to '{boundStoreName}'.")
             End If
 
-            ' Apply the requested limit
-            If matches IsNot Nothing AndAlso matches.Count > maxResults Then
-                matches = matches.Take(maxResults).ToList()
+            If Not String.IsNullOrWhiteSpace(boundStoreName) Then
+                kbRequest.StoreName = boundStoreName
+                kbRequest.HasExplicitStoreFilter = True
+            ElseIf Not String.IsNullOrWhiteSpace(requestedStore) Then
+                kbRequest.StoreName = requestedStore.Trim()
+                kbRequest.HasExplicitStoreFilter = True
             End If
 
-            If matches Is Nothing OrElse matches.Count = 0 Then
+            Dim resolveOptions As New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+    .TaskPrompt = taskPrompt,
+    .IncludeRelevantExtracts = Not String.IsNullOrWhiteSpace(taskPrompt),
+    .IncludeFullDocumentContent = False,
+    .MaxResults = maxResults,
+    .ForceSemanticSearch = Not String.IsNullOrWhiteSpace(query)
+}
+
+            Dim resolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(
+            request:=kbRequest,
+            context:=_context,
+            options:=resolveOptions).ConfigureAwait(False)
+
+            If String.IsNullOrWhiteSpace(resolved.Content) Then
                 response.Success = True
-                response.Response = $"No relevant documents found in Knowledge Store '{storeLabel}'."
+                response.Response = If(String.IsNullOrWhiteSpace(resolved.StatusMessage),
+                                   $"No relevant documents found in Knowledge Store '{storeLabel}'.",
+                                   resolved.StatusMessage)
                 Return response
-            End If
-
-            ' ── Copy source files to temp dir so they are attached to the reply ──
-            Dim copiedSourceNames As New List(Of String)()
-            If Not String.IsNullOrWhiteSpace(_apCurrentTempDir) AndAlso Directory.Exists(_apCurrentTempDir) Then
-                Dim copiedPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
-                For Each m In matches
-                    Dim srcPath As String = If(m.SourcePath, "").Trim().Trim("'"c, """"c)
-                    If String.IsNullOrWhiteSpace(srcPath) Then
-                        context.Log($"  Skip copy (no SourcePath): title='{m.Title}', wiki='{If(m.WikiPagePath, "")}'")
-                        Continue For
-                    End If
-                    If Not File.Exists(srcPath) Then
-                        context.Log($"  Skip copy (file not found): '{srcPath}'")
-                        Continue For
-                    End If
-                    If copiedPaths.Contains(srcPath) Then Continue For
-                    copiedPaths.Add(srcPath)
-
-                    Try
-                        Dim destName = Path.GetFileName(srcPath)
-                        Dim destPath = Path.Combine(_apCurrentTempDir, destName)
-
-                        ' Avoid name collisions with existing files in temp dir
-                        If File.Exists(destPath) Then
-                            Dim baseName = Path.GetFileNameWithoutExtension(destName)
-                            Dim ext = Path.GetExtension(destName)
-                            Dim counter = 1
-                            Do
-                                destPath = Path.Combine(_apCurrentTempDir, $"{baseName}_{counter}{ext}")
-                                counter += 1
-                            Loop While File.Exists(destPath)
-                            destName = Path.GetFileName(destPath)
-                        End If
-
-                        File.Copy(srcPath, destPath, overwrite:=False)
-                        copiedSourceNames.Add(destName)
-                        _apKnowledgeSourceCopies.Add(destPath)
-
-                        ' Register as output so CollectResultAttachments picks it up.
-                        ' When no user files exist (e.g. WebExtension Agent with no uploads),
-                        ' create a placeholder entry so OutputFiles registration still works.
-                        If _apCurrentAttachments IsNot Nothing Then
-                            If _apCurrentAttachments.Count = 0 Then
-                                _apCurrentAttachments.Add(New AutoPilotAttachmentInfo() With {
-                                    .OriginalFileName = "(knowledge-source-placeholder)",
-                                    .TempFilePath = Nothing,
-                                    .Extension = "",
-                                    .SizeBytes = 0,
-                                    .IsOverSizeLimit = False,
-                                    .StatusMessage = "placeholder",
-                                    .OutputFiles = New List(Of String)(),
-                                    .IsToolOutput = True
-                                })
-                            End If
-                            Dim firstAtt = _apCurrentAttachments(0)
-                            If firstAtt.OutputFiles Is Nothing Then firstAtt.OutputFiles = New List(Of String)()
-                            firstAtt.OutputFiles.Add(destPath)
-                        End If
-
-                        ' Update the match's SourcePath to point at the copy so
-                        ' BuildKnowledgeContext emits the temp-dir filename the LLM can
-                        ' reference as an attached file name.
-                        m.SourcePath = destPath
-
-                        context.Log($"Attached source: {destName}")
-                    Catch ex As Exception
-                        ToolingFileLogger.LogWarn($"Could not copy knowledge source '{srcPath}': {ex.Message}")
-                    End Try
-                Next
-            Else
-                context.Log($"File copy skipped: _apCurrentTempDir='{If(_apCurrentTempDir, "(Nothing)")}', exists={If(Not String.IsNullOrWhiteSpace(_apCurrentTempDir), Directory.Exists(_apCurrentTempDir).ToString(), "N/A")}")
-            End If
-
-            Dim knowledgeContext As String = KnowledgeQueryService.BuildKnowledgeContext(matches, 200000)
-
-            If String.IsNullOrWhiteSpace(knowledgeContext) Then
-                response.Success = True
-                response.Response = $"No readable content could be built from Knowledge Store '{storeLabel}'."
-                Return response
-            End If
-
-            ' Append a summary of attached source files so the LLM knows they are available
-            If copiedSourceNames.Count > 0 Then
-                knowledgeContext &= vbCrLf &
-                    "<KNOWLEDGE_ATTACHMENTS>" & vbCrLf &
-                    "The following source documents have been attached to the reply for the recipient:" & vbCrLf &
-                    String.Join(vbCrLf, copiedSourceNames.Select(Function(n) $"  - {n}")) & vbCrLf &
-                    "When referencing these documents, mention them by filename so the recipient can locate the attachment." & vbCrLf &
-                    "</KNOWLEDGE_ATTACHMENTS>"
             End If
 
             response.Success = True
-            response.Response = knowledgeContext
+            response.Response = resolved.Content
 
-            context.Log($"Knowledge search returned content ({knowledgeContext.Length:N0} chars) from '{storeLabel}'" &
-                        If(copiedSourceNames.Count > 0, $", {copiedSourceNames.Count} source file(s) attached.", "."), "success")
+            context.Log($"Knowledge search returned content ({resolved.Content.Length:N0} chars) from '{storeLabel}'.", "success")
 
         Catch ex As Exception
             response.Success = False
@@ -1026,7 +975,6 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
-
 
     ''' <summary>
     ''' Removes knowledge-store source files from the temp directory that were

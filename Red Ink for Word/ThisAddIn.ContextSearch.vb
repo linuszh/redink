@@ -30,6 +30,7 @@ Option Explicit On
 Option Strict Off
 
 Imports System.Data
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Windows.Forms
 Imports Microsoft.Office.Interop.PowerPoint
@@ -139,12 +140,14 @@ Partial Public Class ThisAddIn
 
         LLMResult = LLMResult.Replace("<TEXTTOSEARCH>", "").Replace("</TEXTTOSEARCH>", "")
 
+        Dim originalStart As Integer = selection.Start
+        Dim originalEnd As Integer = selection.End
+
         If Not DoSearchNext Then
 
             Dim parts() As String = LLMResult.Split(New String() {"@@@"}, StringSplitOptions.RemoveEmptyEntries)
             Dim notFoundParts As New List(Of String)
-            Dim originalStart As Integer = selection.Start
-            Dim originalEnd As Integer = selection.End
+
 
             If parts.Count > 0 Then
 
@@ -178,6 +181,13 @@ Partial Public Class ThisAddIn
                     End If
 
                     Dim findText As String = part.Trim()
+
+                    Try
+                        selection.SetRange(originalStart, originalEnd)
+                    Catch exScope As System.Exception
+                        Debug.WriteLine($"ContextSearch: pre-find SetRange failed: {exScope.Message}")
+                    End Try
+
                     If FindLongTextInChunks(findText, selection) And selection IsNot Nothing Then
                         doc.Comments.Add(selection.Range, $"{AN5}{Prefix}: '{SearchContext}'")
                         selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
@@ -213,6 +223,12 @@ Partial Public Class ThisAddIn
         Else
             If Not String.IsNullOrWhiteSpace(LLMResult) Then
                 Dim FindText As String = LLMResult.Trim()
+
+                Try
+                    selection.SetRange(originalStart, originalEnd)
+                Catch exScope As System.Exception
+                    Debug.WriteLine($"ContextSearch: pre-find SetRange failed: {exScope.Message}")
+                End Try
 
                 If FindLongTextInChunks(FindText, selection) And selection IsNot Nothing Then
                     wordApp.ActiveWindow.ScrollIntoView(selection.Range, True)

@@ -1,17 +1,13 @@
 ﻿' Part of "Red Ink" (SharedLibrary)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: LanguageContract.vb
-' Purpose: Centralizes (1) hard system-prompt rule that final user-facing
-'          prose must be in the detected user language, and (2) post-localization
-'          decision for blocked finals (per Q3: only blocked finals are eligible).
-'
-' Rules:
-'  - System prompt fragment mandates all FINAL prose be in user's language.
-'  - Tool arguments and JSON envelopes remain in English.
-'  - Only BLOCKED finals are post-localized (if short enough); COMPLETE finals trust.
-'  - Heuristic detection of target language in prose (accents, common words).
+' Purpose: Centralizes (1) the hard system-prompt rule that final user-facing
+'          prose must be in the detected user language, and (2) host-side
+'          post-localization decisions for final prose when the model ignored
+'          that contract.
 ' =============================================================================
 
 Option Explicit On
@@ -44,20 +40,22 @@ Namespace Agents
         End Function
 
         ''' <summary>
-        ''' Per Q3, only BLOCKED finals are eligible for host-side post-translation.
-        ''' Complete finals trust the language contract above and are not retranslated.
-        ''' Additionally the prose must be short enough to translate cheaply.
+        ''' Returns True when the host should post-localize a final response because
+        ''' the target language is non-English and the prose still does not look like
+        ''' that target language.
         ''' </summary>
-        Public Function ShouldPostLocalizeBlockedFinal(prose As String,
-                                                       userLanguage As String,
-                                                       maxLocalizableChars As Integer) As Boolean
+        Public Function ShouldPostLocalizeFinal(prose As String,
+                                                userLanguage As String,
+                                                finalStatus As String,
+                                                maxLocalizableChars As Integer) As Boolean
             If String.IsNullOrWhiteSpace(prose) Then Return False
             If String.IsNullOrWhiteSpace(userLanguage) Then Return False
             If LooksLikeEnglish(userLanguage) Then Return False
             If prose.Length > maxLocalizableChars Then Return False
-            ' If the prose already looks like it is in the target language we skip,
-            ' otherwise we always translate (cheap, predictable).
-            Return Not ProseLooksLikeTargetLanguage(prose, userLanguage)
+            If ProseLooksLikeTargetLanguage(prose, userLanguage) Then Return False
+
+            Dim status As String = If(finalStatus, "").Trim().ToLowerInvariant()
+            Return status = "blocked" OrElse status = "complete"
         End Function
 
         Private Function LooksLikeEnglish(language As String) As Boolean
@@ -79,7 +77,7 @@ Namespace Agents
 
             If l.StartsWith("de", StringComparison.OrdinalIgnoreCase) OrElse l = "german" Then
                 Return Regex.IsMatch(prose, "[äöüÄÖÜß]") OrElse
-                       Regex.IsMatch(prose, "\b(?:nicht|ich|und|aber|kann|werden|wurde|leider)\b", RegexOptions.IgnoreCase)
+                       Regex.IsMatch(prose, "\b(?:nicht|ich|und|aber|kann|werden|wurde|leider|die|der|das|ist)\b", RegexOptions.IgnoreCase)
             End If
 
             If l.StartsWith("fr", StringComparison.OrdinalIgnoreCase) OrElse l = "french" Then

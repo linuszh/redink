@@ -844,6 +844,33 @@ Partial Public Class ThisAddIn
         return (value || '').replace(/\s+/g, ' ').trim();
     }
 
+        function isAllowedResolvedUrl(url) {
+        if (!url) {
+            return false;
+        }
+
+        try {
+            var parsed = new URL(url, document.baseURI);
+            var protocol = (parsed.protocol || '').toLowerCase();
+            var hostname = (parsed.hostname || '').toLowerCase();
+
+            if (protocol !== 'http:' && protocol !== 'https:') {
+                return false;
+            }
+
+            if (hostname === 'localhost' ||
+                hostname === '::1' ||
+                hostname === '[::1]' ||
+                /^127(?:\.\d{1,3}){3}$/.test(hostname)) {
+                return false;
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
     function resolveUrl(value) {
         if (!value) {
             return '';
@@ -856,7 +883,8 @@ Partial Public Class ThisAddIn
         }
 
         try {
-            return new URL(value, document.baseURI).href;
+            var resolved = new URL(value, document.baseURI).href;
+            return isAllowedResolvedUrl(resolved) ? resolved : '';
         } catch (e) {
             return '';
         }

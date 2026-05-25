@@ -32,19 +32,17 @@ Namespace Agents
 
     Public NotInheritable Class ToolCallSequencing
 
+
+        Public Const TaskStatusReasonMaxChars As Integer = 160
+
         Private Sub New()
         End Sub
 
         Public Const DependentBatchingInstruction As String =
-            "When using tools, do not emit multiple tool calls in one response if any later call depends on the result of an earlier call." & vbCrLf &
-            "A tool call is dependent if it:" & vbCrLf &
-            "- reads data that may have been changed by an earlier call;" & vbCrLf &
-            "- uses the result of an earlier call;" & vbCrLf &
-            "- selects the next item after a state update;" & vbCrLf &
-            "- delegates work based on newly read or newly written state;" & vbCrLf &
-            "- depends on whether an earlier call succeeded or failed." & vbCrLf &
-            "In such cases, emit only the first required tool call. Wait for its result before deciding the next tool call." & vbCrLf &
-            "Only batch multiple tool calls when they are independent read-only operations."
+            "When using tools, the host executes multiple tool calls from one response strictly in the order emitted." & vbCrLf &
+            "Only emit multiple tool calls in one response when every later call's arguments are already fully known at emission time." & vbCrLf &
+            "If a later step depends on inspecting the result of an earlier tool call, emit only the earlier call and wait for its result before deciding the next call." & vbCrLf &
+            "Do not rely on the host to rewrite, infer, defer, queue, or replay omitted tool calls."
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
@@ -84,6 +82,12 @@ Namespace Agents
             FullMemoryAvailable
             NoRelevantMemory
             Blocked
+        End Enum
+
+        Public Enum MemoryGroundingAuthority
+            None
+            Classifier
+            ExplicitOverride
         End Enum
 
         Public NotInheritable Class TaskStatusParseResult
@@ -248,6 +252,7 @@ Namespace Agents
             Public Property AnyUserDeliverableProducedThisRun As Boolean
 
             Public Property MemoryGroundingMode As MemoryGroundingMode
+            Public Property MemoryGroundingAuthority As MemoryGroundingAuthority
             Public Property MemoryGroundingStage As MemoryGroundingStage
             Public Property ShouldExposeRecentMemoryStubs As Boolean
             Public Property MemoryListCalledThisTurn As Boolean
@@ -263,7 +268,12 @@ Namespace Agents
             Public Property MemoryKeysRetrievedThisTurn As List(Of String)
             Public Property FinalAnswerBasedOnSubset As Boolean
 
-
+            Public ReadOnly Property IsRequiredMemoryGroundingEnforced As Boolean
+                Get
+                    Return MemoryGroundingMode = MemoryGroundingMode.Required AndAlso
+               MemoryGroundingAuthority = MemoryGroundingAuthority.ExplicitOverride
+                End Get
+            End Property
 
 
             Public ReadOnly Property RequiresParentRecovery As Boolean
@@ -507,11 +517,47 @@ Namespace Agents
             Return stripped.Trim()
         End Function
 
+        Public Shared Function ExtractVisibleUserFacingText(text As String) As String
+            Dim raw As String = If(text, "")
+            If raw = "" Then
+                Return ""
+            End If
+
+            Dim visible As String =
+                Regex.Replace(
+                    raw,
+                    "<[^>]+>",
+                    " ",
+                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+
+            visible =
+                Regex.Replace(
+                    visible,
+                    "\s+",
+                    " ",
+                    RegexOptions.CultureInvariant)
+
+            Return visible.Trim()
+        End Function
+
+        Public Shared Function HasSubstantiveUserFacingText(text As String) As Boolean
+            Dim visible As String = ExtractVisibleUserFacingText(text)
+
+            If visible = "" Then
+                Return False
+            End If
+
+            Return Regex.IsMatch(
+                visible,
+                "\p{L}",
+                RegexOptions.CultureInvariant)
+        End Function
+
 
         Public Shared Function ParseStrictTaskStatus(text As String) As TaskStatusParseResult
             Dim result As New TaskStatusParseResult() With {
-                .Status = TaskStatusKind.None
-            }
+        .Status = TaskStatusKind.None
+    }
 
             Dim trimmedText As String = If(text, "")
             Dim trimmedEnd As String = trimmedText.TrimEnd()
@@ -522,10 +568,10 @@ Namespace Agents
             End If
 
             Dim matches As MatchCollection =
-                Regex.Matches(
-                    trimmedEnd,
-                    "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
-                    RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
+        Regex.Matches(
+            trimmedEnd,
+            "<TASK_STATUS>\s*(\{.*?\})\s*</TASK_STATUS>",
+            RegexOptions.IgnoreCase Or RegexOptions.Singleline Or RegexOptions.CultureInvariant)
 
             result.FooterCount = matches.Count
 
@@ -555,16 +601,11 @@ Namespace Agents
             Try
                 Dim obj As JObject = JObject.Parse(jsonText)
                 Dim statusText As String = If(obj.Value(Of String)("status"), "").Trim().ToLowerInvariant()
-                Dim reasonText As String = If(obj.Value(Of String)("reason"), "").Trim()
+                Dim rawReasonText As String = If(obj.Value(Of String)("reason"), "")
                 Dim memoryGroundingScopeText As String = If(obj.Value(Of String)("memoryGroundingScope"), "").Trim().ToLowerInvariant()
 
-                If reasonText = "" Then
+                If rawReasonText.Trim() = "" Then
                     result.FailureReason = "task_status_missing_reason"
-                    Return result
-                End If
-
-                If reasonText.Length > 160 Then
-                    result.FailureReason = "task_status_reason_too_long"
                     Return result
                 End If
 
@@ -585,7 +626,7 @@ Namespace Agents
                         Return result
                 End Select
 
-                result.Reason = reasonText
+                result.Reason = NormalizeFooterReason(rawReasonText, statusText)
                 result.MemoryGroundingScope = memoryGroundingScopeText
                 result.IsValid = True
                 Return result
@@ -826,6 +867,156 @@ Namespace Agents
                 unretrieved.Count > 0
         End Sub
 
+        Private NotInheritable Class MemoryListEntryDescriptor
+            Public Property Key As String
+            Public Property Summary As String
+            Public Property WorkflowId As String
+            Public Property TrustedForRuntime As Boolean
+            Public Property UpdatedAt As DateTime
+            Public Property Tags As List(Of String)
+        End Class
+
+        Private Shared Function TokenizeMemorySelectionText(text As String) As List(Of String)
+            If String.IsNullOrWhiteSpace(text) Then
+                Return New List(Of String)()
+            End If
+
+            Return Regex.Matches(text.ToLowerInvariant(), "[\p{L}\p{Nd}_-]{3,}").
+                Cast(Of Match)().
+                Select(Function(m) m.Value.Trim()).
+                Where(Function(s) s <> "").
+                Distinct(StringComparer.OrdinalIgnoreCase).
+                ToList()
+        End Function
+
+        Private Shared Function ScoreMemoryListEntry(entry As MemoryListEntryDescriptor,
+                                                     currentWorkflowId As String,
+                                                     latestUserRequestRaw As String) As Integer
+            If entry Is Nothing Then
+                Return Integer.MinValue
+            End If
+
+            Dim score As Integer = 0
+            Dim normalizedWorkflowId As String = If(currentWorkflowId, "").Trim()
+
+            If normalizedWorkflowId <> "" AndAlso
+               If(entry.WorkflowId, "").Trim().Equals(normalizedWorkflowId, StringComparison.OrdinalIgnoreCase) Then
+                score += 1000000
+            End If
+
+            If entry.TrustedForRuntime Then
+                score += 10000
+            End If
+
+            Dim haystack As String =
+                ((If(entry.Summary, "") & " " & String.Join(" ", If(entry.Tags, New List(Of String)()))).Trim()).
+                ToLowerInvariant()
+
+            For Each token As String In TokenizeMemorySelectionText(latestUserRequestRaw)
+                If haystack.Contains(token) Then
+                    score += 100
+                End If
+            Next
+
+            Return score
+        End Function
+
+        Public Shared Function SelectDeterministicMemoryKeysForHostFollowUp(rawMemoryListResponse As String,
+                                                                            currentWorkflowId As String,
+                                                                            latestUserRequestRaw As String,
+                                                                            Optional maxKeys As Integer = 3) As List(Of String)
+            Dim result As New List(Of String)()
+            Dim descriptors As New List(Of MemoryListEntryDescriptor)()
+
+            Dim trimmed As String = If(rawMemoryListResponse, "").Trim()
+            If trimmed = "" Then
+                Return result
+            End If
+
+            Try
+                Dim token As JToken = JToken.Parse(trimmed)
+                Dim arr As JArray = TryCast(token, JArray)
+                If arr Is Nothing Then
+                    Return result
+                End If
+
+                For Each item As JToken In arr
+                    Dim obj As JObject = TryCast(item, JObject)
+                    If obj Is Nothing Then Continue For
+
+                    Dim key As String = If(obj.Value(Of String)("key"), "").Trim()
+                    If key = "" Then Continue For
+
+                    Dim metadata As JObject = TryCast(obj("metadata"), JObject)
+                    Dim tagsArray As JArray = TryCast(obj("tags"), JArray)
+                    Dim tags As New List(Of String)()
+
+                    If tagsArray IsNot Nothing Then
+                        tags = tagsArray.
+                            Select(Function(t As JToken) t.ToString().Trim()).
+                            Where(Function(t As String) t <> "").
+                            ToList()
+                    End If
+
+                    Dim workflowId As String = ""
+                    Dim trustedForRuntime As Boolean = False
+
+                    If metadata IsNot Nothing Then
+                        workflowId = If(metadata.Value(Of String)("workflowId"), "").Trim()
+                        trustedForRuntime = If(metadata.Value(Of Boolean?)("trustedForRuntime"), False)
+                    End If
+
+                    descriptors.Add(New MemoryListEntryDescriptor With {
+                        .Key = key,
+                        .Summary = If(obj.Value(Of String)("summary"), "").Trim(),
+                        .WorkflowId = workflowId,
+                        .TrustedForRuntime = trustedForRuntime,
+                        .UpdatedAt = If(obj.Value(Of DateTime?)("updatedAt"), DateTime.MinValue),
+                        .Tags = tags
+                    })
+                Next
+            Catch
+                Return result
+            End Try
+
+            If descriptors.Count = 0 Then
+                Return result
+            End If
+
+            Dim ordered As List(Of MemoryListEntryDescriptor) =
+                descriptors.
+                    OrderByDescending(Function(entry) ScoreMemoryListEntry(entry, currentWorkflowId, latestUserRequestRaw)).
+                    ThenByDescending(Function(entry) entry.UpdatedAt).
+                    ThenBy(Function(entry) entry.Key, StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+            If ordered.Count <= RequiredMemoryGetAllThreshold Then
+                Return ordered.Select(Function(entry) entry.Key).ToList()
+            End If
+
+            Dim normalizedWorkflowId As String = If(currentWorkflowId, "").Trim()
+
+            If normalizedWorkflowId <> "" Then
+                Dim workflowMatches As List(Of String) =
+                    ordered.
+                        Where(
+                            Function(entry)
+                                Return If(entry.WorkflowId, "").Trim().Equals(normalizedWorkflowId, StringComparison.OrdinalIgnoreCase)
+                            End Function).
+                        Select(Function(entry) entry.Key).
+                        ToList()
+
+                If workflowMatches.Count > 0 Then
+                    Return workflowMatches
+                End If
+            End If
+
+            Return ordered.
+                Take(Math.Max(1, maxKeys)).
+                Select(Function(entry) entry.Key).
+                ToList()
+        End Function
+
         Private Shared Function HasExplicitSubsetDisclosure(taskStatus As TaskStatusParseResult) As Boolean
             If taskStatus Is Nothing OrElse Not taskStatus.IsValid Then
                 Return False
@@ -896,6 +1087,11 @@ Namespace Agents
                 Return result
             End If
 
+            If Not HasSubstantiveUserFacingText(parsed.TextBeforeFooter) Then
+                result.InvalidReason = "non_user_facing_final_text"
+                Return result
+            End If
+
             Select Case parsed.Status
                 Case TaskStatusKind.Complete
                     If hasUnresolvedToolFailure Then
@@ -959,100 +1155,50 @@ Namespace Agents
         End Function
 
         Public Shared Function BuildActiveToolingRepairPrompt(Optional runState As ToolingRunState = Nothing,
-                                                              Optional invalidReason As String = "") As String
+                                                      Optional invalidReason As String = "") As String
             Dim normalizedInvalidReason As String = If(invalidReason, "").Trim().ToLowerInvariant()
             Dim prompt As String
 
             Select Case normalizedInvalidReason
                 Case "task_status_reason_too_long",
-                     "task_status_missing_reason",
-                     "malformed_task_status"
+             "task_status_missing_reason",
+             "malformed_task_status"
                     prompt =
-                        "REPAIR: Your previous TASK_STATUS reason was too long or malformed. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""short""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""short""}</TASK_STATUS>. " &
-                        "The reason must be a very short plain phrase."
+                "REPAIR: Your previous TASK_STATUS footer was malformed. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
+                Case "non_user_facing_final_text"
+                    prompt =
+                "REPAIR: Your previous final text was not valid user-facing prose. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
                 Case Else
                     prompt =
-                        "REPAIR: Your previous response was invalid for an active tooling session. " &
-                        "Your next response must be EXACTLY one of: " &
-                        "(1) the next required tool call and nothing else; " &
-                        "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>; or " &
-                        "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>. " &
-                        "Progress narration is invalid. Announcements of future work are invalid. Final prose without exactly one valid TASK_STATUS footer is invalid. TASK_STATUS continue is invalid during active tooling. Raw internal JSON is invalid as a user-facing answer."
+                "REPAIR: Your previous turn was not valid for the active tooling contract. " &
+                "Your next response must be EXACTLY one of: " &
+                "(1) the next required tool call and nothing else; " &
+                "(2) a user-facing final prose answer ending with exactly one valid <TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>; or " &
+                "(3) a user-facing blocked explanation ending with exactly one valid <TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>. " &
+                "The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                TaskStatusReasonMaxChars.ToString() & " characters."
             End Select
 
-            If runState IsNot Nothing AndAlso runState.HasUnresolvedToolFailure Then
-                prompt &= " Before giving up, reassess whether the failed tool was the right tool for the remaining work. If another available tool is more appropriate, use that tool instead. If the same tool is still appropriate, retry only with narrower or corrected arguments."
-            End If
-
             If runState IsNot Nothing AndAlso
-               runState.RequestRequiresCreatedDeliverable AndAlso
-               Not HasProducedUserDeliverable(runState) Then
+       runState.MemoryGroundingMode = MemoryGroundingMode.Required Then
 
-                prompt &= " The user request still requires a created deliverable artifact. " &
-                          "A preparatory extraction, read, or analysis result is not enough. " &
-                          "Do not finalize yet. Use an appropriate creation, write, export, or save tool before finalizing, or return a blocked answer only if the deliverable cannot be created reliably."
+                prompt &= " If the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer."
             End If
 
-            If runState IsNot Nothing AndAlso
-               (Not String.IsNullOrWhiteSpace(runState.LastSuccessfulToolCall) OrElse
-                Not String.IsNullOrWhiteSpace(runState.LastStructuredToolResult) OrElse
-                Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference)) Then
-
-                prompt &= " If some work was already completed but the task still cannot be finished reliably, the final user-facing response must briefly say what was completed and what remains incomplete or may be incomplete, in short non-technical task terms."
-            End If
-
-            If runState Is Nothing Then
-                Return prompt
-            End If
-
-            Dim additions As New List(Of String)()
-
-            If runState.HasUnresolvedToolFailure Then
-                Dim failedToolName As String = If(runState.LastToolName, "").Trim()
-                additions.Add(
-                    "A previous tool step failed." &
-                    If(failedToolName = "", " ", " The failed tool was '" & failedToolName & "'. ") &
-                    "First reassess whether that tool was the right tool for the remaining work. " &
-                    "If another available tool is more appropriate, use that tool instead. " &
-                    "If the same tool is still appropriate, retry only with narrower or corrected arguments. " &
-                    "If enough information is already available, provide the best possible final answer and state clearly if it may be incomplete.")
-            End If
-
-            If runState.RequestRequiresCreatedDeliverable AndAlso
-               Not HasProducedUserDeliverable(runState) Then
-
-                additions.Add(
-                    "The original request still requires a created deliverable artifact. " &
-                    "The latest successful result is not yet enough unless a tool has actually produced an artifact reference or output path. " &
-                    "Continue with the next appropriate creation, write, export, or save step before finalizing.")
-            End If
-
-            If Not String.IsNullOrWhiteSpace(runState.LastStructuredToolResult) Then
-                Dim toolLabel As String =
-                    If(String.IsNullOrWhiteSpace(runState.LastStructuredToolName),
-                       "the latest successful tool",
-                       "'" & runState.LastStructuredToolName & "'")
-
-                additions.Add(
-                    "The latest successful structured tool result from " & toolLabel & " remains available during repair. " &
-                    "Do not discard it, do not narrate it as progress, and do not surface it as raw JSON.")
-            End If
-
-            If Not String.IsNullOrWhiteSpace(runState.LastKnownOutputReference) Then
-                additions.Add("A generic output or state reference remains available: " & runState.LastKnownOutputReference & ".")
-            End If
-
-            If additions.Count = 0 Then
-                Return prompt
-            End If
-
-            Return prompt & " " & String.Join(" ", additions)
+            Return prompt
         End Function
-
 
         Public Shared Sub NoteMemoryGroundingToolResult(runState As ToolingRunState,
                                                         toolName As String,
@@ -1129,8 +1275,8 @@ Namespace Agents
         End Sub
 
         Public Shared Function GetRequiredMemoryGroundingFailureReason(runState As ToolingRunState,
-                                                                       proposedTurnKind As ActiveToolingTurnKind,
-                                                                       Optional taskStatus As TaskStatusParseResult = Nothing) As String
+                                                               proposedTurnKind As ActiveToolingTurnKind,
+                                                               Optional taskStatus As TaskStatusParseResult = Nothing) As String
             If proposedTurnKind <> ActiveToolingTurnKind.FinalCompleteTurn Then
                 Return ""
             End If
@@ -1139,7 +1285,7 @@ Namespace Agents
                 Return ""
             End If
 
-            If runState.MemoryGroundingMode <> MemoryGroundingMode.Required Then
+            If Not runState.IsRequiredMemoryGroundingEnforced Then
                 Return ""
             End If
 
@@ -1148,7 +1294,7 @@ Namespace Agents
             End If
 
             If runState.MemoryGetCalledThisTurn AndAlso
-               runState.MemoryGroundingStage = MemoryGroundingStage.Blocked Then
+       runState.MemoryGroundingStage = MemoryGroundingStage.Blocked Then
                 Return MemoryGetFailedCode
             End If
 
@@ -1175,38 +1321,87 @@ Namespace Agents
             Return MissingRequiredMemoryAccessCode
         End Function
 
+
         Public Shared Function IsRequiredMemoryGroundingSatisfied(runState As ToolingRunState,
                                                                   proposedTurnKind As ActiveToolingTurnKind) As Boolean
             Return GetRequiredMemoryGroundingFailureReason(runState, proposedTurnKind) = ""
         End Function
 
-        Public Shared Function BuildRequiredMemoryGroundingRepairPrompt(Optional runState As ToolingRunState = Nothing) As String
-            Dim genericPrompt As String =
-                "Memory grounding is required. If possible, load the needed stored content before finalizing. If only part of the stored content is available, answer based on what was loaded and clearly say that it may be incomplete. If no reliable answer is possible, return a short, understandable blocked message."
+        Public Shared Function RequiresRequiredMemoryGroundingBeforeNonMemoryTool(runState As ToolingRunState,
+                                                                         toolName As String) As Boolean
+            If runState Is Nothing Then
+                Return False
+            End If
 
-            If runState Is Nothing OrElse runState.MemoryGroundingMode <> MemoryGroundingMode.Required Then
-                Return genericPrompt
+            If Not runState.IsRequiredMemoryGroundingEnforced Then
+                Return False
+            End If
+
+            If MemoryTools.IsMemoryTool(toolName) Then
+                Return False
             End If
 
             If runState.MemoryListCalledThisTurn AndAlso runState.MemoryListReturnedNoEntriesThisTurn Then
-                Return "No stored entries were available. Return a valid final response if the request can still be answered without them, or return a short, understandable blocked message."
+                Return False
+            End If
+
+            If runState.FullMemoryValueAvailableThisTurn Then
+                Return False
+            End If
+
+            If Not runState.MemoryListCalledThisTurn Then
+                Return True
+            End If
+
+            If runState.MemoryGroundingStage = MemoryGroundingStage.ListRequired OrElse
+       runState.MemoryGroundingStage = MemoryGroundingStage.Blocked Then
+                Return True
+            End If
+
+            If runState.MemoryListEntryCount > 0 AndAlso runState.MemoryGetCountThisTurn = 0 Then
+                Return True
+            End If
+
+            Return False
+        End Function
+
+
+        Public Shared Function BuildRequiredMemoryGroundingRepairPrompt(Optional runState As ToolingRunState = Nothing) As String
+            Dim genericPrompt As String =
+        "Memory grounding is explicitly required for this run. Use memory_list and memory_get before any non-memory tool or final answer. If no relevant stored entries exist, you may continue without Memory."
+
+            If runState Is Nothing OrElse Not runState.IsRequiredMemoryGroundingEnforced Then
+                Return genericPrompt
+            End If
+
+            If Not runState.MemoryListCalledThisTurn OrElse
+       runState.MemoryGroundingStage = MemoryGroundingStage.ListRequired Then
+                Return "Memory grounding is explicitly required for this run. In THIS turn, call exactly one tool: memory_list. Do not call any non-memory tool. Do not finalize yet."
+            End If
+
+            If runState.MemoryListCalledThisTurn AndAlso runState.MemoryListReturnedNoEntriesThisTurn Then
+                Return "No stored entries were available. You may continue without Memory, or return a short, understandable blocked message if the task still cannot be completed reliably."
             End If
 
             Dim unretrieved As List(Of String) = GetMemoryKeysStillUnretrieved(runState)
+            Dim keyHints As IList(Of String) = runState.MemoryKeysSuggestedForGet
 
-            If runState.MemoryListCalledThisTurn AndAlso runState.MemoryListEntryCount > 0 Then
-                If runState.MemoryGetCountThisTurn = 0 Then
-                    Return "Memory grounding is required. Load the needed stored content before finalizing. If no reliable answer is possible, return a short, understandable blocked message."
-                End If
-
-                If unretrieved.Count > 0 Then
-                    Return "Part of the stored content was loaded, but not all of it. Create an answer based on the loaded content and state clearly if it may be incomplete. If no reliable answer is possible, return a short, understandable blocked message."
-                End If
+            If unretrieved IsNot Nothing AndAlso unretrieved.Count > 0 Then
+                keyHints = unretrieved
             End If
 
-            If runState.MemoryGetCalledThisTurn AndAlso
-               runState.MemoryGroundingStage = MemoryGroundingStage.Blocked Then
-                Return "The stored content could not be fully loaded or evaluated. If no reliable answer is possible, return a short, understandable blocked message."
+            Dim keyPromptSuffix As String = BuildMemoryKeysPromptSuffix(keyHints)
+
+            If runState.MemoryListEntryCount > 0 AndAlso runState.MemoryGetCountThisTurn = 0 Then
+                Return "Memory grounding is explicitly required for this run. In THIS turn, call exactly one tool: memory_get for the most relevant stored entry before any other tool or final answer. Do not call any non-memory tool. Do not finalize yet." & keyPromptSuffix
+            End If
+
+            If runState.MemoryGroundingStage = MemoryGroundingStage.Blocked Then
+                Return "Memory grounding is explicitly required for this run, but the stored content could not be loaded successfully. Retry with memory_get if a relevant key is available, or return a short, understandable blocked message. Do not call any non-memory tool until Memory is resolved." & keyPromptSuffix
+            End If
+
+            If unretrieved.Count > 0 Then
+                Return "At least one stored entry was loaded. You may continue using the loaded Memory. If you finalize based on only part of the stored content, say clearly that the answer may be incomplete." & keyPromptSuffix
             End If
 
             Return genericPrompt
@@ -1214,26 +1409,27 @@ Namespace Agents
 
         Public Shared Function BuildMemoryGroundingStateSummary(runState As ToolingRunState) As String
             If runState Is Nothing Then
-                Return "memoryGroundingMode=none; memoryGroundingStage=not_started; shouldExposeRecentMemoryStubs=false; memoryListEntryCount=0; memoryGetCountThisTurn=0; memoryGetRequiredAfterList=false; memoryKeysSuggestedForGet=(none); memoryKeysRetrievedThisTurn=(none); memoryKeysStillUnretrieved=(none); memoryListCalledThisTurn=false; memoryGetCalledThisTurn=false; fullMemoryValueAvailableThisTurn=false; finalAnswerBasedOnSubset=false; FinalCompleteRejectedForMissingMemoryAccess=false; FinalCompleteRejectedForPartialMemoryRetrieval=false"
+                Return "memoryGroundingMode=none; memoryGroundingAuthority=none; memoryGroundingStage=not_started; shouldExposeRecentMemoryStubs=false; memoryListEntryCount=0; memoryGetCountThisTurn=0; memoryGetRequiredAfterList=false; memoryKeysSuggestedForGet=(none); memoryKeysRetrievedThisTurn=(none); memoryKeysStillUnretrieved=(none); memoryListCalledThisTurn=false; memoryGetCalledThisTurn=false; fullMemoryValueAvailableThisTurn=false; finalAnswerBasedOnSubset=false; FinalCompleteRejectedForMissingMemoryAccess=false; FinalCompleteRejectedForPartialMemoryRetrieval=false"
             End If
 
             Dim unretrieved As List(Of String) = GetMemoryKeysStillUnretrieved(runState)
 
             Return "memoryGroundingMode=" & FormatMemoryGroundingMode(runState.MemoryGroundingMode) & ";" &
-                " memoryGroundingStage=" & FormatMemoryGroundingStage(runState.MemoryGroundingStage) & ";" &
-                " shouldExposeRecentMemoryStubs=" & If(runState.ShouldExposeRecentMemoryStubs, "true", "false") & ";" &
-                " memoryListEntryCount=" & runState.MemoryListEntryCount.ToString(Globalization.CultureInfo.InvariantCulture) & ";" &
-                " memoryGetCountThisTurn=" & runState.MemoryGetCountThisTurn.ToString(Globalization.CultureInfo.InvariantCulture) & ";" &
-                " memoryGetRequiredAfterList=" & If(runState.MemoryGetRequiredAfterList, "true", "false") & ";" &
-                " memoryKeysSuggestedForGet=" & BuildMemoryKeysSummary(runState.MemoryKeysSuggestedForGet) & ";" &
-                " memoryKeysRetrievedThisTurn=" & BuildMemoryKeysSummary(runState.MemoryKeysRetrievedThisTurn) & ";" &
-                " memoryKeysStillUnretrieved=" & BuildMemoryKeysSummary(unretrieved) & ";" &
-                " memoryListCalledThisTurn=" & If(runState.MemoryListCalledThisTurn, "true", "false") & ";" &
-                " memoryGetCalledThisTurn=" & If(runState.MemoryGetCalledThisTurn, "true", "false") & ";" &
-                " fullMemoryValueAvailableThisTurn=" & If(runState.FullMemoryValueAvailableThisTurn, "true", "false") & ";" &
-                " finalAnswerBasedOnSubset=" & If(runState.FinalAnswerBasedOnSubset, "true", "false") & ";" &
-                " FinalCompleteRejectedForMissingMemoryAccess=" & If(runState.FinalCompleteRejectedForMissingMemoryAccess, "true", "false") & ";" &
-                " FinalCompleteRejectedForPartialMemoryRetrieval=" & If(runState.FinalCompleteRejectedForPartialMemoryRetrieval, "true", "false")
+                    " memoryGroundingAuthority=" & runState.MemoryGroundingAuthority.ToString().ToLowerInvariant() & ";" &
+                    " memoryGroundingStage=" & FormatMemoryGroundingStage(runState.MemoryGroundingStage) & ";" &
+                    " shouldExposeRecentMemoryStubs=" & If(runState.ShouldExposeRecentMemoryStubs, "true", "false") & ";" &
+                    " memoryListEntryCount=" & runState.MemoryListEntryCount.ToString(Globalization.CultureInfo.InvariantCulture) & ";" &
+                    " memoryGetCountThisTurn=" & runState.MemoryGetCountThisTurn.ToString(Globalization.CultureInfo.InvariantCulture) & ";" &
+                    " memoryGetRequiredAfterList=" & If(runState.MemoryGetRequiredAfterList, "true", "false") & ";" &
+                    " memoryKeysSuggestedForGet=" & BuildMemoryKeysSummary(runState.MemoryKeysSuggestedForGet) & ";" &
+                    " memoryKeysRetrievedThisTurn=" & BuildMemoryKeysSummary(runState.MemoryKeysRetrievedThisTurn) & ";" &
+                    " memoryKeysStillUnretrieved=" & BuildMemoryKeysSummary(unretrieved) & ";" &
+                    " memoryListCalledThisTurn=" & If(runState.MemoryListCalledThisTurn, "true", "false") & ";" &
+                    " memoryGetCalledThisTurn=" & If(runState.MemoryGetCalledThisTurn, "true", "false") & ";" &
+                    " fullMemoryValueAvailableThisTurn=" & If(runState.FullMemoryValueAvailableThisTurn, "true", "false") & ";" &
+                    " finalAnswerBasedOnSubset=" & If(runState.FinalAnswerBasedOnSubset, "true", "false") & ";" &
+                    " FinalCompleteRejectedForMissingMemoryAccess=" & If(runState.FinalCompleteRejectedForMissingMemoryAccess, "true", "false") & ";" &
+                    " FinalCompleteRejectedForPartialMemoryRetrieval=" & If(runState.FinalCompleteRejectedForPartialMemoryRetrieval, "true", "false")
         End Function
 
         Private Shared Function TryParseMemoryListMetadata(rawResponse As String,
@@ -2000,9 +2196,14 @@ Namespace Agents
         End Sub
 
         Public Shared Function BuildTaskStatusFooter(status As String, reason As String) As String
+            Dim normalizedStatus As String = If(status, "").Trim().ToLowerInvariant()
+            If normalizedStatus = "" Then
+                normalizedStatus = "blocked"
+            End If
+
             Dim footerObject As New JObject(
-                New JProperty("status", If(status, "").Trim().ToLowerInvariant()),
-                New JProperty("reason", NormalizeFooterReason(reason)))
+        New JProperty("status", normalizedStatus),
+        New JProperty("reason", NormalizeFooterReason(reason, normalizedStatus)))
 
             Return "<TASK_STATUS>" & footerObject.ToString(Formatting.None) & "</TASK_STATUS>"
         End Function
@@ -2067,14 +2268,31 @@ Namespace Agents
             End Try
         End Function
 
-        Private Shared Function NormalizeFooterReason(reason As String) As String
-            Dim normalized As String = If(reason, "").Trim()
-            If normalized = "" Then normalized = "blocked"
-            If normalized.Length > 80 Then normalized = normalized.Substring(0, 80).Trim()
+        Private Shared Function NormalizeFooterReason(reason As String, Optional status As String = "") As String
+            Dim normalized As String =
+        Regex.Replace(
+            If(reason, ""),
+            "\s+",
+            " ",
+            RegexOptions.CultureInvariant).Trim()
+
+            If normalized = "" Then
+                Select Case If(status, "").Trim().ToLowerInvariant()
+                    Case "complete"
+                        normalized = "answer ready"
+                    Case "blocked"
+                        normalized = "no safe completion path"
+                    Case Else
+                        normalized = "status recorded"
+                End Select
+            End If
+
+            If normalized.Length > TaskStatusReasonMaxChars Then
+                normalized = normalized.Substring(0, TaskStatusReasonMaxChars).Trim()
+            End If
+
             Return normalized
         End Function
-
-
 
 
         Private Shared Function ExtractFirstPathArgument(arguments As IDictionary(Of String, Object)) As String

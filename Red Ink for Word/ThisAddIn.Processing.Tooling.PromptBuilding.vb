@@ -452,15 +452,49 @@ Partial Public Class ThisAddIn
             Return result
         End If
 
-        result.AddRange(
+        Dim deduplicatedTools As List(Of ModelConfig) =
             allowedTools.
                 Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
                 GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
-                Select(Function(g) g.First()))
+                Select(Function(g) g.First()).
+                ToList()
 
+        If Not SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(deduplicatedTools) Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        If allowedRegistry Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loaderManifests As List(Of SharedLibrary.Agents.ToolManifest) =
+            allowedRegistry.ListManifests().
+                Where(Function(m)
+                          Return m IsNot Nothing AndAlso
+                                 Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                                 Not m.Name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
+                      End Function).
+                OrderBy(Function(m) m.Name, StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+        If loaderManifests.Count = 0 Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loader As ModelConfig =
+            SharedLibrary.Agents.ToolLoaderTool.Build(loaderManifests)
+
+        If loader Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        result.Add(loader)
         Return result
     End Function
-
 
 
     Private Function BuildToolWorkflowInstructionAddendum(selectedTools As List(Of ModelConfig)) As String

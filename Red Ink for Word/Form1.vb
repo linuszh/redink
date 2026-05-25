@@ -300,7 +300,11 @@ Public Class frmAIChat
     ''' </summary>
     Private SystemPrompt As String = ""
 
-
+    ''' <summary>
+    ''' True when the most recent command batch intentionally moved focus to Word.
+    ''' Prevents the chat input box from immediately stealing focus back.
+    ''' </summary>
+    Private _keepFocusOnDocumentAfterCommands As Boolean = False
 
     ' =========================================================================
     ' Private Fields - Model Configuration
@@ -1308,6 +1312,8 @@ Public Class frmAIChat
                                     AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
 
                                     ' Execute bot commands if present and permitted
+                                    _keepFocusOnDocumentAfterCommands = False
+
                                     If My.Settings.DoCommands And Not String.IsNullOrWhiteSpace(CommandsString) Then
                                         Try
                                             ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked)
@@ -1317,9 +1323,12 @@ Public Class frmAIChat
                                         End Try
                                     End If
 
-                                    ' Clear user input and restore focus
+                                    ' Clear user input and restore focus unless a goto/jump/show/select
+                                    ' command intentionally moved focus back to Word.
                                     txtUserInput.Text = ""
-                                    If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
+                                    If String.IsNullOrEmpty(txtUserInput.Text) AndAlso Not _keepFocusOnDocumentAfterCommands Then
+                                        txtUserInput.Focus()
+                                    End If
                                 End Sub)
 
             ' Add to in-memory history
@@ -2836,15 +2845,22 @@ Public Class frmAIChat
             targetText = DecodeParagraphMarks(targetText)
 
             Dim sel As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
-            Dim searchRange As Microsoft.Office.Interop.Word.Range
+            Dim scopeStart As Integer
+            Dim scopeEnd As Integer
 
             If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
-                searchRange = sel.Range.Duplicate
+                scopeStart = sel.Range.Start
+                scopeEnd = sel.Range.End
             Else
-                searchRange = doc.Content.Duplicate
+                scopeStart = doc.Content.Start
+                scopeEnd = doc.Content.End
             End If
 
-            sel.SetRange(searchRange.Start, searchRange.End)
+            Try
+                sel.SetRange(scopeStart, scopeEnd)
+            Catch exScope As System.Exception
+                Debug.WriteLine($"ExecuteGotoCommand: pre-find SetRange failed: {exScope.Message}")
+            End Try
 
             If Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then
                 Dim foundStart As Integer = sel.Start
@@ -2943,6 +2959,19 @@ Public Class frmAIChat
 
             Dim commandSuccess As Boolean = True
             Dim commandDescription As String = ""
+
+            If Not OnlySelection Then
+                Select Case pc.Command.ToLower()
+                    Case "find", "addcomment", "replace", "insertafter", "insertbefore", "goto", "jump", "show", "select"
+                        Try
+                            If wordApp IsNot Nothing AndAlso wordApp.ActiveDocument IsNot Nothing AndAlso wordApp.Selection IsNot Nothing Then
+                                wordApp.Selection.SetRange(wordApp.ActiveDocument.Content.Start, wordApp.ActiveDocument.Content.End)
+                            End If
+                        Catch exScope As System.Exception
+                            Debug.WriteLine($"ExecuteAnyCommands: pre-command SetRange failed: {exScope.Message}")
+                        End Try
+                End Select
+            End If
 
             Select Case pc.Command.ToLower()
                 Case "find"
@@ -3043,6 +3072,8 @@ Public Class frmAIChat
 
         Me.TopMost = topmost
 
+        Dim documentActivated As Boolean = False
+
         If activateDocumentAfterCommands Then
             Try
                 Dim activeApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
@@ -3052,10 +3083,17 @@ Public Class frmAIChat
                     If activeApp.ActiveDocument IsNot Nothing Then
                         activeApp.ActiveDocument.Activate()
                     End If
+
+                    documentActivated = True
                 End If
             Catch
+                documentActivated = False
             End Try
-        Else
+        End If
+
+        _keepFocusOnDocumentAfterCommands = documentActivated
+
+        If Not documentActivated Then
             Me.Focus()
         End If
 
@@ -3443,16 +3481,23 @@ Public Class frmAIChat
         Dim originalSelStart As Integer = sel.Start
         Dim originalSelEnd As Integer = sel.End
 
-        Dim workRange As Microsoft.Office.Interop.Word.Range
+        Dim scopeStart As Integer
+        Dim scopeEnd As Integer
         If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
-            workRange = sel.Range.Duplicate
+            scopeStart = sel.Range.Start
+            scopeEnd = sel.Range.End
         Else
-            workRange = doc.Content.Duplicate
+            scopeStart = doc.Content.Start
+            scopeEnd = doc.Content.End
         End If
 
         Try
             ' Search only inside the intended working range.
-            sel.SetRange(workRange.Start, workRange.End)
+            Try
+                sel.SetRange(scopeStart, scopeEnd)
+            Catch exScope As System.Exception
+                Debug.WriteLine($"ExecuteAddComment: pre-find SetRange failed: {exScope.Message}")
+            End Try
 
             If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then
                 Debug.WriteLine($"AddComments: Search term not found: '{searchTerm}'.")
@@ -3468,7 +3513,7 @@ Public Class frmAIChat
             Dim anchorStart As Integer = anchor.Start
             Dim anchorEnd As Integer = anchor.End
 
-            If anchorStart < workRange.Start OrElse anchorEnd > workRange.End Then
+            If anchorStart < scopeStart OrElse anchorEnd > scopeEnd Then
                 Debug.WriteLine($"AddComments: Found range outside working range for term '{searchTerm}'.")
                 Return False
             End If
@@ -3682,6 +3727,8 @@ Public Class frmAIChat
 
         Try
             Debug.WriteLine("ExecuteReplaceCommand: START")
+            LogReplaceDiag(New String("-"c, 100))
+            LogReplaceDiag("START")
 
             Try
                 doc = Globals.ThisAddIn.Application.ActiveDocument
@@ -3708,6 +3755,7 @@ Public Class frmAIChat
             newText = If(newText, String.Empty)
 
             Debug.WriteLine($"ExecuteReplaceCommand: oldText='{oldText}' ({oldText.Length} chars), newText='{newText}' ({newText.Length} chars)")
+            LogReplaceDiag($"Inputs: OnlySelection={OnlySelection}; oldTextLen={oldText.Length}; newTextLen={newText.Length}; oldText='{PreviewForLog(oldText)}'; newText='{PreviewForLog(newText)}'")
 
             If String.IsNullOrWhiteSpace(oldText) Then
                 CommandsList = $"Note: Empty search term (ignored)." & Environment.NewLine & CommandsList
@@ -3726,6 +3774,7 @@ Public Class frmAIChat
             Dim savedSelectionStart As Integer = doc.Application.Selection.Start
             Dim savedSelectionEnd As Integer = doc.Application.Selection.End
             Debug.WriteLine($"ExecuteReplaceCommand: savedSelection=[{savedSelectionStart},{savedSelectionEnd}]")
+            LogReplaceDiag($"Saved selection=[{savedSelectionStart},{savedSelectionEnd}] {DescribeSelectionState(doc.Application.Selection)}")
 
             ' Define search boundaries
             Dim searchEnd As Integer
@@ -3745,12 +3794,30 @@ Public Class frmAIChat
             Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
             Dim lastFoundEnd As Integer = -1
+            Dim requestedSearchStart As Integer = doc.Application.Selection.Start
 
             Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
 
-            Do While Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True) = True
+            Do
+                LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                Dim findReturned As Boolean = False
+                Try
+                    findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
+                Catch ex As Exception
+                    LogReplaceDiag($"PASS1 FindLongTextInChunks THREW: {ex.GetType().Name}: {ex.Message}")
+                    Throw
+                End Try
+
+                LogReplaceDiag($"PASS1 after Find: returned={findReturned}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                If Not findReturned Then
+                    Exit Do
+                End If
+
                 If doc.Application.Selection Is Nothing Then
                     Debug.WriteLine("ExecuteReplaceCommand: Selection is Nothing after Find, exiting loop")
+                    LogReplaceDiag("PASS1 Selection is Nothing after Find")
                     Exit Do
                 End If
 
@@ -3759,45 +3826,96 @@ Public Class frmAIChat
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
+                    LogReplaceDiag("PASS1 ESC pressed, aborting")
                     Return False
                 End If
 
                 iterationCount += 1
                 If iterationCount > maxIterations Then
                     CommandsList = $"Warning: Max search iterations ({maxIterations}) reached." & Environment.NewLine & CommandsList
-                    Debug.WriteLine($"ExecuteReplaceCommand: Max iterations reached")
+                    Debug.WriteLine("ExecuteReplaceCommand: Max iterations reached")
+                    LogReplaceDiag($"PASS1 maxIterations reached ({maxIterations})")
                     Exit Do
                 End If
 
                 Dim selStart As Integer = doc.Application.Selection.Start
                 Dim selEnd As Integer = doc.Application.Selection.End
-                Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}]")
+                Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart})")
+                LogReplaceDiag($"PASS1 iteration={iterationCount}; found=[{selStart},{selEnd}]; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}")
 
                 ' Validate match is within search bounds
                 If selStart >= searchEnd Then
                     Debug.WriteLine($"ExecuteReplaceCommand: match start {selStart} >= searchEnd {searchEnd}, exiting")
+                    LogReplaceDiag($"PASS1 exiting because selStart {selStart} >= searchEnd {searchEnd}")
                     Exit Do
                 End If
 
-                ' ─── Reject matches that did not advance past the previous one ───
-                ' FindLongTextInChunks / Word Find can return matches BEFORE the
-                ' selection start in tables.  When that happens the match end will
-                ' be <= lastFoundEnd.  Force the selection past the previous match
-                ' and retry instead of recording a duplicate.
-                If selEnd <= lastFoundEnd Then
-                    Debug.WriteLine($"ExecuteReplaceCommand: match [{selStart},{selEnd}] not past lastFoundEnd={lastFoundEnd}, forcing advance")
+                ' Reject matches that cross a table-cell boundary.
+                ' The canonical fallback in FindLongTextAnchoredFast (Strategy 4)
+                ' joins adjacent cell text into a single canonical stream and can
+                ' return a hit that spans cells. Word's Selection then auto-
+                ' expands to include both cells, which corrupts the replacement.
+                Try
+                    Dim probeRange As Word.Range = doc.Range(selStart, Math.Min(selStart + 1, doc.Content.End))
+                    Dim startInTable As Boolean = False
+                    Try
+                        startInTable = CBool(probeRange.Information(Word.WdInformation.wdWithInTable))
+                    Catch
+                        startInTable = False
+                    End Try
 
-                    ' Increment lastFoundEnd so repeated failures keep moving forward
-                    ' instead of retrying the same forcePos indefinitely.
-                    lastFoundEnd += 1
-                    Dim forcePos As Integer = lastFoundEnd
+                    If startInTable Then
+                        Dim startCellEnd As Integer = -1
+                        Try
+                            If probeRange.Cells.Count > 0 Then
+                                startCellEnd = probeRange.Cells(1).Range.End
+                            End If
+                        Catch
+                            startCellEnd = -1
+                        End Try
+
+                        If startCellEnd > 0 AndAlso selEnd > startCellEnd Then
+                            LogReplaceDiag($"PASS1 REJECTING cell-crossing match [{selStart},{selEnd}]; startCellEnd={startCellEnd}")
+                            Debug.WriteLine($"ExecuteReplaceCommand: rejecting cell-crossing match [{selStart},{selEnd}], cellEnd={startCellEnd}")
+
+                            Dim escapePos As Integer = Math.Min(startCellEnd, searchEnd)
+                            If escapePos <= requestedSearchStart Then
+                                Exit Do
+                            End If
+
+                            doc.Application.Selection.SetRange(escapePos, escapePos)
+                            requestedSearchStart = escapePos
+                            lastFoundEnd = Math.Max(lastFoundEnd, escapePos - 1)
+                            Continue Do
+                        End If
+                    End If
+                Catch ex As Exception
+                    LogReplaceDiag($"PASS1 cell-containment check failed: {ex.Message}")
+                End Try
+
+                ' Reject hits that move backwards or that do not advance.
+                ' In tables Word can re-return the same logical cell match with a
+                ' different End position because of cell markers, so checking End
+                ' alone is not sufficient.
+                Dim hitWentBackwards As Boolean = selStart < requestedSearchStart
+                Dim hitDidNotAdvance As Boolean = selEnd <= lastFoundEnd
+
+                If hitWentBackwards OrElse hitDidNotAdvance Then
+                    Debug.WriteLine($"ExecuteReplaceCommand: rejecting stale/backward hit [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart}, lastFoundEnd={lastFoundEnd})")
+                    LogReplaceDiag($"PASS1 rejecting stale/backward hit; hitWentBackwards={hitWentBackwards}; hitDidNotAdvance={hitDidNotAdvance}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                    Dim forcePos As Integer = Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
 
                     If forcePos >= searchEnd Then
                         Debug.WriteLine("ExecuteReplaceCommand: forced position past searchEnd, exiting")
+                        LogReplaceDiag($"PASS1 forcePos {forcePos} >= searchEnd {searchEnd}; exiting")
                         Exit Do
                     End If
+
                     doc.Application.Selection.SetRange(forcePos, searchEnd)
+                    requestedSearchStart = forcePos
                     Debug.WriteLine($"ExecuteReplaceCommand: forced selection to [{forcePos},{searchEnd}]")
+                    LogReplaceDiag($"PASS1 forced selection=[{forcePos},{searchEnd}] {DescribeSelectionState(doc.Application.Selection)}")
                     Continue Do
                 End If
 
@@ -3805,10 +3923,12 @@ Public Class frmAIChat
                 lastFoundEnd = selEnd
                 matchPositions.Add((selStart, selEnd))
                 Debug.WriteLine($"ExecuteReplaceCommand: stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                LogReplaceDiag($"PASS1 stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
 
                 ' Advance past current match
                 doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                 Debug.WriteLine($"ExecuteReplaceCommand: collapsed to {doc.Application.Selection.Start}")
+                LogReplaceDiag($"PASS1 after collapse: {DescribeSelectionState(doc.Application.Selection)}")
 
                 ' Handle table cell boundaries to avoid getting stuck at cell end marker
                 Try
@@ -3817,10 +3937,13 @@ Public Class frmAIChat
                         isInTable = CBool(doc.Application.Selection.Information(Word.WdInformation.wdWithInTable))
                     Catch ex As Exception
                         Debug.WriteLine($"ExecuteReplaceCommand: wdWithInTable check failed: {ex.Message}")
+                        LogReplaceDiag($"PASS1 wdWithInTable check failed: {ex.Message}")
                     End Try
 
                     If isInTable Then
                         Debug.WriteLine("ExecuteReplaceCommand: in table, checking cell boundary")
+                        LogReplaceDiag($"PASS1 in table before boundary handling: {DescribeSelectionState(doc.Application.Selection)}")
+
                         Dim cel As Word.Cell = Nothing
                         Try
                             If doc.Application.Selection.Cells.Count > 0 Then
@@ -3828,34 +3951,54 @@ Public Class frmAIChat
                             End If
                         Catch ex As Exception
                             Debug.WriteLine($"ExecuteReplaceCommand: Cells access failed: {ex.Message}")
+                            LogReplaceDiag($"PASS1 Cells access failed: {ex.Message}")
                         End Try
 
                         If cel IsNot Nothing Then
                             Dim selEndPos As Integer = doc.Application.Selection.End
                             Dim celRangeEnd As Integer = cel.Range.End
+                            LogReplaceDiag($"PASS1 table boundary check: selEndPos={selEndPos}; cellEnd={celRangeEnd}")
+
                             If selEndPos >= celRangeEnd - 1 Then
                                 doc.Application.Selection.SetRange(celRangeEnd, celRangeEnd)
                                 Debug.WriteLine($"ExecuteReplaceCommand: jumped past cell end to {celRangeEnd}")
+                                LogReplaceDiag($"PASS1 jumped past cell end to {celRangeEnd}; {DescribeSelectionState(doc.Application.Selection)}")
                             End If
                         End If
                     End If
                 Catch ex As Exception
                     Debug.WriteLine($"ExecuteReplaceCommand: table navigation failed: {ex.Message}")
+                    LogReplaceDiag($"PASS1 table navigation failed: {ex.Message}")
                 End Try
 
                 ' Check if past search boundary
                 Dim currentPos As Integer = doc.Application.Selection.Start
                 Debug.WriteLine($"ExecuteReplaceCommand: after advance, position={currentPos}, searchEnd={searchEnd}")
+                LogReplaceDiag($"PASS1 after advance: currentPos={currentPos}; searchEnd={searchEnd}; {DescribeSelectionState(doc.Application.Selection)}")
+
                 If currentPos >= searchEnd Then
                     Debug.WriteLine("ExecuteReplaceCommand: past searchEnd, exiting loop")
+                    LogReplaceDiag($"PASS1 exiting because currentPos {currentPos} >= searchEnd {searchEnd}")
                     Exit Do
                 End If
 
-                ' Extend selection to remaining search scope
+                ' Extend selection to remaining search scope.
+                ' In whole-document searches, keep the selection collapsed.
+                ' A non-collapsed Selection that crosses table cells can snap back
+                ' to the start of the previous cell, which causes the same hit to
+                ' be returned again and again.
                 Try
-                    doc.Application.Selection.SetRange(currentPos, searchEnd)
+                    If OnlySelection Then
+                        doc.Application.Selection.SetRange(currentPos, searchEnd)
+                    Else
+                        doc.Application.Selection.SetRange(currentPos, currentPos)
+                    End If
+
+                    requestedSearchStart = currentPos
+                    LogReplaceDiag($"PASS1 prepared next search range=[{currentPos},{If(OnlySelection, searchEnd, currentPos)}] {DescribeSelectionState(doc.Application.Selection)}")
                 Catch ex As Exception
                     Debug.WriteLine($"ExecuteReplaceCommand: SetRange({currentPos},{searchEnd}) failed: {ex.Message}")
+                    LogReplaceDiag($"PASS1 SetRange({currentPos},{searchEnd}) failed: {ex.Message}")
                     Exit Do
                 End Try
             Loop
@@ -3882,6 +4025,45 @@ Public Class frmAIChat
                     Dim mStart As Integer = matchPositions(i).Start
                     Dim mEnd As Integer = matchPositions(i).End
 
+                    ' Avoid replacing the cell's terminal paragraph mark.
+                    ' If the match ends one character before the cell end (i.e. on
+                    ' the cell's last vbCr), shrink the match so the cell marker
+                    ' is not touched, and strip the trailing paragraph mark from
+                    ' newText so the replacement does not push content into the
+                    ' next cell.
+                    Dim adjustedNewText As String = newText
+                    Try
+                        Dim probe As Word.Range = doc.Range(mStart, mEnd)
+                        Dim isInCell As Boolean = False
+                        Try
+                            isInCell = CBool(probe.Information(Word.WdInformation.wdWithInTable))
+                        Catch
+                            isInCell = False
+                        End Try
+
+                        If isInCell AndAlso probe.Cells.Count > 0 Then
+                            Dim cellRangeEnd As Integer = probe.Cells(1).Range.End
+                            ' Word stores cell-end marker as the last character of cell range
+                            If mEnd = cellRangeEnd - 1 Then
+                                Dim tailChar As String = doc.Range(mEnd - 1, mEnd).Text
+                                If tailChar = vbCr OrElse tailChar = vbLf Then
+                                    mEnd -= 1
+                                    LogReplaceDiag($"PASS2 shrunk match to avoid cell paragraph mark; new mEnd={mEnd}")
+                                End If
+                                If adjustedNewText.EndsWith(vbCrLf, StringComparison.Ordinal) Then
+                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 2)
+                                ElseIf adjustedNewText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                       adjustedNewText.EndsWith(vbLf, StringComparison.Ordinal) Then
+                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 1)
+                                End If
+                                LogReplaceDiag($"PASS2 trimmed trailing paragraph mark from newText; len={adjustedNewText.Length}")
+                            End If
+                        End If
+                    Catch ex As Exception
+                        LogReplaceDiag($"PASS2 cell-boundary trim failed: {ex.Message}")
+                    End Try
+
+
                     Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
 
                     Try
@@ -3890,18 +4072,15 @@ Public Class frmAIChat
                         doc.Application.Selection.SetRange(mStart, mEnd)
                         Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
 
-                        ' Atomic replacement
-                        Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
-                        doc.Application.Selection.Text = newText
-                        Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
-
-                        Dim actionEnd As Integer = If(newText.Length > 0,
-                              Math.Min(mStart + newText.Length, doc.Content.End),
-                              mEnd)
-                        RememberLastActionRange(mStart, actionEnd)
-
-                        ' Apply Markdown conversion if enabled and text was inserted
                         If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                            ' Old replacement path so Markdown can be converted afterwards.
+                            Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{adjustedNewText}'")
+                            doc.Application.Selection.Text = adjustedNewText
+                            Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                            Dim actionEnd As Integer = Math.Min(mStart + newText.Length, doc.Content.End)
+                            RememberLastActionRange(mStart, actionEnd)
+
                             Try
                                 Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
                                 Globals.ThisAddIn.ConvertMarkdownToWord()
@@ -3909,6 +4088,22 @@ Public Class frmAIChat
                             Catch ex As Exception
                                 Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
                             End Try
+                        Else
+                            ' Surgical replacement path for plain-text tracked edits.
+                            Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
+                            Dim originalPatchText As String = patchRange.Text
+                            Dim preserveTrailingCr As Boolean =
+                                originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
+
+                            Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
+                            Globals.ThisAddIn.ApplySurgicalReplacement(
+                                originalPatchText,
+                                adjustedNewText,
+                                patchRange,
+                                preserveTrailingCr)
+
+                            RememberLastActionRange(patchRange.Start, patchRange.End)
                         End If
 
                         replaceCount += 1
@@ -3968,6 +4163,61 @@ Public Class frmAIChat
             End Try
         End Try
     End Function
+
+    Private Shared Function PreviewForLog(value As String, Optional maxLen As Integer = 120) As String
+        If value Is Nothing Then Return "<null>"
+
+        Dim s As String = value.
+            Replace(vbCr, "\r").
+            Replace(vbLf, "\n").
+            Replace(ChrW(7), "\cell")
+
+        If s.Length > maxLen Then
+            s = s.Substring(0, maxLen) & "…"
+        End If
+
+        Return s
+    End Function
+
+    <System.Diagnostics.Conditional("DEBUG")>
+    Private Sub LogReplaceDiag(message As String)
+        If String.IsNullOrWhiteSpace(message) Then Return
+        Debug.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [ExecuteReplaceCommand] {message}")
+    End Sub
+
+    Private Function DescribeSelectionState(sel As Word.Selection) As String
+        Try
+            If sel Is Nothing Then
+                Return "selection=<null>"
+            End If
+
+            Dim preview As String = "<unavailable>"
+            Try
+                preview = PreviewForLog(If(sel.Text, String.Empty), 80)
+            Catch
+            End Try
+
+            Dim isInTable As Boolean = False
+            Dim cellInfo As String = ""
+
+            Try
+                isInTable = CBool(sel.Information(Word.WdInformation.wdWithInTable))
+
+                If isInTable AndAlso sel.Cells.Count > 0 Then
+                    Dim currentCell As Word.Cell = sel.Cells(1)
+                    cellInfo =
+                        $" cell=[row={currentCell.RowIndex},col={currentCell.ColumnIndex}] cellRange=[{currentCell.Range.Start},{currentCell.Range.End}]"
+                End If
+            Catch ex As Exception
+                cellInfo = $" cellInfoError='{ex.Message}'"
+            End Try
+
+            Return $"selection=[{sel.Start},{sel.End}] len={Math.Max(0, sel.End - sel.Start)} inTable={isInTable}{cellInfo} text='{preview}'"
+        Catch ex As Exception
+            Return $"selectionStateError='{ex.Message}'"
+        End Try
+    End Function
+
 
     ' =========================================================================
     ' Insert Before/After Command

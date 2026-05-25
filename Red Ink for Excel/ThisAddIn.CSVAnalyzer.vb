@@ -121,7 +121,10 @@ Partial Public Class ThisAddIn
                 do2ndModel = CType(Nothing, Boolean?)
             End If
 
-            Dim p0 As New SLib.InputParameter("Prompt for analysis (leave empty for multiline)", promptDefault)
+            Dim p0 As New SLib.InputParameter("Prompt for analysis", promptDefault) With {
+                .Multiline = True,
+                .MultilineHeight = 150
+            }
             Dim p1 As New SLib.InputParameter("CSV separator", Separator)
             Dim p2 As New SLib.InputParameter("Columns to process (empty = all; separate by same separator)", colsDefault)
 
@@ -164,23 +167,6 @@ Partial Public Class ThisAddIn
             UseSecondAPI = False
             If TypeOf prms(9).Value Is Boolean Then
                 UseSecondAPI = CBool(prms(9).Value)
-            End If
-
-            ' If the prompt field was left empty or too short, open the multiline input box
-            ' so the user can compose a detailed, multi-line prompt comfortably.
-            If OtherPrompt.Trim().Length < 5 Then
-                Dim multilinePrompt As String = ShowCustomInputBox(
-                    "Please enter your analysis prompt (multiline supported):",
-                    $"{AN} CSV Analyzer",
-                    SimpleInput:=False,
-                    DefaultValue:=GetSetting("CSV_Prompt", OtherPrompt))
-
-                If multilinePrompt = "ESC" OrElse String.IsNullOrWhiteSpace(multilinePrompt) Then
-                    ShowCustomMessageBox("No prompt provided — aborting.")
-                    Return
-                End If
-
-                OtherPrompt = multilinePrompt
             End If
 
             SaveSetting("CSV_Separator", Separator)
@@ -227,9 +213,13 @@ Partial Public Class ThisAddIn
             Dim ws As Microsoft.Office.Interop.Excel.Worksheet = CType(Globals.ThisAddIn.Application.ActiveSheet, Microsoft.Office.Interop.Excel.Worksheet)
             Dim outRow As Integer = Math.Max(1, resultStartLine)
             Dim outCol As Integer = Math.Max(1, resultStartCol)
+
+            If Not PromptForFreshWorksheetIfNeeded(ws, outRow, outCol, $"{AN} CSV Analyzer") Then
+                Return
+            End If
+
             Dim headerInserted As Boolean = False
             Dim insertedRowsTotal As Integer = 0 ' track how many result rows were inserted
-
             ' Local action to insert Excel report header block (title, metadata, column headers, alignment).
 
             Dim InsertHeader As System.Action =

@@ -98,12 +98,15 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Class LlmJob
         Implements IDisposable
+
         Public Property Id As String
         Public Property CreatedUtc As DateTime
         Public Property Tcs As TaskCompletionSource(Of String)
         Public Property Cts As CancellationTokenSource
         Public Property UseSecond As Boolean
         Public Property FileObject As String
+        Public Property ChatId As Integer = 1
+
         Public Sub Dispose() Implements IDisposable.Dispose
             Try
                 Cts?.Cancel()
@@ -793,19 +796,70 @@ Partial Public Class ThisAddIn
     ''' Persists chat state for given (or active) chat id into application settings.
     ''' </summary>
     Private Sub SaveInkyState(st As InkyState, Optional chatId As Integer = -1)
+        TrySaveInkyState(st, chatId, "SaveInkyState")
+    End Sub
+
+    Private Function TrySaveInkyState(st As InkyState,
+                                  Optional chatId As Integer = -1,
+                                  Optional operationName As String = "") As Boolean
         If chatId = -1 Then chatId = activeChatId
+
         Dim settingKey As String = If(chatId = 2, "ChatHistory_Inky2", "ChatHistory_Inky")
+        Dim opName As String = If(String.IsNullOrWhiteSpace(operationName), "SaveInkyState", operationName)
+
         Try
             Dim json = Newtonsoft.Json.JsonConvert.SerializeObject(st)
-            Try
-                My.Settings.[GetType]().GetProperty(settingKey).SetValue(My.Settings, json, Nothing)
-                My.Settings.Save()
-            Catch
-                ' ignore
-            End Try
-        Catch
+
+            My.Settings.[GetType]().
+            GetProperty(settingKey).
+            SetValue(My.Settings, json, Nothing)
+
+            My.Settings.Save()
+
+            Debug.WriteLine(
+            $"[Inky] {opName}: saved chat={chatId}; turns={If(st?.History?.Count, 0)}; lastAssistantLen={If(If(st?.LastAssistantText, ""), "").Length}")
+
+            Return True
+        Catch ex As Exception
+            Debug.WriteLine($"[Inky] {opName} failed: chat={chatId}; {ex.Message}")
+            Return False
         End Try
-    End Sub
+    End Function
+
+    Private Function PersistAssistantTurnForJob(job As LlmJob,
+                                            assistantText As String,
+                                            assistantHtml As String) As Boolean
+        If job Is Nothing Then Return False
+
+        Dim targetChatId As Integer = If(job.ChatId = 2, 2, 1)
+
+        Try
+            Dim stJob As InkyState = LoadInkyState(targetChatId)
+
+            stJob.History.Add(New ChatTurn With {
+            .Role = "assistant",
+            .Markdown = assistantText,
+            .Html = assistantHtml,
+            .Utc = Date.UtcNow
+        })
+
+            stJob.LastAssistantText = assistantText
+
+            Dim saved As Boolean = TrySaveInkyState(
+            stJob,
+            targetChatId,
+            "PersistAssistantTurnForJob")
+
+            Debug.WriteLine(
+            $"[Inky] PersistAssistantTurnForJob: job={If(job.Id, "")}; targetChat={targetChatId}; activeChat={activeChatId}; saved={saved}; assistantLen={If(assistantText, "").Length}")
+
+            Return saved
+        Catch ex As Exception
+            Debug.WriteLine(
+            $"[Inky] PersistAssistantTurnForJob failed: job={If(job.Id, "")}; targetChat={targetChatId}; activeChat={activeChatId}; {ex.Message}")
+            Return False
+        End Try
+    End Function
 
     ''' <summary>
     ''' Converts markdown to HTML using Markdig advanced pipeline; falls back to HTML-encoded text on error.
@@ -1207,7 +1261,10 @@ Partial Public Class ThisAddIn
         html.AppendLine("#agentModelBtn.active{background:#1a5276;border-color:#2980b9;color:#fff;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine(":root.light #agentModelBtn.active{background:#d4e6f1;border-color:#2980b9;color:#1a5276;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine("#agentFiles{font-size:.7rem;color:var(--muted);padding:0 1rem .5rem;display:none;} ")
-        html.AppendLine("#agentFiles .file-tag{display:inline-block;background:var(--elev);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin:2px;font-size:.65rem;} ")
+        html.AppendLine("#agentFiles .file-tag{display:inline-flex;align-items:center;gap:6px;background:var(--elev);border:1px solid var(--border);border-radius:999px;padding:2px 4px 2px 8px;margin:2px;font-size:.65rem;} ")
+        html.AppendLine("#agentFiles .file-tag-name{display:inline-block;} ")
+        html.AppendLine("#agentFiles .file-tag-remove{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted);font-size:.9rem;line-height:1;cursor:pointer;} ")
+        html.AppendLine("#agentFiles .file-tag-remove:hover{background:var(--card);color:var(--fg);} ")
         html.AppendLine("#agentWorkspace{font-size:.7rem;color:var(--muted);padding:0 1rem .35rem;display:none;border-top:1px solid var(--border);background:var(--bg);} ")
         html.AppendLine("#agentWorkspace .ws-title{font-weight:600;color:var(--fg);margin-right:6px;} ")
         html.AppendLine("#agentWorkspace .ws-path{opacity:.8;word-break:break-all;} ")
@@ -1427,7 +1484,9 @@ Partial Public Class ThisAddIn
         html.AppendLine("async function boot(){const st=await api('inky_getstate');if(!st.ok){alert(st.error||'Init failed');return;}__supportsFiles=(st.supportsFiles===true);setTheme(st.darkMode!==false);render(st.history||[]);modelSel.innerHTML='';for(const m of (st.models||[])){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}updateModelTooltip();if(st.greeting&&(!Array.isArray(st.history)||st.history.length===0)){msgEl.placeholder=st.greeting;}setActiveChatBtn(st.activeChat||1);__modelSupportsTooling=(st.supportsTooling===true);__toolingEnabled=(st.toolingEnabled===true);toolingChk.checked=__toolingEnabled;__toolLogEnabled=(st.toolingLogEnabled!==false);toolLogBtn.classList.toggle('active',__toolLogEnabled);__memoryEnabled=(st.inkyMemoryEnabled===true);memoryChk.checked=__memoryEnabled;memoryEditLnk.style.display=__memoryEnabled?'inline':'none';syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});adjustModelSel();}")
 
         ' Poll job
-        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;} }finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
+        html.AppendLine("function buildAssistantTurnFromJobResult(r){const md=String((r&&r.result)||'').trim();if(!md)return null;const html=String((r&&r.resultHtml)||'').trim()||md.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>');return {role:'assistant',markdown:md,html:html,utc:new Date().toISOString()};}")
+        html.AppendLine("function ensureJobResultVisible(st,r){const hist=(st&&Array.isArray(st.history))?st.history.slice():[];const turn=buildAssistantTurnFromJobResult(r);if(!turn)return hist;const activeChat=Number((st&&st.activeChat)||1);const resultChat=Number((r&&r.chat)||activeChat);if(activeChat!==resultChat)return hist;const last=hist.length?hist[hist.length-1]:null;const lastMd=String((last&&last.markdown)||'').trim();if(last&&last.role==='assistant'&&lastMd===turn.markdown)return hist;hist.push(turn);return hist;}")
+        html.AppendLine("async function pollJob(jobId){if(!jobId)return;__currentJobId=jobId;__jobCanceled=false;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);try{for(;;){await new Promise(r=>setTimeout(r,2000));if(__jobCanceled)break;const s=await api('inky_jobstatus',{Job:jobId});if(!s.ok){console.warn('job status error',s.error);break;}if(s.status==='running'){continue;}if(s.status==='done'){if(Array.isArray(s.history)){render(s.history);}else{const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);}else{render(ensureJobResultVisible({history:[]},s));console.warn('state sync error',st&&st.error);}}const stSync=await api('inky_getstate');if(stSync&&stSync.ok){if(stSync.agentFiles)updateAgentFilesDisplay(stSync.agentFiles);syncAdvancedToolsUi({advancedToolsEnabled:stSync.advancedToolsEnabled===true,agentWorkspace:stSync.agentWorkspace,agentFiles:stSync.agentFiles||[],agentModelAvailable:stSync.agentModelAvailable===true,agentModelActive:stSync.agentModelActive===true});}break;}if(s.status==='canceled'){const st=await api('inky_getstate');if(st.ok){render(st.history||[]);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}if(s.status==='error'){console.warn('job failed',s.error);break;}const st=await api('inky_getstate');if(st.ok){const hist=ensureJobResultVisible(st,s);render(hist);if(st.agentFiles)updateAgentFilesDisplay(st.agentFiles);}break;}}finally{cancelBtn.style.display='none';removeTypingBubble();sendBtn.disabled=false;pureBtn.disabled=false;disableChatSwitch(false);__currentJobId=null;adjustModelSel();}}")
 
         ' Send (normal)
         html.AppendLine("async function send(){if(__currentJobId){return;}const t=msgEl.value.trim();if(!t)return;__lastPrompt=t;msgEl.value='';sendBtn.disabled=true;pureBtn.disabled=true;chatEl.insertAdjacentHTML('beforeend',`<div class=""row user""><div class=""bubble""><div class=""role"">You</div><div>${t.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\n','<br>')}</div></div></div>`);let typingId=addTempAssistantBubble('<span class=""typing-dots""><span></span><span></span><span></span></span>');const payload={Text:t};if(__pendingFilePath)payload.FileObject=__pendingFilePath;let r;try{r=await api('inky_send',payload);}catch(e){r={ok:false,error:e.message||'Network error'};}if(!r||!r.ok){removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;alert(r&&r.error||'Error');__pendingFilePath='';adjustModelSel();return;}__pendingFilePath='';if(r.job){if(r.history){render(r.history||[]);}removeTempBubble(typingId);__typingBubbleId=null;ensureTypingBubble();startElapsedTimer();cancelBtn.style.display='inline-block';disableChatSwitch(true);pollJob(r.job);}else{removeTempBubble(typingId);sendBtn.disabled=false;pureBtn.disabled=false;if(r.history){render(r.history||[]);}adjustModelSel();}}")
@@ -1473,11 +1532,12 @@ Partial Public Class ThisAddIn
         html.AppendLine("memoryEditLnk.addEventListener('click',async(e)=>{e.preventDefault();const r=await api('inky_editmemory');if(!r.ok)alert(r.error||'Could not open memory editor');});")
 
         ' Agent files display
-        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__toolingEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
         html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
-        html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__toolingEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button>';bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button>';bindWorkspaceButtons();}")
+        html.AppendLine("function updateAgentWorkspaceDisplay(ws){if(!agentWorkspaceEl)return;if(!__advancedToolsEnabled){agentWorkspaceEl.style.display='none';agentWorkspaceEl.innerHTML='';return;}agentWorkspaceEl.style.display='block';if(!ws||!ws.connected){agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> Not connected <button id=""wsConnectBtn"">Connect folder</button>';bindWorkspaceButtons();return;}agentWorkspaceEl.innerHTML='<span class=""ws-title"">📁 Workspace:</span> '+esc(ws.name||'Workspace')+' <span class=""ws-path"">'+esc(ws.rootPath||'')+'</span> <button id=""wsOpenBtn"">Open</button><button id=""wsChangeBtn"">Change</button><button id=""wsPermBtn"">Permissions</button><button id=""wsRevokeBtn"">Revoke</button>';bindWorkspaceButtons();}")
         html.AppendLine("async function refreshWorkspace(){const r=await api('inky_agentworkspace_get');if(r&&r.ok)updateAgentWorkspaceDisplay(r.workspace);}")
 
         html.AppendLine("function closeWorkspaceModal(){workspaceModalBackdrop.classList.remove('show');workspaceModalBody.innerHTML='';workspaceModalOkBtn.textContent='Save';workspaceModalCancelBtn.style.display='';__workspaceDialogMode='';}")
@@ -1669,15 +1729,15 @@ Partial Public Class ThisAddIn
                                 st.PreAgentUseSecondApi = st.UseSecondApi
                                 st.AgentModelActive = True
 
-                                ' Switch to the agent model
+                                ' Switch to the agent model first, but do not mark agent mode as active yet.
+                                ' The source-selection flow reads AgentModeEnabled while building the
+                                ' effective tool list, so setting it too early causes the wrong UI/sequence.
                                 st.UseSecondApi = True
                                 st.SelectedModelKey = agentDisplayKey
+                                st.AgentModeEnabled = False
+                                _chatAdvancedToolsEnabled = False
 
-                                ' Enable agent mode + tooling
-                                st.AgentModeEnabled = True
-                                _chatAdvancedToolsEnabled = True
-
-                                ' Ensure sources are actually selected (prompt user if needed)                                
+                                ' Ensure sources are actually selected (prompt user if needed)
                                 If Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
                                     Dim selectedTools As List(Of ModelConfig) = Nothing
                                     Try
@@ -1688,7 +1748,6 @@ Partial Public Class ThisAddIn
                                     End Try
 
                                     If selectedTools IsNot Nothing AndAlso selectedTools.Count > 0 Then
-                                        _selectedToolsForChat = selectedTools
                                         st.SelectedToolNames = selectedTools.Select(Function(tl) tl.ToolName).ToList()
                                     Else
                                         ' User cancelled — abort the toggle
@@ -1704,9 +1763,14 @@ Partial Public Class ThisAddIn
                                     End If
                                 End If
 
+                                ' Only now is agent mode actually active.
+                                st.AgentModeEnabled = True
+                                _chatAdvancedToolsEnabled = True
+
                                 ' Force-enable tooling since we verified tools exist above
                                 st.ToolingEnabled = True
                                 _chatToolingEnabled = True
+                                _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
                                 Try
                                     st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
@@ -1777,6 +1841,29 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to add files: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentremovefile"
+                        Try
+                            If _chatAgentActive Then
+                                Return JsonErr("Cannot remove files while agent processing is running.")
+                            End If
+
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            If Not ChatAgentRemoveFile(fileName) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .files = GetAgentFileListForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to remove file: " & ex.Message)
                         End Try
 
                     Case "inky_agentclearfiles"
@@ -2040,7 +2127,7 @@ Partial Public Class ThisAddIn
 
                         Return JsonOk(New With {
                             .ok = True,
-                            .history = ToBrowserTurns(LoadInkyState().History),
+                            .history = ToBrowserTurns(st.History),
                             .greeting = greeting,
                             .models = models,
                             .modelLabel = GetSelectedModelLabel(st.UseSecondApi, st.SelectedModelKey),
@@ -2475,14 +2562,17 @@ Partial Public Class ThisAddIn
                         Dim jobId As String = Guid.NewGuid().ToString("N")
                         Dim jobCts As New CancellationTokenSource()
                         Dim tcs As New TaskCompletionSource(Of String)(TaskCreationOptions.RunContinuationsAsynchronously)
+                        Dim originatingChatId As Integer = activeChatId
+
                         Dim job As New LlmJob With {
-                            .Id = jobId,
-                            .CreatedUtc = Date.UtcNow,
-                            .Tcs = tcs,
-                            .Cts = jobCts,
-                            .UseSecond = useSecondApiLocal,
-                            .FileObject = finalFileObject
-                        }
+                                        .Id = jobId,
+                                        .CreatedUtc = Date.UtcNow,
+                                        .Tcs = tcs,
+                                        .Cts = jobCts,
+                                        .UseSecond = useSecondApiLocal,
+                                        .FileObject = finalFileObject,
+                                        .ChatId = originatingChatId
+                                    }
                         If Not jobMap.TryAdd(jobId, job) Then
                             jobCts.Dispose()
                             Return JsonErr("Failed to register job.")
@@ -2715,22 +2805,21 @@ Partial Public Class ThisAddIn
                                     ' (3) Build assistant turn or error turn
                                     Dim assistantText As String = localOutput
                                     Dim wasCanceled As Boolean = jobCts.IsCancellationRequested
+
                                     If assistantText.Length = 0 Then
                                         assistantText = If(wasCanceled,
-                                                           "Aborted by user.",
-                                                           "Error: The model did not provide a response.")
+                                                   "Aborted by user.",
+                                                   "Error: The model did not provide a response.")
                                     End If
-                                    Dim htmlOut = MarkdownToHtml(assistantText)
-                                    ' Reload latest state (in case user switched chats meanwhile)
-                                    Dim stJob = LoadInkyState()
-                                    stJob.History.Add(New ChatTurn With {
-                                        .Role = "assistant",
-                                        .Markdown = assistantText,
-                                        .Html = htmlOut,
-                                        .Utc = Date.UtcNow
-                                    })
-                                    stJob.LastAssistantText = assistantText
-                                    SaveInkyState(stJob)
+
+                                    Dim htmlOut As String = MarkdownToHtml(assistantText)
+                                    Dim persisted As Boolean = PersistAssistantTurnForJob(job, assistantText, htmlOut)
+
+                                    If Not persisted Then
+                                        Debug.WriteLine(
+                                    $"[Inky] Assistant result was returned but could not be persisted for job={job.Id}; chat={job.ChatId}")
+                                    End If
+
                                     If wasCanceled AndAlso localOutput.Length = 0 Then
                                         tcs.TrySetCanceled()
                                     Else
@@ -2811,14 +2900,17 @@ Partial Public Class ThisAddIn
                         Dim jobIdP As String = Guid.NewGuid().ToString("N")
                         Dim jobCtsP As New CancellationTokenSource()
                         Dim tcsP As New TaskCompletionSource(Of String)(TaskCreationOptions.RunContinuationsAsynchronously)
+                        Dim originatingChatIdP As Integer = activeChatId
+
                         Dim jobP As New LlmJob With {
-                            .Id = jobIdP,
-                            .CreatedUtc = Date.UtcNow,
-                            .Tcs = tcsP,
-                            .Cts = jobCtsP,
-                            .UseSecond = useSecondApiLocal,
-                            .FileObject = fileObject
-                        }
+                                    .Id = jobIdP,
+                                    .CreatedUtc = Date.UtcNow,
+                                    .Tcs = tcsP,
+                                    .Cts = jobCtsP,
+                                    .UseSecond = useSecondApiLocal,
+                                    .FileObject = fileObject,
+                                    .ChatId = originatingChatIdP
+                                }
                         If Not jobMap.TryAdd(jobIdP, jobP) Then
                             jobCtsP.Dispose()
                             Return JsonErr("Failed to register job.")
@@ -2863,22 +2955,28 @@ Partial Public Class ThisAddIn
                                     Dim output = RunLlmAsync("", textBody, useSecondApiLocal, False, fileObject, jobCtsP.Token).GetAwaiter().GetResult()
                                     If output Is Nothing Then output = String.Empty
                                     output = SanitizeModelOutputForBrowser(output).Trim()
-                                    If jobCtsP.IsCancellationRequested AndAlso output.Length = 0 Then
+
+                                    Dim assistantText As String = output
+                                    Dim wasCanceled As Boolean = jobCtsP.IsCancellationRequested
+
+                                    If assistantText.Length = 0 Then
+                                        assistantText = If(wasCanceled,
+                                                           "Aborted by user.",
+                                                           "Error: The model returned no content.")
+                                    End If
+
+                                    Dim htmlOut As String = MarkdownToHtml(assistantText)
+                                    Dim persisted As Boolean = PersistAssistantTurnForJob(jobP, assistantText, htmlOut)
+
+                                    If Not persisted Then
+                                        Debug.WriteLine(
+                                            $"[Inky] Pure result was returned but could not be persisted for job={jobP.Id}; chat={jobP.ChatId}")
+                                    End If
+
+                                    If wasCanceled AndAlso output.Length = 0 Then
                                         tcsP.TrySetCanceled()
                                     Else
-                                        If output.Length = 0 Then
-                                            output = If(jobCtsP.IsCancellationRequested, "Aborted by user.", "Error: The model returned no content.")
-                                        End If
-                                        Dim stFin = LoadInkyState()
-                                        stFin.History.Add(New ChatTurn With {
-                                            .Role = "assistant",
-                                            .Markdown = output,
-                                            .Html = MarkdownToHtml(output),
-                                            .Utc = Date.UtcNow
-                                        })
-                                        stFin.LastAssistantText = output
-                                        SaveInkyState(stFin)
-                                        tcsP.TrySetResult(output)
+                                        tcsP.TrySetResult(assistantText)
                                     End If
                                 Catch exOp As OperationCanceledException
                                     tcsP.TrySetCanceled()
@@ -2928,7 +3026,18 @@ Partial Public Class ThisAddIn
                         ElseIf t.IsFaulted Then
                             Return JsonOk(New With {.ok = False, .job = jobId, .status = "error", .error = t.Exception.GetBaseException().Message})
                         Else
-                            Return JsonOk(New With {.ok = True, .job = jobId, .status = "done", .result = t.Result})
+                            Dim resultText As String = If(t.Result, "")
+                            Dim stJob As InkyState = LoadInkyState(job.ChatId)
+
+                            Return JsonOk(New With {
+                                    .ok = True,
+                                    .job = jobId,
+                                    .status = "done",
+                                    .result = resultText,
+                                    .resultHtml = MarkdownToHtml(resultText),
+                                    .chat = job.ChatId,
+                                    .history = ToBrowserTurns(If(stJob?.History, New System.Collections.Generic.List(Of ChatTurn)()))
+                                })
                         End If
 
                     Case "inky_canceljob"
