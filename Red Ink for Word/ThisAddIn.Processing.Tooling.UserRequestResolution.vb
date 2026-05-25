@@ -72,7 +72,7 @@ Partial Public Class ThisAddIn
                 hideSplash,
                 "",
                 "",
-                True)
+                False)
 
             If String.IsNullOrWhiteSpace(raw) Then Return ""
 

@@ -1261,7 +1261,10 @@ Partial Public Class ThisAddIn
         html.AppendLine("#agentModelBtn.active{background:#1a5276;border-color:#2980b9;color:#fff;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine(":root.light #agentModelBtn.active{background:#d4e6f1;border-color:#2980b9;color:#1a5276;box-shadow:inset 0 0 0 1px #2980b9;} ")
         html.AppendLine("#agentFiles{font-size:.7rem;color:var(--muted);padding:0 1rem .5rem;display:none;} ")
-        html.AppendLine("#agentFiles .file-tag{display:inline-block;background:var(--elev);border:1px solid var(--border);border-radius:4px;padding:2px 6px;margin:2px;font-size:.65rem;} ")
+        html.AppendLine("#agentFiles .file-tag{display:inline-flex;align-items:center;gap:6px;background:var(--elev);border:1px solid var(--border);border-radius:999px;padding:2px 4px 2px 8px;margin:2px;font-size:.65rem;} ")
+        html.AppendLine("#agentFiles .file-tag-name{display:inline-block;} ")
+        html.AppendLine("#agentFiles .file-tag-remove{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:1px solid var(--border);border-radius:999px;background:transparent;color:var(--muted);font-size:.9rem;line-height:1;cursor:pointer;} ")
+        html.AppendLine("#agentFiles .file-tag-remove:hover{background:var(--card);color:var(--fg);} ")
         html.AppendLine("#agentWorkspace{font-size:.7rem;color:var(--muted);padding:0 1rem .35rem;display:none;border-top:1px solid var(--border);background:var(--bg);} ")
         html.AppendLine("#agentWorkspace .ws-title{font-weight:600;color:var(--fg);margin-right:6px;} ")
         html.AppendLine("#agentWorkspace .ws-path{opacity:.8;word-break:break-all;} ")
@@ -1529,7 +1532,8 @@ Partial Public Class ThisAddIn
         html.AppendLine("memoryEditLnk.addEventListener('click',async(e)=>{e.preventDefault();const r=await api('inky_editmemory');if(!r.ok)alert(r.error||'Could not open memory editor');});")
 
         ' Agent files display
-        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const kb=(f.size/1024).toFixed(1);h+=`<span class=""file-tag"">${f.name.replaceAll('&','&amp;')} (${kb} KB)</span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("function updateAgentFilesDisplay(files){if(!agentFilesEl)return;if(!files||files.length===0||!__advancedToolsEnabled){agentFilesEl.style.display='none';agentFilesEl.innerHTML='';return;}agentFilesEl.style.display='block';let h='📎 Agent files: ';for(const f of files){const size=Number(f&&f.size||0);const kb=(size/1024).toFixed(1);const name=String(f&&f.name||'');h+=`<span class=""file-tag""><span class=""file-tag-name"">${esc(name)} (${kb} KB)</span><button type=""button"" class=""file-tag-remove"" data-remove-file=""${esc(name)}"" title=""Remove this file"">×</button></span> `;}agentFilesEl.innerHTML=h;}")
+        html.AppendLine("agentFilesEl.addEventListener('click',async e=>{const btn=e.target&&e.target.closest&&e.target.closest('[data-remove-file]');if(!btn)return;e.preventDefault();if(__currentJobId)return;const fileName=btn.getAttribute('data-remove-file')||'';if(!fileName)return;btn.disabled=true;const r=await api('inky_agentremovefile',{Name:fileName});if(!r||!r.ok){btn.disabled=false;alert(r&&r.error||'Failed to remove file');return;}updateAgentFilesDisplay(r.files||[]);});")
         html.AppendLine("function updateAgentModelBtn(){if(!agentModelBtn)return;agentModelBtn.style.display=__agentModelAvailable?'flex':'none';agentModelBtn.classList.toggle('active',__agentModelActive);}")
         html.AppendLine("agentModelBtn.addEventListener('click',async()=>{if(__currentJobId)return;agentModelBtn.disabled=true;try{const r=await api('inky_toggleagentmodel');if(!r.ok){alert(r.error||'Failed to toggle agent model');return;}if(r.models&&r.models.length){modelSel.innerHTML='';for(const m of r.models){const o=document.createElement('option');o.value=m.key||'';o.textContent=m.label||'';o.disabled=!!m.disabled;o.title=o.textContent;if(m.selected&&!o.disabled)o.selected=true;modelSel.appendChild(o);}if(!modelSel.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}}updateModelTooltip();if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}syncAdvancedToolsUi({advancedToolsEnabled:r.advancedToolsEnabled===true,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:r.agentFiles||[],agentModelAvailable:__agentModelAvailable,agentModelActive:r.active===true});adjustModelSel();}finally{agentModelBtn.disabled=false;}});")
         html.AppendLine("function esc(s){return String(s||'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('""','&quot;');}")
@@ -1837,6 +1841,29 @@ Partial Public Class ThisAddIn
                             })
                         Catch ex As Exception
                             Return JsonErr("Failed to add files: " & ex.Message)
+                        End Try
+
+                    Case "inky_agentremovefile"
+                        Try
+                            If _chatAgentActive Then
+                                Return JsonErr("Cannot remove files while agent processing is running.")
+                            End If
+
+                            Dim fileName As String = j("Name")?.ToString()
+                            If String.IsNullOrWhiteSpace(fileName) Then
+                                Return JsonErr("No file name provided.")
+                            End If
+
+                            If Not ChatAgentRemoveFile(fileName) Then
+                                Return JsonErr("The file could not be found in the current agent session.")
+                            End If
+
+                            Return JsonOk(New With {
+                                .ok = True,
+                                .files = GetAgentFileListForBrowser()
+                            })
+                        Catch ex As Exception
+                            Return JsonErr("Failed to remove file: " & ex.Message)
                         End Try
 
                     Case "inky_agentclearfiles"

@@ -704,7 +704,12 @@ Namespace SharedLibrary
                 Return "Error: File not found."
             End If
 
+            If Not EnsureClosedWorkbookForSandboxedRead(xlsxPath, silent) Then
+                Return "Error: The workbook is open in Excel."
+            End If
+
             Dim tempDir As String = Path.Combine(Path.GetTempPath(), "ri_xlsx_" & Guid.NewGuid().ToString("N"))
+
             Try
                 ZipFile.ExtractToDirectory(xlsxPath, tempDir)
 
@@ -872,10 +877,8 @@ Namespace SharedLibrary
                                 displayValue = If(vNode?.InnerText, "")
                             End If
 
-                            ' Skip entirely empty cells (no formula, no value)
                             If String.IsNullOrEmpty(formulaStr) AndAlso String.IsNullOrEmpty(displayValue) Then Continue For
 
-                            ' Match COM output format exactly: {addr}\tFORMULA:={formula}\tVALUE: {value}
                             sb.Append(cellRef)
                             sb.Append(vbTab)
                             sb.Append("FORMULA:")
@@ -895,13 +898,71 @@ Namespace SharedLibrary
                 Dim result = sb.ToString().Trim()
                 Return If(String.IsNullOrWhiteSpace(result), "Error: No data found in .xlsx.", result)
 
+            Catch ex As IOException
+                If Not silent AndAlso IsWorkbookOpenInExcel(xlsxPath) Then
+                    If EnsureClosedWorkbookForSandboxedRead(xlsxPath, silent) Then
+                        Return ReadXlsxSandboxed(xlsxPath, silent, askWorksheetSelection)
+                    End If
+
+                    Return "Error: The workbook is open in Excel."
+                End If
+
+                Return $"Error reading .xlsx: {ex.Message}"
+
             Catch ex As Exception
                 Return $"Error reading .xlsx: {ex.Message}"
+
             Finally
                 Try : If Directory.Exists(tempDir) Then Directory.Delete(tempDir, True)
                 Catch : End Try
             End Try
         End Function
+
+
+        ''' <summary>
+        ''' Returns <c>True</c> when the workbook cannot currently be opened with exclusive read access,
+        ''' which usually means that Excel still has the file open.
+        ''' </summary>
+        Private Shared Function IsWorkbookOpenInExcel(xlsxPath As String) As Boolean
+            Try
+                Using fs As New FileStream(xlsxPath, FileMode.Open, FileAccess.Read, FileShare.None)
+                End Using
+
+                Return False
+
+            Catch ex As IOException
+                Return True
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' In interactive mode, prompts the user to close an open workbook and retry.
+        ''' </summary>
+        Private Shared Function EnsureClosedWorkbookForSandboxedRead(xlsxPath As String,
+                                                                     silent As Boolean) As Boolean
+            If silent Then
+                Return True
+            End If
+
+            Do While IsWorkbookOpenInExcel(xlsxPath)
+                Dim answer As Integer = ShowCustomYesNoBox(
+                    "The Excel workbook '" & Path.GetFileName(xlsxPath) & "' appears to be open. " &
+                    "Please close it, then click Retry to try reading it again.",
+                    "Retry",
+                    "Cancel",
+                    AN & " - Workbook Open",
+                    nonModal:=True)
+
+                If answer <> 1 Then
+                    Return False
+                End If
+
+                System.Threading.Thread.Sleep(250)
+            Loop
+
+            Return True
+        End Function
+
 
         ''' <summary>
         ''' Resolves the full path to a sheet XML file from a relationship ID or positional fallback.

@@ -3872,10 +3872,18 @@ Partial Public Class ThisAddIn
                 .ToolName = toolCall.ToolName
             }
 
-            If Not IsChatAgentWorkspaceConnected() Then
+            Dim hasReadableWorkspace As Boolean = IsChatAgentWorkspaceConnected()
+            Dim hasTransientSessionWorkspace As Boolean =
+                _chatAgentActive AndAlso Not _apActive AndAlso HasChatAgentSessionWorkspace()
+
+            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace Then
                 wsResp.Success = False
                 wsResp.ErrorMessage = "No readable workspace is connected."
                 Return wsResp
+            End If
+
+            If hasTransientSessionWorkspace Then
+                SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
             End If
 
             wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)

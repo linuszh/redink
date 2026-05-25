@@ -1400,7 +1400,7 @@ Partial Public Class ThisAddIn
                 AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
                 ' TOOLS / SOURCES
-                AddItem("setsources", "Select sources/tools available For tooling-capable models (session scope).")
+                AddItem("setagents", "Select sources/tools available For agentic models (session scope).")
                 AddItem("loadurl", "Retrieve the text Of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
@@ -2454,6 +2454,28 @@ Partial Public Class ThisAddIn
             Dim toolTriggerDetected As Boolean = False
             Dim toolTriggerConfig As ModelConfig = Nothing
 
+            If UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Dim freestyleToolDefaultModel As ModelConfig = Nothing
+
+                If modelSupportsTool Then
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). The currently selected model already supports agentic processing. Please remove {ToolTrigger} and, if needed, use '{ToolSelectionTrigger}' to choose the available {ToolFriendlyName.ToLower}.")
+                ElseIf SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    freestyleToolDefaultModel) Then
+
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). Please either choose a model that directly supports agentic processing, or use Freestyle with {ToolTrigger} to invoke the predefined agentic model.")
+                Else
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd), and no predefined agentic model has been configured. Please choose a model that directly supports agentic processing.")
+                End If
+
+                Return
+            End If
+
             If Not UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 toolTriggerDetected = True
 
@@ -2606,6 +2628,11 @@ Partial Public Class ThisAddIn
 
             ' === Prefix-based mode selection ===
 
+            Dim ShowPrefixRequiresSelection As Action(Of String) =
+    Sub(prefix As String)
+        ShowCustomMessageBox($"The '{prefix}' prefix is not available when no text is selected.")
+    End Sub
+
             ' Process prompt prefix to determine output mode and remove prefix from prompt
             If OtherPrompt.StartsWith(ClipboardPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(ClipboardPrefix.Length).Trim()
@@ -2638,31 +2665,63 @@ Partial Public Class ThisAddIn
                 DoChart = 2
                 DoClipboard = True
                 DoChunks = False
-            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(InPlacePrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(InPlacePrefix.Length).Trim()
                 DoInplace = True
-            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix2.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefix.Length).Trim()
                 DoMarkup = True
             ElseIf OtherPrompt.StartsWith(MarkupPrefixRegex, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixRegex)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixRegex.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 4
             ElseIf OtherPrompt.StartsWith(MarkupPrefixWord, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixWord)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixWord.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 1
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiffW, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiffW)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiffW.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 3
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiff, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiff)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiff.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 2
@@ -2672,11 +2731,19 @@ Partial Public Class ThisAddIn
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix.Length).Trim()
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
             ElseIf OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix2.Length).Trim()
                 DoPushback = True
                 DoChunks = False
@@ -2957,7 +3024,7 @@ Partial Public Class ThisAddIn
             ' === User confirmation for processing without text selection ===
 
             ' Prompt user to process full document when bubbles or chunks mode is active but no text selected
-            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso DoFiles Then
+            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Ask the LLM to comment on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -2969,7 +3036,8 @@ Partial Public Class ThisAddIn
             End If
 
             ' Prompt user to process full document when markup mode is active but no text selected
-            If NoText AndAlso DoMarkup AndAlso Not Dofiles Then
+            ' Not used anymore under normal circumstances (gates introduced above), but kept as a fallback in case of misconfiguration or unexpected states
+            If NoText AndAlso DoMarkup AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Do the markup on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument

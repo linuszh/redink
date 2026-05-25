@@ -466,6 +466,7 @@ Partial Public Class ThisAddIn
         }
 
         _chatAgentActive = True
+        SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "AutoPilot (Local) invoked")
 
         Dim tools As New List(Of ModelConfig)()
@@ -491,6 +492,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Sub ChatAgentTeardownToolContext()
         _chatAgentActive = False
+        SyncWorkspaceToPathPolicy()
         ClearAttachmentCaches()
         _apCurrentTempDir = Nothing
         _apCurrentAttachments = Nothing
@@ -1805,6 +1807,9 @@ Partial Public Class ThisAddIn
         Dim sb As New StringBuilder()
         sb.AppendLine("[SESSION FILES]")
         sb.AppendLine("These files currently exist in the active agent session, persist across follow-up chat turns, and may be referenced by session tools or agent_workspace_save_session_file.")
+        If Not IsChatAgentWorkspaceConnected() Then
+            sb.AppendLine("No persistent agent workspace is connected for this run. If the user asks for a text, Markdown, JSON, or code deliverable, use workspace_write with a relative filename or relative path to create it inside the temporary session workspace. Files created there will be surfaced back to the user as output files after the run.")
+        End If
         For Each name In names
             sb.AppendLine("  - " & name)
         Next
@@ -3181,6 +3186,12 @@ Partial Public Class ThisAddIn
         })
     End Function
 
+    Private Function HasChatAgentSessionWorkspace() As Boolean
+        Return _chatAgentActive AndAlso
+               Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso
+               Directory.Exists(_chatAgentTempDir)
+    End Function
+
     ''' <summary>
     ''' Pushes the current chat-agent workspace root into the SharedLibrary PathPolicy.
     ''' Called whenever workspace state is mutated.
@@ -3189,29 +3200,56 @@ Partial Public Class ThisAddIn
     ''' Pushes the current chat-agent workspace root into the SharedLibrary path/workspace state.
     ''' Called whenever workspace state is mutated.
     ''' </summary>
-    Private Sub SyncWorkspaceToPathPolicy()
+    Private Sub SyncWorkspaceToPathPolicy(Optional includeSessionTempFallback As Boolean = False)
         Try
             Dim ws = _chatAgentWorkspace
+
+            Dim effectiveRoot As String = Nothing
+            Dim persistUntilRevoked As Boolean = False
+            Dim allowRead As Boolean = False
+            Dim allowWrite As Boolean = False
+            Dim allowMoveCopyRename As Boolean = False
+            Dim allowDelete As Boolean = False
+            Dim includeHiddenSystem As Boolean = False
 
             If ws IsNot Nothing AndAlso
                Not String.IsNullOrWhiteSpace(ws.RootPath) AndAlso
                Directory.Exists(ws.RootPath) Then
 
-                If ws.AllowRead Then
-                    SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(ws.RootPath)
+                effectiveRoot = Path.GetFullPath(ws.RootPath)
+                persistUntilRevoked = ws.PersistUntilRevoked
+                allowRead = ws.AllowRead
+                allowWrite = ws.AllowWrite
+                allowMoveCopyRename = ws.AllowMoveCopyRename
+                allowDelete = ws.AllowDelete
+                includeHiddenSystem = ws.IncludeHiddenSystem
+
+            ElseIf includeSessionTempFallback AndAlso HasChatAgentSessionWorkspace() Then
+                effectiveRoot = Path.GetFullPath(_chatAgentTempDir)
+                persistUntilRevoked = False
+                allowRead = True
+                allowWrite = True
+                allowMoveCopyRename = True
+                allowDelete = True
+                includeHiddenSystem = True
+            End If
+
+            If Not String.IsNullOrWhiteSpace(effectiveRoot) AndAlso Directory.Exists(effectiveRoot) Then
+                If allowRead Then
+                    SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(effectiveRoot)
                 Else
                     SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
                 End If
 
                 SharedLibrary.Agents.WorkspaceTools.SetActive(
                     New SharedLibrary.Agents.WorkspaceState() With {
-                        .RootPath = Path.GetFullPath(ws.RootPath),
-                        .PersistUntilRevoked = ws.PersistUntilRevoked,
-                        .AllowRead = ws.AllowRead,
-                        .AllowWrite = ws.AllowWrite,
-                        .AllowMoveCopyRename = ws.AllowMoveCopyRename,
-                        .AllowDelete = ws.AllowDelete,
-                        .IncludeHiddenSystem = ws.IncludeHiddenSystem
+                        .RootPath = effectiveRoot,
+                        .PersistUntilRevoked = persistUntilRevoked,
+                        .AllowRead = allowRead,
+                        .AllowWrite = allowWrite,
+                        .AllowMoveCopyRename = allowMoveCopyRename,
+                        .AllowDelete = allowDelete,
+                        .IncludeHiddenSystem = includeHiddenSystem
                     })
             Else
                 SharedLibrary.Agents.PathPolicy.SetWorkspaceRoot(Nothing)
@@ -3222,5 +3260,73 @@ Partial Public Class ThisAddIn
             SharedLibrary.Agents.WorkspaceTools.SetActive(New SharedLibrary.Agents.WorkspaceState())
         End Try
     End Sub
+
+    ''' <summary>
+    ''' Removes a single chat agent file from the current session without clearing
+    ''' the entire temporary workspace. Only the session copy is deleted.
+    ''' </summary>
+    Private Function ChatAgentRemoveFile(fileName As String) As Boolean
+        If String.IsNullOrWhiteSpace(fileName) Then Return False
+
+        Dim attToRemove = _chatAgentFiles.FirstOrDefault(
+            Function(att)
+                If att Is Nothing Then Return False
+
+                If Not String.IsNullOrWhiteSpace(att.OriginalFileName) AndAlso
+                   att.OriginalFileName.Equals(fileName, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                If Not String.IsNullOrWhiteSpace(att.TempFilePath) AndAlso
+                   Path.GetFileName(att.TempFilePath).Equals(fileName, StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+
+                Return False
+            End Function)
+
+        If attToRemove Is Nothing Then Return False
+
+        Dim tempPath As String = attToRemove.TempFilePath
+
+        Try
+            _chatAgentFiles.Remove(attToRemove)
+        Catch
+        End Try
+
+        If _apCurrentAttachments IsNot Nothing Then
+            Try
+                _apCurrentAttachments.Remove(attToRemove)
+            Catch
+            End Try
+        End If
+
+        Try
+            If Not String.IsNullOrWhiteSpace(tempPath) Then
+                Dim fullTempPath = Path.GetFullPath(tempPath)
+
+                If _chatAgentSurfacedFiles IsNot Nothing Then
+                    _chatAgentSurfacedFiles.Remove(fullTempPath)
+                End If
+
+                If File.Exists(fullTempPath) Then
+                    File.Delete(fullTempPath)
+                End If
+            End If
+        Catch
+        End Try
+
+        Try
+            If Not String.IsNullOrWhiteSpace(_chatAgentTempDir) AndAlso
+               Directory.Exists(_chatAgentTempDir) AndAlso
+               Directory.GetFileSystemEntries(_chatAgentTempDir).Length = 0 Then
+                Directory.Delete(_chatAgentTempDir, recursive:=False)
+                _chatAgentTempDir = Nothing
+            End If
+        Catch
+        End Try
+
+        Return True
+    End Function
 
 End Class
