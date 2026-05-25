@@ -985,26 +985,14 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
-                    Dim sequencingPlan = SharedLibrary.Agents.ToolCallSequencing.BuildExecutionPlan(
-                            toolCalls.Select(Function(c) If(c Is Nothing, "", If(c.ToolName, ""))))
-
-                    LogToolBatchPlan(context, sequencingPlan)
-
-                    If sequencingPlan.DeferredCount > 0 Then
-                        ToolingFileLogger.LogWarn("Sequencing barrier detected in tool-call batch.",
-                              details:=$"host={context.HostKind}; executed={sequencingPlan.ExecutedCount}; deferred={sequencingPlan.DeferredCount}")
-                    Else
-                        ToolingFileLogger.LogStep($"Tool-call batch is fully safe. host={context.HostKind}; count={sequencingPlan.TotalCallCount}")
-                    End If
+                    context.Log($"Tool-call batch execution mode: sequential_ordered_no_deferral; total={toolCalls.Count}", "diag")
+                    ToolingFileLogger.LogStep($"Executing tool-call batch sequentially in listed order. host={context.HostKind}; count={toolCalls.Count}")
 
                     Dim stopCurrentBatchAfterTool As Boolean = False
                     Dim restartForRequiredMemoryGrounding As Boolean = False
 
-                    For Each plannedCall In sequencingPlan.Calls
+                    For Each tc In toolCalls
                         If context.IsCancelled Then Exit For
-                        If Not plannedCall.WillExecute Then Continue For
-
-                        Dim tc = toolCalls(plannedCall.Index)
 
                         If Not subAgentMode AndAlso
                                context.SequencingState IsNot Nothing AndAlso
@@ -1282,16 +1270,6 @@ Partial Public Class ThisAddIn
                                         ToolingFileLogger.LogWarn(
                                             "Agent failure returned to parent as structured error and skipped by policy.",
                                             details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}; returnedToParent=true; skipped=true")
-
-                                        If sequencingPlan IsNot Nothing AndAlso sequencingPlan.DeferredCount > 0 Then
-                                            context.LogWarn(
-                                                "Discarding deferred tool calls after skipped tool failure.",
-                                                details:=$"host={context.HostKind}; failedTool={tc.ToolName}; deferred={sequencingPlan.DeferredCount}")
-
-                                            ToolingFileLogger.LogWarn(
-                                                "Deferred tool calls discarded after skipped tool failure.",
-                                                details:=$"host={context.HostKind}; failedTool={tc.ToolName}; deferred={sequencingPlan.DeferredCount}")
-                                        End If
                                     End If
                             End Select
 
@@ -1310,22 +1288,6 @@ Partial Public Class ThisAddIn
                         If stopCurrentBatchAfterTool Then
                             context.LogWarn("Stopping current tool-call batch after failure.",
                     details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}")
-                            Exit For
-                        End If
-
-                        If plannedCall.IsBarrier Then
-                            If sequencingPlan IsNot Nothing AndAlso sequencingPlan.DeferredCount > 0 Then
-                                context.Log("Sequencing barrier reached; later tool calls from the same model response were deferred.", "diag")
-                                ToolingFileLogger.LogStep(
-                                    SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
-                                        "Later tool calls were deferred after the sequencing barrier.",
-                                        context.WorkflowId,
-                                        If(context.RuntimeState?.CurrentPhase, ""),
-                                        hostName:=context.HostKind) &
-                                    " [deferred: " & sequencingPlan.DeferredCount & "]")
-                            Else
-                                context.Log("Sequencing barrier reached; the current batch ended at the barrier.", "diag")
-                            End If
                             Exit For
                         End If
                     Next

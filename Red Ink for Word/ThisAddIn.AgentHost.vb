@@ -246,7 +246,8 @@ Partial Public Class ThisAddIn
                     subAgentInvocationIndex:=invocationIndex,
                     subAgentAgentInvocationCount:=sameAgentInvocationCount,
                     subAgentName:=request.AgentName,
-                    workflowId:=request.WorkflowId).ConfigureAwait(False)
+                    workflowId:=request.WorkflowId,
+                    finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText).ConfigureAwait(False)
 
             Return If(result, "")
         Finally

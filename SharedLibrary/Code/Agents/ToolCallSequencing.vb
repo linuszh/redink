@@ -39,15 +39,10 @@ Namespace Agents
         End Sub
 
         Public Const DependentBatchingInstruction As String =
-            "When using tools, do not emit multiple tool calls in one response if any later call depends on the result of an earlier call." & vbCrLf &
-            "A tool call is dependent if it:" & vbCrLf &
-            "- reads data that may have been changed by an earlier call;" & vbCrLf &
-            "- uses the result of an earlier call;" & vbCrLf &
-            "- selects the next item after a state update;" & vbCrLf &
-            "- delegates work based on newly read or newly written state;" & vbCrLf &
-            "- depends on whether an earlier call succeeded or failed." & vbCrLf &
-            "In such cases, emit only the first required tool call. Wait for its result before deciding the next tool call." & vbCrLf &
-            "Only batch multiple tool calls when they are independent read-only operations."
+            "When using tools, the host executes multiple tool calls from one response strictly in the order emitted." & vbCrLf &
+            "Only emit multiple tool calls in one response when every later call's arguments are already fully known at emission time." & vbCrLf &
+            "If a later step depends on inspecting the result of an earlier tool call, emit only the earlier call and wait for its result before deciding the next call." & vbCrLf &
+            "Do not rely on the host to rewrite, infer, defer, queue, or replay omitted tool calls."
 
         Public Const UnresolvedToolFailureCode As String = "unresolved_tool_failure"
         Public Const InvalidTextOnlyFinalizationCode As String = "invalid_text_only_finalization"
