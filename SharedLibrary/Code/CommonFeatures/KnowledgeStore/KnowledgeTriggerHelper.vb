@@ -34,12 +34,17 @@ Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
+
     ''' <summary>
     ''' Parses (kb:...) triggers from user prompts and resolves them to Knowledge Store content.
     ''' </summary>
     Public Class KnowledgeTriggerHelper
 
 #Region "Constants"
+
+        Public Const MaxRelevantExtractDocuments As Integer = 4
+        Private Const MaxCharsPerRelevantExtractDocument As Integer = 30000
+
 
         ''' <summary>Simple trigger for Knowledge Store invocation.</summary>
         Public Const KbTrigger As String = "(kb)"
@@ -62,9 +67,20 @@ Namespace SharedLibrary
         Private Const KnowledgeOpenTag As String = "<KNOWLEDGESTORE>"
         Private Const KnowledgeCloseTag As String = "</KNOWLEDGESTORE>"
 
+
 #End Region
 
 #Region "Data Model"
+
+
+        Public Class KnowledgeResolveOptions
+            Public Property TaskPrompt As String = ""
+            Public Property IncludeRelevantExtracts As Boolean = False
+            Public Property IncludeFullDocumentContent As Boolean = False
+            Public Property MaxResults As Integer = 0
+            Public Property ForceSemanticSearch As Boolean = False
+        End Class
+
 
         ''' <summary>
         ''' Describes a parsed Knowledge Store request extracted from a user prompt.
@@ -269,10 +285,11 @@ Namespace SharedLibrary
         ''' Synchronous compatibility wrapper over the async implementation.
         ''' </summary>
         Public Shared Function ResolveKnowledge(
-                request As KnowledgeRequest,
-                context As ISharedContext) As (Content As String, StatusMessage As String)
+        request As KnowledgeRequest,
+        context As ISharedContext,
+        Optional options As KnowledgeResolveOptions = Nothing) As (Content As String, StatusMessage As String)
 
-            Return ResolveKnowledgeAsync(request, context).GetAwaiter().GetResult()
+            Return ResolveKnowledgeAsync(request, context, options).GetAwaiter().GetResult()
         End Function
 
         Private Shared Function FindWikiPagePathForEntry(store As KnowledgeStoreCatalog.KnowledgeStoreDefinition,
@@ -409,8 +426,9 @@ Namespace SharedLibrary
         ''' it uses semantic vector search for ranking.
         ''' </summary>
         Public Shared Async Function ResolveKnowledgeAsync(
-                request As KnowledgeRequest,
-                context As ISharedContext) As Task(Of (Content As String, StatusMessage As String))
+        request As KnowledgeRequest,
+        context As ISharedContext,
+        Optional options As KnowledgeResolveOptions = Nothing) As Task(Of (Content As String, StatusMessage As String))
 
             If request Is Nothing Then Return ("", "")
 
@@ -423,12 +441,26 @@ Namespace SharedLibrary
                 Return ("", "No active Knowledge Stores found.")
             End If
 
-            ' Resolve store name from request (explicit or by matching CSV values against store names)
+            Dim effectiveMaxDocuments As Integer = MaxDocuments
+            If options IsNot Nothing AndAlso options.MaxResults > 0 Then
+                effectiveMaxDocuments = Math.Min(Math.Max(1, options.MaxResults), MaxDocuments)
+            End If
+
+            Dim useRelevantExtracts As Boolean =
+        options IsNot Nothing AndAlso
+        options.IncludeRelevantExtracts AndAlso
+        Not String.IsNullOrWhiteSpace(options.TaskPrompt)
+
             Dim targetStores As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition) = Nothing
             Dim resolvedStoreFromTag As Boolean = False
 
             If Not String.IsNullOrWhiteSpace(request.StoreName) Then
                 Dim matches = KnowledgeStoreCatalog.GetStoresByName(request.StoreName, context)
+
+                If matches.Count = 0 AndAlso request.HasExplicitStoreFilter Then
+                    matches = TryConsumeStoreNamePartsFromSearchQuery(request, context)
+                End If
+
                 If matches.Count > 0 Then
                     targetStores = matches
                 Else
@@ -442,10 +474,12 @@ Namespace SharedLibrary
                     targetStores = storeMatches
                     resolvedStoreFromTag = True
                     request = New KnowledgeRequest() With {
-            .LoadAll = True,
-            .StoreName = singleVal,
-            .RawTrigger = request.RawTrigger
-        }
+                .LoadAll = True,
+                .StoreName = singleVal,
+                .RawTrigger = request.RawTrigger,
+                .OriginalParameter = request.OriginalParameter,
+                .HasExplicitStoreFilter = True
+            }
                 End If
             End If
 
@@ -453,26 +487,41 @@ Namespace SharedLibrary
                 targetStores = stores
             End If
 
-            ' =================================================================
-            ' 1. NEW SEMANTIC VECTOR SEARCH BRANCH
-            ' If the user provided a search term (rather than just loading all docs or explicit tags),
-            ' bypass legacy metadata scanning and route directly to the Embedding engine!
-            ' =================================================================
-            If ShouldUseSemanticFirst(request) Then
-                Dim queryText = request.SearchQuery.Trim()
+            Dim forceSemanticSearch As Boolean =
+    options IsNot Nothing AndAlso
+    options.ForceSemanticSearch AndAlso
+    Not request.LoadAll AndAlso
+    Not String.IsNullOrWhiteSpace(request.SearchQuery)
 
-                If Not String.IsNullOrWhiteSpace(request.StoreName) Then
-                    queryText = $"store:{request.StoreName} {queryText}"
+            If forceSemanticSearch OrElse ShouldUseSemanticFirst(request) Then
+                Dim semanticMatches = Await ResolveSemanticMatchesAsync(
+            request:=request,
+            context:=context,
+            targetStores:=targetStores,
+            maxResults:=effectiveMaxDocuments).ConfigureAwait(False)
+
+                If semanticMatches.Count = 0 Then
+                    Return ("", $"No semantic knowledge found matching '{request.SearchQuery}'.")
                 End If
 
-                Dim semanticContext = Await KnowledgeQueryService.ResolveAndBuildAsync(
-                    query:=queryText,
-                    context:=context,
-                    maxResults:=MaxDocuments,
-                    maxTotalChars:=MaxTotalChars).ConfigureAwait(False)
+                Dim semanticContext As String
+                If useRelevantExtracts Then
+                    semanticContext = Await BuildKnowledgeContextWithRelevantSectionsAsync(
+                semanticMatches,
+                request,
+                context,
+                options,
+                MaxTotalChars).ConfigureAwait(False)
+
+                    If String.IsNullOrWhiteSpace(semanticContext) Then
+                        semanticContext = KnowledgeQueryService.BuildKnowledgeContext(semanticMatches, MaxTotalChars)
+                    End If
+                Else
+                    semanticContext = KnowledgeQueryService.BuildKnowledgeContext(semanticMatches, MaxTotalChars)
+                End If
 
                 If String.IsNullOrWhiteSpace(semanticContext) Then
-                    Return ("", $"No semantic knowledge found matching '{request.SearchQuery}'.")
+                    Return ("", $"No readable semantic knowledge found matching '{request.SearchQuery}'.")
                 End If
 
                 Dim semanticMsg = $"Loaded semantic knowledge for '{request.SearchQuery}'"
@@ -480,14 +529,14 @@ Namespace SharedLibrary
                     semanticMsg &= $" in store '{request.StoreName}'"
                 End If
 
+                If useRelevantExtracts Then
+                    semanticMsg &= " with verbatim task-relevant excerpts"
+                End If
+
                 Return (semanticContext, semanticMsg & ".")
             End If
 
-
-            ' =================================================================
-            ' 2. LEGACY LOGIC / METADATA SEARCH (Fallback or LoadAll logic)
-            ' =================================================================
-            Dim allMatches As New List(Of Tuple(Of KnowledgeStoreManager.KnowledgeEntry, String, String))() ' (entry, storeName, wikiPath)
+            Dim allMatches As New List(Of Tuple(Of KnowledgeStoreManager.KnowledgeEntry, String, String))()
 
             For Each store In targetStores
                 Dim manifest = KnowledgeStoreManifest.Load(store)
@@ -501,7 +550,6 @@ Namespace SharedLibrary
                     If request.LoadAll Then
                         include = True
                     ElseIf request.Tags IsNot Nothing AndAlso request.Tags.Length > 0 Then
-                        ' Try tag match
                         If entry.Tags IsNot Nothing Then
                             For Each reqTag In request.Tags
                                 If entry.Tags.Any(Function(t) t.Equals(reqTag, StringComparison.OrdinalIgnoreCase)) Then
@@ -511,7 +559,6 @@ Namespace SharedLibrary
                             Next
                         End If
 
-                        ' If no tag match, try keyword/title search
                         If Not include AndAlso Not String.IsNullOrWhiteSpace(request.SearchQuery) Then
                             Dim sq = request.SearchQuery.ToLowerInvariant()
                             If If(entry.Title, "").ToLowerInvariant().Contains(sq) Then include = True
@@ -537,25 +584,39 @@ Namespace SharedLibrary
 
             If allMatches.Count = 0 Then
                 If Not request.LoadAll AndAlso Not String.IsNullOrWhiteSpace(request.SearchQuery) Then
-                    Dim queryText = request.SearchQuery.Trim()
+                    Dim semanticMatches = Await ResolveSemanticMatchesAsync(
+                request:=request,
+                context:=context,
+                targetStores:=targetStores,
+                maxResults:=effectiveMaxDocuments).ConfigureAwait(False)
 
-                    If Not String.IsNullOrWhiteSpace(request.StoreName) Then
-                        queryText = $"store:{request.StoreName} {queryText}"
-                    End If
+                    If semanticMatches.Count > 0 Then
+                        Dim semanticContext As String
+                        If useRelevantExtracts Then
+                            semanticContext = Await BuildKnowledgeContextWithRelevantSectionsAsync(
+                        semanticMatches,
+                        request,
+                        context,
+                        options,
+                        MaxTotalChars).ConfigureAwait(False)
 
-                    Dim semanticContext = Await KnowledgeQueryService.ResolveAndBuildAsync(
-                        query:=queryText,
-                        context:=context,
-                        maxResults:=MaxDocuments,
-                        maxTotalChars:=MaxTotalChars).ConfigureAwait(False)
-
-                    If Not String.IsNullOrWhiteSpace(semanticContext) Then
-                        Dim semanticMsg = $"Loaded semantic knowledge for '{request.SearchQuery}'"
-                        If Not String.IsNullOrWhiteSpace(request.StoreName) Then
-                            semanticMsg &= $" in store '{request.StoreName}'"
+                            If String.IsNullOrWhiteSpace(semanticContext) Then
+                                semanticContext = KnowledgeQueryService.BuildKnowledgeContext(semanticMatches, MaxTotalChars)
+                            End If
+                        Else
+                            semanticContext = KnowledgeQueryService.BuildKnowledgeContext(semanticMatches, MaxTotalChars)
                         End If
 
-                        Return (semanticContext, semanticMsg & ".")
+                        If Not String.IsNullOrWhiteSpace(semanticContext) Then
+                            Dim semanticMsg = $"Loaded semantic knowledge for '{request.SearchQuery}'"
+                            If Not String.IsNullOrWhiteSpace(request.StoreName) Then
+                                semanticMsg &= $" in store '{request.StoreName}'"
+                            End If
+                            If useRelevantExtracts Then
+                                semanticMsg &= " with verbatim task-relevant excerpts"
+                            End If
+                            Return (semanticContext, semanticMsg & ".")
+                        End If
                     End If
                 End If
 
@@ -569,8 +630,7 @@ Namespace SharedLibrary
                 Return ("", $"No Knowledge Store documents found matching '{filterDesc}'.")
             End If
 
-            ' Limit and assemble
-            Dim entriesToLoad = allMatches.Take(MaxDocuments).ToList()
+            Dim entriesToLoad = allMatches.Take(effectiveMaxDocuments).ToList()
             Dim richMatches As New List(Of KnowledgeQueryService.KnowledgeMatch)()
 
             For Each item In entriesToLoad
@@ -579,17 +639,35 @@ Namespace SharedLibrary
                 Dim wikiPath = item.Item3
 
                 richMatches.Add(New KnowledgeQueryService.KnowledgeMatch With {
-                    .Entry = entry,
-                    .StoreName = sName,
-                    .WikiPagePath = wikiPath,
-                    .Title = If(entry.Title, Path.GetFileNameWithoutExtension(If(entry.FilePath, "Unknown"))),
-                    .Summary = If(entry.Summary, ""),
-                    .SourcePath = ResolveSourcePath(entry.FilePath, stores.FirstOrDefault(Function(s) s.Name.Equals(sName, StringComparison.OrdinalIgnoreCase))),
-                    .MatchReason = "kb-trigger"
-                })
+            .Entry = entry,
+            .StoreName = sName,
+            .WikiPagePath = wikiPath,
+            .Title = If(entry.Title, Path.GetFileNameWithoutExtension(If(entry.FilePath, "Unknown"))),
+            .Summary = If(entry.Summary, ""),
+            .SourcePath = ResolveSourcePath(entry.FilePath, stores.FirstOrDefault(Function(s) s.Name.Equals(sName, StringComparison.OrdinalIgnoreCase))),
+            .MatchReason = "kb-trigger"
+        })
             Next
 
-            Dim richContext = KnowledgeQueryService.BuildKnowledgeContext(richMatches, MaxTotalChars)
+            Dim richContext As String
+            If useRelevantExtracts Then
+                richContext = Await BuildKnowledgeContextWithRelevantSectionsAsync(
+            richMatches,
+            request,
+            context,
+            options,
+            MaxTotalChars).ConfigureAwait(False)
+
+                If String.IsNullOrWhiteSpace(richContext) Then
+                    richContext = KnowledgeQueryService.BuildKnowledgeContext(richMatches, MaxTotalChars)
+                End If
+            Else
+                richContext = KnowledgeQueryService.BuildKnowledgeContext(richMatches, MaxTotalChars)
+            End If
+
+            If String.IsNullOrWhiteSpace(richContext) Then
+                Return ("", "Knowledge Store matches were found, but no readable content could be assembled.")
+            End If
 
             Dim statusMsg = $"Loaded {entriesToLoad.Count} document(s)"
             If Not String.IsNullOrWhiteSpace(request.StoreName) Then
@@ -598,9 +676,428 @@ Namespace SharedLibrary
             If request.Tags IsNot Nothing AndAlso request.Tags.Length > 0 AndAlso Not resolvedStoreFromTag Then
                 statusMsg &= $" for '{String.Join(", ", request.Tags)}'"
             End If
+            If useRelevantExtracts Then
+                statusMsg &= " with verbatim task-relevant excerpts"
+            End If
             statusMsg &= "."
 
             Return (richContext, statusMsg)
+        End Function
+
+        Private Shared Function TryConsumeStoreNamePartsFromSearchQuery(
+        request As KnowledgeRequest,
+        context As ISharedContext) As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)
+
+            Dim result As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
+
+            If request Is Nothing OrElse
+       String.IsNullOrWhiteSpace(request.StoreName) OrElse
+       String.IsNullOrWhiteSpace(request.SearchQuery) Then
+                Return result
+            End If
+
+            Dim tokens = TokenizeWithQuotes(request.SearchQuery)
+            If tokens.Count = 0 Then
+                Return result
+            End If
+
+            Dim maxParts As Integer = Math.Min(tokens.Count, 6)
+
+            For i As Integer = maxParts To 1 Step -1
+                Dim candidateStoreName = (request.StoreName.Trim() & " " & String.Join(" ", tokens.Take(i))).Trim()
+                Dim storeMatches = KnowledgeStoreCatalog.GetStoresByName(candidateStoreName, context)
+
+                If storeMatches.Count > 0 Then
+                    request.StoreName = candidateStoreName
+                    request.SearchQuery = String.Join(" ", tokens.Skip(i)).Trim()
+                    Return storeMatches
+                End If
+            Next
+
+            Return result
+        End Function
+
+        Private Shared Async Function ResolveSemanticMatchesAsync(
+        request As KnowledgeRequest,
+        context As ISharedContext,
+        targetStores As List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition),
+        maxResults As Integer) As Task(Of List(Of KnowledgeQueryService.KnowledgeMatch))
+
+            Dim quoteIfNeeded As Func(Of String, String) =
+        Function(value As String) As String
+            Dim trimmed As String = If(value, "").Trim()
+            If trimmed = "" Then Return ""
+
+            If trimmed.IndexOf(" "c) >= 0 OrElse trimmed.IndexOf(ControlChars.Tab) >= 0 Then
+                Return """" & trimmed.Replace("""", """""") & """"
+            End If
+
+            Return trimmed
+        End Function
+
+            Dim queryParts As New List(Of String)()
+
+            If request.Tags IsNot Nothing AndAlso request.Tags.Length > 0 Then
+                For Each tag In request.Tags
+                    Dim cleanedTag As String = If(tag, "").Trim()
+                    If cleanedTag <> "" Then
+                        queryParts.Add("tag:" & quoteIfNeeded(cleanedTag))
+                    End If
+                Next
+            End If
+
+            If Not String.IsNullOrWhiteSpace(request.SearchQuery) Then
+                queryParts.Add(request.SearchQuery.Trim())
+            End If
+
+            Dim queryText As String = String.Join(" ", queryParts).Trim()
+
+            If String.IsNullOrWhiteSpace(queryText) Then
+                Return New List(Of KnowledgeQueryService.KnowledgeMatch)()
+            End If
+
+            Dim matches = Await KnowledgeQueryService.ResolveQueryAsync(
+        query:=queryText,
+        context:=context,
+        maxResults:=Math.Max(maxResults * 4, 12)).ConfigureAwait(False)
+
+            If targetStores IsNot Nothing AndAlso targetStores.Count > 0 Then
+                Dim allowedStoreNames = New HashSet(Of String)(
+            targetStores.
+                Select(Function(s) If(s.Name, "").Trim()).
+                Where(Function(n) Not String.IsNullOrWhiteSpace(n)),
+            StringComparer.OrdinalIgnoreCase)
+
+                matches = matches.
+            Where(Function(m) allowedStoreNames.Contains(If(m.StoreName, "").Trim())).
+            ToList()
+            End If
+
+            Return matches.
+        OrderByDescending(Function(m) m.Score).
+        ThenBy(Function(m) m.Title, StringComparer.OrdinalIgnoreCase).
+        Take(maxResults).
+        ToList()
+        End Function
+
+
+        Private Shared Async Function BuildKnowledgeContextWithRelevantSectionsAsync(
+        matches As List(Of KnowledgeQueryService.KnowledgeMatch),
+        request As KnowledgeRequest,
+        context As ISharedContext,
+        options As KnowledgeResolveOptions,
+        maxTotalChars As Integer) As Task(Of String)
+
+            If matches Is Nothing OrElse matches.Count = 0 Then Return ""
+
+            Dim sb As New StringBuilder()
+            sb.AppendLine("<KNOWLEDGESTORE>")
+            sb.AppendLine("The following source-backed Knowledge Store documents have been provided for context.")
+            sb.AppendLine("IMPORTANT: When citing information, ALWAYS prefer the original source file link over the wiki page link.")
+            sb.AppendLine("If a sourcePath is provided and non-empty, ALWAYS cite it as: [Source Title](sourcePath)")
+            sb.AppendLine("Only fall back to wikiPath if no sourcePath is available for that document.")
+            sb.AppendLine("Do NOT invent links. Use only the explicit sourcePath or wikiPath values provided in the KSDOCUMENT attributes.")
+            sb.AppendLine($"When available, the resolver has read up to {MaxRelevantExtractDocuments} top-matching documents and extracted only verbatim passages relevant to the user's task prompt.")
+            sb.AppendLine()
+
+            Dim totalChars As Integer = 0
+            Dim docsReadForExtracts As Integer = 0
+
+            For Each m In matches
+                Dim remaining = maxTotalChars - totalChars
+                If remaining <= 0 Then Exit For
+
+                Dim documentContent As String = ReadKnowledgeMatchContent(m)
+                Dim readable As Boolean = Not String.IsNullOrWhiteSpace(documentContent)
+                Dim extracted As String = ""
+                Dim note As String = ""
+                Dim bodyContent As String = ""
+
+                If readable AndAlso
+           docsReadForExtracts < MaxRelevantExtractDocuments AndAlso
+           options IsNot Nothing AndAlso
+           options.IncludeRelevantExtracts AndAlso
+           Not String.IsNullOrWhiteSpace(options.TaskPrompt) Then
+
+                    docsReadForExtracts += 1
+
+                    extracted = Await ExtractRelevantSectionsAsync(
+                match:=m,
+                documentContent:=documentContent,
+                taskPrompt:=options.TaskPrompt,
+                retrievalPrompt:=If(request?.SearchQuery, ""),
+                context:=context).ConfigureAwait(False)
+                End If
+
+                If Not String.IsNullOrWhiteSpace(extracted) Then
+                    bodyContent =
+                "<KSRELEVANTSECTIONS basis=""task_prompt"">" & vbCrLf &
+                extracted.Trim() & vbCrLf &
+                "</KSRELEVANTSECTIONS>"
+
+                    If options IsNot Nothing AndAlso options.IncludeFullDocumentContent Then
+                        bodyContent &= vbCrLf &
+                               "<KSFULLDOCUMENT>" & vbCrLf &
+                               documentContent.Trim() & vbCrLf &
+                               "</KSFULLDOCUMENT>"
+                    End If
+                ElseIf readable Then
+                    bodyContent = documentContent
+                ElseIf Not String.IsNullOrWhiteSpace(m.Summary) Then
+                    note = "The source file could not be read. Only stored summary metadata is available for this match."
+                    bodyContent =
+                "<KSMETADATAONLY>" & vbCrLf &
+                m.Summary.Trim() & vbCrLf &
+                "</KSMETADATAONLY>"
+                Else
+                    note = "The source file and wiki page could not be read for this match."
+                    bodyContent =
+                "<KSMETADATAONLY>" & vbCrLf &
+                "No readable document content was available for this match." & vbCrLf &
+                "</KSMETADATAONLY>"
+                End If
+
+                If String.IsNullOrWhiteSpace(bodyContent) Then Continue For
+
+                If bodyContent.Length > remaining Then
+                    bodyContent = bodyContent.Substring(0, remaining) & vbCrLf & "[... truncated ...]"
+                End If
+
+                sb.AppendLine(BuildKnowledgeDocumentBlock(
+            match:=m,
+            bodyContent:=bodyContent,
+            readable:=readable,
+            excerpted:=Not String.IsNullOrWhiteSpace(extracted),
+            note:=note))
+                sb.AppendLine()
+
+                totalChars += bodyContent.Length
+            Next
+
+            sb.AppendLine("</KNOWLEDGESTORE>")
+            Return sb.ToString()
+        End Function
+
+        Private Shared Function ReadKnowledgeMatchContent(match As KnowledgeQueryService.KnowledgeMatch) As String
+            If match Is Nothing Then Return ""
+
+            Dim content As String = ""
+
+            If Not String.IsNullOrWhiteSpace(match.SourcePath) Then
+                content = TryReadKnowledgeFileContent(match.SourcePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(content) AndAlso match.Entry IsNot Nothing Then
+                content = KnowledgeStoreManager.GetContent(match.Entry)
+            End If
+
+            If String.IsNullOrWhiteSpace(content) AndAlso
+       Not String.IsNullOrWhiteSpace(match.WikiPagePath) AndAlso
+       File.Exists(match.WikiPagePath) Then
+                Try
+                    content = File.ReadAllText(match.WikiPagePath, Encoding.UTF8)
+                Catch
+                End Try
+            End If
+
+            Return If(content, "")
+        End Function
+
+        Private Shared Function TryReadKnowledgeFileContent(filePath As String) As String
+            If String.IsNullOrWhiteSpace(filePath) Then Return ""
+
+            Try
+                Dim expandedPath = SharedMethods.ExpandEnvironmentVariables(filePath)
+                If String.IsNullOrWhiteSpace(expandedPath) OrElse Not File.Exists(expandedPath) Then
+                    Return ""
+                End If
+
+                Dim ext = Path.GetExtension(expandedPath).ToLowerInvariant()
+
+                Select Case ext
+                    Case ".txt", ".ini", ".csv", ".log", ".json", ".xml", ".html", ".htm",
+                 ".md", ".yaml", ".yml", ".vb", ".cs", ".js", ".ts", ".py",
+                 ".java", ".cpp", ".c", ".h", ".sql"
+                        Return File.ReadAllText(expandedPath, Encoding.UTF8)
+
+                    Case ".docx"
+                        Return SharedMethods.ReadDocxSandboxed(expandedPath)
+
+                    Case ".pdf"
+                        Dim t = SharedMethods.ReadPdfAsText(expandedPath, ReturnErrorInsteadOfEmpty:=False, DoOCR:=False, AskUser:=False)
+                        t.Wait()
+                        Return If(t.Result, "")
+
+                    Case ".rtf"
+                        Try
+                            Using rtb As New System.Windows.Forms.RichTextBox()
+                                rtb.LoadFile(expandedPath, System.Windows.Forms.RichTextBoxStreamType.RichText)
+                                Return rtb.Text
+                            End Using
+                        Catch
+                            Return File.ReadAllText(expandedPath, Encoding.UTF8)
+                        End Try
+
+                    Case ".xlsx"
+                        Return SharedMethods.ReadXlsxSandboxed(expandedPath)
+
+                    Case ".pptx"
+                        Return SharedMethods.ReadPptxSandboxed(expandedPath)
+
+                    Case Else
+                        Return File.ReadAllText(expandedPath, Encoding.UTF8)
+                End Select
+            Catch
+                Return ""
+            End Try
+        End Function
+
+        Private Shared Async Function ExtractRelevantSectionsAsync(
+        match As KnowledgeQueryService.KnowledgeMatch,
+        documentContent As String,
+        taskPrompt As String,
+        retrievalPrompt As String,
+        context As ISharedContext) As Task(Of String)
+
+            If String.IsNullOrWhiteSpace(taskPrompt) OrElse String.IsNullOrWhiteSpace(documentContent) Then
+                Return ""
+            End If
+
+            Dim workingContent As String = documentContent.Trim()
+            If workingContent.Length > MaxCharsPerRelevantExtractDocument Then
+                workingContent = workingContent.Substring(0, MaxCharsPerRelevantExtractDocument)
+            End If
+
+            Dim promptSystem As String =
+        "You extract only verbatim passages from a document. " &
+        "Return only passages that are directly useful for answering the USER TASK. " &
+        "The RETRIEVAL HINT is only supporting context and must not narrow or broaden the USER TASK incorrectly. " &
+        "Rules: " &
+        "1. Copy text verbatim from the DOCUMENT only. " &
+        "2. Do not paraphrase, summarize, normalize, or explain. " &
+        "3. Return the smallest useful set of excerpts. " &
+        "4. Return XML only in this exact shape: <EXCERPTS><EXCERPT>...</EXCERPT></EXCERPTS>. " &
+        "5. If nothing is relevant, return <EXCERPTS />."
+
+            Dim promptUser As New StringBuilder()
+            promptUser.AppendLine("USER TASK:")
+            promptUser.AppendLine(taskPrompt.Trim())
+            promptUser.AppendLine()
+
+            If Not String.IsNullOrWhiteSpace(retrievalPrompt) Then
+                promptUser.AppendLine("RETRIEVAL HINT:")
+                promptUser.AppendLine(retrievalPrompt.Trim())
+                promptUser.AppendLine()
+            End If
+
+            promptUser.AppendLine("DOCUMENT TITLE:")
+            promptUser.AppendLine(If(match?.Title, ""))
+            promptUser.AppendLine()
+            promptUser.AppendLine("DOCUMENT TEXT START")
+            promptUser.AppendLine(workingContent)
+            promptUser.AppendLine("DOCUMENT TEXT END")
+
+            Dim llmResponse As String = ""
+
+            Try
+                llmResponse = Await SharedMethods.LLM(
+            context:=context,
+            promptSystem:=promptSystem,
+            promptUser:=promptUser.ToString(),
+            Hidesplash:=True).ConfigureAwait(False)
+            Catch
+                Return ""
+            End Try
+
+            If String.IsNullOrWhiteSpace(llmResponse) Then
+                Return ""
+            End If
+
+            Dim excerpts As New List(Of String)()
+
+            For Each excerptMatch As Match In Regex.Matches(
+        llmResponse,
+        "<EXCERPT>(.*?)</EXCERPT>",
+        RegexOptions.IgnoreCase Or RegexOptions.Singleline)
+
+                Dim excerpt As String = excerptMatch.Groups(1).Value.Trim()
+                If String.IsNullOrWhiteSpace(excerpt) Then Continue For
+                If Not IsVerbatimExcerpt(workingContent, excerpt) Then Continue For
+                If excerpts.Any(Function(x) String.Equals(x, excerpt, StringComparison.Ordinal)) Then Continue For
+
+                excerpts.Add(excerpt)
+            Next
+
+            If excerpts.Count = 0 Then
+                Return ""
+            End If
+
+            Return String.Join(vbCrLf & vbCrLf, excerpts)
+        End Function
+
+        Private Shared Function IsVerbatimExcerpt(documentContent As String, excerpt As String) As Boolean
+            If String.IsNullOrWhiteSpace(documentContent) OrElse String.IsNullOrWhiteSpace(excerpt) Then
+                Return False
+            End If
+
+            Dim normalizedDocument = documentContent.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+            Dim normalizedExcerpt = excerpt.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+
+            Return normalizedDocument.Contains(normalizedExcerpt)
+        End Function
+
+        Private Shared Function BuildKnowledgeDocumentBlock(
+        match As KnowledgeQueryService.KnowledgeMatch,
+        bodyContent As String,
+        readable As Boolean,
+        excerpted As Boolean,
+        note As String) As String
+
+            Dim sourceUri = BuildKnowledgeFileUri(match.SourcePath)
+            Dim wikiUri = BuildKnowledgeFileUri(match.WikiPagePath)
+            Dim sourceLabel = If(String.IsNullOrWhiteSpace(match.SourcePath), "", Path.GetFileName(match.SourcePath))
+            Dim wikiLabel = If(String.IsNullOrWhiteSpace(match.WikiPagePath), "", Path.GetFileName(match.WikiPagePath))
+            Dim title = If(match.Title, Path.GetFileNameWithoutExtension(If(match.SourcePath, "Unknown")))
+
+            Dim sb As New StringBuilder()
+            sb.AppendLine(
+        $"<KSDOCUMENT title=""{SecurityElement.Escape(If(title, ""))}"" " &
+        $"store=""{SecurityElement.Escape(If(match.StoreName, ""))}"" " &
+        $"sourcePath=""{SecurityElement.Escape(sourceUri)}"" " &
+        $"sourceLabel=""{SecurityElement.Escape(sourceLabel)}"" " &
+        $"wikiPath=""{SecurityElement.Escape(wikiUri)}"" " &
+        $"wikiLabel=""{SecurityElement.Escape(wikiLabel)}"" " &
+        $"matchReason=""{SecurityElement.Escape(If(match.MatchReason, ""))}"" " &
+        $"readable=""{If(readable, "true", "false")}"" " &
+        $"excerpted=""{If(excerpted, "true", "false")}"">")
+
+            If Not String.IsNullOrWhiteSpace(note) Then
+                sb.AppendLine("<KSNOTE>")
+                sb.AppendLine(note)
+                sb.AppendLine("</KSNOTE>")
+            End If
+
+            sb.AppendLine(bodyContent)
+            sb.AppendLine("</KSDOCUMENT>")
+
+            Return sb.ToString()
+        End Function
+
+        Private Shared Function BuildKnowledgeFileUri(filePath As String) As String
+            If String.IsNullOrWhiteSpace(filePath) Then Return ""
+
+            Try
+                Dim fullPath = Path.GetFullPath(filePath)
+                Dim uri As New Uri(fullPath)
+                Return uri.AbsoluteUri
+            Catch
+                Try
+                    Dim fullPath = Path.GetFullPath(filePath)
+                    Return "file:///" & fullPath.Replace("\"c, "/"c).Replace(" ", "%20")
+                Catch
+                    Return ""
+                End Try
+            End Try
         End Function
 
 #End Region

@@ -78,12 +78,17 @@ Partial Public Class ThisAddIn
         ' Build condensed parameter summary for log window
         Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
         Dim visibleToolLabel As String = Regex.Replace(If(toolCall.ToolName, ""), "_+", " ").Trim()
+        Dim suppressGenericProgressLog As Boolean =
+            SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolCall.ToolName)
 
         If visibleToolLabel = "" Then
             visibleToolLabel = "processing step"
         End If
 
-        context.Log("Running " & visibleToolLabel & "...")
+        If Not suppressGenericProgressLog Then
+            context.Log("Running " & visibleToolLabel & "...")
+        End If
+
         context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}", "diag")
 
 
@@ -365,6 +370,9 @@ Partial Public Class ThisAddIn
                 response = Await ExecuteInternalDownloadWebFilesTool(toolCall, context)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
+            ElseIf SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolCall.ToolName) Then
+                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
             ElseIf toolCall.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalSearchTool(toolCall, context)
@@ -387,7 +395,10 @@ __AfterDispatch:
 
             ' Log completion with excerpt
             If response.Success Then
-                context.Log("Finished " & visibleToolLabel & ".", "success")
+                If Not suppressGenericProgressLog Then
+                    context.Log("Finished " & visibleToolLabel & ".", "success")
+                End If
+
                 context.Log($"Tool {toolCall.ToolName} completed: {BuildResultExcerpt(response.Response, 160)}", "diag")
             Else
                 context.LogError(

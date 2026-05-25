@@ -1199,8 +1199,10 @@ Partial Public Class ThisAddIn
             Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models, and {ShowModel} to include the model name in the output"
             Dim ToolSelectionInstruct As String = $"; add '{ToolSelectionTrigger}' to permit {ToolFriendlyName.ToLower} selection"
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
+            Dim FormInstruct As String = $"; use '{FormPrefix}' for completing tables/form fields in a Word document"
             Dim FileObject As String = ""
             Dim SlideDeck As String = ""
+            Dim DoForm As Boolean = False
 
             Dim DefaultPrefix As String = INI_DefaultPrefix
             Dim DefaultPrefixText As String = ""
@@ -1211,7 +1213,7 @@ Partial Public Class ThisAddIn
             ' Check if no text is selected (insertion point only)
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
 
-            ' Check if the selected model supports tooling (can call tools)
+            ' Check if the selected model supports tooling (can call tools)f
             Dim modelSupportsTool As Boolean = False
             If UseSecondAPI Then
                 ' Check via SharedMethods - based on APICall_ToolInstructions
@@ -1310,7 +1312,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{FormInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -1398,7 +1400,7 @@ Partial Public Class ThisAddIn
                 AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
                 AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
                 ' TOOLS / SOURCES
-                AddItem("setsources", "Select sources/tools available For tooling-capable models (session scope).")
+                AddItem("setagents", "Select sources/tools available For agentic models (session scope).")
                 AddItem("loadurl", "Retrieve the text Of a particular URL given.")
                 AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
                 AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
@@ -2193,7 +2195,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
-                CompleteWordDocumentTables()
+                directCompleteWordDocumentTables()
                 Return
             End If
 
@@ -2452,6 +2454,28 @@ Partial Public Class ThisAddIn
             Dim toolTriggerDetected As Boolean = False
             Dim toolTriggerConfig As ModelConfig = Nothing
 
+            If UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Dim freestyleToolDefaultModel As ModelConfig = Nothing
+
+                If modelSupportsTool Then
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). The currently selected model already supports agentic processing. Please remove {ToolTrigger} and, if needed, use '{ToolSelectionTrigger}' to choose the available {ToolFriendlyName.ToLower}.")
+                ElseIf SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    freestyleToolDefaultModel) Then
+
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). Please either choose a model that directly supports agentic processing, or use Freestyle with {ToolTrigger} to invoke the predefined agentic model.")
+                Else
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd), and no predefined agentic model has been configured. Please choose a model that directly supports agentic processing.")
+                End If
+
+                Return
+            End If
+
             If Not UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 toolTriggerDetected = True
 
@@ -2604,6 +2628,11 @@ Partial Public Class ThisAddIn
 
             ' === Prefix-based mode selection ===
 
+            Dim ShowPrefixRequiresSelection As Action(Of String) =
+    Sub(prefix As String)
+        ShowCustomMessageBox($"The '{prefix}' prefix is not available when no text is selected.")
+    End Sub
+
             ' Process prompt prefix to determine output mode and remove prefix from prompt
             If OtherPrompt.StartsWith(ClipboardPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(ClipboardPrefix.Length).Trim()
@@ -2636,31 +2665,63 @@ Partial Public Class ThisAddIn
                 DoChart = 2
                 DoClipboard = True
                 DoChunks = False
-            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(InPlacePrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(InPlacePrefix.Length).Trim()
                 DoInplace = True
-            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix2.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefix.Length).Trim()
                 DoMarkup = True
             ElseIf OtherPrompt.StartsWith(MarkupPrefixRegex, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixRegex)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixRegex.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 4
             ElseIf OtherPrompt.StartsWith(MarkupPrefixWord, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixWord)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixWord.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 1
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiffW, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiffW)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiffW.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 3
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiff, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiff)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiff.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 2
@@ -2670,11 +2731,19 @@ Partial Public Class ThisAddIn
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix.Length).Trim()
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
             ElseIf OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix2.Length).Trim()
                 DoPushback = True
                 DoChunks = False
@@ -2688,6 +2757,13 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(AssemblePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(AssemblePrefix.Length).Trim()
                 DoAssemble = True
+            ElseIf OtherPrompt.StartsWith(FormPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If Not NoText Then
+                    ShowCustomMessageBox($"The '{FormPrefix}' prefix is available only when no text is selected.")
+                    Return
+                End If
+                OtherPrompt = OtherPrompt.Substring(FormPrefix.Length).Trim()
+                DoForm = True
             End If
 
             ' (net) trigger: Enable internet search
@@ -2811,6 +2887,23 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            ' ======== COMPLETEFORMS mode (after all other processing, including file embedding, is done) ========
+
+            If DoForm Then
+                Try
+                    Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI)
+                Catch ex As System.Exception
+                    ShowCustomMessageBox("Error in Freestyle ('Form:'): " & ex.Message, "Error")
+                End Try
+
+                If UseSecondAPI AndAlso originalConfigLoaded Then
+                    RestoreDefaults(_context, originalConfig)
+                    originalConfigLoaded = False
+                End If
+
+                Return
+            End If
+
 
             ' === File object selection (for LLM APIs that support file attachments) ===
 
@@ -2931,7 +3024,7 @@ Partial Public Class ThisAddIn
             ' === User confirmation for processing without text selection ===
 
             ' Prompt user to process full document when bubbles or chunks mode is active but no text selected
-            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso DoFiles Then
+            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Ask the LLM to comment on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -2943,7 +3036,8 @@ Partial Public Class ThisAddIn
             End If
 
             ' Prompt user to process full document when markup mode is active but no text selected
-            If NoText AndAlso DoMarkup AndAlso Not Dofiles Then
+            ' Not used anymore under normal circumstances (gates introduced above), but kept as a fallback in case of misconfiguration or unexpected states
+            If NoText AndAlso DoMarkup AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Do the markup on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -3008,9 +3102,8 @@ Partial Public Class ThisAddIn
                 If DoKB Then
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(OtherPrompt)
                     If kbRequest IsNot Nothing Then
-                        ' Strip the trigger from OtherPrompt so it doesn't reach the LLM.
-                        ' If the trigger itself carried the actual user query, preserve that intent.
                         Dim strippedPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+                        Dim knowledgeTaskPrompt As String = strippedPrompt.Trim()
 
                         If String.IsNullOrWhiteSpace(strippedPrompt) Then
                             If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
@@ -3028,14 +3121,22 @@ Partial Public Class ThisAddIn
                             OtherPrompt = strippedPrompt
                         End If
 
-                        ' Show splash while querying the Knowledge Store
+                        Dim kbResolveOptions As KnowledgeTriggerHelper.KnowledgeResolveOptions = Nothing
+                        If Not String.IsNullOrWhiteSpace(knowledgeTaskPrompt) Then
+                            kbResolveOptions = New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+                                .TaskPrompt = knowledgeTaskPrompt,
+                                .IncludeRelevantExtracts = True,
+                                .IncludeFullDocumentContent = False
+                            }
+                        End If
+
                         Dim kbSplash As New SLib.SplashScreen("Querying Knowledge Store...   ")
                         kbSplash.Show()
                         System.Windows.Forms.Application.DoEvents()
 
                         Dim kbResolved As (Content As String, StatusMessage As String)
                         Try
-                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
                         Finally
                             If kbSplash.InvokeRequired Then
                                 kbSplash.Invoke(Sub()
@@ -3049,7 +3150,6 @@ Partial Public Class ThisAddIn
                         End Try
 
                         If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
-                            ' Inject knowledge context into system prompt
                             SysPrompt = SysPrompt & vbCrLf & vbCrLf &
                                 "The following documents from the user's knowledge store are provided as reference material. " &
                                 "Use them to answer the user's question. " &

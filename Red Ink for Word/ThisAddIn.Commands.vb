@@ -87,7 +87,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             TranslateWordDocuments()
             Return
         End If
@@ -108,7 +108,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             CorrectWordDocuments()
             Return
         End If
@@ -361,7 +361,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             AnonymizeWordDocuments()
             Return
         End If
@@ -612,7 +612,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             SwitchPartiesDocuments()
             Return
         End If
@@ -1058,6 +1058,52 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
+    Private Shared Function ShouldRunWholeDocumentPipeline(ByVal Selection As Word.Selection) As Boolean
+        If Selection Is Nothing OrElse Selection.Range Is Nothing Then Return False
+        If Selection.Type <> Word.WdSelectionType.wdSelectionIP Then Return False
+
+        Try
+            Select Case Selection.StoryType
+                Case Word.WdStoryType.wdCommentsStory,
+                 Word.WdStoryType.wdFootnotesStory,
+                 Word.WdStoryType.wdEndnotesStory
+                    Return False
+            End Select
+        Catch
+        End Try
+
+        Try
+            Dim doc As Word.Document = Selection.Range.Document
+            If doc Is Nothing Then Return True
+
+            Dim cursorPos As Integer = Selection.Range.Start
+
+            For Each c As Word.Comment In doc.Comments
+                Dim anchor As Word.Range = Nothing
+
+                Try
+                    anchor = c.Scope
+                Catch
+                    Try
+                        anchor = c.Reference
+                    Catch
+                        anchor = Nothing
+                    End Try
+                End Try
+
+                If anchor IsNot Nothing AndAlso
+               cursorPos >= anchor.Start AndAlso
+               cursorPos <= anchor.End Then
+                    Return False
+                End If
+            Next
+        Catch
+        End Try
+
+        Return True
+    End Function
+
     ''' <summary>
     ''' Displays the settings editor window with configuration options and tooltips.
     ''' Updates context menu after settings are changed.
@@ -1103,9 +1149,9 @@ Partial Public Class ThisAddIn
                 {"MyStylePath", "Path to the MyStyle prompt file"},
                 {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
-                {"ToolingLogWindow", "Tooling: Show log window"},
-                {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
-                {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                {"ToolingLogWindow", "Agents: Show log window"},
+                {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
+                {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
                 {"KnowledgeStorePath", "Knowledge store file (central)"},
                 {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
                 {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},

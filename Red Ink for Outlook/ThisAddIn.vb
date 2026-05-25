@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 18.5.2026
+' 25.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,7 +27,7 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 '
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
 '
@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.180526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.250526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -70,7 +70,8 @@ Partial Public Class ThisAddIn
     Private Const MarkupPrefixDiff As String = "MarkupDiff:"
     Private Const MarkupPrefixDiffW As String = "MarkupDiffW:"
     Private Const MarkupPrefixWord As String = "MarkupWord:"
-    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word]:"
+    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word|Approve]:"
+    Private Const MarkupPrefixApprove As String = "MarkupApprove:"
     Private Const ClipboardPrefix As String = "Clipboard:"
     Private Const ClipboardPrefix2 As String = "Clip:"
     Private Const InsertPrefix As String = "Insert:"
@@ -97,7 +98,6 @@ Partial Public Class ThisAddIn
     Public SourceLanguage As String = ""
     Public OutputLanguage As String = ""
     Public OtherPrompt As String = ""
-    Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
     Public Username As String = ""
     Public MyStyleInsert As String = ""
     Public ShortenLength, SummaryLength As Long
@@ -114,6 +114,13 @@ Partial Public Class ThisAddIn
     Public ExtraInstructions As String = ""
 
     Public InspectorOpened As Boolean = False
+
+    Public ReadOnly Property CurrentDate As String
+        Get
+            Return "Current date (ISO 8601 yyyy-MM-dd): " &
+               DateTime.Now.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+        End Get
+    End Property
 
 
     <DllImport("user32.dll", SetLastError:=True)>

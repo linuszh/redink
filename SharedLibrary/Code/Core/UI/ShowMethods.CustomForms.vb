@@ -2281,16 +2281,38 @@ Namespace SharedLibrary
                     ctrl = cb
 
                 Else
+                    Dim stringValue As String = rawValue.ToString()
+                    Dim useMultiline As Boolean =
+                        TypeOf rawValue Is String AndAlso
+                        (param.Multiline OrElse
+                         stringValue.Contains(vbCr) OrElse
+                         stringValue.Contains(vbLf))
+
                     Dim txt As New TextBox() With {
-                        .Text = rawValue.ToString(),
-                        .Anchor = AnchorStyles.Left Or AnchorStyles.Right,
+                        .Text = stringValue,
+                        .Anchor = If(useMultiline,
+                                     AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right,
+                                     AnchorStyles.Left Or AnchorStyles.Right),
                         .Margin = New Padding(0, 0, 0, 8)
                     }
+
                     If TypeOf rawValue Is String Then
-                        txt.MinimumSize = New Size(400, 0)
+                        If useMultiline Then
+                            Dim multilineHeight As Integer = If(param.MultilineHeight > 0, param.MultilineHeight, 96)
+                            txt.Multiline = True
+                            txt.AcceptsReturn = True
+                            txt.ScrollBars = ScrollBars.Vertical
+                            txt.WordWrap = True
+                            txt.MinimumSize = New Size(400, multilineHeight)
+                            txt.Size = New Size(400, multilineHeight)
+                            lbl.Anchor = AnchorStyles.Left Or AnchorStyles.Top
+                        Else
+                            txt.MinimumSize = New Size(400, 0)
+                        End If
                     Else
                         txt.MinimumSize = New Size(50, 0)
                     End If
+
                     ctrl = txt
                 End If
 
@@ -2885,9 +2907,21 @@ Namespace SharedLibrary
             ''' </summary>
             Public Property InputControl As System.Windows.Forms.Control
 
+            ''' <summary>
+            ''' When True, string values are rendered in a multiline TextBox.
+            ''' </summary>
+            Public Property Multiline As System.Boolean
+
+            ''' <summary>
+            ''' Preferred height for multiline text boxes.
+            ''' </summary>
+            Public Property MultilineHeight As System.Int32
+
             ' Important: parameterless constructor (required for "New InputParameter() With {...}").
             Public Sub New()
                 Me.Options = New System.Collections.Generic.List(Of System.String)()
+                Me.Multiline = False
+                Me.MultilineHeight = 96
             End Sub
 
             ''' <summary>

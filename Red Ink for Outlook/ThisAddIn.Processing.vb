@@ -1,23 +1,38 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.vb
-' Purpose: Text processing helpers for the Outlook add-in: Word-based document comparison
-'          (tracked changes flattened), inline diff (DiffPlex) with custom markup tags,
-'          Markdown conversion from Word formatting, formatted insertion routines,
-'          RTF to plain text conversion, parsing of markup tag sequences, and word count.
+' Purpose:
+'   Provides the Outlook add-in text-processing pipeline for comparing, transforming,
+'   and inserting content in the active compose window. Supports Word-based document
+'   comparison, DiffPlex-based inline diffs, Markdown conversion from Word ranges,
+'   tagged markup parsing, formatted insertion, RTF/plain-text normalization, and
+'   selection word counting.
+'
+' Key Responsibilities:
+'   - Compare two texts via Word `CompareDocuments` and flatten revisions into static
+'     formatting for insertion into the current Outlook editor.
+'   - Build inline word-level diffs with DiffPlex and encode insertions/deletions
+'     using internal pseudo tags for later rendering.
+'   - Convert Word content ranges to Markdown, including headings, lists, bold,
+'     italic, underline, and strikethrough handling.
+'   - Insert formatted comparison output quickly into the compose window using HTML
+'     fragments or incremental span-based formatting.
+'   - Parse internal markup tag sequences into text/format segments for rendering.
+'   - Normalize RTF input to plain text and provide small text-processing utilities.
+'   - Measure the current Outlook editor selection for word-count related features.
 '
 ' Architecture:
-' - CompareAndInsertTextCompareDocs: uses Word CompareDocuments API to build formatting markup, applies static styling, pastes into current compose window.
-' - CompareAndInsertText: builds a word-level diff via DiffPlex, encodes insert/delete spans with pseudo tags for later HTML/format rendering.
-' - ConvertRangeToMarkdown: traverses a Word.Range; maps headings, lists, and basic character formatting (bold/italic/underline/strikethrough) into Markdown or inline HTML escapes.
-' - ReplaceWithinRange: controlled find/replace loop with boundary preservation; single replacement iterations and rollback if exceeding original range.
-' - InsertFormattedTextFast / InsertFormattedText: two insertion paths (HTML fragment vs incremental tagged spans) applying blue underline for insertions and red strikethrough for deletions.
-' - ParseText: linear tag parser producing parallel arrays of segments and formatting codes.
-' - ConvertRtfToPlainText: regex-based RTF control word stripping and hex escape decoding.
-' - RGB: utility composing a DWORD color.
-' - GetSelectedTextLength: acquires selection, filters for HTML/RTF mail, counts words via whitespace split.
+'   - Comparison Layer: `CompareAndInsertTextCompareDocs` uses Microsoft Word's
+'     compare engine; `CompareAndInsertText` uses DiffPlex for inline diffs.
+'   - Transformation Layer: `ConvertRangeToMarkdown`, `ReplaceWithinRange`, and
+'     related helpers rewrite formatted Word content into Markdown-compatible text.
+'   - Rendering Layer: `InsertFormattedTextFast`, `InsertFormattedText`, and
+'     `ParseText` convert tagged diff output into visible editor formatting.
+'   - Utility Layer: RTF/plain-text conversion, color helpers, and selection-length
+'     helpers support the higher-level processing flow.
 ' =============================================================================
 
 Option Explicit On

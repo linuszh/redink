@@ -224,24 +224,52 @@ Partial Public Class ThisAddIn
         End If
 
         ' Route comment-bubble selections to a comment pipeline
-        If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+
+        Dim activeComment As Word.Comment = Nothing
+        If TryResolveActiveComment(selection, activeComment) Then
             Dim bubbleSel As Word.Range = Nothing
+
             Try
-                bubbleSel = selection.Range.Duplicate
+                If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                    bubbleSel = selection.Range.Duplicate
+                ElseIf activeComment IsNot Nothing Then
+                    bubbleSel = activeComment.Range.Duplicate
+                End If
             Catch
                 bubbleSel = Nothing
             End Try
 
-
             Return Await ProcessSelectedTextInActiveCommentBubble(
-                                SysCommand,
-                                CheckMaxToken,
-                                bubbleSel,
-                                UseSecondAPI:=UseSecondAPI,
-                                SelectionMandatory:=SelectionMandatory,
-                                FileObject:=FileObject
-                            )
+                    SysCommand,
+                    CheckMaxToken,
+                    bubbleSel,
+                    UseSecondAPI:=UseSecondAPI,
+                    SelectionMandatory:=SelectionMandatory,
+                    FileObject:=FileObject,
+                    DoMarkup:=DoMarkup,
+                    MarkupMethod:=MarkupMethod
+                )
         End If
+
+
+        'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+        'Dim bubbleSel As Word.Range = Nothing
+        'Try
+        'bubbleSel = selection.Range.Duplicate
+        'Catch
+        'bubbleSel = Nothing
+        'End Try
+
+
+        'Return Await ProcessSelectedTextInActiveCommentBubble(
+        'SysCommand,
+        'CheckMaxToken,
+        'bubbleSel,
+        'UseSecondAPI:=UseSecondAPI,
+        'SelectionMandatory:=SelectionMandatory,
+        'FileObject:=FileObject
+        '                   )
+        'End If
 
         If selection IsNot Nothing AndAlso
    (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
@@ -3576,6 +3604,10 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+    Public Sub ApplySurgicalReplacement(originalText As String, newText As String, targetRange As Range, Optional trailingCR As Boolean = False)
+        CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
+    End Sub
+
     ''' <summary>
     ''' Represents one candidate surgical edit operation for a diff cluster.
     ''' Stores the text to delete, the text to insert, the search start position,
@@ -5016,5 +5048,63 @@ Partial Public Class ThisAddIn
             Debug.WriteLine($"ActivateProcessingContext failed: {ex.Message}")
         End Try
     End Sub
+
+    Private Shared Function TryResolveActiveComment(
+    ByVal Selection As Word.Selection,
+    ByRef activeComment As Word.Comment) As Boolean
+
+        activeComment = Nothing
+
+        If Selection Is Nothing OrElse Selection.Range Is Nothing Then Return False
+
+        Dim doc As Word.Document = Nothing
+        Try
+            doc = Selection.Range.Document
+        Catch
+            doc = Nothing
+        End Try
+        If doc Is Nothing Then Return False
+
+        Try
+            If Selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                For Each c As Word.Comment In doc.Comments
+                    If Selection.Range.Start >= c.Range.Start AndAlso
+                       Selection.Range.End <= c.Range.End Then
+                        activeComment = c
+                        Return True
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        Try
+            Dim cursorPos As Integer = Selection.Range.Start
+
+            For Each c As Word.Comment In doc.Comments
+                Dim anchor As Word.Range = Nothing
+
+                Try
+                    anchor = c.Scope
+                Catch
+                    Try
+                        anchor = c.Reference
+                    Catch
+                        anchor = Nothing
+                    End Try
+                End Try
+
+                If anchor IsNot Nothing AndAlso
+                   cursorPos >= anchor.Start AndAlso
+                   cursorPos <= anchor.End Then
+                    activeComment = c
+                    Return True
+                End If
+            Next
+        Catch
+        End Try
+
+        Return False
+    End Function
 
 End Class

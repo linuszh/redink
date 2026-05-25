@@ -2665,16 +2665,17 @@ Public Class DiscussInky
                     Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(cleanedUserText)
                     If kbRequest IsNot Nothing Then
                         Dim strippedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
+                        Dim knowledgeTaskPrompt As String = strippedUserText.Trim()
 
                         If String.IsNullOrWhiteSpace(strippedUserText) Then
                             If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
                                 cleanedUserText = kbRequest.SearchQuery.Trim()
                             ElseIf kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0 Then
                                 cleanedUserText = "Answer based on the provided Knowledge Store content, focusing on: " &
-                                                  String.Join(", ", kbRequest.Tags)
+                                      String.Join(", ", kbRequest.Tags)
                             ElseIf Not String.IsNullOrWhiteSpace(kbRequest.StoreName) Then
                                 cleanedUserText = "Answer based on the provided Knowledge Store content from store '" &
-                                                  kbRequest.StoreName & "'."
+                                      kbRequest.StoreName & "'."
                             Else
                                 cleanedUserText = "Answer based on the provided Knowledge Store content."
                             End If
@@ -2682,14 +2683,22 @@ Public Class DiscussInky
                             cleanedUserText = strippedUserText
                         End If
 
-                        ' Show splash while querying the Knowledge Store
+                        Dim kbResolveOptions As KnowledgeTriggerHelper.KnowledgeResolveOptions = Nothing
+                        If Not String.IsNullOrWhiteSpace(knowledgeTaskPrompt) Then
+                            kbResolveOptions = New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+                    .TaskPrompt = knowledgeTaskPrompt,
+                    .IncludeRelevantExtracts = True,
+                    .IncludeFullDocumentContent = False
+                }
+                        End If
+
                         Dim kbSplash As New SharedMethods.SplashScreen("Querying Knowledge Store...   ")
                         kbSplash.Show()
                         System.Windows.Forms.Application.DoEvents()
 
                         Dim kbResolved As (Content As String, StatusMessage As String)
                         Try
-                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context)
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
                         Finally
                             If kbSplash.InvokeRequired Then
                                 kbSplash.Invoke(Sub()
@@ -2706,17 +2715,17 @@ Public Class DiscussInky
                             kbContext = kbResolved.Content
 
                             systemPrompt &= " The following documents from the user's knowledge store are provided as reference material. " &
-                                            "Use them to answer the user's question. " &
-                                            "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
-                                            "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
-                                            "Only fall back to wikiPath if no sourcePath is available for that document. " &
-                                            "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata."
+                                "Use them to answer the user's question. " &
+                                "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
+                                "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
+                                "Only fall back to wikiPath if no sourcePath is available for that document. " &
+                                "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata."
 
                             AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")
                         Else
                             AppendSystemMessage(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
-                                                   "No documents found in the Knowledge Store.",
-                                                   $"Knowledge store: {kbResolved.StatusMessage}"))
+                                       "No documents found in the Knowledge Store.",
+                                       $"Knowledge store: {kbResolved.StatusMessage}"))
                         End If
                     End If
                 Catch ex As Exception

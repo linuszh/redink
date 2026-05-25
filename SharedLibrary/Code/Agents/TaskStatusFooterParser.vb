@@ -133,10 +133,35 @@ Namespace Agents
 
         ''' <summary>Builds a strict, valid TASK_STATUS footer line.</summary>
         Public Function Build(status As String, reason As String) As String
+            Dim normalizedStatus As String = If(status, "").Trim().ToLowerInvariant()
+            If normalizedStatus = "" Then
+                normalizedStatus = "blocked"
+            End If
+
+            Dim normalizedReason As String =
+        Regex.Replace(
+            If(reason, ""),
+            "\s+",
+            " ",
+            RegexOptions.CultureInvariant).Trim()
+
+            If normalizedReason = "" Then
+                If String.Equals(normalizedStatus, "complete", StringComparison.OrdinalIgnoreCase) Then
+                    normalizedReason = "answer ready"
+                Else
+                    normalizedReason = "no safe completion path"
+                End If
+            End If
+
+            If normalizedReason.Length > ToolCallSequencing.TaskStatusReasonMaxChars Then
+                normalizedReason = normalizedReason.Substring(0, ToolCallSequencing.TaskStatusReasonMaxChars).Trim()
+            End If
+
             Dim obj As New JObject(
-                New JProperty("status", If(status, "")),
-                New JProperty("reason", If(reason, ""))
-            )
+        New JProperty("status", normalizedStatus),
+        New JProperty("reason", normalizedReason)
+    )
+
             Return "<TASK_STATUS>" & obj.ToString(Formatting.None) & "</TASK_STATUS>"
         End Function
 

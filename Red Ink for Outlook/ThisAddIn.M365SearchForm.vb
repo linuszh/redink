@@ -1269,12 +1269,7 @@ Public Class M365SearchTestForm
 
             Dim knownCandidatesBlock As String = BuildKnownCandidatesBlock(_aiCandidateHits)
 
-            Dim resolvedSysPrompt As String = If(_context.SP_AIMailSearch1, "")
-            resolvedSysPrompt = System.Text.RegularExpressions.Regex.Replace(
-                resolvedSysPrompt,
-                "\{OtherPrompt\}",
-                userPrompt.Replace("\", "\\").Replace("$", "$$"),
-                System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+            Dim resolvedSysPrompt As String = addIn.InterpolateAtRuntime(If(_context.SP_AIMailSearch1, ""))
             resolvedSysPrompt &= retryPolicy
 
             If appendMore AndAlso Not String.IsNullOrWhiteSpace(knownCandidatesBlock) Then
@@ -1288,7 +1283,8 @@ Public Class M365SearchTestForm
                 useSecondAPI:=True,
                 otherPrompt:=userPrompt,
                 hideSplash:=True,
-                cancellationToken:=ct).ConfigureAwait(False)
+                cancellationToken:=ct,
+                finalResponseContract:=SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText).ConfigureAwait(False)
 
             Dim toolResponses As List(Of ThisAddIn.ToolResponse) = addIn.GetLastCompletedToolResponsesSnapshot()
             Return Tuple.Create(finalText, toolResponses)

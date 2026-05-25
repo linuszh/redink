@@ -1128,10 +1128,11 @@ Namespace SharedLibrary
             End If
             fullUrl = SanitizePotentialMarkdownUrl(fullUrl)
 
-            Dim uri As System.Uri = Nothing
-            If Not System.Uri.TryCreate(fullUrl, System.UriKind.Absolute, uri) Then
-                Throw New System.Exception("open_url: Not an absolute URL: " & fullUrl)
+            If Not IsAllowedNetworkUrl(fullUrl) Then
+                Throw New System.Exception("open_url: Only non-loopback absolute HTTP/HTTPS URLs are allowed: " & fullUrl)
             End If
+
+            Dim requestUri As New System.Uri(fullUrl)
 
             Dim returnBody = parms.Value(Of Boolean?)("return_body").GetValueOrDefault(False)
 
@@ -1162,7 +1163,7 @@ Namespace SharedLibrary
                 Using cts As New System.Threading.CancellationTokenSource(timeoutMs)
                     Using cancel.Register(Sub() cts.Cancel())
                         Try
-                            Dim req = New System.Net.Http.HttpRequestMessage(New System.Net.Http.HttpMethod(method), uri)
+                            Dim req = New System.Net.Http.HttpRequestMessage(New System.Net.Http.HttpMethod(method), requestUri)
 
                             For Each kv In _headersDefault
                                 If Not req.Headers.Contains(kv.Key) Then
@@ -1274,7 +1275,7 @@ Namespace SharedLibrary
                             Try
                                 Log("[open_url] Trying HEAD fallback to test reachability …")
                                 Using headCts As New System.Threading.CancellationTokenSource(Math.Min(5000, timeoutMs))
-                                    Dim headReq = New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Head, uri)
+                                    Dim headReq = New System.Net.Http.HttpRequestMessage(System.Net.Http.HttpMethod.Head, requestUri)
                                     Dim respHead = Await _http.SendAsync(headReq, headCts.Token)
                                     Log("[open_url] HEAD fallback status: " & CInt(respHead.StatusCode))
                                 End Using
@@ -1555,6 +1556,15 @@ Namespace SharedLibrary
         ''' </param>
         Private Async Function CmdDownloadUrlAsync(parms As Newtonsoft.Json.Linq.JObject, cancel As System.Threading.CancellationToken) As System.Threading.Tasks.Task(Of System.Object)
             Dim url = ResolveUrl(ExpandTemplates(parms.Value(Of System.String)("url")))
+
+            If System.String.IsNullOrWhiteSpace(url) Then
+                Throw New System.Exception("download_url: 'url' missing.")
+            End If
+
+            If Not IsAllowedNetworkUrl(url) Then
+                Throw New System.Exception("download_url: Only non-loopback absolute HTTP/HTTPS URLs are allowed: " & url)
+            End If
+
             Dim targetDir = ExpandTemplates(parms.Value(Of System.String)("target_dir"))
             Dim filename = ExpandTemplates(parms.Value(Of System.String)("filename"))
             If System.String.IsNullOrWhiteSpace(targetDir) Then Throw New System.Exception("target_dir missing.")
@@ -3638,6 +3648,36 @@ Namespace SharedLibrary
 
             Return url
         End Function
+
+        Private Function IsAllowedNetworkUrl(url As System.String) As System.Boolean
+            Try
+                If System.String.IsNullOrWhiteSpace(url) Then
+                    Return False
+                End If
+
+                Dim uri As System.Uri = Nothing
+                If Not System.Uri.TryCreate(url, System.UriKind.Absolute, uri) Then
+                    Return False
+                End If
+
+                If uri.Scheme <> System.Uri.UriSchemeHttp AndAlso uri.Scheme <> System.Uri.UriSchemeHttps Then
+                    Return False
+                End If
+
+                If uri.IsLoopback Then
+                    Return False
+                End If
+
+                If System.String.Equals(uri.Host, "localhost", System.StringComparison.OrdinalIgnoreCase) Then
+                    Return False
+                End If
+
+                Return True
+            Catch
+                Return False
+            End Try
+        End Function
+
 
         ''' <summary>
         ''' Attempts to normalize URLs that may have been provided in Markdown link form (`[text](url)`), angle-bracket form (`<url>`),

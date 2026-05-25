@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 18.5.2026
+' 25.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,7 +27,7 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 
 ' The Word add-in calls the Draw.io online diagramming service/app (https://www.draw.io) via embed.diagrams.net for diagram editing (https://github.com/jgraph/drawio); copyright (c) 2026 by draw.io Ltd and draw.io AG (made available under Apache 2.0 license [https://github.com/jgraph/drawio?tab=Apache-2.0-1-ov-file])
 
@@ -53,7 +53,7 @@ Partial Public Class ThisAddIn
 
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.180526" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.250526" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -117,9 +117,10 @@ Partial Public Class ThisAddIn
     Private Const BoWTrigger As String = "(bow)"
     Private Const ChunkTrigger As String = "(iterate)"
     Private Const EmbedTrigger As String = "(embed)"
+    Private Const FormPrefix As String = "Form:"
     Private Const RefreshTrigger As String = "(refresh)"
-    Private Const ToolSelectionTrigger As String = "(sources)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
-    Private Const ToolTrigger As String = "(s)"
+    Private Const ToolSelectionTrigger As String = "(agents)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
+    Private Const ToolTrigger As String = "(a)"
     Public Const ToolFriendlyName As String = "Agents"  ' How to refer to tools (e.g., sources) towards the user
     Private Const KbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger          ' "(kb)"
     Private Const KbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix ' "(kb:"

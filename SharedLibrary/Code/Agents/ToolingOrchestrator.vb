@@ -50,23 +50,27 @@ Namespace Agents
         ' at least one fallback attempt when the user authorized one.
         ' ---------------------------------------------------------------------
         Public ReadOnly TaskStatusFooterInstruction As String =
-            "TASK STATUS FOOTER (MANDATORY CONTRACT, MACHINE-READ): " &
-            "Whenever you produce a final prose response instead of invoking a tool, you MUST append, " &
-            "as the literal last line of that turn, exactly: " &
-            "<TASK_STATUS>{""status"":""<value>"",""reason"":""<short>""}</TASK_STATUS>  " &
-            "Allowed values for <value>: " &
-            "  'complete' = the user's entire request has been FULLY satisfied in THIS turn. " &
-            "  'blocked'  = the task cannot be completed despite reasonable tool attempts. " &
-            "Rules: " &
-            "(1) NEVER include the footer in a turn that contains a tool call. " &
-            "(2) NEVER wrap the footer in code fences or quotes; it must be plain text on its own final line. " &
-            "(3) NEVER claim 'complete' while still announcing future work. " &
-            "(4) During active tooling, final prose MUST end with exactly one valid TASK_STATUS footer whose status is either 'complete' or 'blocked'. " &
-            "(5) If the user's request covers multiple items, you may emit 'complete' only after all required items have actually been processed via tool calls and the full final result is ready. " &
-            "(6) If the task is not yet complete and more tool work is required or possible, emit the next required tool call instead of final prose. " &
-            "(7) If required Memory grounding is active and the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer. " &
-            "(8) NEVER pair 'blocked' with prose that announces a future fallback action (""I will try to..."", ""instead I'll...""). Either invoke the fallback now via a tool call, or declare blocked WITHOUT announcing further work. " &
-            "(9) If the user explicitly authorized a fallback (e.g. ""create a Word file, otherwise a plain text file""), 'blocked' is only valid AFTER all authorized fallbacks have actually been attempted via tool calls."
+    "TASK STATUS FOOTER (MANDATORY CONTRACT, MACHINE-READ): " &
+    "Whenever you produce a final prose response instead of invoking a tool, you MUST append, " &
+    "as the literal last line of that turn, exactly: " &
+    "<TASK_STATUS>{""status"":""<value>"",""reason"":""<short>""}</TASK_STATUS>  " &
+    "Allowed values for <value>: " &
+    "  'complete' = the user's entire request has been FULLY satisfied in THIS turn. " &
+    "  'blocked'  = the task cannot be completed despite reasonable tool attempts. " &
+    "Rules: " &
+    "(1) NEVER include the footer in a turn that contains a tool call. " &
+    "(2) NEVER wrap the footer in code fences or quotes; it must be plain text on its own final line. " &
+    "(3) NEVER claim 'complete' while still announcing future work. " &
+    "(4) During active tooling, final prose MUST end with exactly one valid TASK_STATUS footer whose status is either 'complete' or 'blocked'. " &
+    "(5) If the user's request covers multiple items, you may emit 'complete' only after all required items have actually been processed via tool calls and the full final result is ready. " &
+    "(6) If the task is not yet complete and more tool work is required or possible, emit the next required tool call instead of final prose. " &
+    "(7) If required Memory grounding is active and the final answer relies only on a retrieved subset of listed Memory entries, include ""memoryGroundingScope"":""subset"" inside the TASK_STATUS JSON footer. " &
+    "(8) NEVER pair 'blocked' with prose that announces a future fallback action (""I will try to..."", ""instead I'll...""). Either invoke the fallback now via a tool call, or declare blocked WITHOUT announcing further work. " &
+    "(9) If the user explicitly authorized a fallback (e.g. ""create a Word file, otherwise a plain text file""), 'blocked' is only valid AFTER all authorized fallbacks have actually been attempted via tool calls. " &
+    "(10) The ""reason"" value MUST be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+    ToolCallSequencing.TaskStatusReasonMaxChars.ToString() &
+    " characters. Good examples: ""answer ready"", ""no safe completion path"", ""all requested edits applied""."
+
 
         ''' <summary>
         ''' Central decision function for the final-turn acceptance gate. Hosts call this
@@ -139,7 +143,12 @@ Namespace Agents
                 sb.AppendLine("Detected issue: " & parsed.InvalidDetail)
             End If
             sb.AppendLine("Repeat your final response now and end with EXACTLY ONE line of the form:")
-            sb.AppendLine("<TASK_STATUS>{""status"":""complete|blocked"",""reason"":""...""}</TASK_STATUS>")
+            sb.AppendLine("<TASK_STATUS>{""status"":""complete|blocked"",""reason"":""short phrase""}</TASK_STATUS>")
+            sb.AppendLine("The reason must be a single very short plain phrase, ideally 2-6 words, with no line breaks, and no more than " &
+                  ToolCallSequencing.TaskStatusReasonMaxChars.ToString() & " characters.")
+            sb.AppendLine("Valid examples:")
+            sb.AppendLine("<TASK_STATUS>{""status"":""complete"",""reason"":""answer ready""}</TASK_STATUS>")
+            sb.AppendLine("<TASK_STATUS>{""status"":""blocked"",""reason"":""no safe completion path""}</TASK_STATUS>")
             sb.AppendLine("Do not wrap the footer in quotes or code fences. Do not emit a footer if you are calling a tool.")
             Return sb.ToString().TrimEnd()
         End Function
@@ -170,16 +179,20 @@ Namespace Agents
             Return LanguageContract.BuildSystemPromptFragment(userLanguage)
         End Function
 
+
         ''' <summary>
-        ''' Convenience: post-egress decision for blocked-final localization (Q3 — only blocked finals).
+        ''' Convenience: post-egress decision for final-response localization when the
+        ''' final prose does not match the detected user language.
         ''' </summary>
-        Public Function ShouldPostLocalizeBlockedFinal(prose As String, userLanguage As String) As Boolean
-            Return LanguageContract.ShouldPostLocalizeBlockedFinal(
+        Public Function ShouldPostLocalizeFinal(prose As String,
+                                                userLanguage As String,
+                                                finalStatus As String) As Boolean
+            Return LanguageContract.ShouldPostLocalizeFinal(
                 prose,
                 userLanguage,
+                finalStatus,
                 ToolingConstants.MaxLocalizableBlockedFinalChars)
         End Function
-
     End Module
 
 End Namespace

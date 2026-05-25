@@ -142,8 +142,8 @@ Namespace SharedLibrary
             ' Text editor
             Dim textEditor As New System.Windows.Forms.TextBox()
             textEditor.Multiline = True
-            textEditor.ScrollBars = System.Windows.Forms.ScrollBars.Vertical
-            textEditor.WordWrap = True
+            textEditor.ScrollBars = System.Windows.Forms.ScrollBars.Both
+            textEditor.WordWrap = False
             textEditor.AcceptsReturn = True
             textEditor.AcceptsTab = True
             textEditor.Dock = System.Windows.Forms.DockStyle.Fill
@@ -198,6 +198,28 @@ Namespace SharedLibrary
 
             ' --- Load file content ---
             Dim originalLoadedText As String = System.String.Empty
+            Dim originalLineEnding As String = System.Environment.NewLine
+
+            Dim normalizeForEditor As Func(Of String, String) =
+                Function(value As String) As String
+                    If value Is Nothing Then Return System.String.Empty
+                    Return value.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf)
+                End Function
+
+            Dim normalizeForSave As Func(Of String, String) =
+                Function(value As String) As String
+                    Dim normalized As String = normalizeForEditor(value)
+
+                    Select Case originalLineEnding
+                        Case vbLf
+                            Return normalized.Replace(vbCrLf, vbLf)
+                        Case vbCr
+                            Return normalized.Replace(vbCrLf, vbCr)
+                        Case Else
+                            Return normalized
+                    End Select
+                End Function
+
             Try
                 If System.IO.File.Exists(filePath) Then
                     Try
@@ -210,10 +232,19 @@ Namespace SharedLibrary
                         End Try
                     End Try
                 End If
+
+                If originalLoadedText.Contains(vbCrLf) Then
+                    originalLineEnding = vbCrLf
+                ElseIf originalLoadedText.Contains(vbLf) Then
+                    originalLineEnding = vbLf
+                ElseIf originalLoadedText.Contains(vbCr) Then
+                    originalLineEnding = vbCr
+                End If
             Catch ex As System.Exception
                 ShowCustomMessageBox("Unexpected error while loading the file:" & System.Environment.NewLine & ex.Message)
             End Try
-            textEditor.Text = originalLoadedText
+
+            textEditor.Text = normalizeForEditor(originalLoadedText)
 
             ' --- Minimal invasive JSON pretty-print support ---
             Dim isJsonFile As Boolean = False
@@ -421,7 +452,7 @@ Namespace SharedLibrary
 
                 Try
                     Dim enc As System.Text.Encoding = New System.Text.UTF8Encoding(True)
-                    System.IO.File.WriteAllText(filePath, textEditor.Text, enc)
+                    System.IO.File.WriteAllText(filePath, normalizeForSave(textEditor.Text), enc)
                 Catch exWrite As System.Exception
                     ShowCustomMessageBox("Failed to save file:" & System.Environment.NewLine & exWrite.Message)
                     Return
