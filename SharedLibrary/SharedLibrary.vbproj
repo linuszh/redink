@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" />
+  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" />
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
@@ -89,39 +89,54 @@
     <Reference Include="DiffPlex, Version=1.9.0.0, Culture=neutral, PublicKeyToken=1d35e91d1bd7bc0f, processorArchitecture=MSIL">
       <HintPath>..\packages\DiffPlex.1.9.0\lib\net45\DiffPlex.dll</HintPath>
     </Reference>
-    <Reference Include="Google.Protobuf, Version=3.34.1.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
-      <HintPath>..\packages\Google.Protobuf.3.34.1\lib\net45\Google.Protobuf.dll</HintPath>
+    <Reference Include="DocumentFormat.OpenXml, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.3.5.1\lib\net46\DocumentFormat.OpenXml.dll</HintPath>
+    </Reference>
+    <Reference Include="DocumentFormat.OpenXml.Framework, Version=3.5.1.0, Culture=neutral, PublicKeyToken=8fb06cb64d019a17, processorArchitecture=MSIL">
+      <HintPath>..\packages\DocumentFormat.OpenXml.Framework.3.5.1\lib\net46\DocumentFormat.OpenXml.Framework.dll</HintPath>
+    </Reference>
+    <Reference Include="Google.Protobuf, Version=3.35.0.0, Culture=neutral, PublicKeyToken=a7d26565bac4d604, processorArchitecture=MSIL">
+      <HintPath>..\packages\Google.Protobuf.3.35.0\lib\net45\Google.Protobuf.dll</HintPath>
     </Reference>
     <Reference Include="HtmlAgilityPack, Version=1.12.4.0, Culture=neutral, PublicKeyToken=bd319b19eaf3b43a, processorArchitecture=MSIL">
       <HintPath>..\packages\HtmlAgilityPack.1.12.4\lib\Net45\HtmlAgilityPack.dll</HintPath>
     </Reference>
-    <Reference Include="Markdig, Version=1.1.0.0, Culture=neutral, processorArchitecture=MSIL">
-      <HintPath>..\packages\Markdig.1.1.2\lib\net462\Markdig.dll</HintPath>
+    <Reference Include="Markdig, Version=1.2.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\Markdig.1.2.0\lib\net462\Markdig.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.10.0.5\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
+    <Reference Include="Microsoft.Bcl.AsyncInterfaces, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.AsyncInterfaces.10.0.8\lib\net462\Microsoft.Bcl.AsyncInterfaces.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Bcl.HashCode, Version=6.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Bcl.HashCode.6.0.0\lib\net462\Microsoft.Bcl.HashCode.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.Memory, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.Memory.10.0.5\lib\net462\Microsoft.Bcl.Memory.dll</HintPath>
+    <Reference Include="Microsoft.Bcl.Memory, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.Memory.10.0.8\lib\net462\Microsoft.Bcl.Memory.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Bcl.Numerics, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Bcl.Numerics.10.0.5\lib\net462\Microsoft.Bcl.Numerics.dll</HintPath>
+    <Reference Include="Microsoft.Bcl.Numerics, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Bcl.Numerics.10.0.8\lib\net462\Microsoft.Bcl.Numerics.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.CSharp" />
-    <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.4.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.4.1\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
+    <Reference Include="Microsoft.Extensions.AI.Abstractions, Version=10.6.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.AI.Abstractions.10.6.0\lib\net462\Microsoft.Extensions.AI.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions, Version=10.0.0.5, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.Abstractions.10.0.5\lib\net462\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
+    <Reference Include="Microsoft.Extensions.DependencyInjection.Abstractions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.DependencyInjection.Abstractions.10.0.8\lib\net462\Microsoft.Extensions.DependencyInjection.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=10.0.0.5, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Extensions.Logging.Abstractions.10.0.5\lib\net462\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=adb9793829ddae60, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Extensions.Logging.Abstractions.10.0.8\lib\net462\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.ML.OnnxRuntime, Version=1.24.4.0, Culture=neutral, PublicKeyToken=f27f157f0a5b7bb6, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.ML.OnnxRuntime.Managed.1.24.4\lib\netstandard2.0\Microsoft.ML.OnnxRuntime.dll</HintPath>
+    <Reference Include="Microsoft.Identity.Client, Version=4.84.1.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Identity.Client.4.84.1\lib\net472\Microsoft.Identity.Client.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.Identity.Client.Extensions.Msal, Version=4.84.1.0, Culture=neutral, PublicKeyToken=0a613f4dd989e8ae, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Identity.Client.Extensions.Msal.4.84.1\lib\netstandard2.0\Microsoft.Identity.Client.Extensions.Msal.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.IdentityModel.Abstractions, Version=8.18.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.IdentityModel.Abstractions.8.18.0\lib\net472\Microsoft.IdentityModel.Abstractions.dll</HintPath>
+    </Reference>
+    <Reference Include="Microsoft.ML.OnnxRuntime, Version=1.26.0.0, Culture=neutral, PublicKeyToken=f27f157f0a5b7bb6, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.ML.OnnxRuntime.Managed.1.26.0\lib\netstandard2.0\Microsoft.ML.OnnxRuntime.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.ML.Tokenizers, Version=1.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.ML.Tokenizers.2.0.0\lib\netstandard2.0\Microsoft.ML.Tokenizers.dll</HintPath>
@@ -142,14 +157,14 @@
     <Reference Include="Microsoft.Office.Tools.Common, Version=10.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <EmbedInteropTypes>True</EmbedInteropTypes>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.3856.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3856.49\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Core, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.Core.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.3856.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3856.49\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.WinForms, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.WinForms.dll</HintPath>
     </Reference>
-    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.3856.49, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
-      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3856.49\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+    <Reference Include="Microsoft.Web.WebView2.Wpf, Version=1.0.3967.48, Culture=neutral, PublicKeyToken=2a8ab48044d2601e, processorArchitecture=MSIL">
+      <HintPath>..\packages\Microsoft.Web.WebView2.1.0.3967.48\lib\net462\Microsoft.Web.WebView2.Wpf.dll</HintPath>
     </Reference>
     <Reference Include="Microsoft.Win32.Registry, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Win32.Registry.5.0.0\lib\net461\Microsoft.Win32.Registry.dll</HintPath>
@@ -182,29 +197,33 @@
     <Reference Include="System.Buffers, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Buffers.4.6.1\lib\net462\System.Buffers.dll</HintPath>
     </Reference>
-    <Reference Include="System.CodeDom, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.CodeDom.10.0.5\lib\net462\System.CodeDom.dll</HintPath>
+    <Reference Include="System.CodeDom, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.CodeDom.10.0.8\lib\net462\System.CodeDom.dll</HintPath>
     </Reference>
-    <Reference Include="System.Collections.Immutable, Version=10.0.0.5, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Collections.Immutable.10.0.5\lib\net462\System.Collections.Immutable.dll</HintPath>
+    <Reference Include="System.Collections.Immutable, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Collections.Immutable.10.0.8\lib\net462\System.Collections.Immutable.dll</HintPath>
     </Reference>
     <Reference Include="System.ComponentModel.Composition" />
     <Reference Include="System.ComponentModel.DataAnnotations" />
     <Reference Include="System.Data" />
     <Reference Include="System.Deployment" />
     <Reference Include="System.Design" />
-    <Reference Include="System.Diagnostics.DiagnosticSource, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Diagnostics.DiagnosticSource.10.0.5\lib\net462\System.Diagnostics.DiagnosticSource.dll</HintPath>
+    <Reference Include="System.Diagnostics.DiagnosticSource, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Diagnostics.DiagnosticSource.10.0.8\lib\net462\System.Diagnostics.DiagnosticSource.dll</HintPath>
     </Reference>
     <Reference Include="System.Drawing" />
     <Reference Include="System.Drawing.Common, Version=10.0.0.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Drawing.Common.10.0.5\lib\net462\System.Drawing.Common.dll</HintPath>
+      <HintPath>..\packages\System.Drawing.Common.10.0.8\lib\net462\System.Drawing.Common.dll</HintPath>
     </Reference>
-    <Reference Include="System.Formats.Nrbf, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Formats.Nrbf.10.0.5\lib\net462\System.Formats.Nrbf.dll</HintPath>
+    <Reference Include="System.Formats.Asn1, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Formats.Asn1.10.0.8\lib\net462\System.Formats.Asn1.dll</HintPath>
     </Reference>
+    <Reference Include="System.Formats.Nrbf, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Formats.Nrbf.10.0.8\lib\net462\System.Formats.Nrbf.dll</HintPath>
+    </Reference>
+    <Reference Include="System.IdentityModel" />
     <Reference Include="System.Interactive.Async, Version=7.0.0.0, Culture=neutral, PublicKeyToken=94bc3704cddfc263, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Interactive.Async.7.0.0\lib\net48\System.Interactive.Async.dll</HintPath>
+      <HintPath>..\packages\System.Interactive.Async.7.0.1\lib\net48\System.Interactive.Async.dll</HintPath>
     </Reference>
     <Reference Include="System.IO, Version=4.1.1.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.IO.4.3.0\lib\net462\System.IO.dll</HintPath>
@@ -212,14 +231,17 @@
       <Private>True</Private>
     </Reference>
     <Reference Include="System.IO.Compression.FileSystem" />
-    <Reference Include="System.IO.Pipelines, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.IO.Pipelines.10.0.5\lib\net462\System.IO.Pipelines.dll</HintPath>
+    <Reference Include="System.IO.FileSystem.AccessControl, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.IO.FileSystem.AccessControl.5.0.0\lib\net461\System.IO.FileSystem.AccessControl.dll</HintPath>
+    </Reference>
+    <Reference Include="System.IO.Pipelines, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.IO.Pipelines.10.0.8\lib\net462\System.IO.Pipelines.dll</HintPath>
     </Reference>
     <Reference Include="System.Linq.Async, Version=7.0.0.0, Culture=neutral, PublicKeyToken=94bc3704cddfc263, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Linq.Async.7.0.0\lib\net48\System.Linq.Async.dll</HintPath>
+      <HintPath>..\packages\System.Linq.Async.7.0.1\lib\net48\System.Linq.Async.dll</HintPath>
     </Reference>
-    <Reference Include="System.Linq.AsyncEnumerable, Version=10.0.0.5, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Linq.AsyncEnumerable.10.0.5\lib\net462\System.Linq.AsyncEnumerable.dll</HintPath>
+    <Reference Include="System.Linq.AsyncEnumerable, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Linq.AsyncEnumerable.10.0.8\lib\net462\System.Linq.AsyncEnumerable.dll</HintPath>
     </Reference>
     <Reference Include="System.Management" />
     <Reference Include="System.Memory, Version=4.0.5.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
@@ -230,21 +252,21 @@
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
-    <Reference Include="System.Net.Http.WinHttpHandler, Version=10.0.0.5, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Net.Http.WinHttpHandler.10.0.5\lib\net462\System.Net.Http.WinHttpHandler.dll</HintPath>
+    <Reference Include="System.Net.Http.WinHttpHandler, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Net.Http.WinHttpHandler.10.0.8\lib\net462\System.Net.Http.WinHttpHandler.dll</HintPath>
     </Reference>
     <Reference Include="System.Numerics" />
-    <Reference Include="System.Numerics.Tensors, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Numerics.Tensors.10.0.5\lib\net462\System.Numerics.Tensors.dll</HintPath>
+    <Reference Include="System.Numerics.Tensors, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Numerics.Tensors.10.0.8\lib\net462\System.Numerics.Tensors.dll</HintPath>
     </Reference>
     <Reference Include="System.Numerics.Vectors, Version=4.1.6.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Numerics.Vectors.4.6.1\lib\net462\System.Numerics.Vectors.dll</HintPath>
     </Reference>
-    <Reference Include="System.Reflection.Metadata, Version=10.0.0.5, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Reflection.Metadata.10.0.5\lib\net462\System.Reflection.Metadata.dll</HintPath>
+    <Reference Include="System.Reflection.Metadata, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Reflection.Metadata.10.0.8\lib\net462\System.Reflection.Metadata.dll</HintPath>
     </Reference>
-    <Reference Include="System.Resources.Extensions, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Resources.Extensions.10.0.5\lib\net462\System.Resources.Extensions.dll</HintPath>
+    <Reference Include="System.Resources.Extensions, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Resources.Extensions.10.0.8\lib\net462\System.Resources.Extensions.dll</HintPath>
     </Reference>
     <Reference Include="System.Runtime, Version=4.1.1.1, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Runtime.4.3.1\lib\net462\System.Runtime.dll</HintPath>
@@ -254,6 +276,7 @@
     <Reference Include="System.Runtime.CompilerServices.Unsafe, Version=6.0.3.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Runtime.CompilerServices.Unsafe.6.1.2\lib\net462\System.Runtime.CompilerServices.Unsafe.dll</HintPath>
     </Reference>
+    <Reference Include="System.Security" />
     <Reference Include="System.Security.AccessControl, Version=6.0.0.1, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Security.AccessControl.6.0.1\lib\net461\System.Security.AccessControl.dll</HintPath>
     </Reference>
@@ -272,6 +295,9 @@
       <Private>True</Private>
       <Private>True</Private>
     </Reference>
+    <Reference Include="System.Security.Cryptography.ProtectedData, Version=10.0.0.8, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Security.Cryptography.ProtectedData.10.0.8\lib\net462\System.Security.Cryptography.ProtectedData.dll</HintPath>
+    </Reference>
     <Reference Include="System.Security.Cryptography.X509Certificates, Version=4.1.1.2, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Security.Cryptography.X509Certificates.4.3.2\lib\net461\System.Security.Cryptography.X509Certificates.dll</HintPath>
       <Private>True</Private>
@@ -280,11 +306,11 @@
     <Reference Include="System.Security.Principal.Windows, Version=5.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Security.Principal.Windows.5.0.0\lib\net461\System.Security.Principal.Windows.dll</HintPath>
     </Reference>
-    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Text.Encodings.Web.10.0.5\lib\net462\System.Text.Encodings.Web.dll</HintPath>
+    <Reference Include="System.Text.Encodings.Web, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Text.Encodings.Web.10.0.8\lib\net462\System.Text.Encodings.Web.dll</HintPath>
     </Reference>
-    <Reference Include="System.Text.Json, Version=10.0.0.5, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
-      <HintPath>..\packages\System.Text.Json.10.0.5\lib\net462\System.Text.Json.dll</HintPath>
+    <Reference Include="System.Text.Json, Version=10.0.0.8, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
+      <HintPath>..\packages\System.Text.Json.10.0.8\lib\net462\System.Text.Json.dll</HintPath>
     </Reference>
     <Reference Include="System.Threading.Tasks.Extensions, Version=4.2.4.0, Culture=neutral, PublicKeyToken=cc7b13ffcd2ddd51, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Threading.Tasks.Extensions.4.6.3\lib\net462\System.Threading.Tasks.Extensions.dll</HintPath>
@@ -317,6 +343,7 @@
     <Reference Include="UglyToad.PdfPig.Tokens, Version=0.1.14.0, Culture=neutral, PublicKeyToken=605d367334e74123, processorArchitecture=MSIL">
       <HintPath>..\packages\PdfPig.0.1.14\lib\net471\UglyToad.PdfPig.Tokens.dll</HintPath>
     </Reference>
+    <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
     <Import Include="Microsoft.VisualBasic" />
@@ -330,7 +357,77 @@
     <Import Include="System.Threading.Tasks" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Code\Agents\ActionPromiseValidator.vb" />
+    <Compile Include="Code\Agents\AgentGate.vb" />
+    <Compile Include="Code\Agents\AgentResources.vb" />
+    <Compile Include="Code\Agents\AgentResourcesViewerForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\Agents\AgentToolRouter.vb" />
+    <Compile Include="Code\Agents\HostToolRegistration.vb" />
+    <Compile Include="Code\Agents\InkyPromptBuilder.vb" />
+    <Compile Include="Code\Agents\ISubAgentHost.vb" />
+    <Compile Include="Code\Agents\IWordDocumentHost.vb" />
+    <Compile Include="Code\Agents\JsRunTool.vb" />
+    <Compile Include="Code\Agents\LanguageContract.vb" />
+    <Compile Include="Code\Agents\MemoryTools.vb" />
+    <Compile Include="Code\Agents\PathPolicy.vb" />
+    <Compile Include="Code\Agents\SessionMemoryViewerForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\Agents\SessionMemory.vb" />
+    <Compile Include="Code\Agents\SkillAuthorMode.vb" />
+    <Compile Include="Code\Agents\SkillInvokeTool.vb" />
+    <Compile Include="Code\Agents\SubAgentRunner.vb" />
+    <Compile Include="Code\Agents\SubAgentRuntimeHardening.vb" />
+    <Compile Include="Code\Agents\SubAgentToolScopeInitializer.vb" />
+    <Compile Include="Code\Agents\TaskStatusFooterParser.vb" />
+    <Compile Include="Code\Agents\TextTools.vb" />
+    <Compile Include="Code\Agents\ToolCallSequencing.vb" />
+    <Compile Include="Code\Agents\ToolExecutorRegistry.vb" />
+    <Compile Include="Code\Agents\ToolingConstants.vb" />
+    <Compile Include="Code\Agents\ToolingFinalResponseContract.vb" />
+    <Compile Include="Code\Agents\ToolingOrchestrator.vb" />
+    <Compile Include="Code\Agents\ToolLoaderTool.vb" />
+    <Compile Include="Code\Agents\ToolRegistry.vb" />
+    <Compile Include="Code\Agents\ToolRegistryBuilder.vb" />
+    <Compile Include="Code\Agents\WebGroundingTool.vb" />
+    <Compile Include="Code\Agents\WebView2JsSandbox.vb" />
+    <Compile Include="Code\Agents\WordDocTools.vb" />
+    <Compile Include="Code\Agents\WordTools.vb" />
+    <Compile Include="Code\Agents\WorkflowContinuity.vb" />
+    <Compile Include="Code\Agents\WorkspaceState.vb" />
+    <Compile Include="Code\Agents\WorkspaceTools.vb" />
     <Compile Include="Code\CommonFeatures\FactExtractionService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeEmbeddingService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeIndexer.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeQueryService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeSourceDossierService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStore.Schema.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreCatalog.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreForegroundIndexer.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreIdleService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreManager.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreManifest.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreProcessingService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreWatcher.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeTriggerHelper.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeWikiService.vb" />
+    <Compile Include="Code\CommonFeatures\KnowledgeStore\KnowledgeStoreHostGate.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365Models.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365SearchProgressForm.Designer.vb">
+      <DependentUpon>M365SearchProgressForm.vb</DependentUpon>
+    </Compile>
+    <Compile Include="Code\CommonFeatures\M365\M365SearchProgressForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
+    <Compile Include="Code\CommonFeatures\M365\M365Service.Extensions.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365Service.Threads.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365Service.vb" />
+    <Compile Include="Code\CommonFeatures\M365\M365ToolService.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.MyStyleHelpers.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.PromptLibrary.vb" />
     <Compile Include="Code\CommonFeatures\SharedMethods.TextFileEditor.vb" />
@@ -385,6 +482,7 @@
     <Compile Include="Code\Core\LLM\SharedMethods.GoogleOAuthHelper.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MainLLM.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.MCP.vb" />
+    <Compile Include="Code\Core\LLM\SharedMethods.MCPOAuth.vb" />
     <Compile Include="Code\Core\LLM\SharedMethods.Signing.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.Diff.vb" />
     <Compile Include="Code\Core\LLM\ImageDecoder.vb" />
@@ -398,7 +496,11 @@
     </Compile>
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandling.vb" />
     <Compile Include="Code\Core\Texthandling\SharedMethods.TextHandlingExcel.vb" />
+    <Compile Include="Code\Core\UI\MCPOAuthBrowserForm.vb">
+      <SubType>Form</SubType>
+    </Compile>
     <Compile Include="Code\Core\UI\LogWindow.vb" />
+    <Compile Include="Code\Core\UI\SharedMethods.DialogOwner.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.Infobox.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.Pane.vb" />
     <Compile Include="Code\Core\UI\SharedMethods.SelectionFormSmall.vb" />
@@ -459,6 +561,7 @@
     <EmbeddedResource Include="Code\Core\Config\ConfigWizard.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </EmbeddedResource>
+    <None Include="Code\Agents\Red_Ink_Tool_List.md" />
     <None Include="My Project\Application.myapp">
       <Generator>MyApplicationCodeGenerator</Generator>
       <LastGenOutput>Application.Designer.vb</LastGenOutput>
@@ -492,19 +595,20 @@
   <ItemGroup>
     <Service Include="{508349B6-6B84-4DF5-91F0-309BEEBAD82D}" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.VisualBasic.targets" />
-  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.3856.49\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.3856.49\build\Microsoft.Web.WebView2.targets')" />
   <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
     <PropertyGroup>
       <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
     </PropertyGroup>
-    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.3856.49\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.3856.49\build\Microsoft.Web.WebView2.targets'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.Managed.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props'))" />
-    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets'))" />
     <Error Condition="!Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.Managed.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.props'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets'))" />
+    <Error Condition="!Exists('..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets'))" />
   </Target>
-  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.Managed.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" />
-  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.1.24.4\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" />
   <Import Project="..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets" Condition="Exists('..\packages\System.ValueTuple.4.6.2\build\net471\System.ValueTuple.targets')" />
+  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.Managed.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.Managed.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.Managed.targets')" />
+  <Import Project="..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets" Condition="Exists('..\packages\Microsoft.ML.OnnxRuntime.1.26.0\build\netstandard2.0\Microsoft.ML.OnnxRuntime.targets')" />
+  <Import Project="..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets" Condition="Exists('..\packages\Microsoft.Web.WebView2.1.0.3967.48\build\Microsoft.Web.WebView2.targets')" />
 </Project>

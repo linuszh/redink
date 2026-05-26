@@ -196,7 +196,7 @@ Partial Public Class ThisAddIn
             Dim proceed = ShowCustomYesNoBox(
                 $"The selected model ({modelLabel}) does not support tool calling." & vbCrLf & vbCrLf &
                 $"{AN6} AutoPilot will still respond to e-mails, but will not be able to " &
-                "use external sources (databases, web retrieval, etc.) or process attachments " &
+                $"use {Globals.ThisAddIn.ToolFriendlyName.ToLower} (databases, web retrieval, etc.) or process attachments " &
                 "via built-in document tools." & vbCrLf & vbCrLf &
                 "Do you want to proceed without tool support?",
                 "Proceed without tools", "Cancel",
@@ -377,7 +377,7 @@ Partial Public Class ThisAddIn
             }
             paramsList.Add(pVoicemail)
             pVoicemailSender = New InputParameter() With {
-                .Name = "Voicemail sender address (e.g. noreply@combox.swisscom.ch)",
+                .Name = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
                 .Value = If(saved.VoicemailSenderAddress, "")
             }
             paramsList.Add(pVoicemailSender)
@@ -455,7 +455,7 @@ Partial Public Class ThisAddIn
 
         ' ── Step 6: Source selection (only if model supports tooling) ──
         If modelSupportsTools Then
-            Dim availableTools = GetAvailableTools()
+            Dim availableTools = GetAvailableToolsForAutoPilotSelection()
             If availableTools IsNot Nothing AndAlso availableTools.Count > 0 Then
                 ' Load previously persisted tool names for pre-selection
                 Dim previousToolNames As New List(Of String)()
@@ -465,12 +465,12 @@ Partial Public Class ThisAddIn
                 End If
 
                 Dim toolChoice = ShowCustomYesNoBox(
-                    $"There are {availableTools.Count} source(s) available (web retrieval, etc.)." & vbCrLf &
+                    $"There are {availableTools.Count} {Globals.ThisAddIn.ToolFriendlyName.ToLower} available (web retrieval, etc.)." & vbCrLf &
                     If(previousToolNames.Count > 0,
-                       $"Previously selected: {previousToolNames.Count} source(s)." & vbCrLf, "") &
+                       $"Previously selected: {previousToolNames.Count} {Globals.ThisAddIn.ToolFriendlyName.ToLower}." & vbCrLf, "") &
                     "Would you like to enable them for AutoPilot?",
-                    "Yes, select sources", "No, skip",
-                    header:=$"{AN6} AutoPilot — {ToolFriendlyName}")
+                    $"Yes, select {Globals.ThisAddIn.ToolFriendlyName.ToLower}", "No, skip",
+                    header:=$"{AN6} AutoPilot — Optional {ToolFriendlyName}")
 
                 If toolChoice = 1 Then
                     ' Use MultiModelSelectorForm with pre-selection if we have persisted names
@@ -480,7 +480,7 @@ Partial Public Class ThisAddIn
                             title:=$"{AN6} AutoPilot {ToolFriendlyName}",
                             resetChecked:=False,
                             preselectMany:=previousToolNames,
-                            instruction:="Select the sources to enable for AutoPilot:")
+                            instruction:=$"Select the optional {Globals.ThisAddIn.ToolFriendlyName.ToLower} to enable for AutoPilot:")
                             If dlg.ShowDialog() = DialogResult.OK Then
                                 config.SelectedExternalTools = dlg.SelectedModels
                             End If

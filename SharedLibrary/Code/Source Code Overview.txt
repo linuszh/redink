@@ -1,5 +1,4 @@
-﻿' Part of "Red Ink" (SharedLibrary)
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.'
+﻿' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' The compiled version of Red Ink also ...
 '
@@ -25,17 +24,17 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
-
-
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+'
 ' =============================================================================
 ' Red Ink Shared Library - Architectural Overview
 '
 ' Purpose:
-'   Central reusable components for Office add-ins (Word, Excel, Outlook) and 
-'   AI-assisted document features: text processing, embeddings, anonymization, 
+'   Central reusable components for Office add-ins (Word, Excel, Outlook) and
+'   AI-assisted document features: text processing, embeddings, anonymization,
 '   UI, configuration, model orchestration, speech recognition, web automation,
-'   licensing, and context-aware search.
+'   licensing, knowledge stores, agents, Microsoft 365 integration, memory,
+'   and context-aware search.
 '
 ' Language: VB.NET (.NET Framework 4.8)
 ' Target: Microsoft Office VSTO Add-ins
@@ -107,6 +106,8 @@
 '   LogWindow.vb                    - Persistent non-activating log window module with thread-safe
 '                                     API (ShowLogWindow/AppendLog/etc.), color-coded entries, and
 '                                     bottom-right initial placement.
+'   SessionMemoryViewerForm.vb      - UI for inspecting and managing persistent session memory entries.
+'   KnowledgeStoreForm.vb           - UI for Knowledge Store administration, stats, repair, and schema editing.
 '
 ' [Core\Various]
 '   SharedMethods.FileImporter      - File ingestion pipeline (PDF, DOCX, TXT via PdfPig/OpenXML/Interop).
@@ -114,6 +115,7 @@
 '   SharedMethods.VarHelpers        - Generic variable utilities and environment expansion.
 '   SharedLogger.vb                 - Lightweight privacy-preserving async file logger with per-user
 '                                     hash identity, background queue writer, and log analysis utility.
+'   SharedMethods.SandboxedReaders  - COM-free readers for DOCX/XLSX/PPTX/MSG/EML via OpenXML/XML parsing.
 '
 ' [CommonFeatures\Embeddings]
 '   EmbeddingStore.vb               - ONNX-based neural embedding store for semantic search.
@@ -121,6 +123,45 @@
 '   MlNetTokenizer.vb               - SentencePiece/WordPiece tokenization wrapper.
 '   OnnxAnonymizer.vb               - ONNX-based Named Entity Recognition (NER) with selective anonymization.
 '   TextChunk / TokenOffset / SearchResult - Data models for chunking, offsets, and search ranking.
+'
+' [CommonFeatures\KnowledgeStore]
+'   KnowledgeStoreCatalog.vb        - Catalog load/merge, store definitions, store IDs, display labels, and permissions.
+'   KnowledgeStoreManager.vb        - Merged index persistence and KnowledgeEntry data model.
+'   KnowledgeStoreManifest.vb      - Per-store manifest load/save and entry management.
+'   KnowledgeStoreSchema.vb        - Store schema settings for wiki, linking, contradictions, and queries.
+'   KnowledgeStoreForegroundIndexer.vb - User-initiated indexing with progress reporting and cancel support.
+'   KnowledgeWikiService.vb        - Wiki orchestration, page normalization, health analysis, repair, and embeddings.
+'   KnowledgeTriggerHelper.vb      - Parses `(kb)` / `(kb:...)` triggers and builds prompt-ready knowledge blocks.
+'   KnowledgeStoreForm.vb          - WinForms administration dialog for store maintenance and repair workflows.
+'
+' [CommonFeatures\M365]
+'   M365Models.vb                   - Shared DTOs, enums, progress payloads, and result models for Graph search/retrieval.
+'   M365Service.vb                  - Microsoft Graph / MSAL service for mail, files, events, Teams, OneNote, and people.
+'   M365ToolService.vb              - Host-neutral `m365_*` tool family used by the add-in tooling loops.
+'
+' [CommonFeatures\Agents]
+'   AgentResources.vb               - Discovers Claude-style resources (`Inky.md`, skills, agents) from central/local roots.
+'   HostToolRegistration.vb         - Central registry for host-internal tool names and deliverable-capable tools.
+'   InkyPromptBuilder.vb            - Builds main-loop prompt addendum from `Inky.md` plus active skills/agents.
+'   JsRunTool.vb                    - Sandboxed JavaScript execution tool using hidden WebView2.
+'   MemoryTools.vb                  - `memory_put`, `memory_get`, `memory_list`, `memory_delete` tool family.
+'   SessionMemory.vb                - Persistent process-wide session memory store.
+'   SessionMemoryMetadata           - Metadata model for session memory entries.
+'   SkillInvokeTool.vb              - `skill_use` loader for Claude-style `SKILL.md` resources.
+'   TextTools.vb                    - Sandbox text file read/write/search tools.
+'   ToolLoaderTool.vb               - Lazy manifest-only loader for large tool sets.
+'   ToolRegistryBuilder.vb          - Registers eager tools, skills, and agents into tool registries.
+'   ToolCallSequencing.vb           - Tool-call ordering, task-status validation, memory grounding, and repair guards.
+'   ToolingFinalResponseContract.vb - Final-response contract enum and helpers.
+'   ToolingOrchestrator.vb          - Final-turn acceptance and guard-prompt orchestration.
+'   WorkflowContinuity.vb           - Workflow IDs, runtime state, checkpoints, and source-record continuity.
+'   WordTools.vb                    - File-level `.docx` tools via OpenXML.
+'   WordDocTools.vb                 - Active-document Word host bridge tools.
+'
+' [CommonFeatures\M365 / Agents support]
+'   ToolLoaderTool.vb               - Helps keep first-pass tool exposure compact.
+'   HostToolRegistration.vb         - Shared allowlists and host-specific tool classification.
+'   WorkflowContinuity.vb           - Records workflow phase, sources, and execution continuity across turns.
 '
 ' [CommonFeatures]
 '   AnonymizationModule.vb          - Top-level anonymization workflow coordinator.
@@ -168,25 +209,23 @@
 '                                     command execution, model switching, "Sources" tooling toggle/picker.
 '   DiscussInky.vb                  - Extended discussion UI (Word-only): personas, missions, knowledge loading,
 '                                     auto-respond + sort-out flows, optional "Sources" tooling integration.
-'   DrawioEditorForm.vb             - WebView2 host for the diagrams.net (draw.io) embedded editor; loads
-'                                     mxfile XML, saves edits to local .drawio file, supports export via
-'                                     postMessage API with optional offline mode.
-'   LogWindow.vb                    - Modeless tooling log UI: RichTextBox log with Cancel/Close, Keep Open,
-'                                     Copy, Clear buttons; thread-safe updates; auto-close countdown.
+'   DrawioEditorForm.vb             - WebView2 host for the diagrams.net embedded editor; loads mxfile XML,
+'                                     saves edits to local `.drawio` files, supports export via postMessage API.
+'   LogWindow.vb                    - Modeless tooling log UI with Cancel/Close, Keep Open, Copy, Clear, Abort Job.
 '   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
 '   ThisAddIn.FileHelpers.vb        - Word file ingestion helpers (txt/rtf/doc/docx/pdf/pptx + OCR).
 '   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
+'   ThisAddIn.KnowledgeStoreWiring.vb - Knowledge Store idle service timer, host-idle gate, and foreground indexing.
 '   ThisAddIn.MCPImporter.vb        - MCP server tool discovery via JSON-RPC (initialize + tools/list),
 '                                     supports Streamable HTTP and SSE transports, generates special-service
 '                                     INI sections with parameter mapping and user input collection.
 '   ThisAddIn.WordHelpers.vb        - Word-range/document manipulations (selection, insertion, cleanup).
-'   ThisAddIn.WordHelpers.DrawioConverter.vb - Converts .drawio XML to self-contained interactive HTML
-'                                     flowchart navigator with multi-page, compressed diagram, and
-'                                     object wrapper support.
+'   ThisAddIn.WordHelpers.DrawioConverter.vb - Converts `.drawio` XML to self-contained interactive HTML
+'                                     flowchart navigator with multi-page, compressed diagram, and wrapper support.
 '   ThisAddIn.WordHelpers.Snapshotter.vb - Document/URL snapshot management: download content, optional
 '                                     LLM clutter removal, snapshot comparison via Word, INI-style
 '                                     library with central and local paths plus archive management.
-'   ThisAddIn.WordSearchHelper.vb   - Specialized search routines (clauses, hidden prompts, regex etc.).
+'   ThisAddIn.WordSearchHelper.vb   - Specialized search routines (clauses, hidden prompts, regex, etc.).
 '   ThisAddIn.Redactions.vb         - PDF redaction pipeline (LLM-driven plan + PdfPig/PDFsharp rendering),
 '                                     burn-in image-only mode, pdfium loading, metadata stripping.
 '                                     Classes: PdfRedactionService, TextPosition, RedactionRangeDto,
@@ -202,12 +241,13 @@
 '   ThisAddIn.Processing.FormatSaveAndRestore.vb - Formatting capture/restore for fields/footnotes/endnotes/highlights.
 '   ThisAddIn.Processing.SearchGrounding.vb - Web search grounding for LLM responses: search term collection,
 '                                     HTTP/WebView2 crawling with depth limits, and content aggregation.
-'   ThisAddIn.Processing.Tooling.vb - "Sources" tooling loop (LLM tool-calling orchestration): tool selection,
-'                                     tool call detection/extraction, internal web retrieval (with SSRF
-'                                     safeguards) and external tool execution, response injection, iteration
-'                                     limits, diagnostics logging, and persistence of tool selections.
-'   ThisAddIn.Processing.FileRAG.vb - File-based Retrieval-Augmented Generation (library loading,
-'                                     LLM retrieval prompting, and system prompt preparation).
+'   ThisAddIn.Processing.Tooling.vb - "Sources" tooling loop orchestration: tool selection, tool call extraction,
+'                                     internal web retrieval safeguards, external tool execution, iterations, diagnostics.
+'   ThisAddIn.Processing.Tooling.ToolExecutionContext.vb - Full per-run tool state, retries, sequencing, and workflow data.
+'   ThisAddIn.Processing.Tooling.Logging.vb - File-based tooling logger with nested-session handling and diagnostics.
+'   ThisAddIn.Processing.Tooling.Memory.vb - Memory grounding resolution, classifier input, and memory availability logic.
+'   ThisAddIn.Processing.Tooling.M365.vb - Word host adapter for shared Microsoft 365 tools and source extraction.
+'   ThisAddIn.Processing.FileRAG.vb - File-based Retrieval-Augmented Generation (library loading, prompting, system prompt prep).
 '   ThisAddIn.PaneAndMerge.vb       - Task pane orchestration, pane content updates, merge/view logic.
 '   ThisAddIn.WebAgent.vb           - WebAgent Word UI for running WebAgentInterpreter scripts.
 '   ThisAddIn.WebExtension.vb       - Localhost HTTP listener (browser extension → Word insertion).
@@ -222,8 +262,8 @@
 '                                     Paragraph grouping, token-safe batching, context windows, pure-text LLM,
 '                                     optional formatting marker mode, and Word compare for correction mode.
 '   ThisAddIn.TranslatePresentations.vb - Batch translation / correction of PowerPoint `.pptx` files via
-'                                     OpenXML DrawingML (<a:t> nodes); reuses the marker-based formatting
-'                                     logic from TranslateDocuments; processes all slides and notes slides.
+'                                     OpenXML DrawingML (<a:t> nodes); reuses marker-based formatting logic;
+'                                     processes all slides and notes slides.
 '   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
 '   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
 '   VBA Helper\RI_Helper_Code_Word.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).
@@ -240,127 +280,107 @@
 '   Form1.vb (frmAIChat)            - Excel chat UI: include worksheet/selection, optional write access,
 '                                     model switch, inline command parsing/execution against sheet.
 '                                     Classes: ParsedCommand.
-'   ThisAddIn.Pane.vb               - Task pane workflow + IntelligentMerge callback; applies parsed
-'                                     instructions to sheet.
-'   ThisAddIn.ExcelHelpers.vb       - Row height adjustment (including merged cells), legacy comment (note)
-'                                     shape sizing, and multi-pattern regex search/replace across ranges.
-'   ThisAddIn.Helpers.vb            - Cell protection detection, text extraction from ranges, undo
-'                                     functionality, runtime string interpolation, and VBA module validation.
-'   ThisAddIn.MenuContext.vb        - Context menu creation (RIMenu) with submenu population, keyboard
-'                                     shortcut assignment via INI settings, and VBA helper integration.
-'   ThisAddIn.Processing.vb         - Cell/range LLM processing pipeline: individual cell iteration,
-'                                     range-level serialization, batch file processing, and worksheet
-'                                     content extraction with undo state tracking.
-'   ThisAddIn.Processing.InsertIntoWorksheet.vb - Parses LLM response for cell directives ([Cell:],
-'                                     [Formula:], [Value:], [Comment:]) and applies them to the active
-'                                     worksheet with undo state capture and locale-aware formula handling.
+'   ThisAddIn.Pane.vb               - Task pane workflow + IntelligentMerge callback; applies parsed instructions to sheet.
+'   ThisAddIn.ExcelHelpers.vb       - Row height adjustment (including merged cells), legacy comment shape sizing,
+'                                     and multi-pattern regex search/replace across ranges.
+'   ThisAddIn.Helpers.vb            - Cell protection detection, text extraction from ranges, undo functionality,
+'                                     runtime string interpolation, and VBA module validation.
+'   ThisAddIn.MenuContext.vb        - Context menu creation (RIMenu) with submenu population, keyboard shortcut
+'                                     assignment via INI settings, and VBA helper integration.
+'   ThisAddIn.Processing.vb         - Cell/range LLM processing pipeline: individual cell iteration, range-level
+'                                     serialization, batch file processing, and worksheet content extraction with undo tracking.
+'   ThisAddIn.Processing.InsertIntoWorksheet.vb - Parses LLM response for cell directives ([Cell:], [Formula:],
+'                                     [Value:], [Comment:]) and applies them to the active worksheet with
+'                                     undo state capture and locale-aware formula handling.
 '   ThisAddIn.FileHelpers.vb        - Excel file ingestion helpers (txt/rtf/doc/docx/pdf + OCR) and GetFileName().
 '   DragDropForm.vb                 - File/folder drag & drop selector (FileOnly/DirectoryOnly/Both modes).
 '   ThisAddIn.FactExtractor.vb      - Fact extraction UI wired to SharedLibrary.FactExtractionService;
-'                                     instruction/schema library loading, merge resolution, multi-file
-'                                     folder batch processing, date clamping, sorting, and Excel output.
-'   ThisAddIn.CSVAnalyzer.vb        - CSV/TXT analysis via LLM with dynamic column selection, chunked
-'                                     processing, progress reporting, and optional secondary model use;
-'                                     writes structured results into the active Excel worksheet.
-'   ThisAddIn.FileRenamer.vb        - AI-assisted file renaming: instruction library loading, optional
-'                                     reference document, LLM-based name generation, sanitization,
-'                                     uniqueness enforcement, and summary reporting.
+'                                     instruction/schema library loading, merge resolution, batch processing,
+'                                     date clamping, sorting, and Excel output.
+'   ThisAddIn.CSVAnalyzer.vb        - CSV/TXT analysis via LLM with dynamic column selection, chunked processing,
+'                                     progress reporting, and optional secondary model use; writes structured
+'                                     results into the active worksheet.
+'   ThisAddIn.FileRenamer.vb        - AI-assisted file renaming: instruction library loading, optional reference
+'                                     document, LLM-based name generation, sanitization, uniqueness enforcement,
+'                                     and summary reporting.
 '   BridgeSubs.vb                   - COM-visible automation surface for external scripts/macros.
 '   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer).
 '   VBA Helper\RI_Helper_Code_Excel.bas - VBA macro helper for keyboard shortcuts (calls VSTO add-in methods).
 '
 ' [Red Ink for Outlook]
 '   ThisAddIn.vb                    - VSTO entry point: startup sequencing (two-phase initialization),
-'                                     OLE message filter (OleMessageFilter class), UI thread marshaling,
-'                                     config bridge, explorer/inspector lifecycle, power mode watcher,
-'                                     delayed startup with fallback timer, COM retry logic (ComRetry).
+'                                     OLE message filter, UI-thread marshaling, config bridge, explorer/inspector
+'                                     lifecycle, power mode watcher, delayed startup, COM retry logic.
 '   ThisAddIn.Properties.vb         - Context holder (SharedContext) + Override() helpers + InitialConfigFailed.
 '   ThisAddIn.Commands.vb           - Email processing commands (MailReply, MailSumup, Translate, Correct,
 '                                     Improve, Shorten, Freestyle, etc.) and clipboard helpers.
 '                                     Includes email-context resolution, chain summarization, markup strategies.
-'   ThisAddIn.Commands.InboxBoard.vb - Visual Kanban-style board for categorized Inbox emails rendered in
-'                                     WebView2. Supports drag-and-drop category changes (normal + Ctrl+drag),
-'                                     conversation grouping, flag support, board-folder organization, AI
-'                                     summary generation, dark/light theme, search, column filters, column
-'                                     reorder, field toggles, sort per column, and persisted settings via
-'                                     My.Settings.
-'   ThisAddIn.Commands.MailMover.vb - AI-assisted mail sorting: scans Inbox/Sent Items, LLM-based folder
-'                                     assignment with batched calls, DPI-aware review dialog with ComboBox
-'                                     per row, confidence color-coding, undo support, and async processing.
+'   ThisAddIn.Commands.InboxBoard.vb - Visual Kanban-style board for categorized Inbox emails rendered in WebView2.
+'                                     Supports drag-and-drop category changes, conversation grouping, flag support,
+'                                     board-folder organization, AI summary generation, dark/light theme, search,
+'                                     column filters/reorder, field toggles, sort per column, and persisted settings.
+'   ThisAddIn.Commands.MailMover.vb - AI-assisted mail sorting: scans Inbox/Sent Items, LLM-based folder assignment,
+'                                     DPI-aware review dialog with ComboBox per row, confidence color-coding,
+'                                     undo support, and async processing.
+'   ThisAddIn.M365SearchForm.vb     - M365 mail search UI with search, sign-in/out, AI search, and open-in-Outlook.
 '   ThisAddIn.Helpers.vb            - Shared helper routines (text diff, HTML/Markdown conversion, dialogs).
 '   ThisAddIn.VarHelpers.vb         - Variable and interaction helpers: user-driven selection capture and
-'                                     comparison of two text ranges inside the Outlook compose editor
-'                                     (WordEditor) using Word compare-docs or DiffPlex inline diff.
+'                                     comparison of two text ranges inside the Outlook compose editor (WordEditor)
+'                                     using Word compare-docs or DiffPlex inline diff.
 '   ThisAddIn.Processing.vb         - Text processing helpers: Word-based document comparison, inline diff
 '                                     (DiffPlex) with custom markup tags, Markdown conversion from Word
 '                                     formatting, formatted insertion routines, RTF-to-plain-text conversion,
 '                                     markup tag parsing, and word count.
 '   ThisAddIn.Tooling.vb            - Model-agnostic tool/function-calling loop for LLM interactions:
-'                                     tool loop orchestration, tool call parsing/extraction, internal
-'                                     (retrieve_web_content with SSRF safeguards) and external tool
-'                                     execution, tool selection/persistence, and diagnostics logging.
-'   ThisAddIn.Autopilot.vb          - Inky AutoPilot: AI mail watcher monitoring incoming e-mails via
-'                                     NewMailEx event. Dual-mode (AutoPilot auto-send / CoPilot approval).
-'                                     Filter engine with domain/sender/subject wildcards, anti-loop safeguards,
-'                                     per-sender cooldown, thread depth limits, and dashboard via LogWindow.
-'                                     Catch-up processing for recent mailbox history since last processed
-'                                     timestamp. Queue with attachment-based category classification, rolling
-'                                     timing estimates, and active-job progress notifications. Web grounding
-'                                     support. Voicemail processing (transcription via model audio capability,
-'                                     caller ID CSV mapping). Scheduler lifecycle (start/stop timer alongside
-'                                     session). Reply handling with optional generated attachments and
-'                                     "Sources used" footer. Security model with per-mail isolated temp dirs.
-'   ThisAddIn.AutoPilot.Config.vb   - AutoPilot configuration data class and startup dialog: model selection,
-'                                     filter rules, restrictions, tool selection, EnableWebGrounding,
-'                                     EnableScheduler, EnableVoicemailProcessing, ReprocessLookbackHours,
-'                                     IsUnattended mode, and My.Settings persistence.
-'   ThisAddIn.AutoPilot.Tools.vb    - AutoPilot-specific internal tools for document processing and attachment
-'                                     handling: process/comment Word documents, extract PDF text, merge/split
-'                                     PDFs, read/list/describe attachments, compare Word documents, create PDF
-'                                     from text, extract Excel data, add PDF watermark, word-to-PDF conversion,
-'                                     pdf-to-Word conversion, search in attachments, summarize thread, create
-'                                     Word/Excel/PowerPoint/code files, extract data from attachments, redact/
-'                                     overlay PDFs, create audio files, generate images, web grounding,
-'                                     manage scheduled tasks, and report inability. Includes attachment caching
-'                                     and scheduler integration via ThisAddIn.AutoPilot.Scheduler.vb.
-'   ThisAddIn.AutoPilot.Scheduler.vb - AutoPilot Scheduler: persistent JSON-based task store alongside
-'                                     redink.ini. CRUD operations (create, list, get, update, delete, pause,
-'                                     resume) driven by LLM via manage_scheduled_tasks tool. iCalendar-style
-'                                     RRULE recurrence with lightweight evaluator. Periodic timer checks for
-'                                     due tasks; catch-up execution on AutoPilot start. Task execution reuses
-'                                     the LLM + tooling pipeline with e-mail delivery of results. Per-task
-'                                     file attachment storage. Local Chat access gated by INI flag.
-'   ThisAddIn.AutoPilot.CommentProcessor.vb - Adds Word comment bubbles to DOCX via OpenXML (no Word interop):
-'                                     extracts text, sends to LLM with SP_Add_Bubbles prompt, parses
-'                                     text@@comment§§§ response, inserts commentRangeStart/End elements.
-'   ThisAddIn.AutoPilot.DocProcessor.vb - OpenXML document-processing engine for DOCX/PPTX/XLSX attachments:
-'                                     extracts processable text units, batches with context windows for LLM,
-'                                     parses structured responses, writes updates back. DOCX run boundary
-'                                     markers (| and ‖), sub-part coverage (headers/footers/comments/
-'                                     footnotes/endnotes). PPTX slide and notes slide processing. XLSX
-'                                     worksheet cells, formulas, shared strings with on-demand creation.
-'   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF annotation comments (highlight + popup) using
-'                                     PdfPig for text extraction with positions and PdfSharp for annotation
-'                                     injection. Multi-tier text matching (exact, case-insensitive, normalized,
-'                                     fuzzy prefix). Unmatched comments placed as sticky notes.
-'   LogWindow.vb                    - Modeless tooling log UI: RichTextBox log with Cancel/Close, Keep Open,
-'                                     Copy, Clear, Abort Job buttons; thread-safe updates; auto-close countdown.
-'   ThisAddIn.WebExtension.vb       - "Inky" local web UI + API route handler, job scheduling,
-'                                     markdown→HTML rendering, model switching (primary/secondary/alternate),
-'                                     file upload/extraction, browser sanitization, suspend/resume guards.
-'                                     Classes: LlmJob, InkyState, ChatTurn.
-'   ThisAddIn.WebExtension.Agent.vb - Chat Agent mode: provides AutoPilot document-processing tooling
-'                                     to the browser-based local chat. Loads multiple files, executes
-'                                     LLM tooling loop, collects output files to Desktop\Inky folder.
-'   ThisAddIn.WebExtension.InkyPlay.vb - Four arcade-style security awareness mini games served under
-'                                     /inky/play: Inbox Invaders, Phish Pong, Data Defender, Risk Stack.
-'                                     LLM-generated phishing/legitimate email content; persisted high scores.
-'   ThisAddIn.WebExtension.ListenerAndPower.vb
-'                                   - HttpListener lifecycle, suspend/resume handling, watchdog recovery,
-'                                     stuck detection. Classes: PowerNotificationWindow.
-'   ThisAddIn.WebExtension.FileHelpers.vb
-'                                   - Office/text extraction helpers for browser file uploads
-'                                     (Word/Excel/PPT/textlike). Sandboxed OpenXML readers with COM
-'                                     Interop fallback for legacy formats. Encoding-smart file reading.
+'                                     orchestration, tool call parsing/extraction, internal and external tool execution,
+'                                     tool selection/persistence, and diagnostics logging.
+'   ThisAddIn.Tooling.ToolExecutionContext.vb - Per-run tooling state, sequencing, retries, workflow metadata, and logging.
+'   ThisAddIn.Tooling.Logging.vb    - Reduced file-based logger for tooling operations with nested session depth support.
+'   ThisAddIn.Tooling.Memory.vb     - Memory grounding mode resolution and classification for the tooling loop.
+'   ThisAddIn.Tooling.M365.vb       - Outlook host adapter for shared Microsoft 365 tools and source-link extraction.
+'   ThisAddIn.Tooling.Sources.vb    - Knowledge Store tool naming, store discovery, fuzzy matching, and trigger building.
+'   ThisAddIn.Autopilot.vb          - Inky AutoPilot: AI mail watcher monitoring incoming e-mails via NewMailEx.
+'                                     Dual-mode (AutoPilot auto-send / CoPilot approval), filter engine with
+'                                     domain/sender/subject wildcards, anti-loop safeguards, per-sender cooldown,
+'                                     thread depth limits, dashboard, catch-up processing, attachment classification,
+'                                     scheduler lifecycle, voicemail processing, web grounding, and reply handling.
+'   ThisAddIn.AutoPilot.Config.vb    - AutoPilot configuration data class and startup dialog: model selection,
+'                                     filter rules, restrictions, tool selection, web grounding, scheduler,
+'                                     voicemail processing, lookback, unattended mode, and settings persistence.
+'   ThisAddIn.AutoPilot.Tools.vb     - AutoPilot internal tools for document processing and attachment handling:
+'                                     process/comment Word docs, extract PDF text, merge/split PDFs, read/list/describe
+'                                     attachments, compare Word docs, create PDF from text, extract Excel data,
+'                                     add PDF watermark, Word/PDF conversion, search attachments, summarize thread,
+'                                     create Word/Excel/PowerPoint/code files, redact/overlay PDFs, create audio files,
+'                                     generate images, manage scheduled tasks, and report inability.
+'   ThisAddIn.AutoPilot.Scheduler.vb  - JSON-based scheduled task store, CRUD operations, RRULE recurrence,
+'                                     periodic due-task checks, catch-up execution, per-task attachments, and LLM-driven
+'                                     `manage_scheduled_tasks` support.
+'   ThisAddIn.AutoPilot.CommentProcessor.vb - Adds Word comment bubbles to DOCX via OpenXML, parses comment prompts,
+'                                     and inserts comment range markers.
+'   ThisAddIn.AutoPilot.DocProcessor.vb - OpenXML document-processing engine for DOCX/PPTX/XLSX attachments,
+'                                     with batching, context windows, structured response parsing, and updates.
+'   ThisAddIn.AutoPilot.PDFCommentProcessor.vb - Adds PDF annotation comments (highlight + popup) using PdfPig/PdfSharp.
+'   ThisAddIn.AutoPilot.UserStorageDashboard.vb - Admin dashboard for per-user AutoPilot storage (memory + files).
+'   ThisAddIn.WebExtension.vb       - "Inky" local web UI + API route handler, job scheduling, markdown→HTML rendering,
+'                                     model switching, file upload/extraction, browser sanitization, suspend/resume guards.
+'   ThisAddIn.WebExtension.Agent.vb  - Chat Agent mode: provides AutoPilot document-processing tooling to browser chat,
+'                                     loads multiple files, runs the LLM tooling loop, and collects output files.
+'   ThisAddIn.WebExtension.InkyPlay.vb - Four arcade-style security awareness mini games served under /inky/play:
+'                                     Inbox Invaders, Phish Pong, Data Defender, Risk Stack.
+'   ThisAddIn.WebExtension.ListenerAndPower.vb - HttpListener lifecycle, suspend/resume handling, watchdog recovery,
+'                                     stuck detection, and power notifications.
+'   ThisAddIn.WebExtension.FileHelpers.vb - Office/text extraction helpers for browser file uploads with sandboxed
+'                                     OpenXML readers and COM fallback for legacy formats.
 '   Ribbon1.vb                      - Ribbon callbacks (buttons → Commands layer, dynamic enable/disable).
 '
+' =============================================================================
+' NOTES
+' =============================================================================
+'
+' - Knowledge Store modules are shared by Word and Outlook for indexing, wiki maintenance, and prompt-triggered retrieval.
+' - Agent modules provide discovered skills, agents, memory, and lazy tool loading for the model-agnostic tooling loops.
+' - M365 modules centralize Microsoft 365 Graph integration and are wrapped separately by Word and Outlook hosts.
+' - Tooling loops are now split into smaller host-specific files for execution state, logging, memory grounding, and source handling.
+' - Excel remains the lightest host, primarily focused on worksheet document workflows and file-based AI processing.
+' - Outlook now includes the most extensive automation surface because it combines mail, AutoPilot, web extension, M365, and Knowledge Store wiring.

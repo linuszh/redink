@@ -132,7 +132,8 @@ Public Class DiscussInky
 
     Private Const AssistantName As String = Globals.ThisAddIn.AN6
     Private Const PersistedKnowledgeFileName As String = "redink-discussknowledge.txt"
-    Private Const ToolTrigger As String = "(t)"
+    Private Const ToolTrigger As String = "(a)"
+    Private Const KBTrigger As String = "(kb)"  ' Trigger to supplement with knowledge store results.
 
     ' Default fallback persona used when no persona library is configured
     Private Const DefaultPersonaName As String = "Discussion Partner"
@@ -154,9 +155,16 @@ Public Class DiscussInky
 
     ' Supported file extensions for knowledge loading
     Private Shared ReadOnly SupportedKnowledgeExtensions As String() = {
-        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
-        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
-        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+        ".txt", ".rtf", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm",
+        ".md", ".yaml", ".yml",
+        ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql",
+        ".doc", ".docx", ".xlsx", ".pptx",
+        ".pdf",
+        ".eml", ".msg",
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".svg",
+        ".mp3", ".wav", ".ogg", ".flac", ".m4a", ".aac", ".wma", ".opus", ".webm",
+        ".mp4", ".avi", ".mkv", ".mov", ".wmv"
     }
 
     ' Random words for response variety
@@ -236,6 +244,7 @@ Public Class DiscussInky
     Private ReadOnly _btnSortOut As Button = New Button() With {.Text = "Sort It Out", .AutoSize = True}
     Private ReadOnly _btnTools As Button = New Button() With {.Text = Globals.ThisAddIn.ToolFriendlyName, .AutoSize = True}
     Private ReadOnly _chkEnableTooling As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}", .AutoSize = True}
+    Private ReadOnly _chkAdvancedTools As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Advanced tools", .AutoSize = True}
     Private ReadOnly _chkShowToolingLog As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Tooling log", .AutoSize = True, .Checked = True}
     Private ReadOnly _chkInkyMemory As System.Windows.Forms.CheckBox = New System.Windows.Forms.CheckBox() With {.Text = "Inky Memory", .AutoSize = True, .Checked = My.Settings.DiscussInkyMemory}
     Private ReadOnly _lnkEditMemory As New LinkLabel() With {
@@ -333,6 +342,10 @@ Public Class DiscussInky
         Me.StartPosition = FormStartPosition.Manual
         Me.MinimumSize = New System.Drawing.Size(780, 480)
         Me.Font = New System.Drawing.Font("Segoe UI", 9.0F)
+        ' Do NOT set Me.TopMost = True.
+        ' Child dialogs are parented via SharedMethods.PushDialogOwner(Me) and the
+        ' shared Show* helpers already re-assert TopMost themselves on Shown,
+        ' so they will always come to the foreground even over Word.
         Try
             Me.Icon = Icon.FromHandle(New Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard)).GetHicon())
         Catch
@@ -382,6 +395,7 @@ Public Class DiscussInky
         pnlButtons.Controls.Add(_btnSortOut)
         pnlButtons.Controls.Add(_btnTools)
         pnlButtons.Controls.Add(_chkEnableTooling)
+        pnlButtons.Controls.Add(_chkAdvancedTools)
         pnlButtons.Controls.Add(_chkIncludeActiveDoc)
         pnlButtons.Controls.Add(_chkPersistKnowledge)
         pnlButtons.Controls.Add(_chkShowToolingLog)
@@ -401,7 +415,6 @@ Public Class DiscussInky
         ' Event handlers
         AddHandler Me.Load, AddressOf OnLoadForm
         AddHandler Me.FormClosing, AddressOf OnFormClosing
-        AddHandler Me.Activated, AddressOf OnActivated
         AddHandler _btnSend.Click, AddressOf OnSend
         AddHandler _btnClear.Click, AddressOf OnClear
         AddHandler _btnSendToDoc.Click, AddressOf OnSendToDoc
@@ -412,6 +425,7 @@ Public Class DiscussInky
         AddHandler _btnKnowledge.Click, AddressOf OnLoadKnowledge
         AddHandler _btnAlternateModel.Click, AddressOf OnAlternateModelClick
         AddHandler _txtInput.KeyDown, AddressOf OnInputKeyDown
+        AddHandler _txtInput.KeyPress, AddressOf OnInputKeyPress
         AddHandler _chat.DocumentCompleted, AddressOf Chat_DocumentCompleted
         AddHandler _chat.Navigating, AddressOf Chat_Navigating
         AddHandler _chat.NewWindow, AddressOf Chat_NewWindow
@@ -421,9 +435,11 @@ Public Class DiscussInky
         AddHandler _btnSortOut.Click, AddressOf OnSortOutClick
         AddHandler _btnTools.Click, AddressOf OnToolsClick
         AddHandler _chkEnableTooling.CheckedChanged, AddressOf OnEnableToolingChanged
+        AddHandler _chkAdvancedTools.CheckedChanged, AddressOf OnAdvancedToolsChanged
         AddHandler _chkShowToolingLog.CheckedChanged, AddressOf OnShowToolingLogChanged
         AddHandler _chkInkyMemory.CheckedChanged, AddressOf OnInkyMemoryChanged
         AddHandler _lnkEditMemory.LinkClicked, AddressOf OnEditMemoryClicked
+        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
     End Sub
 
@@ -557,12 +573,40 @@ Public Class DiscussInky
         _txtInput.SelectAll()
     End Sub
 
+    ' Ambient dialog-owner scope. Lifetime is bound to the form's window handle
+    ' (NOT to Activated/Deactivate) because those events are pumped asynchronously:
+    ' when a child modal returns, the next user line of code can call ShowCustom...
+    ' BEFORE Activated has fired, which would leave the stack empty and cause the
+    ' new dialog to be parented to the Office host (Word) instead of this form.
+    Private _ownerScope As IDisposable
+
     ''' <summary>
-    ''' Handles form activation; TopMost behavior is disabled.
+    ''' Pushes this form onto the SharedLibrary dialog-owner stack as soon as it
+    ''' has a window handle, so every shared modal dialog opened from this form
+    ''' (or after a child modal returns) is correctly parented here.
     ''' </summary>
-    Private Sub OnActivated(sender As Object, e As EventArgs)
-        ' No longer applying TopMost behavior
+    Protected Overrides Sub OnHandleCreated(e As EventArgs)
+        MyBase.OnHandleCreated(e)
+        If _ownerScope Is Nothing Then
+            _ownerScope = SharedMethods.PushDialogOwner(Me)
+        End If
     End Sub
+
+    ''' <summary>
+    ''' Pops this form from the SharedLibrary dialog-owner stack when its handle
+    ''' is destroyed (form closing/disposing).
+    ''' </summary>
+    Protected Overrides Sub OnHandleDestroyed(e As EventArgs)
+        Dim scope = _ownerScope
+        _ownerScope = Nothing
+        If scope IsNot Nothing Then
+            Try : scope.Dispose() : Catch : End Try
+        End If
+        MyBase.OnHandleDestroyed(e)
+    End Sub
+
+
+
 
     ''' <summary>
     ''' Persists the 'include active document' checkbox state when changed.
@@ -706,6 +750,7 @@ Public Class DiscussInky
 
         ' Restore tooling checkbox state
         Try : _chkEnableTooling.Checked = My.Settings.DiscussEnableTooling : Catch : _chkEnableTooling.Checked = False : End Try
+        _chkAdvancedTools.Checked = Globals.ThisAddIn.GetDiscussInkyAdvancedToolsEnabled()
 
         ' Tooling log checkbox always reflects the INI setting (not persisted separately)
         _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
@@ -880,7 +925,7 @@ Public Class DiscussInky
 
             If isFile Then
                 ' Single file - use existing logic
-                Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False)
+                Dim result = Await LoadSingleKnowledgeFileAsync(savedPath, False, False, askWorksheetSelection:=True)
                 _knowledgeContent = result.Content
                 _knowledgeFilePath = savedPath
 
@@ -920,28 +965,46 @@ Public Class DiscussInky
                 Dim resultBuilder As New StringBuilder()
                 Dim useDocumentTags = (filesToProcess.Count > 1)
                 Dim loadedCount = 0
-
                 For Each filePath In filesToProcess
                     Try
-                        Dim result = Await LoadSingleKnowledgeFileAsync(filePath, False, True)
+                        Dim askWorksheetSelection As Boolean =
+                        isFile AndAlso
+                        filesToProcess.Count = 1 AndAlso
+                        Path.GetExtension(filePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        Dim result = Await LoadSingleKnowledgeFileAsync(
+                        filePath,
+                        ctx.EnableOCR,
+                        silent:=Not askWorksheetSelection,
+                        askWorksheetSelection:=askWorksheetSelection)
+
                         Dim content = result.Content
 
-                        If String.IsNullOrWhiteSpace(content) Then Continue For
+                        ' Track PDFs that may have incomplete content
+                        If result.PdfMayBeIncomplete Then
+                            ctx.PdfsWithPossibleImages.Add(filePath)
+                        End If
+
+                        If String.IsNullOrWhiteSpace(content) Then
+                            ctx.FailedFiles.Add(filePath)
+                            Continue For
+                        End If
 
                         ctx.GlobalDocumentCounter += 1
-                        loadedCount += 1
+                        ctx.LoadedFiles.Add(Tuple.Create(filePath, content.Length))
 
                         If useDocumentTags Then
                             Dim docNum = ctx.GlobalDocumentCounter
                             Dim fileName = Path.GetFileName(filePath)
-                            resultBuilder.Append($"<document{docNum} name=""{fileName}"">")
-                            resultBuilder.Append(content)
-                            resultBuilder.Append($"</document{docNum}>")
+                            Dim openTag = $"<document{docNum} name=""{fileName}"">"
+                            Dim closeTag = $"</document{docNum}>"
+                            resultBuilder.Append(openTag).Append(content).Append(closeTag)
                         Else
                             resultBuilder.Append(content)
                         End If
-                    Catch
-                        ' Skip failed files silently during restore
+
+                    Catch ex As Exception
+                        ctx.FailedFiles.Add(filePath)
                     End Try
                 Next
 
@@ -991,12 +1054,40 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Repositions the form after monitor/resolution changes.
+    ''' </summary>
+    Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New MethodInvoker(
+                    Sub()
+                        If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                    End Sub))
+            Else
+                SharedMethods.EnsureVisibleOnScreen(Me)
+            End If
+        Catch
+        End Try
+    End Sub
+
+    ''' <summary>
     ''' Persists geometry, transcript, persona, mission, knowledge path, and checkbox state on close.
     ''' </summary>
     Private Sub OnFormClosing(sender As Object, e As FormClosingEventArgs)
         Try
+            Dim scope = _ownerScope
+            _ownerScope = Nothing
+            If scope IsNot Nothing Then
+                Try : scope.Dispose() : Catch : End Try
+            End If
             PersistTranscriptLimited()
             PersistChatHtml()
+            Try
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+            Catch
+            End Try
             If Me.WindowState = FormWindowState.Normal Then
                 My.Settings.DiscussFormLocation = Me.Location
                 My.Settings.DiscussFormSize = Me.Size
@@ -1015,6 +1106,11 @@ Public Class DiscussInky
                 pathToSave = pathToSave.Substring(0, pathToSave.Length - " (directory)".Length)
             End If
             My.Settings.DiscussKnowledgePath = pathToSave
+
+            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
+                _chkAdvancedTools.Checked)
 
             My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
             My.Settings.Save()
@@ -1196,7 +1292,7 @@ Public Class DiscussInky
 #Region "Tooling Support"
 
     ''' <summary>
-    ''' Updates enabled state of tooling controls based on current model's tooling support.
+    ''' Updates enabled state of tooling controls based on current model support and "(t)" availability.
     ''' </summary>
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
@@ -1207,21 +1303,22 @@ Public Class DiscussInky
             currentConfig = SharedMethods.GetCurrentConfig(_context)
         End If
 
-        Dim supportsTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsToolTrigger As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
 
-        _chkEnableTooling.Enabled = supportsTooling
-        _btnTools.Enabled = supportsTooling
+        Dim toolingUiAvailable As Boolean = supportsCurrentModelTooling OrElse supportsToolTrigger
 
-        ' Log checkbox is only enabled when the current model actually supports tooling
-        ' (not merely because a ToolDefaultModel exists — (t) uses it transiently)
-        _chkShowToolingLog.Enabled = supportsTooling
+        _chkEnableTooling.Enabled = toolingUiAvailable
+        _btnTools.Enabled = toolingUiAvailable
+        _chkAdvancedTools.Enabled = toolingUiAvailable AndAlso _chkEnableTooling.Checked
+        _chkShowToolingLog.Enabled = toolingUiAvailable
 
-        If Not supportsTooling Then
+        If Not toolingUiAvailable Then
             _chkEnableTooling.Checked = False
             _selectedToolsForChat = Nothing
         End If
 
-        ' Only set checkbox from INI on first initialization; preserve user's mid-session toggle afterward
         If Not _toolingControlsInitialized Then
             _chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
             _toolingControlsInitialized = True
@@ -1260,7 +1357,8 @@ Public Class DiscussInky
     ''' </summary>
     Private Sub OnToolsClick(sender As Object, e As EventArgs)
         Try
-            Dim selectedTools = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=True, Globals.ThisAddIn.ToolFriendlyName)
+            Dim selectedTools = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
+
             If selectedTools IsNot Nothing Then
                 _selectedToolsForChat = selectedTools
             End If
@@ -1273,11 +1371,27 @@ Public Class DiscussInky
     ''' Handles the Enable Tooling checkbox change.
     ''' </summary>
     Private Sub OnEnableToolingChanged(sender As Object, e As EventArgs)
-        If Not _chkEnableTooling.Checked Then
-            _selectedToolsForChat = Nothing
-        End If
-        ' Log checkbox enabled state tracks the enable-tooling checkbox
-        _chkShowToolingLog.Enabled = _chkEnableTooling.Checked AndAlso _chkEnableTooling.Enabled
+        Try
+            My.Settings.DiscussEnableTooling = _chkEnableTooling.Checked
+            My.Settings.Save()
+        Catch
+        End Try
+
+        _selectedToolsForChat = Nothing
+        _chkAdvancedTools.Enabled = _chkEnableTooling.Checked
+        UpdateToolingControlsState()
+    End Sub
+
+    Private Sub OnAdvancedToolsChanged(sender As Object, e As EventArgs)
+        Try
+            Globals.ThisAddIn.PersistDiscussInkyToolSelection(
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedMainToolNames"))),
+                Globals.ThisAddIn.SplitPersistedToolNames(CStr(My.Settings("SelectedAdvancedToolNames"))),
+                _chkAdvancedTools.Checked)
+        Catch
+        End Try
+
+        _selectedToolsForChat = Nothing
     End Sub
 
     ''' <summary>
@@ -1304,78 +1418,10 @@ Public Class DiscussInky
             Return True
         End If
 
-        _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(forceDialog:=False)
+        _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=False)
         Return _selectedToolsForChat IsNot Nothing AndAlso _selectedToolsForChat.Count > 0
     End Function
 
-    ''' <summary>
-    ''' Checks whether a "ToolDefaultModel" entry exists in the alternate models INI
-    ''' without applying it to the shared context. Used for UI hints and pre-validation.
-    ''' </summary>
-    ''' <returns>True if a model with ToolDefaultModel=True is defined; otherwise False.</returns>
-    Private Function IsToolDefaultModelAvailable() As Boolean
-        Try
-            Dim iniPath As String = _context.INI_AlternateModelPath
-            If String.IsNullOrWhiteSpace(iniPath) Then Return False
-
-            iniPath = SharedMethods.ExpandEnvironmentVariables(iniPath)
-            If Not System.IO.File.Exists(iniPath) Then Return False
-
-            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                "true", "yes", "wahr", "ja", "on", "1"
-            }
-
-            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-
-            For Each rawLine In System.IO.File.ReadAllLines(iniPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
-                    Continue For
-                End If
-
-                ' Section header
-                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                    If currentDict.ContainsKey("ToolDefaultModel") Then
-                        Dim raw As String = currentDict("ToolDefaultModel")
-                        If raw IsNot Nothing Then
-                            Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                            Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                            raw = raw.Trim()
-                            If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                                raw = raw.Substring(1, raw.Length - 2).Trim()
-                            End If
-                            If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                        End If
-                    End If
-                    currentDict.Clear()
-                    Continue For
-                End If
-
-                Dim tokens = line.Split(New Char() {"="c}, 2)
-                If tokens.Length = 2 Then
-                    currentDict(tokens(0).Trim()) = tokens(1).Trim()
-                End If
-            Next
-
-            ' Check final section
-            If currentDict.ContainsKey("ToolDefaultModel") Then
-                Dim raw As String = currentDict("ToolDefaultModel")
-                If raw IsNot Nothing Then
-                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                    raw = raw.Trim()
-                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                        raw = raw.Substring(1, raw.Length - 2).Trim()
-                    End If
-                    If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                End If
-            End If
-
-            Return False
-        Catch
-            Return False
-        End Try
-    End Function
 
 #End Region
 
@@ -1844,6 +1890,31 @@ Public Class DiscussInky
 
 #Region "Knowledge File Management"
 
+
+    Private Sub DeleteCurrentKnowledge()
+        _knowledgeContent = Nothing
+        _knowledgeFilePath = Nothing
+        _cachedKnowledgeContent = Nothing
+        _cachedKnowledgeFilePath = Nothing
+
+        Try
+            Dim persistPath = GetPersistedKnowledgeFilePath()
+            If File.Exists(persistPath) Then
+                File.Delete(persistPath)
+            End If
+        Catch
+        End Try
+
+        Try
+            My.Settings.DiscussKnowledgePath = ""
+            My.Settings.Save()
+        Catch
+        End Try
+
+        UpdateWindowTitle()
+        AppendSystemMessage("Knowledge deleted.")
+    End Sub
+
     ''' <summary>
     ''' Button handler that launches the knowledge file/directory picker.
     ''' </summary>
@@ -1879,30 +1950,7 @@ Public Class DiscussInky
                         "Yes, delete knowledge", "No, keep it")
 
                     If answer = 1 Then
-                        ' Delete knowledge
-                        _knowledgeContent = Nothing
-                        _knowledgeFilePath = Nothing
-                        _cachedKnowledgeContent = Nothing
-                        _cachedKnowledgeFilePath = Nothing
-
-                        ' Delete persisted knowledge file if it exists
-                        Try
-                            Dim persistPath = GetPersistedKnowledgeFilePath()
-                            If File.Exists(persistPath) Then
-                                File.Delete(persistPath)
-                            End If
-                        Catch
-                        End Try
-
-                        ' Clear the saved path in settings
-                        Try
-                            My.Settings.DiscussKnowledgePath = ""
-                            My.Settings.Save()
-                        Catch
-                        End Try
-
-                        UpdateWindowTitle()
-                        AppendSystemMessage("Knowledge deleted.")
+                        DeleteCurrentKnowledge()
                     End If
                 End If
                 Return
@@ -1997,7 +2045,33 @@ Public Class DiscussInky
 
             For Each filePath In filesToProcess
                 Try
-                    Dim result = Await LoadSingleKnowledgeFileAsync(filePath, ctx.EnableOCR, True)
+                    Dim askWorksheetSelection As Boolean =
+                        isFile AndAlso
+                        filesToProcess.Count = 1 AndAlso
+                        Path.GetExtension(filePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                    Dim result = Await LoadSingleKnowledgeFileAsync(
+                        filePath,
+                        ctx.EnableOCR,
+                        silent:=Not askWorksheetSelection,
+                        askWorksheetSelection:=askWorksheetSelection)
+
+                    If result.UserCancelled Then
+                        RemoveAssistantThinking()
+
+                        If Not String.IsNullOrWhiteSpace(_knowledgeContent) Then
+                            Dim answer = ShowCustomYesNoBox(
+                                "No worksheet was selected. Do you want to delete the currently loaded knowledge?",
+                                "Yes, delete knowledge", "No, keep it")
+
+                            If answer = 1 Then
+                                DeleteCurrentKnowledge()
+                            End If
+                        End If
+
+                        Return
+                    End If
+
                     Dim content = result.Content
 
                     ' Track PDFs that may have incomplete content
@@ -2126,49 +2200,42 @@ Public Class DiscussInky
     End Function
 
     ''' <summary>
-    ''' Loads a single knowledge file, optionally with OCR for PDFs.
+    ''' Loads a single knowledge file via the shared file importer used by Freestyle.
+    ''' This aligns DiscussInky with sandboxed readers and shared file-type support.
     ''' </summary>
     ''' <param name="filePath">Path to the file to load.</param>
     ''' <param name="enableOCR">Whether to enable OCR for PDF files.</param>
     ''' <param name="silent">Whether to suppress error messages.</param>
-    ''' <returns>Tuple of (content, pdfMayBeIncomplete) where pdfMayBeIncomplete is True if PDF heuristics suggest images but OCR was not performed.</returns>
-    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+    ''' <param name="askWorksheetSelection">
+    ''' For Excel files, whether to prompt the user to select one worksheet or all worksheets.
+    ''' </param>
+    ''' <returns>
+    ''' Tuple of (content, pdfMayBeIncomplete) where pdfMayBeIncomplete is True if PDF
+    ''' heuristics suggest images/scans but OCR was not performed.
+    ''' </returns>
+    Private Async Function LoadSingleKnowledgeFileAsync(filePath As String,
+                                                        enableOCR As Boolean,
+                                                        silent As Boolean,
+                                                        Optional askWorksheetSelection As Boolean = False) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean, UserCancelled As Boolean))
         If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
-            Return ("", False)
+            Return ("", False, False)
         End If
 
         Try
-            Dim ext = Path.GetExtension(filePath).ToLowerInvariant()
+            Dim result = Await Globals.ThisAddIn.GetFileContentEx(
+                optionalFilePath:=filePath,
+                Silent:=silent,
+                DoOCR:=enableOCR,
+                AskUser:=False,
+                AskWorksheetSelection:=askWorksheetSelection)
 
-            Select Case ext
-                Case ".txt", ".md", ".log", ".ini", ".csv", ".json", ".xml", ".html", ".htm",
-                     ".vb", ".cs", ".js", ".ts", ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
-                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
-
-                Case ".rtf"
-                    Return (ReadRtfAsText(filePath), False)
-
-                Case ".doc", ".docx"
-                    Return (ReadWordDocument(filePath), False)
-
-                Case ".pdf"
-                    ' Use the extended version that reports if OCR was skipped
-                    Dim pdfResult = Await ReadPdfAsTextEx(filePath, True, enableOCR, False, _context)
-                    Return (pdfResult.Content, pdfResult.OcrWasSkippedDueToHeuristics)
-
-                Case ".pptx"
-                    Return (Globals.ThisAddIn.GetPresentationJson(filePath), False)
-
-                Case Else
-                    ' Try to read as text
-                    Return (File.ReadAllText(filePath, Encoding.UTF8), False)
-            End Select
+            Return (If(result.Content, ""), result.PdfMayBeIncomplete, result.UserCancelled)
 
         Catch ex As Exception
             If Not silent Then
                 AppendSystemMessage($"Error loading {Path.GetFileName(filePath)}: {ex.Message}")
             End If
-            Return ("", False)
+            Return ("", False, False)
         End Try
     End Function
 
@@ -2183,24 +2250,31 @@ Public Class DiscussInky
         Dim userText = _txtInput.Text.Trim()
         If userText.Length = 0 Then Return
 
-        ' Detect and strip ToolTrigger "(t)" from user prompt
-        Dim toolTriggerDetected As Boolean = False
+        ' Detect and strip explicit ToolTrigger "(t)" from user prompt
+        Dim explicitToolTriggerDetected As Boolean = False
         If userText.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-            toolTriggerDetected = True
+            explicitToolTriggerDetected = True
             userText = userText.Replace(ToolTrigger, "").Trim()
 
-            ' If the prompt is now empty after stripping, restore for user to fix
             If String.IsNullOrWhiteSpace(userText) Then
-                _txtInput.Text = userText
+                _txtInput.Text = ToolTrigger
                 Return
             End If
         End If
+
+        Dim promptToStore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
+
+        Try
+            My.Settings.LastPromptDiscussInky = promptToStore
+            My.Settings.Save()
+        Catch
+        End Try
 
         AppendUserHtml(userText)
         _history.Add(("user", userText))
         _txtInput.Clear()
         ShowAssistantThinking()
-        Dim __ = SendAsync(userText, toolTriggerDetected)
+        Dim __ = SendAsync(userText, explicitToolTriggerDetected)
     End Sub
 
     ''' <summary>
@@ -2341,9 +2415,50 @@ Public Class DiscussInky
     End Sub
 
     ''' <summary>
+    ''' Handles slash-triggered prompt library insertion for the DiscussInky input box.
+    ''' </summary>
+    Private Sub OnInputKeyPress(sender As Object, e As KeyPressEventArgs)
+        If e.KeyChar <> "/"c Then Return
+        If Not _context.INI_PromptLib Then Return
+
+        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+            SharedMethods.HandlePromptLibrarySlash(
+                _txtInput,
+                _context.INI_PromptLibPath,
+                _context.INI_PromptLibPathLocal,
+                _context,
+                My.Settings.LastPromptDiscussInky
+            )
+
+        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+            e.Handled = True
+        End If
+    End Sub
+
+    ''' <summary>
     ''' Handles Enter/Escape shortcuts for sending and closing.
     ''' </summary>
     Private Sub OnInputKeyDown(sender As Object, e As KeyEventArgs)
+        If e.Control AndAlso e.KeyCode = Keys.P Then
+            Dim lastPrompt As String = My.Settings.LastPromptDiscussInky
+
+            If Not String.IsNullOrWhiteSpace(lastPrompt) Then
+                Dim insertionIndex As Integer = _txtInput.SelectionStart
+                Dim selectionLength As Integer = _txtInput.SelectionLength
+
+                Dim newText As String =
+                    _txtInput.Text.Remove(insertionIndex, selectionLength).Insert(insertionIndex, lastPrompt)
+
+                _txtInput.Text = newText
+                _txtInput.SelectionStart = insertionIndex + lastPrompt.Length
+                _txtInput.SelectionLength = 0
+            End If
+
+            e.SuppressKeyPress = True
+            e.Handled = True
+            Return
+        End If
+
         If e.KeyCode = Keys.Enter AndAlso Not e.Shift Then
             e.SuppressKeyPress = True
             OnSend(Me, EventArgs.Empty)
@@ -2398,9 +2513,22 @@ Public Class DiscussInky
             sb.Append(" | Knowledge: None loaded")
         End If
 
+        ' Knowledge store hint
+        If Not String.IsNullOrEmpty(Globals.ThisAddIn._context.INI_KnowledgeStorePath) OrElse
+           Not String.IsNullOrEmpty(Globals.ThisAddIn._context.INI_KnowledgeStorePathLocal) Then
+            sb.Append($" | Type '(kb)' to search all stores, '(kb:storename)' for a specific store, or '(kb:tag:...)' for tagged documents")
+        End If
+
         ' ToolTrigger hint
-        If IsToolDefaultModelAvailable() Then
+        Dim toolTriggerAvailable As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+        If toolTriggerAvailable Then
             sb.Append($" | Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request.")
+        End If
+
+        If _context.INI_PromptLib Then
+            sb.Append(" | Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library.")
         End If
 
         AppendSystemMessage(sb.ToString())
@@ -2472,11 +2600,34 @@ Public Class DiscussInky
     ''' <summary>
     ''' Builds the full prompt (persona, mission, knowledge, history, document) and sends it to the LLM.
     ''' Supports one-shot ToolTrigger "(t)" for a single request using the ToolDefaultModel.
+    ''' Also supports implicit "(t)" behavior when Enable Tooling is checked, the current model
+    ''' does not support tooling, and a tooling-capable ToolDefaultModel exists.
     ''' </summary>
     ''' <param name="userText">User's message text.</param>
     ''' <param name="toolTriggerDetected">True if the user included "(t)" in their prompt.</param>
     Private Async Function SendAsync(userText As String, Optional toolTriggerDetected As Boolean = False) As Task
         Try
+            Dim explicitToolTriggerDetected As Boolean = toolTriggerDetected
+            Dim restoreUserText As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userText}".Trim(), userText)
+
+            Dim currentConfig As ModelConfig = Nothing
+            If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                currentConfig = _alternateModelConfig
+            Else
+                currentConfig = SharedMethods.GetCurrentConfig(_context)
+            End If
+
+            Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+            Dim supportsToolTrigger As Boolean =
+                SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+            Dim autoToolTriggerFromCheckbox As Boolean =
+                _chkEnableTooling.Checked AndAlso
+                Not supportsCurrentModelTooling AndAlso
+                supportsToolTrigger
+
+            toolTriggerDetected = explicitToolTriggerDetected OrElse autoToolTriggerFromCheckbox
+
             ' Build system prompt from persona or default
             Dim dateContext = GetDateContext()
             Dim randomWord = GetRandomModifier()
@@ -2506,11 +2657,87 @@ Public Class DiscussInky
                 End If
             End If
 
+            ' (kb) / (kb:...) trigger: Supplement with knowledge store results
+            Dim kbContext As String = Nothing
+            Dim cleanedUserText = userText
+            If KnowledgeTriggerHelper.HasKnowledgeTrigger(cleanedUserText) Then
+                Try
+                    Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(cleanedUserText)
+                    If kbRequest IsNot Nothing Then
+                        Dim strippedUserText = KnowledgeTriggerHelper.StripKnowledgeTrigger(cleanedUserText, kbRequest)
+                        Dim knowledgeTaskPrompt As String = strippedUserText.Trim()
+
+                        If String.IsNullOrWhiteSpace(strippedUserText) Then
+                            If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
+                                cleanedUserText = kbRequest.SearchQuery.Trim()
+                            ElseIf kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0 Then
+                                cleanedUserText = "Answer based on the provided Knowledge Store content, focusing on: " &
+                                      String.Join(", ", kbRequest.Tags)
+                            ElseIf Not String.IsNullOrWhiteSpace(kbRequest.StoreName) Then
+                                cleanedUserText = "Answer based on the provided Knowledge Store content from store '" &
+                                      kbRequest.StoreName & "'."
+                            Else
+                                cleanedUserText = "Answer based on the provided Knowledge Store content."
+                            End If
+                        Else
+                            cleanedUserText = strippedUserText
+                        End If
+
+                        Dim kbResolveOptions As KnowledgeTriggerHelper.KnowledgeResolveOptions = Nothing
+                        If Not String.IsNullOrWhiteSpace(knowledgeTaskPrompt) Then
+                            kbResolveOptions = New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+                    .TaskPrompt = knowledgeTaskPrompt,
+                    .IncludeRelevantExtracts = True,
+                    .IncludeFullDocumentContent = False
+                }
+                        End If
+
+                        Dim kbSplash As New SharedMethods.SplashScreen("Querying Knowledge Store...   ")
+                        kbSplash.Show()
+                        System.Windows.Forms.Application.DoEvents()
+
+                        Dim kbResolved As (Content As String, StatusMessage As String)
+                        Try
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
+                        Finally
+                            If kbSplash.InvokeRequired Then
+                                kbSplash.Invoke(Sub()
+                                                    kbSplash.Close()
+                                                    kbSplash.Dispose()
+                                                End Sub)
+                            Else
+                                kbSplash.Close()
+                                kbSplash.Dispose()
+                            End If
+                        End Try
+
+                        If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
+                            kbContext = kbResolved.Content
+
+                            systemPrompt &= " The following documents from the user's knowledge store are provided as reference material. " &
+                                "Use them to answer the user's question. " &
+                                "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
+                                "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
+                                "Only fall back to wikiPath if no sourcePath is available for that document. " &
+                                "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata."
+
+                            AppendSystemMessage($"Knowledge store: {kbResolved.StatusMessage}")
+                        Else
+                            AppendSystemMessage(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
+                                       "No documents found in the Knowledge Store.",
+                                       $"Knowledge store: {kbResolved.StatusMessage}"))
+                        End If
+                    End If
+                Catch ex As Exception
+                    AppendSystemMessage($"Knowledge store query failed: {ex.Message}")
+                End Try
+            End If
+
             ' Build user prompt with knowledge and context
             Dim sb As New StringBuilder()
 
             sb.AppendLine("User message:")
-            sb.AppendLine(userText)
+            sb.AppendLine(cleanedUserText)
             sb.AppendLine()
 
             ' Include full knowledge document without truncation for smaller docs
@@ -2519,6 +2746,20 @@ Public Class DiscussInky
                 Dim knowledgeText = _knowledgeContent
                 sb.AppendLine(knowledgeText)
                 sb.AppendLine("</Knowledge Base>")
+                sb.AppendLine()
+            End If
+
+            ' Append knowledge store results (supplemental to manually loaded knowledge)
+            If Not String.IsNullOrWhiteSpace(kbContext) Then
+                sb.AppendLine("<Knowledge Store Results>")
+                sb.AppendLine("The following documents from the user's knowledge store are provided as reference material. " &
+                              "Use them as additional reference material alongside any loaded knowledge. " &
+                              "When citing information, ALWAYS prefer the original source file link over the wiki page link. " &
+                              "If a KSDOCUMENT element provides a sourcePath attribute and it is non-empty, ALWAYS cite it as [Source](sourcePath). " &
+                              "Only fall back to wikiPath if no sourcePath is available for that document. " &
+                              "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata.")
+                sb.AppendLine(kbContext)
+                sb.AppendLine("</Knowledge Store Results>")
                 sb.AppendLine()
             End If
 
@@ -2542,69 +2783,41 @@ Public Class DiscussInky
 
             ' ──────────────────────────────────────────────────────────────
             ' ToolTrigger "(t)" - One-Shot Tooling Model
+            ' Also used implicitly when Enable Tooling is checked and only ToolDefaultModel supports tooling
             ' ──────────────────────────────────────────────────────────────
             Dim toolTriggerConfig As ModelConfig = Nothing
 
             If toolTriggerDetected Then
-                If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
+                If Not SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    _context.INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    toolTriggerConfig) Then
+
                     RemoveAssistantThinking()
-                    AppendSystemMessage($"The {ToolTrigger} trigger requires an alternate model configuration file, but none is configured.")
-                    Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                    AppendSystemMessage($"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                    Ui(Sub() _txtInput.Text = restoreUserText)
                     Return
                 End If
 
-                Dim preToolConfig As ModelConfig = SharedMethods.GetCurrentConfig(_context)
-                Dim found As Boolean = SharedMethods.GetSpecialTaskModel(
-                    _context, _context.INI_AlternateModelPath, "ToolDefaultModel")
-
-                If found Then
-                    ' Capture the just-applied ToolDefaultModel config
-                    toolTriggerConfig = SharedMethods.GetCurrentConfig(_context)
-
-                    ' Immediately restore original config so global context stays pristine
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
-                    ' Verify that the ToolDefaultModel actually supports tooling
-                    If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
-                        RemoveAssistantThinking()
-                        AppendSystemMessage($"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
-                        Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
-                        Return
-                    End If
-                Else
-                    ' Restore original config
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
+                If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
                     RemoveAssistantThinking()
-                    AppendSystemMessage($"The {ToolTrigger} trigger was used, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
-                    Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                    AppendSystemMessage($"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                    Ui(Sub() _txtInput.Text = restoreUserText)
                     Return
                 End If
 
                 ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
-                forceDialog:=True)
+                    _selectedToolsForChat = Globals.ThisAddIn.SelectDiscussInkyToolsForSession(forceDialog:=True)
 
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         RemoveAssistantThinking()
                         AppendSystemMessage($"The {ToolTrigger} trigger requires {Globals.ThisAddIn.ToolFriendlyName.ToLower} to be selected. Please select at least one tool and try again.")
-                        Ui(Sub() _txtInput.Text = ToolTrigger & " " & userText)
+                        Ui(Sub() _txtInput.Text = restoreUserText)
                         Return
                     End If
                 End If
-
-                ' (t) does not require pre-selected tools — Sources always works.
-                ' Use whatever tools are already selected; if none, pass an empty list.
-                'If _selectedToolsForChat Is Nothing Then
-                '_selectedToolsForChat = New List(Of ModelConfig)()
-                'End If
 
                 ' Execute via tooling loop with one-shot ToolDefaultModel config
                 Dim hideLog As Boolean = Not _chkShowToolingLog.Checked
@@ -2648,6 +2861,8 @@ Public Class DiscussInky
 
             ' ──────────────────────────────────────────────────────────────
             ' Standard LLM call (existing behavior)
+            ' If the current model supports tooling and Enable Tooling is checked,
+            ' CallLlmWithSelectedModelAsync already handles that path.
             ' ──────────────────────────────────────────────────────────────
             Dim sw = Stopwatch.StartNew()
             Dim stdAnswer = Await CallLlmWithSelectedModelAsync(systemPrompt, sb.ToString())

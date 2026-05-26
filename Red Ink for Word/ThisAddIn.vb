@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.4.2026
+' 25.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,7 +27,7 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 
 ' The Word add-in calls the Draw.io online diagramming service/app (https://www.draw.io) via embed.diagrams.net for diagram editing (https://github.com/jgraph/drawio); copyright (c) 2026 by draw.io Ltd and draw.io AG (made available under Apache 2.0 license [https://github.com/jgraph/drawio?tab=Apache-2.0-1-ov-file])
 
@@ -44,13 +44,16 @@ Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports SharedLibrary.SharedLibrary
 Imports System.Globalization
+Imports SharedLibrary.SharedLibrary.SharedMethods
+
 
 Partial Public Class ThisAddIn
 
+    Private Const DLLDIAGNOSTICS = False ' Whether to show diagnostics for loading native DLLs
+
     ' Hardcoded config values
 
-    Public Shared Version As String = "V.080426" & SharedMethods.VersionQualifier
-
+    Public Shared Version As String = "V.250526" & SharedMethods.VersionQualifier
     Public Const AN As String = "Red Ink"
     Public Const AN2 As String = "redink"
     Public Const AN5 As String = "RI" ' for bubble comments 
@@ -114,9 +117,13 @@ Partial Public Class ThisAddIn
     Private Const BoWTrigger As String = "(bow)"
     Private Const ChunkTrigger As String = "(iterate)"
     Private Const EmbedTrigger As String = "(embed)"
+    Private Const FormPrefix As String = "Form:"
     Private Const RefreshTrigger As String = "(refresh)"
-    Private Const ToolSelectionTrigger As String = "(sources)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
-    Public Const ToolFriendlyName As String = "Sources"  ' How to refer to tools (e.g., sources) towards the user
+    Private Const ToolSelectionTrigger As String = "(agents)"  ' Trigger in OtherPrompt to re-select tools for tooling-enabled models.
+    Private Const ToolTrigger As String = "(a)"
+    Public Const ToolFriendlyName As String = "Agents"  ' How to refer to tools (e.g., sources) towards the user
+    Private Const KbTrigger As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTrigger          ' "(kb)"
+    Private Const KbTriggerPrefix As String = SharedLibrary.SharedLibrary.KnowledgeTriggerHelper.KbTriggerPrefix ' "(kb:"
 
     Private Const MaxFilibuster As Integer = 10000 ' Maximum number of words for filibuster mode 
     Private Const ArgueAgainstDefault As Integer = 50 ' Number of words to propose for Argue Against
@@ -241,23 +248,43 @@ Partial Public Class ThisAddIn
 
     Public Const ToolingLog_AutoCloseDefaultSeconds As Integer = 20
 
-    Public Const InternalToolSuffix As String = " (internal)"  ' Suffix displayed for the internal web tool in selection dialogs.
+    Public Const InternalToolSuffix As String = ""  ' Suffix displayed for the internal web tool in selection dialogs.
 
     Public Const InternalWebToolName As String = "web_content_retriever"
     Public Const InternalWebToolDescription As String =
-        "Retrieves readable text from one or more web pages. Use this tool when you need to access the content behind a URL instead of relying on summaries or excerpts."
+        "Retrieves readable text from one or more web pages. By default it returns text only. " &
+        "Optionally, the caller can request structured link extraction for any linked content."
 
     Public Const InternalWebToolDefinition As String =
         "{""name"":""web_content_retriever"",""description"":""Fetches and returns readable text from one or more web URLs. " &
+        "By default this tool returns text only. " &
+        "Optional behavior: set include_links=true to also extract structured hyperlinks; set expand_interactive_sections=true " &
+        "to attempt opening accordions, tabs, details elements, and similar collapsed UI before extraction; set link_extensions " &
+        "to filter extracted links to specific extensions such as pdf, docx, xlsx, zip, html, or any other extension. " &
         "IMPORTANT: Cannot access SharePoint, OneDrive, Teams, or other authenticated cloud storage URLs " &
         "(sharepoint.com, onedrive.com, 1drv.ms, teams.microsoft.com, :f:/). " &
-        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""},""url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}}}}" ' Note: do not require urls; code validates at runtime.
+        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{" &
+        """urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""One or more absolute URLs to fetch (preferred).""}," &
+        """url"":{""type"":""string"",""description"":""Single absolute URL to fetch (alternative to urls).""}," &
+        """include_links"":{""type"":""boolean"",""description"":""Optional. Default false. When true, include a structured <LINKS_n> JSON block for each URL.""}," &
+        """link_extensions"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional. Restrict extracted links to these extensions, for example ['pdf','docx']. Ignored unless include_links=true.""}," &
+        """expand_interactive_sections"":{""type"":""boolean"",""description"":""Optional. Default false for tooling calls. When true, attempts to expand accordions, tabs, details sections, and similar collapsed UI before extraction.""}}}}" ' Runtime validates url/urls.
 
     Public Const InternalWebToolInstructionsPrompt As String =
         "web_content_retriever: Fetches readable text from web pages. " &
         "Call this tool when you need the actual page content behind a link. " &
         "Provide either urls (array of strings) or url (single string). " &
-        "Return value is plain text content for each URL (or an error per URL if retrieval fails). " &
+        "By default, this tool returns readable text only. " &
+        "If you also need structured links to downloadable or linked content, explicitly set include_links=true. " &
+        "If linked content may be hidden behind accordions, tabs, or collapsed sections, explicitly set expand_interactive_sections=true. " &
+        "Optionally set link_extensions to restrict extracted links to specific extensions such as ['pdf'], ['docx'], or any other extension. " &
+        "Return value is plain text content for each URL, optionally followed by a structured <LINKS_n> JSON block for each URL. " &
+        "IMPORTANT BOUNDARY: This tool retrieves readable text and link metadata only. It does NOT download or preserve original binary file bytes. " &
+        "If you call this tool on a direct PDF, DOCX, XLSX, PPTX, ZIP, image, audio, or other binary URL, the result is text extraction or page content — not a real downloadable file object. " &
+        "Therefore, NEVER use this tool as a file-downloader and NEVER save its returned text as if it were the original PDF or other binary file. " &
+        "If the user wants the actual remote file saved into the workspace, use a dedicated binary download tool if available; otherwise explain that the current toolset can analyze the content but cannot save the original remote binary file. " &
+        "IMPORTANT FALLBACK RULE: If include_links=true returns zero matching links, and the page may be dynamically computing or revealing links client-side, then use js_run as a fallback with allow_network=true and navigate_url set to that page. " &
+        "In js_run, the code is already the body of an async function, so it must return the final value explicitly at top level. " &
         "SHAREPOINT/ONEDRIVE LIMITATION: This tool CANNOT access SharePoint, OneDrive, Microsoft Teams, or any other " &
         "authenticated cloud storage URLs. URLs containing 'sharepoint.com', 'onedrive.com', '1drv.ms', " &
         "'teams.microsoft.com', or ':f:/' point to resources that require authentication and will NOT return " &
@@ -265,6 +292,24 @@ Partial Public Class ThisAddIn
         "If the user asks you to retrieve content from such a link, do NOT call this tool. Instead, explain " &
         "that you cannot remotely log into authenticated cloud storage and ask the user to download the file(s) " &
         "and provide them as direct attachments."
+
+    Public Const InternalDownloadWebFilesToolName As String = "download_web_files"
+
+    Public Const InternalDownloadWebFilesToolDefinition As String =
+        "{""name"":""download_web_files"",""description"":""Downloads one or more remote files and saves the original binary bytes to disk. " &
+        "Use this for real file downloads, not for text extraction. Only absolute HTTP/HTTPS URLs are allowed. " &
+        "Authenticated SharePoint, OneDrive, Teams, and similar cloud storage URLs are not supported.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of absolute HTTP/HTTPS URLs to download.""}," &
+        """target_directory"":{""type"":""string"",""description"":""Optional relative target folder. If a writable workspace is active, this is resolved under the workspace root; otherwise under the safe download root.""}," &
+        """overwrite"":{""type"":""boolean"",""description"":""Optional. Default false. If false, existing files are not overwritten; unique names are created instead.""}}" &
+        ",""required"":[""urls""]}}"
+
+    Public Const InternalDownloadWebFilesToolInstructionsPrompt As String =
+        "download_web_files: Downloads one or more remote files and saves the original binary bytes to disk. " &
+        "Use this only when the user wants the actual file saved locally. " &
+        "Provide urls (required array). Optionally provide target_directory (relative subfolder under the current workspace when available; otherwise under the safe download root) and overwrite (boolean, default false). " &
+        "Use this tool instead of web_content_retriever when the user wants the actual PDF or other binary file, not merely extracted text."
 
     ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
 
@@ -293,7 +338,40 @@ Partial Public Class ThisAddIn
         "do NOT call this tool — instead respond based on your existing knowledge and state your uncertainty."
 
 
+    ' Knowledge Store Tooling (available only when KnowledgeStorePath or KnowledgeStorePathLocal is configured)
+
+    Public Const InternalKnowledgeToolName As String = "knowledge_search"
+
+    Public Const InternalKnowledgeToolDefinition As String =
+        "{""name"":""knowledge_search""," &
+        """description"":""Searches the user's local knowledge store (a curated collection of documents such as contracts, policies, legal briefs, " &
+        "manuals, and reference material) and returns the most relevant document content. Use this tool when the user's question " &
+        "relates to their own documents, internal policies, past work, or reference material that would not be found on the public internet. " &
+        "Do NOT use this tool for general knowledge questions or publicly available information — use your training data or internet_search instead.""," &
+        """parameters"":{""type"":""object"",""properties"":{" &
+        """query"":{""type"":""string"",""description"":""A natural language search query describing what information is needed from the knowledge store. " &
+        "Supports optional prefixes: 'tag:tagname' to filter by tag, 'store:storename' to restrict to a specific store, " &
+        "or both 'tag:tagname store:storename'. Without prefixes, all stores are searched by keyword relevance.""}," &
+        """max_results"":{""type"":""integer"",""description"":""Maximum number of documents to retrieve (default: 5, max: 10).""}},""required"":[""query""]}}"
+
+    Public Const InternalKnowledgeToolInstructionsPrompt As String =
+        "knowledge_search: Searches the user's local knowledge store — a curated library of the user's own documents " &
+        "(contracts, policies, briefs, manuals, templates, reference material, etc.). " &
+        "Call this tool when the user's question relates to their own documents, internal policies, past work, or reference material. " &
+        "Provide query (required string) describing the information needed. Optionally provide max_results (integer, default 5). " &
+        "The query supports optional prefixes: 'tag:tagname' filters by document tag, 'store:storename' restricts to a specific knowledge store. " &
+        "Return value is the text content of the most relevant documents, each tagged with the document name and store. " &
+        "IMPORTANT: Do NOT use this tool for general knowledge or publicly available information — only for the user's own document library. " &
+        "When citing information from the results, mention the document name so the user can locate the source."
+
     Public Shared SelectedToolNames As New List(Of String)()   ' Persisted list of selected tool names for tooling sessions.
+
+
+    Private Const Add_OcrMarkdownInstruction As String =
+            "Provide the output as Markdown. " &
+            "Use Markdown formatting where it helps preserve the original structure, including headings, lists, tables and other tabular content. " &
+            "Return only the Markdown content and no surrounding code fences."
+
 
 
     ' Declare variables publicly so that InterpolateAtRuntime can access them; case-sensitive
@@ -306,7 +384,7 @@ Partial Public Class ThisAddIn
     Public OtherPrompt As String = ""
     Public OtherPromptUnfilled As String = ""
     Public OutputLanguage As String = ""
-    Public MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = SharedLibrary.Agents.ToolingConstants.DefaultMaxToolIterations
     Public InsertDocs As String = ""
     Public MyStyleInsert As String = ""
     Public FormatInstruction As String = ""
@@ -350,6 +428,13 @@ Partial Public Class ThisAddIn
     ' UI threading context and scheduler (captured at Startup)
     Private Shared _uiContext As SynchronizationContext
     Private Shared _uiScheduler As TaskScheduler
+    ''' <summary>
+    ''' Captured WindowsFormsSynchronizationContext for the Word UI/STA thread.
+    ''' Used to marshal LogWindow creation and updates back to the UI thread,
+    ''' regardless of whether the caller awaited with ConfigureAwait(False).
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+    Public Shared UiThreadId As Integer
 
 
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -358,6 +443,14 @@ Partial Public Class ThisAddIn
 
         ' 1) Force the creation of the Control's handle on the Office UI thread
         Dim dummy = mainThreadControl.Handle
+
+        ' Ensure a WinForms sync context exists on the UI thread, then capture it.
+        If System.Threading.SynchronizationContext.Current Is Nothing Then
+            System.Threading.SynchronizationContext.SetSynchronizationContext(
+        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+        End If
+        UiSyncContext = System.Threading.SynchronizationContext.Current
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
 
         ' 2) Capture synchronization context & scheduler after handle exists
         _uiContext = SynchronizationContext.Current
@@ -383,6 +476,8 @@ Partial Public Class ThisAddIn
         ' Other tasks that need to be done at startup
 
         SharedMethods.Initialize(Me.CustomTaskPanes)
+
+        SharedLibrary.Agents.WordHostPolicy.Host = Me
 
         If System.Threading.SynchronizationContext.Current Is Nothing Then
             System.Threading.SynchronizationContext.SetSynchronizationContext(
@@ -495,20 +590,68 @@ Partial Public Class ThisAddIn
         Try
             InitializeAddInFeatures()
             StartupHttpListener()
+            ' Initialize Knowledge Store background indexing service
+            InitializeKnowledgeStoreService()
+
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
+
         Catch ex As System.Exception
             ' Handle exceptions gracefully.
         End Try
     End Sub
 
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
-        RemoveOldContextMenu()
+        ' Shut down Knowledge Store service
+        ShutdownKnowledgeStoreService()
         ShutdownHttpListener()
+        RemoveOldContextMenu()
     End Sub
 
     Public Sub InitializeAddInFeatures()
         InitializeConfig(True, True)
+        If DLLDIAGNOSTICS Then WriteDllLoadDiagnosticsIfEnabled()
+
+        ' Restore the previously selected primary model (if multi-model is configured)
+        If _context.INIloaded Then
+            Try
+                Dim saved = PrimaryModelManager.LoadSavedModelNumber()
+                If PrimaryModelManager.GetAvailableModels().Count > 0 Then
+                    ' Try saved selection first; fall back to model 1 if it no longer exists
+                    If Not PrimaryModelManager.SelectModel(_context, saved) Then
+                        PrimaryModelManager.SelectModel(_context, PrimaryModelManager.GetAvailableModels()(0))
+                    End If
+                End If
+            Catch
+                ' non-critical
+            End Try
+        End If
+
         AddContextMenu()
         UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, RDV, INI_UpdatePath, _context)
+
+        ' Initialize model menu buttons on the ribbon
+        Try
+            If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+            End If
+        Catch
+            ' non-critical
+        End Try
+
     End Sub
 
 
@@ -526,7 +669,9 @@ Partial Public Class ThisAddIn
     End Function
     Public Shared Async Function LLM(ByVal promptSystem As String, ByVal promptUser As String, Optional ByVal Model As String = "", Optional ByVal Temperature As String = "", Optional ByVal Timeout As Long = 0, Optional ByVal UseSecondAPI As Boolean = False, Optional ByVal Hidesplash As Boolean = False, Optional ByVal AddUserPrompt As String = "", Optional ByVal FileObject As String = "", Optional ByVal ToolExecution As Boolean = False, Optional cancellationToken As Threading.CancellationToken = Nothing, Optional EnsureUI As Boolean = True) As Task(Of String)
         Dim Response = Await SharedMethods.LLM(_context, promptSystem, promptUser, Model, Temperature, Timeout, UseSecondAPI, Hidesplash, AddUserPrompt, FileObject, cancellationToken, ToolExecution:=ToolExecution)
-        If EnsureUI Then Await EnsureUIThread().ConfigureAwait(False)
+        If EnsureUI Then
+            Await EnsureUIThread().ConfigureAwait(False)
+        End If
         Return Response
     End Function
     Private Sub ShowSettingsWindow(Settings As Dictionary(Of String, String), SettingsTips As Dictionary(Of String, String))
@@ -552,6 +697,237 @@ Partial Public Class ThisAddIn
             automationObject = New BridgeSubs()
         End If
         Return automationObject
+    End Function
+
+    Private Sub WriteDllLoadDiagnosticsIfEnabled()
+        Try
+            If _context Is Nothing Then Return
+            If Not _context.INIloaded Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the configuration could not be loaded.")
+                Return
+            End If
+            If Not _context.INI_APIDebug Then Return
+
+            Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+            If String.IsNullOrWhiteSpace(desktopPath) Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because the desktop path is invalid.")
+                Return
+            End If
+            If Not System.IO.Directory.Exists(desktopPath) Then
+                ShowCustomMessageBox("Cannot generate RI DLL load diagnostics because could not locate the desktop path.")
+                Return
+            End If
+
+            Dim outputPath As String = System.IO.Path.Combine(desktopPath, "RI_DLL_Loaded.txt")
+            Dim report As New System.Text.StringBuilder()
+
+            report.AppendLine("RI DLL Loaded Diagnostic Report")
+            report.AppendLine(New String("="c, 80))
+            report.AppendLine("Created: " & DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture))
+            report.AppendLine("App: " & AN & " for Word")
+            report.AppendLine("Red Ink Version: " & Version)
+            report.AppendLine("RDV: " & If(_context.RDV, ""))
+            report.AppendLine("Machine: " & Environment.MachineName)
+            report.AppendLine("User: " & Environment.UserName)
+            report.AppendLine("OS Version: " & Environment.OSVersion.ToString())
+            report.AppendLine(".NET Version: " & Environment.Version.ToString())
+            report.AppendLine("64-bit OS: " & Environment.Is64BitOperatingSystem.ToString())
+            report.AppendLine("64-bit Process: " & Environment.Is64BitProcess.ToString())
+            report.AppendLine("Current Directory: " & SafeValue(Environment.CurrentDirectory))
+            report.AppendLine("Base Directory: " & SafeValue(AppDomain.CurrentDomain.BaseDirectory))
+            report.AppendLine("AppDomain Config File: " & SafeValue(AppDomain.CurrentDomain.SetupInformation.ConfigurationFile))
+            report.AppendLine("API Debug Enabled: " & _context.INI_APIDebug.ToString())
+            report.AppendLine()
+
+            Try
+                Dim currentProcess = System.Diagnostics.Process.GetCurrentProcess()
+                report.AppendLine("Process Name: " & SafeValue(currentProcess.ProcessName))
+                report.AppendLine("Process Id: " & currentProcess.Id.ToString(CultureInfo.InvariantCulture))
+                Try
+                    report.AppendLine("Process Path: " & SafeValue(currentProcess.MainModule.FileName))
+                Catch ex As Exception
+                    report.AppendLine("Process Path: <error: " & ex.GetType().FullName & ": " & ex.Message & ">")
+                End Try
+            Catch ex As Exception
+                report.AppendLine("Process Info Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("CONFIGURATION")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                report.AppendLine("Active redink.ini Path: " & SafeValue(SharedMethods.GetActiveConfigFilePath(_context)))
+            Catch ex As Exception
+                report.AppendLine("Active redink.ini Path Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine("INI_LogPath: " & SafeValue(_context.INI_LogPath))
+            report.AppendLine("INI_UpdatePath: " & SafeValue(_context.INI_UpdatePath))
+            report.AppendLine()
+
+            report.AppendLine("KEY ASSEMBLIES")
+            report.AppendLine(New String("-"c, 80))
+            AppendAssemblyInfo(report, "ThisAddIn Assembly", Me.GetType().Assembly)
+            AppendAssemblyInfo(report, "SharedLibrary Assembly", GetType(SharedMethods).Assembly)
+            AppendAssemblyInfo(report, "Newtonsoft.Json / JToken Assembly", GetType(Newtonsoft.Json.Linq.JToken).Assembly)
+
+            report.AppendLine()
+            report.AppendLine("JTOKEN METHOD CHECK")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                Dim jTokenType As System.Type = GetType(Newtonsoft.Json.Linq.JToken)
+                Dim formattingType As System.Type = GetType(Newtonsoft.Json.Formatting)
+                Dim formattingMethod As System.Reflection.MethodInfo = jTokenType.GetMethod("ToString", New System.Type() {formattingType})
+
+                report.AppendLine("JToken Type AssemblyQualifiedName: " & SafeValue(jTokenType.AssemblyQualifiedName))
+                If formattingMethod Is Nothing Then
+                    report.AppendLine("Reflection Lookup: JToken.ToString(Newtonsoft.Json.Formatting) = NOT FOUND")
+                Else
+                    report.AppendLine("Reflection Lookup: " & formattingMethod.ToString())
+                End If
+            Catch ex As Exception
+                report.AppendLine("Reflection Lookup Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("RUNTIME PROBE")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                Dim probeToken As Newtonsoft.Json.Linq.JToken = Newtonsoft.Json.Linq.JToken.Parse("{""x"":1}")
+                Dim probeText As String = probeToken.ToString(Newtonsoft.Json.Formatting.Indented)
+
+                report.AppendLine("Probe Result: SUCCESS")
+                report.AppendLine("Probe Output:")
+                report.AppendLine(probeText)
+            Catch ex As Exception
+                report.AppendLine("Probe Result: FAILED")
+                report.AppendLine("Exception Type: " & ex.GetType().FullName)
+                report.AppendLine("Exception Message: " & ex.Message)
+                report.AppendLine("Stack Trace:")
+                report.AppendLine(If(ex.StackTrace, ""))
+            End Try
+
+            report.AppendLine()
+            report.AppendLine("LOADED ASSEMBLIES OF INTEREST")
+            report.AppendLine(New String("-"c, 80))
+
+            Try
+                For Each loadedAssembly As System.Reflection.Assembly In AppDomain.CurrentDomain.GetAssemblies()
+                    Dim assemblyName As String = ""
+                    Try
+                        assemblyName = loadedAssembly.GetName().Name
+                    Catch
+                    End Try
+
+                    If String.Equals(assemblyName, "Newtonsoft.Json", StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(assemblyName, "SharedLibrary", StringComparison.OrdinalIgnoreCase) OrElse
+                       String.Equals(assemblyName, Me.GetType().Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase) Then
+
+                        AppendAssemblyInfo(report, "Loaded Assembly", loadedAssembly)
+                        report.AppendLine()
+                    End If
+                Next
+            Catch ex As Exception
+                report.AppendLine("Loaded Assembly Scan Error: " & ex.GetType().FullName & ": " & ex.Message)
+            End Try
+
+            report.AppendLine("APP.CONFIG NEWTONSOFT SNIPPET")
+            report.AppendLine(New String("-"c, 80))
+            AppendConfigSnippet(report, AppDomain.CurrentDomain.SetupInformation.ConfigurationFile, "Newtonsoft.Json")
+
+            report.AppendLine()
+            report.AppendLine("DONE")
+            report.AppendLine(New String("="c, 80))
+
+            System.IO.File.WriteAllText(outputPath, report.ToString(), New System.Text.UTF8Encoding(False))
+        Catch
+            ShowCustomMessageBox("Cannot generate RI DLL load diagnostics due to an error.")
+            ' Intentionally silent: diagnostics must never break startup.
+        End Try
+    End Sub
+
+    Private Shared Sub AppendAssemblyInfo(report As System.Text.StringBuilder, title As String, assemblyValue As System.Reflection.Assembly)
+        report.AppendLine(title & ":")
+
+        If assemblyValue Is Nothing Then
+            report.AppendLine("  <nothing>")
+            Return
+        End If
+
+        Try
+            report.AppendLine("  FullName: " & SafeValue(assemblyValue.FullName))
+        Catch ex As Exception
+            report.AppendLine("  FullName Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            report.AppendLine("  Location: " & SafeValue(assemblyValue.Location))
+        Catch ex As Exception
+            report.AppendLine("  Location Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            report.AppendLine("  ImageRuntimeVersion: " & SafeValue(assemblyValue.ImageRuntimeVersion))
+        Catch ex As Exception
+            report.AppendLine("  ImageRuntimeVersion Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+
+        Try
+            Dim fileVersion As String = ""
+            If Not String.IsNullOrWhiteSpace(assemblyValue.Location) AndAlso System.IO.File.Exists(assemblyValue.Location) Then
+                fileVersion = System.Diagnostics.FileVersionInfo.GetVersionInfo(assemblyValue.Location).FileVersion
+            End If
+            report.AppendLine("  FileVersion: " & SafeValue(fileVersion))
+        Catch ex As Exception
+            report.AppendLine("  FileVersion Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Sub AppendConfigSnippet(report As System.Text.StringBuilder, configPath As String, searchText As String)
+        Try
+            If String.IsNullOrWhiteSpace(configPath) Then
+                report.AppendLine("<no config path>")
+                Return
+            End If
+
+            report.AppendLine("Config Path: " & configPath)
+
+            If Not System.IO.File.Exists(configPath) Then
+                report.AppendLine("<config file not found>")
+                Return
+            End If
+
+            Dim lines As String() = System.IO.File.ReadAllLines(configPath)
+            Dim found As Boolean = False
+
+            For i As Integer = 0 To lines.Length - 1
+                If lines(i).IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                    found = True
+                    Dim startIndex As Integer = Math.Max(0, i - 3)
+                    Dim endIndex As Integer = Math.Min(lines.Length - 1, i + 3)
+
+                    For j As Integer = startIndex To endIndex
+                        report.AppendLine((j + 1).ToString(CultureInfo.InvariantCulture).PadLeft(5) & ": " & lines(j))
+                    Next
+
+                    Exit For
+                End If
+            Next
+
+            If Not found Then
+                report.AppendLine("<search text not found in config>")
+            End If
+        Catch ex As Exception
+            report.AppendLine("Config Snippet Error: " & ex.GetType().FullName & ": " & ex.Message)
+        End Try
+    End Sub
+
+    Private Shared Function SafeValue(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return "<empty>"
+        Return value
     End Function
 
 

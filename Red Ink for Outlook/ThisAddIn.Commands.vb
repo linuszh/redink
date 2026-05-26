@@ -43,6 +43,114 @@ Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
 
+    Private Class ParagraphFormattingSnapshot
+        Public Property Style As Object
+        Public Property Font As Microsoft.Office.Interop.Word.Font
+        Public Property ParagraphFormat As Microsoft.Office.Interop.Word.ParagraphFormat
+    End Class
+
+    Private Shared Function RangeWithoutTrailingParagraphMark(sourceRange As Microsoft.Office.Interop.Word.Range) As Microsoft.Office.Interop.Word.Range
+        Dim result As Microsoft.Office.Interop.Word.Range = sourceRange.Duplicate
+
+        If result.End <= result.Start Then Return result
+
+        Try
+            Dim lastChar As String = result.Document.Range(result.End - 1, result.End).Text
+            If lastChar = vbCr OrElse lastChar = vbLf Then
+                result.End -= 1
+            End If
+        Catch
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function TextOnlyParagraphRange(paragraphRange As Microsoft.Office.Interop.Word.Range,
+                                               limitEnd As Integer) As Microsoft.Office.Interop.Word.Range
+        Dim result As Microsoft.Office.Interop.Word.Range = paragraphRange.Duplicate
+
+        If result.End > limitEnd Then
+            result.End = limitEnd
+        End If
+
+        If result.End <= result.Start Then Return result
+
+        Try
+            Dim lastChar As String = result.Document.Range(result.End - 1, result.End).Text
+            If lastChar = vbCr OrElse lastChar = vbLf Then
+                result.End -= 1
+            End If
+        Catch
+        End Try
+
+        Return result
+    End Function
+
+    Private Shared Function CaptureParagraphFormatting(sourceRange As Microsoft.Office.Interop.Word.Range) As List(Of ParagraphFormattingSnapshot)
+        Dim snapshots As New List(Of ParagraphFormattingSnapshot)()
+
+        If sourceRange Is Nothing Then Return snapshots
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(sourceRange)
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+
+            If paragraphRange.Start >= effectiveRange.End Then Continue For
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Dim textRange As Microsoft.Office.Interop.Word.Range =
+            TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+
+            snapshots.Add(New ParagraphFormattingSnapshot() With {
+            .Style = paragraphRange.Style,
+            .Font = textRange.Font.Duplicate,
+            .ParagraphFormat = paragraphRange.ParagraphFormat.Duplicate
+        })
+        Next
+
+        Return snapshots
+    End Function
+
+    Private Shared Sub ApplyParagraphFormatting(targetRange As Microsoft.Office.Interop.Word.Range,
+                                             snapshots As List(Of ParagraphFormattingSnapshot))
+        If targetRange Is Nothing OrElse snapshots Is Nothing OrElse snapshots.Count = 0 Then Return
+
+        Dim effectiveRange As Microsoft.Office.Interop.Word.Range = RangeWithoutTrailingParagraphMark(targetRange)
+        Dim index As Integer = 0
+
+        For Each paragraph As Microsoft.Office.Interop.Word.Paragraph In effectiveRange.Paragraphs
+            Dim paragraphRange As Microsoft.Office.Interop.Word.Range = paragraph.Range.Duplicate
+
+            If paragraphRange.Start >= effectiveRange.End Then Continue For
+            If paragraphRange.End > effectiveRange.End Then paragraphRange.End = effectiveRange.End
+
+            Dim snapshot As ParagraphFormattingSnapshot = snapshots(Math.Min(index, snapshots.Count - 1))
+
+            Try
+                paragraphRange.Style = snapshot.Style
+            Catch
+            End Try
+
+            Try
+                paragraphRange.ParagraphFormat = snapshot.ParagraphFormat
+            Catch
+            End Try
+
+            Try
+                Dim textRange As Microsoft.Office.Interop.Word.Range =
+                TextOnlyParagraphRange(paragraphRange, effectiveRange.End)
+
+                If textRange.End > textRange.Start Then
+                    textRange.Font = snapshot.Font
+                End If
+            Catch
+            End Try
+
+            index += 1
+        Next
+    End Sub
+
     ''' <summary>
     ''' Main command dispatcher. Guards reentrancy, ensures configuration is loaded, validates active MailItem,
     ''' and executes the requested RI_Command (translate, summarize, improve, style, markup, freestyle, etc.).
@@ -266,6 +374,8 @@ Partial Public Class ThisAddIn
             If Command = "InsertClipboard" Then InsertClipboard() : Return
 
             If Command = "MailMover" Then MailMover() : Return
+
+            If Command = "M365" Then M365SearchTest.Show(_context) : Return
 
             If Command = "InboxBoard" Then InboxBoard() : Return
 
@@ -1172,13 +1282,21 @@ Partial Public Class ThisAddIn
             'Try
             'Using New WordUndoScope(wordEditor, $"{AN} Changes")
 
+            If Not KeepFormat Then
+                EncodeHyperlinksAsMarkdown(selection.Range)
+            End If
+
             If INI_KeepFormatCap > 0 Then If Len(selection.Text) > INI_KeepFormatCap Then KeepFormat = False
 
             If KeepFormat Then
                 SelectedText = SLib.GetRangeHtml(selection.Range)
             Else
-                If INI_MarkdownConvert Then ConvertRangeToMarkdown(selection.Range)
-                SelectedText = selection.Text
+                If INI_MarkdownConvert Then
+                    ConvertRangeToMarkdown(selection.Range)
+                    SelectedText = CleanMarkdownTextForLlm(selection.Text)
+                Else
+                    SelectedText = selection.Text
+                End If
             End If
 
             If String.IsNullOrWhiteSpace(SelectedText) Then
@@ -1217,6 +1335,32 @@ Partial Public Class ThisAddIn
 
             ' Replace the selected text with the processed result
             If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                ' --- Method 4: Interactive review BEFORE any insertion ---
+                If DoMarkup AndAlso MarkupMethod = 4 Then
+
+                    Dim originalForReview As String =
+                        If(KeepFormat, SLib.RemoveHTML(SelectedText), SelectedText)
+                    Dim suggestedForReview As String =
+                        If(KeepFormat, SLib.RemoveHTML(LLMResult), LLMResult)
+
+                    Dim reviewed As String = Nothing
+                    Using dlg As New ReviewChangesDialog(originalForReview, suggestedForReview)
+                        If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                            ' Cancel = do absolutely nothing
+                            Return
+                        End If
+                        reviewed = dlg.ReviewedText
+                    End Using
+
+                    If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+                    ' Use the reviewed text for the normal insertion path; replace the current selection.
+                    LLMResult = reviewed
+                    DoMarkup = False
+                    Inplace = True
+                End If
+
                 If KeepFormat Then
 
                     Dim Plaintext As String = ""
@@ -1224,14 +1368,21 @@ Partial Public Class ThisAddIn
                     SelectedText = selection.Text
                     SLib.InsertTextWithFormat(LLMResult, range, Inplace, Not trailingCR)
                     If DoMarkup Then
-                        LLMResult = SLib.RemoveHTML(LLMResult)
-                        If MarkupMethod <> 3 Then
+                        Dim markupCompareText As String = SLib.RemoveHTML(LLMResult)
+
+                        If MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             range.Text = vbCrLf & vbCrLf & "MARKUP:" & vbCrLf
                         End If
+
                         range.Collapse(WdCollapseDirection.wdCollapseEnd)
                         selection.SetRange(range.Start, selection.End)
 
-                        CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                        Select Case MarkupMethod
+                            Case 2, 3
+                                CompareAndInsertText(SelectedText, markupCompareText, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                            Case Else
+                                CompareAndInsertTextCompareDocs(SelectedText, markupCompareText)
+                        End Select
                     End If
 
                 Else
@@ -1239,15 +1390,15 @@ Partial Public Class ThisAddIn
                     If Inplace Then
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Lf) Then LLMResult = LLMResult.TrimEnd(ControlChars.Lf)
                         If Not trailingCR And LLMResult.EndsWith(ControlChars.Cr) Then LLMResult = LLMResult.TrimEnd(ControlChars.Cr)
-                        If DoMarkup And MarkupMethod <> 3 Then
+                        If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>", trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
                         End If
                     Else
                         ' Insert two new line breaks and select final position while preserving formatting.
+                        Dim sourceFormatting As List(Of ParagraphFormattingSnapshot) = CaptureParagraphFormatting(range)
                         Dim selRange As Microsoft.Office.Interop.Word.Range = selection.Range.Duplicate
-                        Dim originalFont As Microsoft.Office.Interop.Word.Font = selRange.Font.Duplicate
 
                         selRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         selRange.Text = vbCrLf & vbCrLf
@@ -1256,13 +1407,17 @@ Partial Public Class ThisAddIn
                         Dim newEnd As Integer = selRange.End
                         selection.SetRange(newStart, newEnd)
 
-                        selection.Font = originalFont
-
-                        If DoMarkup And MarkupMethod <> 3 Then
+                        If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                             SLib.InsertTextWithMarkdown(selection, LLMResult & "<p>MARKUP:<br></p>" & vbCrLf, trailingCR)
                         Else
                             SLib.InsertTextWithMarkdown(selection, LLMResult, trailingCR)
                         End If
+
+                        Dim insertedRange As Microsoft.Office.Interop.Word.Range =
+                                wordEditor.Range(newStart, selection.Range.End)
+
+                        ApplyParagraphFormatting(insertedRange, sourceFormatting)
+
                     End If
 
                     ' Use Find to locate the nearest line break backward and adjust selection
@@ -1278,19 +1433,18 @@ Partial Public Class ThisAddIn
 
                     ' Perform markup comparison and insertion if necessary
                     If DoMarkup Then
-                        If MarkupMethod = 2 Or MarkupMethod = 3 Then
-                            CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
-                        Else
-                            CompareAndInsertTextCompareDocs(SelectedText, LLMResult)
-                        End If
-
+                        Select Case MarkupMethod
+                            Case 2, 3
+                                CompareAndInsertText(SelectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                            Case Else
+                                CompareAndInsertTextCompareDocs(SelectedText, LLMResult)
+                        End Select
                     End If
 
                 End If
 
             Else
                 ShowCustomMessageBox("The LLM did not return any content to insert.")
-
             End If
 
             ' End Using
@@ -1334,6 +1488,8 @@ Partial Public Class ThisAddIn
             Dim FileObject As String = ""
             Dim DoNewDoc As Boolean = False
             Dim DoMyStyle As Boolean = False
+            Dim DoAddMail As Boolean = False
+            Dim MailChainText As String = ""
 
             Dim UseSecondAPI As Boolean = False
 
@@ -1343,6 +1499,7 @@ Partial Public Class ThisAddIn
             Dim PromptLibInstruct As String = If(INI_PromptLib, " or press 'OK' for the prompt library", "")
             Dim NoFormatInstruct As String = $"; add '{NoFormatTrigger2}'/'{KFTrigger2}'/'{KPFTrigger2}' for overriding formatting defaults"
             Dim MyStyleInstruct As String = $"; add '{MyStyleTrigger}' to apply your personal style"
+            Dim AddMailInstruct As String = $"; add '{AddmailTrigger}' to include the full mailchain as context"
             Dim SecondAPIInstruct As String = If(INI_SecondAPI, $"'{SecondAPICode}' to use {If(String.IsNullOrWhiteSpace(INI_AlternateModelPath), $"the secondary model ({INI_Model_2})", "one of the other models")}", "")
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
             Dim ObjectInstruct As String = $"; add '{ObjectTrigger2}' for including a clipboard object"
@@ -1356,6 +1513,7 @@ Partial Public Class ThisAddIn
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add ", ", ")
             End If
+            AddOnInstruct += AddMailInstruct.Replace("; add ", ", ")
 
             Dim DefaultPrefix As String = INI_DefaultPrefix
             Dim DefaultPrefixText As String = ""
@@ -1430,20 +1588,24 @@ Partial Public Class ThisAddIn
 
             ' Prompt for the text to process
 
+            Dim InsertButtons As System.Tuple(Of String, String, String)() = {
+                        System.Tuple.Create("📧", $"Include full mailchain ({AddmailTrigger})", AddmailTrigger)
+                    }
+
             If Not NoText Then
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix),
-                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefixDiff}' as a prefix.", MarkupPrefixDiff)
+                            System.Tuple.Create("OK, do a markup", $"Use this to automatically insert '{MarkupPrefix}' as a prefix.", MarkupPrefix)
                         }
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute on the selected text ({MarkupInstruct}, {InplaceInstruct}, {ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
             Else
                 Dim OptionalButtons As System.Tuple(Of String, String, String)() = {
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, do a new doc", $"Use this to automatically insert '{NewDocPrefix}' as a prefix.", NewDocPrefix)
                         }
 
-                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons)
+                OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}){PromptLibInstruct}{AddOnInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons)
             End If
 
             If String.IsNullOrEmpty(OtherPrompt) AndAlso OtherPrompt <> "ESC" AndAlso INI_PromptLib Then
@@ -1505,6 +1667,10 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefix.Length).Trim()
                 DoMarkup = True
+            ElseIf OtherPrompt.StartsWith(MarkupPrefixApprove, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+                OtherPrompt = OtherPrompt.Substring(MarkupPrefixApprove.Length).Trim()
+                DoMarkup = True
+                MarkupMethod = 4
             ElseIf OtherPrompt.StartsWith(MarkupPrefixWord, StringComparison.OrdinalIgnoreCase) And Not NoText Then
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixWord.Length).Trim()
                 DoMarkup = True
@@ -1568,6 +1734,30 @@ Partial Public Class ThisAddIn
                 DoMyStyle = True
             End If
 
+            If OtherPrompt.IndexOf(AddmailTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                OtherPrompt = OtherPrompt.Replace(AddmailTrigger, "").Trim()
+                DoAddMail = True
+
+                Try
+                    MailChainText = wordEditor.Content.Text
+                Catch
+                    MailChainText = ""
+                End Try
+
+                If String.IsNullOrWhiteSpace(MailChainText) Then
+                    Try
+                        MailChainText = GetMailBody(mailItem)
+                    Catch
+                        MailChainText = ""
+                    End Try
+                End If
+
+                If String.IsNullOrWhiteSpace(MailChainText) Then
+                    ShowCustomMessageBox("The mailchain could not be read.")
+                    Return
+                End If
+            End If
+
             If INI_SecondAPI Then
                 If OtherPrompt.Contains(SecondAPICode) Then
                     UseSecondAPI = True
@@ -1602,17 +1792,50 @@ Partial Public Class ThisAddIn
             ' Call LLM function with selected text
 
             Dim LLMResult As String
+            Dim SystemPrompt As String =
+                InterpolateAtRuntime(If(NoText, SP_FreestyleNoText, SP_FreestyleText)) &
+                If(DoMyStyle, " " & MyStyleInsert, "") &
+                If(DoAddMail,
+                   " You may additionally receive the full surrounding e-mail chain (including a draft response) between the tags <MAILCHAIN> and </MAILCHAIN>. Use it only as additional context for chronology, participants, tone, prior statements, and unanswered points. If <TEXTTOPROCESS> is present, this is the text selected by the user, perform the requested task on <TEXTTOPROCESS>; use <MAILCHAIN> only to understand the context better.",
+                   "")
+
+            Dim UserPrompt As String = ""
 
             If Not NoText Then
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_FreestyleText) & If(DoMyStyle, " " & MyStyleInsert, ""), "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>", "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
-
-                LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
-            Else
-                LLMResult = Await LLM(InterpolateAtRuntime(SP_FreestyleNoText) & If(DoMyStyle, " " & MyStyleInsert, ""), "", "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+                UserPrompt = "<TEXTTOPROCESS>" & selectedText & "</TEXTTOPROCESS>"
             End If
 
+            If DoAddMail Then
+                If UserPrompt <> "" Then
+                    UserPrompt &= vbCrLf & vbCrLf
+                End If
+                UserPrompt &= "<MAILCHAIN>" & MailChainText & "</MAILCHAIN>"
+            End If
+
+            LLMResult = Await LLM(SystemPrompt, UserPrompt, "", "", 0, UseSecondAPI, False, OtherPrompt, FileObject)
+
+            If Not NoText Then
+                LLMResult = LLMResult.Replace("<TEXTTOPROCESS>", "").Replace("</TEXTTOPROCESS>", "")
+            End If
             If INI_PostCorrection <> "" Then
                 LLMResult = Await PostCorrection(LLMResult)
+            End If
+
+            If DoMarkup AndAlso MarkupMethod = 4 AndAlso Not NoText Then
+
+                Dim reviewed As String = Nothing
+                Using dlg As New ReviewChangesDialog(selectedText, LLMResult)
+                    If dlg.ShowDialog() <> System.Windows.Forms.DialogResult.OK Then
+                        Return
+                    End If
+                    reviewed = dlg.ReviewedText
+                End Using
+
+                If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+                LLMResult = reviewed
+                DoMarkup = False
+                DoInplace = True
             End If
 
             OtherPrompt = ""
@@ -1655,7 +1878,7 @@ Partial Public Class ThisAddIn
                 End If
 
                 ' Insert result
-                If DoMarkup And MarkupMethod <> 3 Then
+                If DoMarkup AndAlso MarkupMethod <> 3 AndAlso MarkupMethod <> 4 Then
                     SLib.InsertTextWithMarkdown(selection, vbCrLf & LLMResult & vbCrLf & "<p>MARKUP:<br></p>", trailingCR)
                 Else
                     If DoInplace Then
@@ -1678,11 +1901,12 @@ Partial Public Class ThisAddIn
 
                 ' Markup comparison if requested
                 If DoMarkup Then
-                    If MarkupMethod = 2 Or MarkupMethod = 3 Then
-                        CompareAndInsertText(selectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
-                    Else
-                        CompareAndInsertTextCompareDocs(selectedText, LLMResult)
-                    End If
+                    Select Case MarkupMethod
+                        Case 2, 3
+                            CompareAndInsertText(selectedText, LLMResult, MarkupMethod = 3, "This is the markup of the text inserted:", True)
+                        Case Else
+                            CompareAndInsertTextCompareDocs(selectedText, LLMResult)
+                    End Select
                 End If
             End If
 
@@ -1801,65 +2025,146 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
-            ' Inspector context: insert at cursor — we are on the UI/STA thread here
-            Dim wordEditor As Microsoft.Office.Interop.Word.Document =
-                ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+            ' Inspector context: insert at cursor — we are on the UI/STA thread here.
+            ' Re-validate state because the await may have changed it (focus loss,
+            ' inspector closed, user switched to reading pane, mail sent, etc.).
+            Try : ComRetry(Function()
+                               inspector.Activate()
+                               Return 0
+                           End Function) : Catch : End Try
 
-            If wordEditor Is Nothing Then
-                ' Fallback to clipboard path — stay on UI thread for COM safety
-                Dim txtObj As New DataObject()
-                txtObj.SetData(DataFormats.UnicodeText, result)
-                txtObj.SetData(DataFormats.Text, result)
-                Dim clipOk = Await SetClipboardRobustAsync(txtObj)
+            ' Pump a couple of messages so Outlook can finish activating the editor
+            ' before we touch the Word object model.
+            System.Windows.Forms.Application.DoEvents()
+            System.Threading.Thread.Sleep(50)
+            System.Windows.Forms.Application.DoEvents()
 
-                If clipOk Then
-                    SLib.ShowCustomMessageBox("Could not access the mail editor; result copied to clipboard instead.")
-                Else
-                    Dim edited As String = SLib.ShowCustomWindow(
-                        "Could not access the mail editor; clipboard is busy. Copy manually or edit and press OK:",
-                        result,
-                        "If copying still fails, the text will be saved to a temporary file.",
-                        AN, False)
+            Dim mailItem As Microsoft.Office.Interop.Outlook.MailItem =
+                TryCast(curr, Microsoft.Office.Interop.Outlook.MailItem)
 
-                    If Not String.IsNullOrWhiteSpace(edited) Then
-                        Dim editedObj As New DataObject()
-                        editedObj.SetData(DataFormats.UnicodeText, edited)
-                        editedObj.SetData(DataFormats.Text, edited)
-                        Dim editedOk = Await SetClipboardRobustAsync(editedObj)
-                        If Not editedOk Then
-                            Dim tmp = SaveTextToTempFile(edited)
-                            If Not String.IsNullOrWhiteSpace(tmp) Then
-                                SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
-                            Else
-                                SLib.ShowCustomMessageBox("Clipboard is locked and saving failed.")
-                            End If
-                        Else
-                            SLib.ShowCustomMessageBox("Your edited text has been copied to the clipboard.")
-                        End If
+            Dim editorUsable As Boolean = False
+            Dim wordEditor As Microsoft.Office.Interop.Word.Document = Nothing
+            Try
+                If mailItem IsNot Nothing AndAlso Not mailItem.Sent Then
+                    wordEditor = ComRetry(Function() CType(inspector.WordEditor, Microsoft.Office.Interop.Word.Document))
+                    If wordEditor IsNot Nothing Then
+                        ' wdNoProtection = -1
+                        Dim prot As Integer = ComRetry(Function() CInt(wordEditor.ProtectionType))
+                        editorUsable = (prot = -1)
                     End If
                 End If
-                Return
-            End If
+            Catch
+                editorUsable = False
+            End Try
 
-            Dim selection As Microsoft.Office.Interop.Word.Selection = wordEditor.Application.Selection
-            If selection IsNot Nothing Then
-                If selection.Start <> selection.End Then
-                    selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            If editorUsable Then
+                Dim inserted As Boolean = False
+                Dim lastComEx As System.Runtime.InteropServices.COMException = Nothing
+
+                ' Up to 3 attempts: re-fetch Selection each time, because a stale
+                ' Selection from before the await is a frequent cause of the
+                ' "document is locked for editing" error.
+                For attempt As Integer = 1 To 3
+                    Dim selection As Microsoft.Office.Interop.Word.Selection = Nothing
+                    Try
+                        selection = ComRetry(Function() wordEditor.Application.Selection)
+                        If selection Is Nothing Then
+                            System.Threading.Thread.Sleep(100)
+                            Continue For
+                        End If
+
+                        ComRetry(Function()
+                                     If selection.Start <> selection.End Then
+                                         selection.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                                     End If
+                                     selection.TypeParagraph()
+                                     Return 0
+                                 End Function)
+
+                        InsertTextWithMarkdown(selection, result, True)
+                        inserted = True
+                        Exit For
+
+                    Catch ex As System.Runtime.InteropServices.COMException
+                        lastComEx = ex
+                        ' 0x800A1769 = CommandNotAvailable ("document locked for editing")
+                        ' 0x800AC472 = Word busy
+                        System.Windows.Forms.Application.DoEvents()
+                        System.Threading.Thread.Sleep(150 * attempt)
+                    Finally
+                        If selection IsNot Nothing Then
+                            Try : Marshal.ReleaseComObject(selection) : Catch : End Try
+                            selection = Nothing
+                        End If
+                    End Try
+                Next
+
+                If inserted Then
+                    Try : inspector.Display() : Catch : End Try
+                Else
+                    ' Body refused the edit – fall back to clipboard so the user
+                    ' can paste manually rather than losing the AI result.
+                    Await FallbackToClipboardAsync(result,
+                        "The mail body is currently locked for editing. " &
+                        "The result has been copied to the clipboard instead.")
                 End If
-                selection.TypeParagraph()
-                InsertTextWithMarkdown(selection, result, True)
+            Else
+                ' No usable editor (mail sent, read-only, switched to reading pane, …)
+                Await FallbackToClipboardAsync(result,
+                    "The mail editor is not available for editing. " &
+                    "The result has been copied to the clipboard instead.")
             End If
 
-            inspector.Display()
-
-            If selection IsNot Nothing Then Marshal.ReleaseComObject(selection) : selection = Nothing
             If wordEditor IsNot Nothing Then Marshal.ReleaseComObject(wordEditor) : wordEditor = Nothing
             If inspector IsNot Nothing Then Marshal.ReleaseComObject(inspector) : inspector = Nothing
 
+        Catch ex As System.Runtime.InteropServices.COMException When ex.HResult = &H800A1769
+            ' Document locked for editing – last-resort fallback so the result is not lost.
+            Try
+                Dim txtObj As New DataObject()
+                txtObj.SetData(DataFormats.UnicodeText, ex.Message)
+            Catch
+            End Try
+            SLib.ShowCustomMessageBox("The mail body is locked for editing right now. Please click into the message body and try again.")
         Catch ex As System.Runtime.InteropServices.ExternalException
-            SLib.ShowCustomMessageBox($"InsertClipboard clipboard error (probably locked): {ex.Message}")
+            SLib.ShowCustomMessageBox($"InsertClipboard COM error: 0x{ex.HResult:X8} – {ex.Message}")
         Catch ex As System.Exception
             SLib.ShowCustomMessageBox($"InsertClipboard failed: {ex.GetType().FullName}: {ex.Message}")
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Copies the given text to the clipboard (RTF + Unicode) and shows a message.
+    ''' Used as a fallback when the Outlook body cannot be edited.
+    ''' </summary>
+    Private Async Function FallbackToClipboardAsync(text As String, message As String) As System.Threading.Tasks.Task
+        Try
+            Dim dataObj As New System.Windows.Forms.DataObject()
+            If text.Length < 350000 Then
+                Try
+                    Dim rtf = MarkdownToRtfConverter.Convert(text)
+                    If Not String.IsNullOrEmpty(rtf) Then
+                        dataObj.SetData(System.Windows.Forms.DataFormats.Rtf, rtf)
+                    End If
+                Catch
+                End Try
+            End If
+            dataObj.SetData(System.Windows.Forms.DataFormats.UnicodeText, text)
+            dataObj.SetData(System.Windows.Forms.DataFormats.Text, text)
+
+            Dim ok = Await SetClipboardRobustAsync(dataObj)
+            If ok Then
+                SLib.ShowCustomMessageBox(message)
+            Else
+                Dim tmp = SaveTextToTempFile(text)
+                If Not String.IsNullOrWhiteSpace(tmp) Then
+                    SLib.ShowCustomMessageBox($"Clipboard is locked. The result was saved to: {tmp}")
+                Else
+                    SLib.ShowCustomMessageBox("Clipboard and editor are both unavailable; the result could not be saved.")
+                End If
+            End If
+        Catch ex As System.Exception
+            SLib.ShowCustomMessageBox($"Fallback failed: {ex.Message}")
         End Try
     End Function
 
@@ -2019,8 +2324,8 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "Replace text (other commands)"},
                         {"ReplaceText2Override", "Replace text (other commands) [override]"},
                         {"DoMarkupOutlook", "Also do a markup (other commands)"},
-                        {"MarkupMethodOutlook", "Markup method (1 = Word, 2 = Diff, 3 = DiffW)"},
-                        {"MarkupMethodOutlookOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW) [override]"},
+                        {"MarkupMethodOutlook", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Review Changes)"},
+                        {"MarkupMethodOutlookOverride", "Markup method (1 = Word, 2 = Diff, 3 = DiffW, 4 = Review Changes) [override]"},
                         {"MarkupDiffCap", "Maximum characters for Diff Markup"},
                         {"PreCorrection", "Additional instruction for prompts"},
                         {"PostCorrection", "Prompt to apply after queries"},
@@ -2029,9 +2334,15 @@ Partial Public Class ThisAddIn
                         {"PromptLibPathLocal", "Prompt library file (local)"},
                         {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                         {"Location", "Location information to use, e.g., in 'Freestyle'"},
-                        {"ToolingLogWindow", "Tooling: Show log window"},
-                        {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
-                        {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"}
+                        {"ToolingLogWindow", "Agents: Show log window"},
+                        {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
+                        {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                        {"KnowledgeStorePath", "Knowledge store file (central)"},
+                        {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
+                        {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
+                        {"KnowledgeStoreOwner", "Knowledge store: Default owner"},
+                        {"KnowledgeStoreBackgroundIndexing", "Knowledge store: Background indexing"},
+                        {"KnowledgeStoreBackgroundIndexingWindow", "Knowledge store: Background processing window"}
                     }
 
         Dim SettingsTips As New Dictionary(Of String, String) From {
@@ -2050,7 +2361,7 @@ Partial Public Class ThisAddIn
                         {"ReplaceText2", "If selected, the response of the LLM for other commands (than translate) will replace the original text"},
                         {"ReplaceText2Override", "Leave empty to not override the above value; use 0 or 'false' to disable and 1 or 'true' to enable 'Replace text' as a personal override"},
                         {"DoMarkupOutlook", "Whether a markup should be done for functions that change only parts of a text"},
-                        {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window"},
+                                                {"MarkupMethodOutlook", "Markup method to use: 1 = Compare using the Word compare function, 2 = Simple Differ, 3 = Simple Diff shown in a window, 4 = Interactive review (accept/reject each change)"},
                         {"MarkupMethodOutlookOverride", "Leave empty to not override the above value; otherwise enter the personal override value for 'markup method'"},
                         {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                         {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
@@ -2062,8 +2373,14 @@ Partial Public Class ThisAddIn
                         {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
                         {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                         {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
-                        {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."}
-        }
+                        {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                        {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
+                        {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
+                        {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
+                        {"KnowledgeStoreOwner", "Default owner identity for locally created stores (empty = current Windows username)"},
+                        {"KnowledgeStoreBackgroundIndexing", "When enabled, new or changed documents in active stores are indexed automatically in the background"},
+                        {"KnowledgeStoreBackgroundIndexingWindow", "Optional local-time processing window for background indexing. Leave empty to allow any time. Examples: '22:00-06:00' (only at night), 'allow:22:00-06:00;12:00-13:00', 'deny:08:00-18:00'."}
+                }
 
         ShowSettingsWindow(Settings, SettingsTips)
 

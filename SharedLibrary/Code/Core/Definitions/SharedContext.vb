@@ -185,6 +185,9 @@ Namespace SharedLibrary
             Property SP_MailReply As String
             Property SP_MailSumup As String
             Property SP_MailSumup2 As String
+            Property SP_AIMailSearch1 As String
+            Property SP_AIMailSearch2 As String
+            Property SP_AIMailSearch3 As String
             Property SP_FreestyleText As String
             Property SP_FreestyleNoText As String
             Property SP_Freestyle_Document As String
@@ -269,6 +272,7 @@ Namespace SharedLibrary
             Property INI_MarkupMethodWord As Integer
             Property INI_MarkupMethodWordOverride As String
             Property INI_MarkupMethodOutlookOverride As String
+            Property INI_MarkupAuthor As String
             Property INI_ShortcutsWordExcel As String
             Property INI_PromptLib As Boolean
             Property INI_PromptLibPath As String
@@ -278,6 +282,8 @@ Namespace SharedLibrary
             Property INI_SpecialServicePath As String
             Property INI_FindClausePath As String
             Property INI_FindClausePathLocal As String
+            Property INI_AgentResourcesPath As String
+            Property INI_AgentResourcesPathLocal As String
             Property INI_WebAgentPath As String
             Property INI_WebAgentPathLocal As String
             Property INI_SnapshotLibPath As String
@@ -285,6 +291,13 @@ Namespace SharedLibrary
 
             Property INI_DocCheckPath As String
             Property INI_DocCheckPathLocal As String
+            Property INI_KnowledgeStorePath As String
+            Property INI_KnowledgeStorePathLocal As String
+            Property INI_KnowledgeStoreUseLLMIndex As Boolean
+            Property INI_KnowledgeStoreOwner As String
+            Property INI_KnowledgeStoreBackgroundIndexing As Boolean
+            Property INI_KnowledgeStoreBackgroundIndexingWindow As String
+            Property INI_FormulaInstruction As String
             Property INI_DocStylePath As String
             Property INI_DocStylePathLocal As String
             Property INI_PromptLibPath_Transcript As String
@@ -358,6 +371,11 @@ Namespace SharedLibrary
             Property SP_Assemble_Plan As String
             Property SP_Assemble_Execute As String
             Property SP_Assemble_Summarize As String
+
+            ' Microsoft 365 / Graph integration (used by M365Service in CommonFeatures)
+            Property INI_M365ClientId As String
+            Property INI_M365TenantId As String
+            Property INI_M365Scopes As String
 
 
         End Interface
@@ -508,6 +526,9 @@ Namespace SharedLibrary
         Public Property SP_MailReply As String Implements ISharedContext.SP_MailReply
         Public Property SP_MailSumup As String Implements ISharedContext.SP_MailSumup
         Public Property SP_MailSumup2 As String Implements ISharedContext.SP_MailSumup2
+        Public Property SP_AIMailSearch1 As String Implements ISharedContext.SP_AIMailSearch1
+        Public Property SP_AIMailSearch2 As String Implements ISharedContext.SP_AIMailSearch2
+        Public Property SP_AIMailSearch3 As String Implements ISharedContext.SP_AIMailSearch3
         Public Property SP_FreestyleText As String Implements ISharedContext.SP_FreestyleText
         Public Property SP_FreestyleNoText As String Implements ISharedContext.SP_FreestyleNoText
         Public Property SP_Freestyle_Document As String Implements ISharedContext.SP_Freestyle_Document
@@ -590,8 +611,8 @@ Namespace SharedLibrary
         Public Property INI_MarkupMethodHelper As Integer Implements ISharedContext.INI_MarkupMethodHelper
         Public Property INI_MarkupMethodWord As Integer Implements ISharedContext.INI_MarkupMethodWord
         Public Property INI_MarkupMethodWordOverride As String Implements ISharedContext.INI_MarkupMethodWordOverride
-
         Public Property INI_MarkupMethodOutlookOverride As String Implements ISharedContext.INI_MarkupMethodOutlookOverride
+        Public Property INI_MarkupAuthor As String Implements ISharedContext.INI_MarkupAuthor
         Public Property INI_ShortcutsWordExcel As String Implements ISharedContext.INI_ShortcutsWordExcel
         Public Property INI_PromptLib As Boolean Implements ISharedContext.INI_PromptLib
         Public Property INI_PromptLibPath As String Implements ISharedContext.INI_PromptLibPath
@@ -601,6 +622,8 @@ Namespace SharedLibrary
         Public Property INI_SpecialServicePath As String Implements ISharedContext.INI_SpecialServicePath
         Public Property INI_FindClausePath As String Implements ISharedContext.INI_FindClausePath
         Public Property INI_FindClausePathLocal As String Implements ISharedContext.INI_FindClausePathLocal
+        Public Property INI_AgentResourcesPath As String Implements ISharedContext.INI_AgentResourcesPath
+        Public Property INI_AgentResourcesPathLocal As String Implements ISharedContext.INI_AgentResourcesPathLocal
         Public Property INI_WebAgentPath As String Implements ISharedContext.INI_WebAgentPath
         Public Property INI_WebAgentPathLocal As String Implements ISharedContext.INI_WebAgentPathLocal
         Public Property INI_SnapshotLibPath As String Implements ISharedContext.INI_SnapshotLibPath
@@ -608,6 +631,14 @@ Namespace SharedLibrary
 
         Public Property INI_DocCheckPath As String Implements ISharedContext.INI_DocCheckPath
         Public Property INI_DocCheckPathLocal As String Implements ISharedContext.INI_DocCheckPathLocal
+        Public Property INI_KnowledgeStorePath As String Implements ISharedContext.INI_KnowledgeStorePath
+        Public Property INI_KnowledgeStorePathLocal As String Implements ISharedContext.INI_KnowledgeStorePathLocal
+        Public Property INI_KnowledgeStoreUseLLMIndex As Boolean Implements ISharedContext.INI_KnowledgeStoreUseLLMIndex
+        Public Property INI_KnowledgeStoreOwner As String Implements ISharedContext.INI_KnowledgeStoreOwner
+
+        Public Property INI_KnowledgeStoreBackgroundIndexing As Boolean Implements ISharedContext.INI_KnowledgeStoreBackgroundIndexing
+        Public Property INI_KnowledgeStoreBackgroundIndexingWindow As String Implements ISharedContext.INI_KnowledgeStoreBackgroundIndexingWindow
+        Public Property INI_FormulaInstruction As String Implements ISharedContext.INI_FormulaInstruction
         Public Property INI_DocStylePath As String Implements ISharedContext.INI_DocStylePath
         Public Property INI_DocStylePathLocal As String Implements ISharedContext.INI_DocStylePathLocal
         Public Property INI_PromptLibPath_Transcript As String Implements ISharedContext.INI_PromptLibPath_Transcript
@@ -670,6 +701,10 @@ Namespace SharedLibrary
         Public Property SP_Assemble_Plan As String Implements ISharedContext.SP_Assemble_Plan
         Public Property SP_Assemble_Execute As String Implements ISharedContext.SP_Assemble_Execute
         Public Property SP_Assemble_Summarize As String Implements ISharedContext.SP_Assemble_Summarize
+
+        Public Property INI_M365ClientId As String Implements ISharedContext.INI_M365ClientId
+        Public Property INI_M365TenantId As String Implements ISharedContext.INI_M365TenantId
+        Public Property INI_M365Scopes As String Implements ISharedContext.INI_M365Scopes
 
     End Class
 End Namespace

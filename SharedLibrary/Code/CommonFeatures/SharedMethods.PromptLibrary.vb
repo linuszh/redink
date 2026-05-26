@@ -36,6 +36,23 @@ Namespace SharedLibrary
 
     Partial Public Class SharedMethods
 
+        Private Const PromptLibraryAllCategoriesLabel As String = "(All categories)"
+        Private Const PromptLibraryUncategorizedLabel As String = "(Uncategorized)"
+
+        Private NotInheritable Class PromptLibraryEntry
+
+            Public ReadOnly Title As String
+            Public ReadOnly Prompt As String
+            Public ReadOnly Category As String
+
+            Public Sub New(title As String, prompt As String, category As String)
+                Me.Title = title
+                Me.Prompt = prompt
+                Me.Category = category
+            End Sub
+
+        End Class
+
         ''' <summary>
         ''' Shows a prompt selection dialog that loads prompts from an optional local file and a central file,
         ''' displays a title list with prompt preview, and returns the selected prompt and output options.
@@ -54,61 +71,70 @@ Namespace SharedLibrary
             Dim localPath As String = ExpandEnvironmentVariables(filepathlocal)
             Dim hasLocal As Boolean = Not String.IsNullOrWhiteSpace(localPath)
 
-            ' Load prompts from both files independently (local first), ignore missing/non-existing silently
-            Dim localTitles As New List(Of String)()
-            Dim localPrompts As New List(Of String)()
-            Dim centralTitles As New List(Of String)()
-            Dim centralPrompts As New List(Of String)()
-
-            LoadPromptsIntoLists(localPath, localTitles, localPrompts, " (local)")
-            LoadPromptsIntoLists(centralPath, centralTitles, centralPrompts, Nothing)
-
+            Dim allEntries As New List(Of PromptLibraryEntry)()
             Dim combinedTitles As New List(Of String)()
             Dim combinedPrompts As New List(Of String)()
 
-            ' Local first
-            combinedTitles.AddRange(localTitles)
-            combinedPrompts.AddRange(localPrompts)
+            Dim SyncContextFromEntries As System.Action =
+                Sub()
+                    combinedTitles.Clear()
+                    combinedPrompts.Clear()
 
-            ' Then central
-            combinedTitles.AddRange(centralTitles)
-            combinedPrompts.AddRange(centralPrompts)
+                    For Each entry As PromptLibraryEntry In allEntries
+                        combinedTitles.Add(entry.Title)
+                        combinedPrompts.Add(entry.Prompt)
+                    Next
 
-            ' Optionally keep Context in sync with what the user sees
-            Try
-                If Context IsNot Nothing Then
-                    If Context.PromptTitles Is Nothing Then Context.PromptTitles = New List(Of String)()
-                    If Context.PromptLibrary Is Nothing Then Context.PromptLibrary = New List(Of String)()
-                    Context.PromptTitles.Clear()
-                    Context.PromptLibrary.Clear()
-                    Context.PromptTitles.AddRange(combinedTitles)
-                    Context.PromptLibrary.AddRange(combinedPrompts)
-                End If
-            Catch
-                ' Best-effort only
-            End Try
+                    Try
+                        If Context IsNot Nothing Then
+                            If Context.PromptTitles Is Nothing Then Context.PromptTitles = New List(Of String)()
+                            If Context.PromptLibrary Is Nothing Then Context.PromptLibrary = New List(Of String)()
+                            Context.PromptTitles.Clear()
+                            Context.PromptLibrary.Clear()
+                            Context.PromptTitles.AddRange(combinedTitles)
+                            Context.PromptLibrary.AddRange(combinedPrompts)
+                        End If
+                    Catch
+                        ' Best-effort only
+                    End Try
+                End Sub
+
+            Dim ReloadPromptEntries As System.Action =
+                Sub()
+                    Dim localEntries As New List(Of PromptLibraryEntry)()
+                    Dim centralEntries As New List(Of PromptLibraryEntry)()
+
+                    allEntries.Clear()
+
+                    LoadPromptEntriesIntoList(localPath, localEntries, " (local)")
+                    LoadPromptEntriesIntoList(centralPath, centralEntries, Nothing)
+
+                    allEntries.AddRange(localEntries)
+                    allEntries.AddRange(centralEntries)
+
+                    SyncContextFromEntries()
+                End Sub
+
+            ReloadPromptEntries()
 
             Dim NoBubbles As Boolean = False
             Dim NoMarkup As Boolean = False
 
-            ' If enableMarkup is not used; comparing to Nothing treats Nothing as False.
             If enableMarkup = Nothing Then
                 NoMarkup = True
                 enableMarkup = False
             End If
 
-            ' If enableBubbles is not used; comparing to Nothing treats Nothing as False.
             If enableBubbles = Nothing Then
                 NoBubbles = True
                 enableBubbles = False
             End If
 
-            If combinedPrompts.Count = 0 Then
+            If allEntries.Count = 0 Then
                 ShowCustomMessageBox("No prompts have been found in the configured prompt library files.")
                 Return ("", False, False, False)
             End If
 
-            ' --- Form -----------------------------------------------------------------
             Dim settingsForm As New System.Windows.Forms.Form With {
                     .Text = "Select Prompt",
                     .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi,
@@ -118,7 +144,8 @@ Namespace SharedLibrary
                     .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
                     .Padding = New System.Windows.Forms.Padding(10),
                     .MinimizeBox = True,
-                    .MaximizeBox = True
+                    .MaximizeBox = True,
+                    .TopMost = True
                 }
             settingsForm.MinimumSize = New System.Drawing.Size(900, 650)
 
@@ -128,29 +155,52 @@ Namespace SharedLibrary
             Dim standardFont As New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
             settingsForm.Font = standardFont
 
-            ' --- Layout grid ----------------------------------------------------------
             Dim layout As New System.Windows.Forms.TableLayoutPanel With {
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .ColumnCount = 2,
-                .RowCount = 3,
+                .RowCount = 4,
                 .Padding = New System.Windows.Forms.Padding(10)
             }
             layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
             layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
             layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 70.0F))
             layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
             layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
             settingsForm.Controls.Add(layout)
 
-            ' --- Selector --------------------------------------------------------------
+            Dim categoryPanel As New System.Windows.Forms.FlowLayoutPanel With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .WrapContents = False,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(10, 10, 10, 0),
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+            }
+
+            Dim categoryLabel As New System.Windows.Forms.Label With {
+                .Text = "Category:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+
+            Dim categoryComboBox As New System.Windows.Forms.ComboBox With {
+                .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                .Width = 320,
+                .Margin = New System.Windows.Forms.Padding(3)
+            }
+
+            categoryPanel.Controls.Add(categoryLabel)
+            categoryPanel.Controls.Add(categoryComboBox)
+            layout.Controls.Add(categoryPanel, 0, 0)
+            layout.SetColumnSpan(categoryPanel, 2)
+
             Dim titleListBox As New System.Windows.Forms.ListBox With {
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .Margin = New System.Windows.Forms.Padding(10)
             }
-            titleListBox.Items.AddRange(combinedTitles.ToArray())
-            layout.Controls.Add(titleListBox, 0, 0)
+            layout.Controls.Add(titleListBox, 0, 1)
 
-            ' --- Preview ---------------------------------------------------------------
             Dim promptTextBox As New System.Windows.Forms.TextBox With {
                 .Dock = System.Windows.Forms.DockStyle.Fill,
                 .Multiline = True,
@@ -158,33 +208,8 @@ Namespace SharedLibrary
                 .ScrollBars = System.Windows.Forms.ScrollBars.Vertical,
                 .Margin = New System.Windows.Forms.Padding(10)
             }
-            layout.Controls.Add(promptTextBox, 1, 0)
+            layout.Controls.Add(promptTextBox, 1, 1)
 
-            If combinedTitles.Count > 0 Then
-                titleListBox.SelectedIndex = 0
-                promptTextBox.Text = combinedPrompts(0).Replace("\n", vbCrLf)
-            End If
-
-            ' Updates the preview on selection changes.
-            AddHandler titleListBox.SelectedIndexChanged,
-                Sub()
-                    Dim selectedIndex = titleListBox.SelectedIndex
-                    If selectedIndex >= 0 AndAlso selectedIndex < combinedPrompts.Count Then
-                        Dim selectedPrompt = combinedPrompts(selectedIndex).Replace("\n", vbCrLf)
-                        promptTextBox.Text = selectedPrompt
-                    End If
-                End Sub
-
-            ' Confirms the dialog on Enter.
-            AddHandler titleListBox.KeyDown,
-                Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
-                    If e.KeyCode = System.Windows.Forms.Keys.Enter Then
-                        settingsForm.DialogResult = System.Windows.Forms.DialogResult.OK
-                        settingsForm.Close()
-                    End If
-                End Sub
-
-            ' --- Checkboxes (wrapping) ------------------------------------------------
             Dim checkboxPanel As New System.Windows.Forms.FlowLayoutPanel With {
                 .FlowDirection = System.Windows.Forms.FlowDirection.TopDown,
                 .WrapContents = False,
@@ -193,7 +218,7 @@ Namespace SharedLibrary
                 .AutoSize = True,
                 .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
             }
-            layout.Controls.Add(checkboxPanel, 0, 1)
+            layout.Controls.Add(checkboxPanel, 0, 2)
 
             Dim markupCheckbox As New System.Windows.Forms.CheckBox With {
                 .Text = "The output shall be provided as a markup",
@@ -222,7 +247,6 @@ Namespace SharedLibrary
             checkboxPanel.Controls.Add(clipboardCheckbox)
             checkboxPanel.Controls.Add(bubblesCheckbox)
 
-            ' Applies MaximumSize to trigger line wrapping based on the left grid cell width.
             Dim ApplyCheckboxWrap As System.Action =
                 Sub()
                     Dim cellWidthLeft As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(0).Width / 100.0F) - 20
@@ -233,12 +257,10 @@ Namespace SharedLibrary
                 End Sub
             AddHandler layout.SizeChanged, Sub() ApplyCheckboxWrap()
 
-            ' Mutual exclusivity
             AddHandler markupCheckbox.CheckedChanged, Sub() If markupCheckbox.Checked Then bubblesCheckbox.Checked = False : clipboardCheckbox.Checked = False
             AddHandler bubblesCheckbox.CheckedChanged, Sub() If bubblesCheckbox.Checked Then markupCheckbox.Checked = False : clipboardCheckbox.Checked = False
             AddHandler clipboardCheckbox.CheckedChanged, Sub() If clipboardCheckbox.Checked Then markupCheckbox.Checked = False : bubblesCheckbox.Checked = False
 
-            ' --- Source label (wrapping) ----------------------------------------------
             Dim sourceText As String
             If hasLocal Then
                 sourceText = $"Source: {localPath} (local, editable) | {centralPath} (central)"
@@ -253,9 +275,8 @@ Namespace SharedLibrary
                 .Margin = New System.Windows.Forms.Padding(10),
                 .AutoEllipsis = False
             }
-            layout.Controls.Add(filePathLabel, 1, 1)
+            layout.Controls.Add(filePathLabel, 1, 2)
 
-            ' Applies MaximumSize to trigger line wrapping based on the right grid cell width.
             Dim ApplyFilePathWrap As System.Action =
                 Sub()
                     Dim cellWidthRight As Integer = CInt((layout.ClientSize.Width - layout.Padding.Horizontal) * layout.ColumnStyles(1).Width / 100.0F) - 20
@@ -264,7 +285,6 @@ Namespace SharedLibrary
                 End Sub
             AddHandler layout.SizeChanged, Sub() ApplyFilePathWrap()
 
-            ' --- Buttons (LEFT aligned, OK | Cancel | Edit) ---------------------------
             Dim buttonPanel As New System.Windows.Forms.FlowLayoutPanel With {
                 .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
                 .WrapContents = False,
@@ -274,7 +294,7 @@ Namespace SharedLibrary
                 .Margin = New System.Windows.Forms.Padding(4),
                 .Padding = New System.Windows.Forms.Padding(4)
             }
-            layout.Controls.Add(buttonPanel, 0, 2)
+            layout.Controls.Add(buttonPanel, 0, 3)
             layout.SetColumnSpan(buttonPanel, 2)
 
             Dim okButton As New System.Windows.Forms.Button With {
@@ -302,44 +322,163 @@ Namespace SharedLibrary
             buttonPanel.Controls.Add(cancelButton)
             buttonPanel.Controls.Add(editButton)
 
-            ' --- Edit button: edit ONLY local if defined, else central; then reload both
-            AddHandler editButton.Click,
-                Sub()
-                    Dim target As String = If(hasLocal, localPath, centralPath)
-                    Dim targetKind As String = If(hasLocal, "local", "central")
-                    ShowTextFileEditor(target, $"You can now edit your {targetKind} prompts (stored at {target}). Make sure that on each line, the description and the prompt is separated by a '|'; you can use ';' for indicating comments.")
+            Dim visibleEntries As New List(Of PromptLibraryEntry)()
+            Dim suppressCategoryRefresh As Boolean = False
 
-                    ' Reload both sources after editing
-                    localTitles.Clear() : localPrompts.Clear()
-                    centralTitles.Clear() : centralPrompts.Clear()
-                    LoadPromptsIntoLists(localPath, localTitles, localPrompts, " (local)")
-                    LoadPromptsIntoLists(centralPath, centralTitles, centralPrompts, Nothing)
+            Dim RefreshVisiblePromptList As System.Action(Of String) =
+                Sub(preferredTitle As String)
+                    Dim selectedCategory As String = PromptLibraryAllCategoriesLabel
+                    If categoryComboBox.SelectedItem IsNot Nothing Then
+                        selectedCategory = CStr(categoryComboBox.SelectedItem)
+                    End If
 
-                    combinedTitles.Clear() : combinedPrompts.Clear()
-                    combinedTitles.AddRange(localTitles) : combinedPrompts.AddRange(localPrompts)
-                    combinedTitles.AddRange(centralTitles) : combinedPrompts.AddRange(centralPrompts)
+                    visibleEntries.Clear()
 
-                    ' Keep Context synced with the combined view
-                    Try
-                        If Context IsNot Nothing Then
-                            Context.PromptTitles.Clear()
-                            Context.PromptLibrary.Clear()
-                            Context.PromptTitles.AddRange(combinedTitles)
-                            Context.PromptLibrary.AddRange(combinedPrompts)
+                    For Each entry As PromptLibraryEntry In allEntries
+                        If String.Equals(selectedCategory, PromptLibraryAllCategoriesLabel, StringComparison.OrdinalIgnoreCase) OrElse
+                           String.Equals(entry.Category, selectedCategory, StringComparison.OrdinalIgnoreCase) Then
+                            visibleEntries.Add(entry)
                         End If
-                    Catch
-                        ' Best-effort only
-                    End Try
+                    Next
 
+                    titleListBox.BeginUpdate()
                     titleListBox.Items.Clear()
-                    titleListBox.Items.AddRange(combinedTitles.ToArray())
+                    For Each entry As PromptLibraryEntry In visibleEntries
+                        titleListBox.Items.Add(entry.Title)
+                    Next
+                    titleListBox.EndUpdate()
 
-                    If combinedTitles.Count > 0 Then
-                        titleListBox.SelectedIndex = 0
-                        promptTextBox.Text = combinedPrompts(0).Replace("\n", vbCrLf)
+                    Dim selectedIndex As Integer = -1
+
+                    If Not String.IsNullOrWhiteSpace(preferredTitle) Then
+                        For i As Integer = 0 To visibleEntries.Count - 1
+                            If String.Equals(visibleEntries(i).Title, preferredTitle, StringComparison.OrdinalIgnoreCase) Then
+                                selectedIndex = i
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If selectedIndex = -1 AndAlso visibleEntries.Count > 0 Then
+                        selectedIndex = 0
+                    End If
+
+                    If selectedIndex >= 0 Then
+                        titleListBox.SelectedIndex = selectedIndex
+                        promptTextBox.Text = visibleEntries(selectedIndex).Prompt.Replace("\n", vbCrLf)
                     Else
                         promptTextBox.Clear()
                     End If
+                End Sub
+
+            Dim RefreshCategoryFilter As System.Action(Of String) =
+                Sub(preferredCategory As String)
+                    Dim categories As New List(Of String)()
+                    Dim seenCategories As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                    Dim hasDefinedCategories As Boolean = False
+
+                    categories.Add(PromptLibraryAllCategoriesLabel)
+
+                    For Each entry As PromptLibraryEntry In allEntries
+                        If String.Equals(entry.Category, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                            Continue For
+                        End If
+
+                        If seenCategories.Add(entry.Category) Then
+                            categories.Add(entry.Category)
+                            hasDefinedCategories = True
+                        End If
+                    Next
+
+                    If hasDefinedCategories Then
+                        For Each entry As PromptLibraryEntry In allEntries
+                            If String.Equals(entry.Category, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                                If seenCategories.Add(entry.Category) Then
+                                    categories.Add(entry.Category)
+                                End If
+                            End If
+                        Next
+                    End If
+
+                    suppressCategoryRefresh = True
+
+                    categoryComboBox.BeginUpdate()
+                    categoryComboBox.Items.Clear()
+                    categoryComboBox.Items.AddRange(categories.ToArray())
+                    categoryComboBox.EndUpdate()
+
+                    categoryComboBox.Enabled = hasDefinedCategories
+                    categoryLabel.Enabled = hasDefinedCategories
+
+                    Dim selectedIndex As Integer = 0
+
+                    If hasDefinedCategories AndAlso Not String.IsNullOrWhiteSpace(preferredCategory) Then
+                        For i As Integer = 0 To categories.Count - 1
+                            If String.Equals(categories(i), preferredCategory, StringComparison.OrdinalIgnoreCase) Then
+                                selectedIndex = i
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If categoryComboBox.Items.Count > 0 Then
+                        categoryComboBox.SelectedIndex = selectedIndex
+                    End If
+
+                    suppressCategoryRefresh = False
+                End Sub
+
+            RefreshCategoryFilter(PromptLibraryAllCategoriesLabel)
+            RefreshVisiblePromptList(Nothing)
+
+            AddHandler categoryComboBox.SelectedIndexChanged,
+                Sub()
+                    If suppressCategoryRefresh Then Return
+                    RefreshVisiblePromptList(Nothing)
+                End Sub
+
+            AddHandler titleListBox.SelectedIndexChanged,
+                Sub()
+                    Dim selectedIndex = titleListBox.SelectedIndex
+                    If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
+                        promptTextBox.Text = visibleEntries(selectedIndex).Prompt.Replace("\n", vbCrLf)
+                    Else
+                        promptTextBox.Clear()
+                    End If
+                End Sub
+
+            AddHandler titleListBox.KeyDown,
+                Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                    If e.KeyCode = System.Windows.Forms.Keys.Enter Then
+                        settingsForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                        settingsForm.Close()
+                    End If
+                End Sub
+
+            AddHandler editButton.Click,
+                Sub()
+                    Dim previousCategory As String = PromptLibraryAllCategoriesLabel
+                    If categoryComboBox.SelectedItem IsNot Nothing Then
+                        previousCategory = CStr(categoryComboBox.SelectedItem)
+                    End If
+
+                    Dim previousTitle As String = Nothing
+                    If titleListBox.SelectedIndex >= 0 AndAlso titleListBox.SelectedIndex < visibleEntries.Count Then
+                        previousTitle = visibleEntries(titleListBox.SelectedIndex).Title
+                    End If
+
+                    Dim target As String = If(hasLocal, localPath, centralPath)
+                    Dim targetKind As String = If(hasLocal, "local", "central")
+
+                    EnsurePromptLibraryDirectoryExists(target)
+                    ShowTextFileEditor(
+                        target,
+                        $"You can now edit your {targetKind} prompts (stored at {target}). Make sure that on each prompt line, the description and the prompt are separated by a '|'; you can use ';' for comments; optional category blocks use <Category Name> and </Category Name>."
+                    )
+
+                    ReloadPromptEntries()
+                    RefreshCategoryFilter(previousCategory)
+                    RefreshVisiblePromptList(previousTitle)
 
                     titleListBox.Focus()
                 End Sub
@@ -351,9 +490,9 @@ Namespace SharedLibrary
 
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex = titleListBox.SelectedIndex
-                If selectedIndex >= 0 AndAlso selectedIndex < combinedPrompts.Count Then
+                If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
                     Return (
-                        combinedPrompts(selectedIndex),
+                        visibleEntries(selectedIndex).Prompt,
                         markupCheckbox.Checked,
                         bubblesCheckbox.Checked,
                         clipboardCheckbox.Checked
@@ -363,6 +502,7 @@ Namespace SharedLibrary
 
             Return ("", False, False, False)
         End Function
+
 
         ' Helper: read prompts from a single file into provided lists; ignore missing files silently.
         ' If titleSuffix is provided (e.g., " (local)"), it is appended to every title from this file.
@@ -374,41 +514,63 @@ Namespace SharedLibrary
         ''' <param name="titles">Destination list for prompt titles.</param>
         ''' <param name="prompts">Destination list for prompt texts.</param>
         ''' <param name="titleSuffix">Optional suffix appended to each title loaded from this file.</param>
-        Private Shared Sub LoadPromptsIntoLists(filePath As String,
-                                               titles As List(Of String),
-                                               prompts As List(Of String),
-                                               Optional titleSuffix As String = Nothing)
+        Private Shared Sub LoadPromptEntriesIntoList(filePath As String,
+                                                     entries As List(Of PromptLibraryEntry),
+                                                     Optional titleSuffix As String = Nothing)
             Try
                 If String.IsNullOrWhiteSpace(filePath) Then Return
                 filePath = ExpandEnvironmentVariables(filePath)
                 If Not System.IO.File.Exists(filePath) Then Return
 
+                Dim currentCategory As String = Nothing
                 Dim lines = System.IO.File.ReadAllLines(filePath)
+
                 For Each line As String In lines
-                    Dim trimmedLine = line.Trim()
+                    Dim trimmedLine As String = line.Trim()
                     If trimmedLine.Length = 0 OrElse trimmedLine.StartsWith(";") Then Continue For
+
+                    If trimmedLine.StartsWith("</", StringComparison.Ordinal) AndAlso trimmedLine.EndsWith(">", StringComparison.Ordinal) Then
+                        currentCategory = Nothing
+                        Continue For
+                    End If
+
+                    If trimmedLine.StartsWith("<", StringComparison.Ordinal) AndAlso
+                       trimmedLine.EndsWith(">", StringComparison.Ordinal) AndAlso
+                       Not trimmedLine.Contains("|") Then
+
+                        Dim openingTagName As String = trimmedLine.Substring(1, trimmedLine.Length - 2).Trim()
+                        If openingTagName.Length > 0 AndAlso Not openingTagName.StartsWith("/", StringComparison.Ordinal) Then
+                            currentCategory = openingTagName
+                            Continue For
+                        End If
+                    End If
 
                     Dim parts = trimmedLine.Split("|"c)
                     If parts.Length >= 2 Then
-                        Dim title = parts(0).Trim()
+                        Dim title As String = parts(0).Trim()
                         Dim prompt As String
+
                         If parts.Length = 2 Then
                             prompt = parts(1).Trim()
                         Else
-                            ' Avoid LINQ; keep everything after the first '|' intact
                             prompt = String.Join("|", parts, 1, parts.Length - 1).Trim()
                         End If
+
                         If Not String.IsNullOrEmpty(titleSuffix) Then title &= titleSuffix
 
-                        titles.Add(title)
-                        prompts.Add(prompt)
+                        Dim category As String = If(
+                            String.IsNullOrWhiteSpace(currentCategory),
+                            PromptLibraryUncategorizedLabel,
+                            currentCategory.Trim()
+                        )
+
+                        entries.Add(New PromptLibraryEntry(title, prompt, category))
                     End If
                 Next
             Catch
                 ' Swallow errors to avoid noisy UX in dual-source mode
             End Try
         End Sub
-
 
         ''' <summary>
         ''' Legacy prompt selector that loads prompts from a single file via LoadPrompts and uses Context for storage.
@@ -926,6 +1088,919 @@ Namespace SharedLibrary
         End Function
 
 
+        Public Enum PromptLibrarySlashAction
+            NotTriggered = 0
+            Canceled = 1
+            Inserted = 2
+        End Enum
+
+        ''' <summary>
+        ''' Returns <c>True</c> when a typed slash should open the prompt library instead of being inserted literally.
+        ''' A slash is treated as a command trigger only at the start of the text or after whitespace.
+        ''' </summary>
+        Public Shared Function IsPromptLibrarySlashTrigger(targetTextBox As System.Windows.Forms.TextBoxBase) As Boolean
+            If targetTextBox Is Nothing Then Return False
+
+            Dim insertionIndex As Integer = targetTextBox.SelectionStart
+            If insertionIndex <= 0 Then Return True
+            If insertionIndex > targetTextBox.TextLength Then insertionIndex = targetTextBox.TextLength
+
+            Dim previousChar As Char = targetTextBox.Text.Chars(insertionIndex - 1)
+            Return Char.IsWhiteSpace(previousChar)
+        End Function
+
+
+        Private Shared Function GetEditablePromptLibraryPath(localPath As String, centralPath As String) As String
+            If Not String.IsNullOrWhiteSpace(localPath) Then
+                Return localPath
+            End If
+
+            Return centralPath
+        End Function
+
+        Private Shared Sub EnsurePromptLibraryDirectoryExists(filePath As String)
+            If String.IsNullOrWhiteSpace(filePath) Then
+                Throw New InvalidOperationException("No prompt library file path is configured.")
+            End If
+
+            Dim dir As String = System.IO.Path.GetDirectoryName(filePath)
+            If String.IsNullOrWhiteSpace(dir) Then
+                Throw New InvalidOperationException("The prompt library path does not contain a valid directory.")
+            End If
+
+            If Not System.IO.Directory.Exists(dir) Then
+                System.IO.Directory.CreateDirectory(dir)
+            End If
+        End Sub
+
+        Private Shared Sub EnsurePromptLibraryFileExists(filePath As String)
+            EnsurePromptLibraryDirectoryExists(filePath)
+
+            If System.IO.File.Exists(filePath) Then
+                Return
+            End If
+
+            Dim sb As New System.Text.StringBuilder()
+            sb.AppendLine("; Local prompt library")
+            sb.AppendLine("; Format: Title|Prompt")
+            sb.AppendLine("; Optional categories: <Category Name> ... </Category Name>")
+            sb.AppendLine()
+
+            System.IO.File.WriteAllText(filePath, sb.ToString(), New System.Text.UTF8Encoding(False))
+        End Sub
+
+        Private Shared Function NormalizePromptLibraryPromptText(value As String) As String
+            If value Is Nothing Then
+                Return String.Empty
+            End If
+
+            Return value.Replace(vbCrLf, "\n").
+                         Replace(vbCr, "\n").
+                         Replace(vbLf, "\n").
+                         Replace("|", "¦").
+                         Trim()
+        End Function
+
+        Private Shared Sub AppendPromptLibraryEntry(filePath As String,
+                                                    title As String,
+                                                    prompt As String,
+                                                    Optional category As String = Nothing)
+            title = SanitizeForSingleLine(title)
+            category = SanitizeForSingleLine(category)
+            prompt = NormalizePromptLibraryPromptText(prompt)
+
+            If String.IsNullOrWhiteSpace(title) Then
+                Throw New InvalidOperationException("Please provide a title.")
+            End If
+
+            If String.IsNullOrWhiteSpace(prompt) Then
+                Throw New InvalidOperationException("Please provide a prompt.")
+            End If
+
+            EnsurePromptLibraryFileExists(filePath)
+
+            Dim sb As New System.Text.StringBuilder()
+
+            Try
+                If System.IO.File.Exists(filePath) AndAlso New System.IO.FileInfo(filePath).Length > 0 Then
+                    sb.AppendLine()
+                End If
+            Catch
+            End Try
+
+            If Not String.IsNullOrWhiteSpace(category) Then
+                sb.AppendLine("<" & category & ">")
+            End If
+
+            sb.AppendLine(title & "|" & prompt)
+
+            If Not String.IsNullOrWhiteSpace(category) Then
+                sb.AppendLine("</" & category & ">")
+            End If
+
+            System.IO.File.AppendAllText(filePath, sb.ToString(), New System.Text.UTF8Encoding(False))
+        End Sub
+
+        Private Shared Function ShowAddPromptLibraryEntryDialog(targetPath As String,
+                                                        defaultCategory As String,
+                                                        lastPromptForCtrlP As String,
+                                                        ByRef newTitle As String,
+                                                        ByRef newPrompt As String,
+                                                        ByRef newCategory As String,
+                                                        Optional ownerHandle As IntPtr = Nothing) As Boolean
+
+
+            newTitle = Nothing
+            newPrompt = Nothing
+            newCategory = Nothing
+
+            Dim pendingTitle As String = Nothing
+            Dim pendingPrompt As String = Nothing
+            Dim pendingCategory As String = Nothing
+
+            Dim form As New System.Windows.Forms.Form With {
+                .Text = "Add Prompt",
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi,
+                .AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F),
+                .Padding = New System.Windows.Forms.Padding(10),
+                .MinimizeBox = False,
+                .MaximizeBox = False,
+                .TopMost = True
+            }
+            form.MinimumSize = New System.Drawing.Size(820, 560)
+
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+            form.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            form.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+
+            Dim layout As New System.Windows.Forms.TableLayoutPanel With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .ColumnCount = 2,
+                .RowCount = 5,
+                .Padding = New System.Windows.Forms.Padding(10)
+            }
+            layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            form.Controls.Add(layout)
+
+            Dim infoLabel As New System.Windows.Forms.Label With {
+                .Text = $"The new prompt will be stored in: {targetPath}",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 3, 3, 10)
+            }
+            layout.Controls.Add(infoLabel, 0, 0)
+            layout.SetColumnSpan(infoLabel, 2)
+
+            Dim titleLabel As New System.Windows.Forms.Label With {
+                .Text = "Title:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+            Dim titleTextBox As New System.Windows.Forms.TextBox With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(3)
+            }
+            layout.Controls.Add(titleLabel, 0, 1)
+            layout.Controls.Add(titleTextBox, 1, 1)
+
+            Dim categoryLabel As New System.Windows.Forms.Label With {
+                .Text = "Category:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+            Dim categoryTextBox As New System.Windows.Forms.TextBox With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Text = If(defaultCategory, "")
+            }
+            layout.Controls.Add(categoryLabel, 0, 2)
+            layout.Controls.Add(categoryTextBox, 1, 2)
+
+            Dim promptLabel As New System.Windows.Forms.Label With {
+                .Text = "Prompt:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+            Dim promptTextBox As New System.Windows.Forms.TextBox With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Multiline = True,
+                .AcceptsReturn = True,
+                .ScrollBars = System.Windows.Forms.ScrollBars.Vertical,
+                .Margin = New System.Windows.Forms.Padding(3)
+            }
+            layout.Controls.Add(promptLabel, 0, 3)
+            layout.Controls.Add(promptTextBox, 1, 3)
+
+            Dim hintLabel As New System.Windows.Forms.Label With {
+                .Text = "Ctrl+P inserts the caller's last prompt. Ctrl+Enter adds the new prompt.",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 3, 3)
+            }
+            layout.Controls.Add(hintLabel, 0, 4)
+            layout.SetColumnSpan(hintLabel, 2)
+
+            Dim buttonPanel As New System.Windows.Forms.FlowLayoutPanel With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .WrapContents = False,
+                .Dock = System.Windows.Forms.DockStyle.Bottom,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Margin = New System.Windows.Forms.Padding(4),
+                .Padding = New System.Windows.Forms.Padding(4)
+            }
+            form.Controls.Add(buttonPanel)
+
+            Dim addButton As New System.Windows.Forms.Button With {
+                .Text = "Add",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+            }
+            Dim cancelButton As New System.Windows.Forms.Button With {
+                .Text = "Cancel",
+                .AutoSize = True,
+                .DialogResult = System.Windows.Forms.DialogResult.Cancel,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+            }
+
+            buttonPanel.Controls.Add(addButton)
+            buttonPanel.Controls.Add(cancelButton)
+
+            form.AcceptButton = addButton
+            form.CancelButton = cancelButton
+
+            AddHandler addButton.Click,
+                Sub()
+                    Dim titleValue As String = titleTextBox.Text.Trim()
+                    Dim promptValue As String = promptTextBox.Text.Trim()
+
+                    If titleValue.Length = 0 Then
+                        ShowCustomMessageBox("Please provide a title.")
+                        titleTextBox.Focus()
+                        Return
+                    End If
+
+                    If promptValue.Length = 0 Then
+                        ShowCustomMessageBox("Please provide a prompt.")
+                        promptTextBox.Focus()
+                        Return
+                    End If
+
+                    pendingTitle = titleValue
+                    pendingPrompt = promptValue
+                    pendingCategory = categoryTextBox.Text.Trim()
+
+                    form.DialogResult = System.Windows.Forms.DialogResult.OK
+                    form.Close()
+                End Sub
+
+            AddHandler promptTextBox.KeyDown,
+                Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                    If e.Control AndAlso e.KeyCode = System.Windows.Forms.Keys.P Then
+                        If Not String.IsNullOrWhiteSpace(lastPromptForCtrlP) Then
+                            Dim startIndex As Integer = promptTextBox.SelectionStart
+                            Dim selectionLength As Integer = promptTextBox.SelectionLength
+
+                            promptTextBox.Text =
+                                promptTextBox.Text.Remove(startIndex, selectionLength).Insert(startIndex, lastPromptForCtrlP)
+
+                            promptTextBox.SelectionStart = startIndex + lastPromptForCtrlP.Length
+                            promptTextBox.SelectionLength = 0
+                        End If
+
+                        e.SuppressKeyPress = True
+                        e.Handled = True
+                        Return
+                    End If
+
+                    If e.Control AndAlso e.KeyCode = System.Windows.Forms.Keys.Enter Then
+                        addButton.PerformClick()
+                        e.SuppressKeyPress = True
+                        e.Handled = True
+                    End If
+                End Sub
+
+            AddHandler form.Shown,
+    Sub()
+        titleTextBox.Focus()
+        Try
+            form.BringToFront()
+            form.Activate()
+            SharedLibrary.NativeMethods.SetForegroundWindow(form.Handle)
+        Catch
+        End Try
+    End Sub
+
+            Dim result As System.Windows.Forms.DialogResult
+            Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+            If ownerHandle <> System.IntPtr.Zero Then
+                owner = New WindowWrapper(ownerHandle)
+            Else
+                owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            If owner IsNot Nothing Then
+                result = form.ShowDialog(owner)
+            Else
+                result = form.ShowDialog()
+            End If
+
+            If result = System.Windows.Forms.DialogResult.OK Then
+                newTitle = pendingTitle
+                newPrompt = pendingPrompt
+                newCategory = pendingCategory
+                Return True
+            End If
+
+            Return False
+        End Function
+
+        ''' <summary>
+        ''' Opens a prompt picker that can be filtered by prompt name and category and returns the selected prompt text.
+        ''' Returns an empty string if the user cancels or no prompt is available.
+        ''' </summary>
+        Public Shared Function ShowPromptInsertionSelector(filePath As String,
+                                                   filepathlocal As String,
+                                                   Context As ISharedContext,
+                                                   Optional initialFilter As String = Nothing,
+                                                   Optional lastPromptForCtrlP As String = Nothing,
+                                                   Optional ownerHandle As IntPtr = Nothing) As String
+
+            Dim centralPath As String = ExpandEnvironmentVariables(filePath)
+            Dim localPath As String = ExpandEnvironmentVariables(filepathlocal)
+            Dim hasLocal As Boolean = Not String.IsNullOrWhiteSpace(localPath)
+
+            Dim allEntries As New List(Of PromptLibraryEntry)()
+            Dim combinedTitles As New List(Of String)()
+            Dim combinedPrompts As New List(Of String)()
+
+            Dim SyncContextFromEntries As System.Action =
+                Sub()
+                    combinedTitles.Clear()
+                    combinedPrompts.Clear()
+
+                    For Each entry As PromptLibraryEntry In allEntries
+                        combinedTitles.Add(entry.Title)
+                        combinedPrompts.Add(entry.Prompt)
+                    Next
+
+                    Try
+                        If Context IsNot Nothing Then
+                            If Context.PromptTitles Is Nothing Then Context.PromptTitles = New List(Of String)()
+                            If Context.PromptLibrary Is Nothing Then Context.PromptLibrary = New List(Of String)()
+
+                            Context.PromptTitles.Clear()
+                            Context.PromptLibrary.Clear()
+                            Context.PromptTitles.AddRange(combinedTitles)
+                            Context.PromptLibrary.AddRange(combinedPrompts)
+                        End If
+                    Catch
+                        ' Best-effort only
+                    End Try
+                End Sub
+
+            Dim ReloadPromptEntries As System.Action =
+                Sub()
+                    Dim localEntries As New List(Of PromptLibraryEntry)()
+                    Dim centralEntries As New List(Of PromptLibraryEntry)()
+
+                    allEntries.Clear()
+
+                    LoadPromptEntriesIntoList(localPath, localEntries, " (local)")
+                    LoadPromptEntriesIntoList(centralPath, centralEntries, Nothing)
+
+                    allEntries.AddRange(localEntries)
+                    allEntries.AddRange(centralEntries)
+
+                    SyncContextFromEntries()
+                End Sub
+
+            ReloadPromptEntries()
+
+            Dim pickerForm As New System.Windows.Forms.Form With {
+                .Text = "Insert Prompt",
+                .AutoScaleMode = System.Windows.Forms.AutoScaleMode.Dpi,
+                .AutoScaleDimensions = New System.Drawing.SizeF(96.0F, 96.0F),
+                .StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen,
+                .Padding = New System.Windows.Forms.Padding(10),
+                .MinimizeBox = True,
+                .MaximizeBox = True,
+                .TopMost = True
+            }
+            pickerForm.MinimumSize = New System.Drawing.Size(950, 680)
+
+            Dim bmp As New System.Drawing.Bitmap(SharedMethods.GetLogoBitmap(SharedMethods.LogoType.Standard))
+            pickerForm.Icon = System.Drawing.Icon.FromHandle(bmp.GetHicon())
+            pickerForm.Font = New System.Drawing.Font("Segoe UI", 9.0F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point)
+
+            Dim layout As New System.Windows.Forms.TableLayoutPanel With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .ColumnCount = 2,
+                .RowCount = 5,
+                .Padding = New System.Windows.Forms.Padding(10)
+            }
+            layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
+            layout.ColumnStyles.Add(New System.Windows.Forms.ColumnStyle(System.Windows.Forms.SizeType.Percent, 50.0F))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.Percent, 100.0F))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            layout.RowStyles.Add(New System.Windows.Forms.RowStyle(System.Windows.Forms.SizeType.AutoSize))
+            pickerForm.Controls.Add(layout)
+
+            Dim searchPanel As New System.Windows.Forms.FlowLayoutPanel With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .WrapContents = False,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(10, 10, 10, 0),
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+            }
+
+            Dim searchLabel As New System.Windows.Forms.Label With {
+                .Text = "Search:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+
+            Dim searchTextBox As New System.Windows.Forms.TextBox With {
+                .Width = 420,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Text = If(initialFilter, "")
+            }
+
+            searchPanel.Controls.Add(searchLabel)
+            searchPanel.Controls.Add(searchTextBox)
+            layout.Controls.Add(searchPanel, 0, 0)
+            layout.SetColumnSpan(searchPanel, 2)
+
+            Dim categoryPanel As New System.Windows.Forms.FlowLayoutPanel With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .WrapContents = False,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(10, 4, 10, 0),
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink
+            }
+
+            Dim categoryLabel As New System.Windows.Forms.Label With {
+                .Text = "Category:",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3, 8, 8, 3)
+            }
+
+            Dim categoryComboBox As New System.Windows.Forms.ComboBox With {
+                .DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                .Width = 320,
+                .Margin = New System.Windows.Forms.Padding(3)
+            }
+
+            categoryPanel.Controls.Add(categoryLabel)
+            categoryPanel.Controls.Add(categoryComboBox)
+            layout.Controls.Add(categoryPanel, 0, 1)
+            layout.SetColumnSpan(categoryPanel, 2)
+
+            Dim titleListBox As New System.Windows.Forms.ListBox With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(10)
+            }
+            layout.Controls.Add(titleListBox, 0, 2)
+
+            Dim promptTextBox As New System.Windows.Forms.TextBox With {
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Multiline = True,
+                .ReadOnly = True,
+                .ScrollBars = System.Windows.Forms.ScrollBars.Vertical,
+                .Margin = New System.Windows.Forms.Padding(10)
+            }
+            layout.Controls.Add(promptTextBox, 1, 2)
+
+            Dim sourceText As String
+            If hasLocal Then
+                sourceText = $"Source: {localPath} (local, editable) | {centralPath} (central)"
+            Else
+                sourceText = $"Source: {centralPath} (central, editable)"
+            End If
+
+            Dim sourceLabel As New System.Windows.Forms.Label With {
+                .Text = sourceText,
+                .AutoSize = True,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .Margin = New System.Windows.Forms.Padding(10),
+                .AutoEllipsis = False
+            }
+            layout.Controls.Add(sourceLabel, 0, 3)
+            layout.SetColumnSpan(sourceLabel, 2)
+
+            Dim buttonPanel As New System.Windows.Forms.FlowLayoutPanel With {
+                .FlowDirection = System.Windows.Forms.FlowDirection.LeftToRight,
+                .WrapContents = False,
+                .Dock = System.Windows.Forms.DockStyle.Fill,
+                .AutoSize = True,
+                .AutoSizeMode = System.Windows.Forms.AutoSizeMode.GrowAndShrink,
+                .Margin = New System.Windows.Forms.Padding(4),
+                .Padding = New System.Windows.Forms.Padding(4)
+            }
+            layout.Controls.Add(buttonPanel, 0, 4)
+            layout.SetColumnSpan(buttonPanel, 2)
+
+            Dim insertButton As New System.Windows.Forms.Button With {
+                .Text = "Insert",
+                .AutoSize = True,
+                .DialogResult = System.Windows.Forms.DialogResult.OK,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4),
+                .Enabled = False
+            }
+
+            Dim cancelButton As New System.Windows.Forms.Button With {
+                .Text = "Cancel",
+                .AutoSize = True,
+                .DialogResult = System.Windows.Forms.DialogResult.Cancel,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+            }
+
+            Dim addButton As New System.Windows.Forms.Button With {
+                .Text = "Add",
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+            }
+
+            Dim editButton As New System.Windows.Forms.Button With {
+                .Text = If(hasLocal, "Edit Local", "Edit"),
+                .AutoSize = True,
+                .Margin = New System.Windows.Forms.Padding(3),
+                .Padding = New System.Windows.Forms.Padding(8, 4, 8, 4)
+            }
+
+            buttonPanel.Controls.Add(insertButton)
+            buttonPanel.Controls.Add(cancelButton)
+            buttonPanel.Controls.Add(addButton)
+            buttonPanel.Controls.Add(editButton)
+
+            pickerForm.AcceptButton = insertButton
+            pickerForm.CancelButton = cancelButton
+
+            Dim visibleEntries As New List(Of PromptLibraryEntry)()
+            Dim suppressCategoryRefresh As Boolean = False
+
+            Dim GetDisplayTitle As System.Func(Of PromptLibraryEntry, String) =
+                Function(entry As PromptLibraryEntry) As String
+                    If entry Is Nothing Then Return ""
+
+                    If String.Equals(entry.Category, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                        Return entry.Title
+                    End If
+
+                    Return $"{entry.Title} [{entry.Category}]"
+                End Function
+
+            Dim RefreshVisiblePromptList As System.Action(Of String) = Nothing
+            Dim RefreshCategoryFilter As System.Action(Of String) = Nothing
+
+            RefreshVisiblePromptList =
+                Sub(preferredTitle As String)
+                    Dim selectedCategory As String = PromptLibraryAllCategoriesLabel
+                    If categoryComboBox.SelectedItem IsNot Nothing Then
+                        selectedCategory = CStr(categoryComboBox.SelectedItem)
+                    End If
+
+                    Dim searchText As String = searchTextBox.Text.Trim()
+
+                    visibleEntries.Clear()
+
+                    For Each entry As PromptLibraryEntry In allEntries
+                        Dim categoryMatches As Boolean =
+                            String.Equals(selectedCategory, PromptLibraryAllCategoriesLabel, StringComparison.OrdinalIgnoreCase) OrElse
+                            String.Equals(entry.Category, selectedCategory, StringComparison.OrdinalIgnoreCase)
+
+                        If Not categoryMatches Then Continue For
+
+                        Dim searchMatches As Boolean =
+                            searchText.Length = 0 OrElse
+                            entry.Title.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                            entry.Category.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0
+
+                        If searchMatches Then
+                            visibleEntries.Add(entry)
+                        End If
+                    Next
+
+                    titleListBox.BeginUpdate()
+                    titleListBox.Items.Clear()
+                    For Each entry As PromptLibraryEntry In visibleEntries
+                        titleListBox.Items.Add(GetDisplayTitle(entry))
+                    Next
+                    titleListBox.EndUpdate()
+
+                    Dim selectedIndex As Integer = -1
+
+                    If Not String.IsNullOrWhiteSpace(preferredTitle) Then
+                        For i As Integer = 0 To visibleEntries.Count - 1
+                            If String.Equals(visibleEntries(i).Title, preferredTitle, StringComparison.OrdinalIgnoreCase) Then
+                                selectedIndex = i
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If selectedIndex = -1 AndAlso visibleEntries.Count > 0 Then
+                        selectedIndex = 0
+                    End If
+
+                    If selectedIndex >= 0 Then
+                        titleListBox.SelectedIndex = selectedIndex
+                        promptTextBox.Text = visibleEntries(selectedIndex).Prompt.Replace("\n", vbCrLf)
+                    Else
+                        titleListBox.ClearSelected()
+                        promptTextBox.Clear()
+                    End If
+
+                    insertButton.Enabled = selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count
+                End Sub
+
+            RefreshCategoryFilter =
+                Sub(preferredCategory As String)
+                    Dim categories As New List(Of String)()
+                    Dim seenCategories As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+                    Dim hasDefinedCategories As Boolean = False
+
+                    categories.Add(PromptLibraryAllCategoriesLabel)
+
+                    For Each entry As PromptLibraryEntry In allEntries
+                        If String.Equals(entry.Category, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                            Continue For
+                        End If
+
+                        If seenCategories.Add(entry.Category) Then
+                            categories.Add(entry.Category)
+                            hasDefinedCategories = True
+                        End If
+                    Next
+
+                    If hasDefinedCategories Then
+                        For Each entry As PromptLibraryEntry In allEntries
+                            If String.Equals(entry.Category, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                                If seenCategories.Add(entry.Category) Then
+                                    categories.Add(entry.Category)
+                                End If
+                            End If
+                        Next
+                    End If
+
+                    suppressCategoryRefresh = True
+
+                    categoryComboBox.BeginUpdate()
+                    categoryComboBox.Items.Clear()
+                    categoryComboBox.Items.AddRange(categories.ToArray())
+                    categoryComboBox.EndUpdate()
+
+                    categoryComboBox.Enabled = hasDefinedCategories
+                    categoryLabel.Enabled = hasDefinedCategories
+
+                    Dim selectedIndex As Integer = 0
+
+                    If hasDefinedCategories AndAlso Not String.IsNullOrWhiteSpace(preferredCategory) Then
+                        For i As Integer = 0 To categories.Count - 1
+                            If String.Equals(categories(i), preferredCategory, StringComparison.OrdinalIgnoreCase) Then
+                                selectedIndex = i
+                                Exit For
+                            End If
+                        Next
+                    End If
+
+                    If categoryComboBox.Items.Count > 0 Then
+                        categoryComboBox.SelectedIndex = selectedIndex
+                    End If
+
+                    suppressCategoryRefresh = False
+                End Sub
+
+            AddHandler searchTextBox.TextChanged,
+                Sub()
+                    Dim currentTitle As String = Nothing
+
+                    If titleListBox.SelectedIndex >= 0 AndAlso titleListBox.SelectedIndex < visibleEntries.Count Then
+                        currentTitle = visibleEntries(titleListBox.SelectedIndex).Title
+                    End If
+
+                    RefreshVisiblePromptList(currentTitle)
+                End Sub
+
+            AddHandler categoryComboBox.SelectedIndexChanged,
+                Sub()
+                    If suppressCategoryRefresh Then Return
+                    RefreshVisiblePromptList(Nothing)
+                End Sub
+
+            AddHandler titleListBox.SelectedIndexChanged,
+                Sub()
+                    Dim selectedIndex As Integer = titleListBox.SelectedIndex
+                    If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
+                        promptTextBox.Text = visibleEntries(selectedIndex).Prompt.Replace("\n", vbCrLf)
+                        insertButton.Enabled = True
+                    Else
+                        promptTextBox.Clear()
+                        insertButton.Enabled = False
+                    End If
+                End Sub
+
+            AddHandler titleListBox.DoubleClick,
+                Sub()
+                    If titleListBox.SelectedIndex >= 0 Then
+                        pickerForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                        pickerForm.Close()
+                    End If
+                End Sub
+
+            AddHandler titleListBox.KeyDown,
+                Sub(sender As Object, e As System.Windows.Forms.KeyEventArgs)
+                    If e.KeyCode = System.Windows.Forms.Keys.Enter Then
+                        e.SuppressKeyPress = True
+                        If titleListBox.SelectedIndex >= 0 Then
+                            pickerForm.DialogResult = System.Windows.Forms.DialogResult.OK
+                            pickerForm.Close()
+                        End If
+                    End If
+                End Sub
+
+            AddHandler addButton.Click,
+                Sub()
+                    Try
+                        Dim target As String = GetEditablePromptLibraryPath(localPath, centralPath)
+                        If String.IsNullOrWhiteSpace(target) Then
+                            ShowCustomMessageBox("No editable prompt library file is configured.")
+                            Return
+                        End If
+
+                        Dim selectedCategory As String = Nothing
+                        If categoryComboBox.SelectedItem IsNot Nothing Then
+                            selectedCategory = CStr(categoryComboBox.SelectedItem)
+                        End If
+
+                        If String.Equals(selectedCategory, PromptLibraryAllCategoriesLabel, StringComparison.OrdinalIgnoreCase) OrElse
+                           String.Equals(selectedCategory, PromptLibraryUncategorizedLabel, StringComparison.OrdinalIgnoreCase) Then
+                            selectedCategory = Nothing
+                        End If
+
+                        Dim addedTitle As String = Nothing
+                        Dim addedPrompt As String = Nothing
+                        Dim addedCategory As String = Nothing
+
+                        If Not ShowAddPromptLibraryEntryDialog(target, selectedCategory, lastPromptForCtrlP, addedTitle, addedPrompt, addedCategory, ownerHandle) Then
+                            Return
+                        End If
+
+                        AppendPromptLibraryEntry(target, addedTitle, addedPrompt, addedCategory)
+
+                        ReloadPromptEntries()
+
+                        Dim preferredCategory As String =
+                            If(String.IsNullOrWhiteSpace(addedCategory), PromptLibraryAllCategoriesLabel, addedCategory)
+
+                        RefreshCategoryFilter(preferredCategory)
+
+                        Dim preferredTitle As String = addedTitle
+                        If hasLocal AndAlso String.Equals(target, localPath, StringComparison.OrdinalIgnoreCase) Then
+                            preferredTitle &= " (local)"
+                        End If
+
+                        RefreshVisiblePromptList(preferredTitle)
+                        titleListBox.Focus()
+                    Catch ex As Exception
+                        ShowCustomMessageBox("Failed to add prompt: " & ex.Message)
+                    End Try
+                End Sub
+
+            AddHandler editButton.Click,
+                Sub()
+                    Try
+                        Dim previousCategory As String = PromptLibraryAllCategoriesLabel
+                        If categoryComboBox.SelectedItem IsNot Nothing Then
+                            previousCategory = CStr(categoryComboBox.SelectedItem)
+                        End If
+
+                        Dim previousTitle As String = Nothing
+                        If titleListBox.SelectedIndex >= 0 AndAlso titleListBox.SelectedIndex < visibleEntries.Count Then
+                            previousTitle = visibleEntries(titleListBox.SelectedIndex).Title
+                        End If
+
+                        Dim target As String = GetEditablePromptLibraryPath(localPath, centralPath)
+                        If String.IsNullOrWhiteSpace(target) Then
+                            ShowCustomMessageBox("No editable prompt library file is configured.")
+                            Return
+                        End If
+
+                        Dim targetKind As String = If(hasLocal, "local", "central")
+
+                        EnsurePromptLibraryDirectoryExists(target)
+
+                        ShowTextFileEditor(
+                                target,
+                                $"You can now edit your {targetKind} prompts (stored at {target}). Make sure that on each prompt line, the description and the prompt are separated by a '|'; you can use ';' for comments; optional category blocks use <Category Name> and </Category Name>.",
+                                ownerHandle:=ownerHandle
+                            )
+
+                        ReloadPromptEntries()
+                        RefreshCategoryFilter(previousCategory)
+                        RefreshVisiblePromptList(previousTitle)
+
+                        titleListBox.Focus()
+                    Catch ex As Exception
+                        ShowCustomMessageBox("Failed to open the prompt library editor: " & ex.Message)
+                    End Try
+                End Sub
+
+            RefreshCategoryFilter(PromptLibraryAllCategoriesLabel)
+            RefreshVisiblePromptList(Nothing)
+
+            AddHandler pickerForm.Shown,
+                    Sub()
+                        searchTextBox.Focus()
+                        searchTextBox.SelectionStart = 0
+                        searchTextBox.SelectionLength = searchTextBox.TextLength
+                        Try
+                            pickerForm.BringToFront()
+                            pickerForm.Activate()
+                            SharedLibrary.NativeMethods.SetForegroundWindow(pickerForm.Handle)
+                        Catch
+                        End Try
+                    End Sub
+
+            Dim result As System.Windows.Forms.DialogResult
+            Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+            If ownerHandle <> System.IntPtr.Zero Then
+                owner = New WindowWrapper(ownerHandle)
+            Else
+                owner = System.Windows.Forms.Form.ActiveForm
+            End If
+
+            If owner IsNot Nothing Then
+                result = pickerForm.ShowDialog(owner)
+            Else
+                result = pickerForm.ShowDialog()
+            End If
+
+
+
+            If result = System.Windows.Forms.DialogResult.OK Then
+                Dim selectedIndex As Integer = titleListBox.SelectedIndex
+                If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
+                    Return visibleEntries(selectedIndex).Prompt
+                End If
+            End If
+
+            Return ""
+        End Function
+
+
+        ''' <summary>
+        ''' Handles slash-triggered prompt insertion for chat input text boxes.
+        ''' </summary>
+        Public Shared Function HandlePromptLibrarySlash(targetTextBox As System.Windows.Forms.TextBoxBase,
+                                                        filePath As String,
+                                                        filepathlocal As String,
+                                                        Context As ISharedContext,
+                                                        Optional lastPromptForCtrlP As String = Nothing) As PromptLibrarySlashAction
+
+            If targetTextBox Is Nothing Then
+                Return PromptLibrarySlashAction.NotTriggered
+            End If
+
+            If Not IsPromptLibrarySlashTrigger(targetTextBox) Then
+                Return PromptLibrarySlashAction.NotTriggered
+            End If
+
+            Dim selectedPrompt As String =
+                ShowPromptInsertionSelector(filePath, filepathlocal, Context, Nothing, lastPromptForCtrlP)
+
+            If String.IsNullOrEmpty(selectedPrompt) Then
+                Return PromptLibrarySlashAction.Canceled
+            End If
+
+            Dim insertText As String = selectedPrompt.Replace("\n", Environment.NewLine)
+            Dim insertionIndex As Integer = targetTextBox.SelectionStart
+            Dim selectionLength As Integer = targetTextBox.SelectionLength
+
+            Dim newText As String = targetTextBox.Text.Remove(insertionIndex, selectionLength).Insert(insertionIndex, insertText)
+            targetTextBox.Text = newText
+            targetTextBox.SelectionStart = insertionIndex + insertText.Length
+            targetTextBox.SelectionLength = 0
+            targetTextBox.Focus()
+
+            Return PromptLibrarySlashAction.Inserted
+        End Function
 
     End Class
 

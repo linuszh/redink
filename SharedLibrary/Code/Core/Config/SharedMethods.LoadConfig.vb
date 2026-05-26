@@ -176,6 +176,9 @@ Namespace SharedLibrary
                 context.SP_MailReply = If(configDict.ContainsKey("SP_MailReply"), configDict("SP_MailReply"), Default_SP_MailReply)
                 context.SP_MailSumup = If(configDict.ContainsKey("SP_MailSumup"), configDict("SP_MailSumup"), Default_SP_MailSumup)
                 context.SP_MailSumup2 = If(configDict.ContainsKey("SP_MailSumup2"), configDict("SP_MailSumup2"), Default_SP_MailSumup2)
+                context.SP_AIMailSearch1 = If(configDict.ContainsKey("SP_AIMailSearch1"), configDict("SP_AIMailSearch1"), Default_SP_AIMailSearch1)
+                context.SP_AIMailSearch2 = If(configDict.ContainsKey("SP_AIMailSearch2"), configDict("SP_AIMailSearch2"), Default_SP_AIMailsearch2)
+                context.SP_AIMailSearch3 = If(configDict.ContainsKey("SP_AIMailSearch3"), configDict("SP_AIMailSearch3"), Default_SP_AIMailsearch3)
                 context.SP_SwitchParty = If(configDict.ContainsKey("SP_SwitchParty"), configDict("SP_SwitchParty"), Default_SP_SwitchParty)
                 context.SP_Anonymize = If(configDict.ContainsKey("SP_Anonymize"), configDict("SP_Anonymize"), Default_SP_Anonymize)
                 context.SP_SwitchParty_Document = If(configDict.ContainsKey("SP_SwitchParty_Document"), configDict("SP_SwitchParty_Document"), Default_SP_SwitchParty_Document)
@@ -268,6 +271,7 @@ Namespace SharedLibrary
                 context.INI_ReplaceText2Override = My.Settings.ReplaceText2Override
                 context.INI_MarkupMethodWordOverride = My.Settings.MarkupMethodWordOverride
                 context.INI_MarkupMethodOutlookOverride = My.Settings.MarkupMethodOutlookOverride
+                context.INI_MarkupAuthor = My.Settings.MarkupAuthor
 
                 ' Boolean parameters.
                 context.INI_DoubleS = ParseBoolean(configDict, "DoubleS")
@@ -302,6 +306,12 @@ Namespace SharedLibrary
                 context.INI_ToolingLogWindow = ParseBoolean(configDict, "ToolingLogWindow", DEFAULT_BOOL_TOOLINGLOGWINDOW)
                 context.INI_ToolingDryRun = ParseBoolean(configDict, "ToolingDryRun")
                 context.INI_ToolingMaximumIterations = If(configDict.ContainsKey("ToolingMaximumIterations"), CInt(configDict("ToolingMaximumIterations")), DEFAULT_TOOLING_MAXIMUMITERATIONS)
+
+                ' M365 settings
+
+                context.INI_M365ClientId = If(configDict.ContainsKey("M365ClientID"), configDict("M365ClientID"), "")
+                context.INI_M365TenantId = If(configDict.ContainsKey("M365TenantID"), configDict("M365TenantID"), "")
+                context.INI_M365Scopes = If(configDict.ContainsKey("M365Scopes"), configDict("M365Scopes"), DEFAULT_M365SCOPES)
 
                 ' Other parameters.
 
@@ -355,6 +365,13 @@ Namespace SharedLibrary
                 context.INI_DocStylePathLocal = If(configDict.ContainsKey("DocStylePathLocal"), configDict("DocStylePathLocal"), "")
                 context.INI_PromptLibPath_Transcript = If(configDict.ContainsKey("PromptLib_Transcript"), configDict("PromptLib_Transcript"), "")
 
+                context.INI_FormulaInstruction = My.Settings.FormulaInstruction
+
+                context.INI_AgentResourcesPath = If(configDict.ContainsKey("AgentResourcesPath"), configDict("AgentResourcesPath"), "")
+                context.INI_AgentResourcesPathLocal = If(configDict.ContainsKey("AgentResourcesPathLocal"), configDict("AgentResourcesPathLocal"), "")
+                Agents.AgentResources.SetPaths(context.INI_AgentResourcesPath, context.INI_AgentResourcesPathLocal)
+
+
                 ' Logo paths
                 context.INI_LogoPath = If(configDict.ContainsKey("LogoPath"), configDict("LogoPath"), "")
                 context.INI_LogoPathMedium = If(configDict.ContainsKey("LogoPathMedium"), configDict("LogoPathMedium"), "")
@@ -402,6 +419,13 @@ Namespace SharedLibrary
                     context.INI_Lib_Apply_SP_Markup = If(configDict.ContainsKey("Lib_Apply_SP_Markup"), configDict("Lib_Apply_SP_Markup"), Default_Lib_Apply_SP_Markup)
 
                 End If
+
+                ' Knowledge Store settings
+                context.INI_KnowledgeStorePath = If(configDict.ContainsKey("KnowledgeStorePath"), configDict("KnowledgeStorePath"), "")
+                context.INI_KnowledgeStorePathLocal = If(configDict.ContainsKey("KnowledgeStorePathLocal"), configDict("KnowledgeStorePathLocal"), "")
+                context.INI_KnowledgeStoreOwner = If(configDict.ContainsKey("KnowledgeStoreOwner"), configDict("KnowledgeStoreOwner"), "")
+                context.INI_KnowledgeStoreUseLLMIndex = ParseBoolean(configDict, "KnowledgeStoreUseLLMIndex")
+
 
                 ' Process SecondAPI configuration if enabled.
                 context.INI_Endpoint_2 = "" ' Necessary for googleapi check (should not be null).

@@ -100,8 +100,8 @@
 '     - Validation checks: INI path configured, ToolDefaultModel found, model supports tooling,
 '       tools selected. Each failure reports an error to chat and restores the original prompt
 '       (prefixed with "(t)") into txtUserInput so the user can resend without retyping.
-'     - Availability is checked at form load via IsToolDefaultModelAvailable() (reads INI without
-'       applying). When available, lblInstructions includes "(t)" usage hint.
+'     - Availability is checked at form load via HasToolingCapableSpecialTaskModel(). When 
+'       available, lblInstructions includes "(t)" usage hint.
 '     - The one-shot model is never persisted — after the request completes, subsequent messages
 '       use whatever model was previously active (primary/secondary/alternate).
 '
@@ -253,7 +253,7 @@ Public Class frmAIChat
     ''' <summary>Abbreviated name prefixed to comment replies (e.g., "RI: Reply text").</summary>
     Const AN6 As String = "RI"
 
-    Const ToolTrigger As String = "(t)"
+    Const ToolTrigger As String = "(a)"
 
     ''' <summary>
     ''' Special Unicode private-use character (U+E000) inserted during text replacement.
@@ -299,6 +299,12 @@ Public Class frmAIChat
     ''' Rebuilt on each Send button click.
     ''' </summary>
     Private SystemPrompt As String = ""
+
+    ''' <summary>
+    ''' True when the most recent command batch intentionally moved focus to Word.
+    ''' Prevents the chat input box from immediately stealing focus back.
+    ''' </summary>
+    Private _keepFocusOnDocumentAfterCommands As Boolean = False
 
     ' =========================================================================
     ' Private Fields - Model Configuration
@@ -378,80 +384,6 @@ Public Class frmAIChat
         .Margin = New Padding(0, 5, 0, 0)
     }
 
-    ' =========================================================================
-    ' ToolTrigger (t) Support - ToolDefaultModel
-    ' =========================================================================
-
-    ''' <summary>
-    ''' Checks whether a "ToolDefaultModel" entry exists in the alternate models INI
-    ''' without applying it to the shared context. Used for UI hints and pre-validation.
-    ''' </summary>
-    ''' <returns>True if a model with ToolDefaultModel=True is defined; otherwise False.</returns>
-    Private Function IsToolDefaultModelAvailable() As Boolean
-        Try
-            Dim iniPath As String = _context.INI_AlternateModelPath
-            If String.IsNullOrWhiteSpace(iniPath) Then Return False
-
-            iniPath = SharedMethods.ExpandEnvironmentVariables(iniPath)
-            If Not System.IO.File.Exists(iniPath) Then Return False
-
-            Dim truthy As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                "true", "yes", "wahr", "ja", "on", "1"
-            }
-
-            Dim currentDict As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase)
-
-            For Each rawLine In System.IO.File.ReadAllLines(iniPath)
-                Dim line = rawLine.Trim()
-                If line.Length = 0 OrElse line.StartsWith(";") OrElse line.StartsWith("#") Then
-                    Continue For
-                End If
-
-                ' Section header
-                If line.StartsWith("[") AndAlso line.EndsWith("]") Then
-                    ' Check previous section before clearing
-                    If currentDict.ContainsKey("ToolDefaultModel") Then
-                        Dim raw As String = currentDict("ToolDefaultModel")
-                        If raw IsNot Nothing Then
-                            Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                            Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                            raw = raw.Trim()
-                            If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                                raw = raw.Substring(1, raw.Length - 2).Trim()
-                            End If
-                            If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                        End If
-                    End If
-                    currentDict.Clear()
-                    Continue For
-                End If
-
-                ' Parse key=value
-                Dim tokens = line.Split(New Char() {"="c}, 2)
-                If tokens.Length = 2 Then
-                    currentDict(tokens(0).Trim()) = tokens(1).Trim()
-                End If
-            Next
-
-            ' Check final section
-            If currentDict.ContainsKey("ToolDefaultModel") Then
-                Dim raw As String = currentDict("ToolDefaultModel")
-                If raw IsNot Nothing Then
-                    Dim scIdx = raw.IndexOf(";"c) : If scIdx >= 0 Then raw = raw.Substring(0, scIdx)
-                    Dim hashIdx = raw.IndexOf("#"c) : If hashIdx >= 0 Then raw = raw.Substring(0, hashIdx)
-                    raw = raw.Trim()
-                    If raw.Length >= 2 AndAlso ((raw.StartsWith("""") AndAlso raw.EndsWith("""")) OrElse (raw.StartsWith("'") AndAlso raw.EndsWith("'"))) Then
-                        raw = raw.Substring(1, raw.Length - 2).Trim()
-                    End If
-                    If truthy.Contains(raw.ToLowerInvariant()) Then Return True
-                End If
-            End If
-
-            Return False
-        Catch
-            Return False
-        End Try
-    End Function
 
     ' =========================================================================
     ' UI Controls - Checkboxes
@@ -502,6 +434,17 @@ Public Class frmAIChat
         .Text = $"Enable {Globals.ThisAddIn.ToolFriendlyName.ToLower}",
         .AutoSize = True,
         .Checked = My.Settings.ChatEnableTooling
+    }
+
+    ''' <summary>
+    ''' When checked, the selected advanced tools remain callable.
+    ''' When unchecked, advanced-tool selections stay persisted but are excluded from the effective tool list.
+    ''' Persisted to My.Settings.AdvancedToolsEnabled.
+    ''' </summary>
+    Private WithEvents chkAdvancedTools As New System.Windows.Forms.CheckBox() With {
+        .Text = "Advanced tools",
+        .AutoSize = True,
+        .Checked = My.Settings.AdvancedToolsEnabled
     }
 
     ''' <summary>
@@ -771,15 +714,25 @@ Public Class frmAIChat
             ' Layout not ready yet; keep default SplitterDistance
         End Try
 
-        ' Attach input keydown handler (Enter to send, Shift+Enter for newline)
+        ' Attach input handlers
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
+        AddHandler txtUserInput.KeyPress, AddressOf UserInput_KeyPress
+        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
         ' Configure instructions label
-        ' Configure instructions label
         Dim baseInstructions As String = "Enter your question and Enter (or 'Send'). You can allow the chatbot to do actions on your document (search, replace, delete, insert text and add or reply to comments). It does not see deletions, markups as such or formatting."
-        If IsToolDefaultModelAvailable() Then
+
+        If _context.INI_PromptLib Then
+            baseInstructions &= " Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library."
+        End If
+
+        Dim toolTriggerAvailable As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+        If toolTriggerAvailable Then
             baseInstructions &= $" Type '{ToolTrigger}' in your prompt to use the configured {Globals.ThisAddIn.ToolFriendlyName.ToLower} model for a single request."
         End If
+
         lblInstructions.Text = baseInstructions
         lblInstructions.AutoSize = True
         lblInstructions.Height = 50
@@ -808,6 +761,7 @@ Public Class frmAIChat
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
         pnlCheckboxes.Controls.Add(chkEnableTooling)
+        pnlCheckboxes.Controls.Add(chkAdvancedTools)
         pnlCheckboxes.Controls.Add(chkShowToolingLog)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkConvertMarkdown)
@@ -834,6 +788,7 @@ Public Class frmAIChat
 
         ' Attach event handlers for tooling controls
         AddHandler chkEnableTooling.Click, AddressOf chkEnableTooling_Click
+        AddHandler chkAdvancedTools.Click, AddressOf chkAdvancedTools_Click
         AddHandler chkShowToolingLog.CheckedChanged, AddressOf chkShowToolingLog_CheckedChanged
         AddHandler btnTools.Click, AddressOf btnTools_Click
 
@@ -857,6 +812,25 @@ Public Class frmAIChat
         ' Set focus to user input if empty
         If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
 
+    End Sub
+
+    ''' <summary>
+    ''' Repositions the form after monitor or resolution changes.
+    ''' </summary>
+    Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New MethodInvoker(
+                    Sub()
+                        If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                    End Sub))
+            Else
+                SharedMethods.EnsureVisibleOnScreen(Me)
+            End If
+        Catch
+        End Try
     End Sub
 
     ' =========================================================================
@@ -961,19 +935,27 @@ Public Class frmAIChat
         Dim errorMessage As String = ""
 
         ' ──────────────────────────────────────────────────────────────
-        ' STEP 0: Detect and strip ToolTrigger "(t)" from user prompt
+        ' STEP 0: Detect and strip explicit ToolTrigger "(t)" from user prompt
         ' ──────────────────────────────────────────────────────────────
-        Dim toolTriggerDetected As Boolean = False
+        Dim explicitToolTriggerDetected As Boolean = False
         If userPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
-            toolTriggerDetected = True
+            explicitToolTriggerDetected = True
             userPrompt = userPrompt.Replace(ToolTrigger, "").Trim()
 
             ' If the prompt is now empty after stripping, restore for user to fix
             If String.IsNullOrWhiteSpace(userPrompt) Then
-                txtUserInput.Text = userPrompt
+                txtUserInput.Text = ToolTrigger
                 Return
             End If
         End If
+
+        Dim promptToRestore As String = If(explicitToolTriggerDetected, $"{ToolTrigger} {userPrompt}".Trim(), userPrompt)
+
+        Try
+            My.Settings.LastPromptChat = promptToRestore
+            My.Settings.Save()
+        Catch
+        End Try
 
         Try
             ' ──────────────────────────────────────────────────────────────
@@ -989,7 +971,7 @@ Public Class frmAIChat
                         $" Your name is '{AN5}'. The current date and time is: {DateTime.Now.ToString("MMMM dd, yyyy hh:mm tt")}." &
                         If(chkIncludeDocText.Checked, vbLf & "You have access to the user's active document." & vbLf, "") &
                         If(chkIncludeselection.Checked, vbLf & "You have access to a selection of the active document." & vbLf, "") &
-                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have access to all other open Word documents (the user's request may refer to them)." & vbLf, "") &
+                        If(chkIncludeOtherDocs.Checked, vbLf & "You also have read-only access to all other open Word documents for context only. Commands must never target those other documents." & vbLf, "") &
                         If(My.Settings.DoCommands And (chkIncludeDocText.Checked Or chkIncludeselection.Checked),
                            _context.SP_Add_ChatWord_Commands,
                            _context.SP_Add_Chat_NoCommands)
@@ -1001,6 +983,21 @@ Public Class frmAIChat
                 If Not String.IsNullOrWhiteSpace(memoryContent) Then
                     SystemPrompt &= vbLf & "<INKY_MEMORY_CURRENT>" & vbLf & memoryContent & vbLf & "</INKY_MEMORY_CURRENT>"
                 End If
+            End If
+
+            If My.Settings.DoCommands AndAlso (chkIncludeDocText.Checked Or chkIncludeselection.Checked) Then
+                Dim activeDocumentNameForCommands As String = ""
+
+                Try
+                    activeDocumentNameForCommands = Globals.ThisAddIn.Application.ActiveDocument.Name
+                Catch
+                    activeDocumentNameForCommands = "the currently active Word document"
+                End Try
+
+                SystemPrompt &= vbLf &
+                    $"Command scope: All commands are executed only against the currently active Word document '{activeDocumentNameForCommands}'. " &
+                    "Other open documents, if provided, are read-only context. Never issue a command for text that appears only in another document. " &
+                    "If the user asks to work on another document, tell the user to activate that document first."
             End If
 
             ' ──────────────────────────────────────────────────────────────
@@ -1120,101 +1117,74 @@ Public Class frmAIChat
             ' Check if tooling should be used
             Dim useTooling As Boolean = False
             Dim currentConfig As ModelConfig = Nothing
-
-            ' One-shot ToolDefaultModel config used when (t) trigger is active
             Dim toolTriggerConfig As ModelConfig = Nothing
 
+            If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
+                currentConfig = _alternateModelConfig
+            Else
+                currentConfig = SharedMethods.GetCurrentConfig(_context)
+            End If
+
+            Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+            Dim supportsToolTrigger As Boolean =
+                SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
+
+            Dim autoToolTriggerFromCheckbox As Boolean =
+                chkEnableTooling.Checked AndAlso
+                Not supportsCurrentModelTooling AndAlso
+                supportsToolTrigger
+
+            Dim toolTriggerDetected As Boolean = explicitToolTriggerDetected OrElse autoToolTriggerFromCheckbox
+
             If toolTriggerDetected Then
-                ' ── (t) trigger: load ToolDefaultModel for this single request ──
-                ' Snapshot current config, call GetSpecialTaskModel to apply it,
-                ' capture the applied config, then immediately restore original.
-                If String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
-                    ' No alternate model INI configured at all
+                If Not SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    _context.INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    toolTriggerConfig) Then
+
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger requires an alternate model configuration file, but none is configured.")
-                                            txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                                $"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                                            txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
                 End If
 
-                Dim preToolConfig As ModelConfig = SharedMethods.GetCurrentConfig(_context)
-                Dim found As Boolean = SharedMethods.GetSpecialTaskModel(
-                    _context, _context.INI_AlternateModelPath, "ToolDefaultModel")
-
-                If found Then
-                    ' Capture the just-applied ToolDefaultModel config
-                    toolTriggerConfig = SharedMethods.GetCurrentConfig(_context)
-
-                    ' Immediately restore original config so global context stays pristine
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
-                    ' Verify that the ToolDefaultModel actually supports tooling
-                    If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
-                        Await UpdateUIAsync(Sub()
-                                                ReportCommandExecutionError(
-                                                    $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
-                                                txtUserInput.Text = ToolTrigger & " " & userPrompt
-                                            End Sub)
-                        Return
-                    End If
-
-                    ' Force tooling on for this request
-                    useTooling = True
-                    currentConfig = toolTriggerConfig
-                Else
-                    ' Restore original config (GetSpecialTaskModel may have partially modified state)
-                    If SharedMethods.originalConfigLoaded Then
-                        SharedMethods.RestoreDefaults(_context, SharedMethods.originalConfig)
-                    End If
-                    SharedMethods.originalConfigLoaded = False
-
-                    ' Report error and allow user to resend
+                If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
                     Await UpdateUIAsync(Sub()
                                             ReportCommandExecutionError(
-                                                $"The {ToolTrigger} trigger was used, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
-                                            txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                                $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {Globals.ThisAddIn.ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                                            txtUserInput.Text = promptToRestore
                                         End Sub)
                     Return
                 End If
-            ElseIf chkEnableTooling.Checked Then
-                ' ── Standard tooling path (checkbox-based) ──
-                ' Get effective model config
-                If _alternateModelSelected AndAlso _alternateModelConfig IsNot Nothing Then
-                    currentConfig = _alternateModelConfig
-                Else
-                    currentConfig = SharedMethods.GetCurrentConfig(_context)
-                End If
 
-                ' Use shared function - checks APICall_ToolInstructions
-                useTooling = SharedMethods.ModelSupportsTooling(currentConfig)
+                useTooling = True
+                currentConfig = toolTriggerConfig
+
+            ElseIf chkEnableTooling.Checked AndAlso supportsCurrentModelTooling Then
+                ' Standard tooling path with the currently selected model
+                useTooling = True
             End If
 
             If useTooling Then
-                ' Ensure tools are selected
                 If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
-                    ' Temporarily disable TopMost so dialog is not blocked
                     Dim wasTopMost As Boolean = Me.TopMost
                     Try
                         Me.TopMost = False
-                        ' Show tool selection dialog (forceDialog when triggered by (t) to ensure user picks tools)
                         _selectedToolsForChat = Globals.ThisAddIn.SelectToolsForSession(
                             forceDialog:=toolTriggerDetected)
                     Finally
                         Me.TopMost = wasTopMost
                     End Try
 
-                    ' If user cancelled or no tools selected, fall back to regular LLM
                     If _selectedToolsForChat Is Nothing OrElse _selectedToolsForChat.Count = 0 Then
                         If toolTriggerDetected Then
-                            ' For (t) trigger, tooling is mandatory — restore prompt and abort
                             Await UpdateUIAsync(Sub()
                                                     ReportCommandExecutionError(
                                                         $"The {ToolTrigger} trigger requires {Globals.ThisAddIn.ToolFriendlyName.ToLower} to be selected. Please select at least one tool and try again.")
-                                                    txtUserInput.Text = ToolTrigger & " " & userPrompt
+                                                    txtUserInput.Text = promptToRestore
                                                 End Sub)
                             Return
                         Else
@@ -1342,6 +1312,8 @@ Public Class frmAIChat
                                     AppendAssistantMarkdown(aiResponseMdDisplay.TrimStart())
 
                                     ' Execute bot commands if present and permitted
+                                    _keepFocusOnDocumentAfterCommands = False
+
                                     If My.Settings.DoCommands And Not String.IsNullOrWhiteSpace(CommandsString) Then
                                         Try
                                             ExecuteAnyCommands(CommandsString, chkIncludeselection.Checked)
@@ -1351,9 +1323,12 @@ Public Class frmAIChat
                                         End Try
                                     End If
 
-                                    ' Clear user input and restore focus
+                                    ' Clear user input and restore focus unless a goto/jump/show/select
+                                    ' command intentionally moved focus back to Word.
                                     txtUserInput.Text = ""
-                                    If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
+                                    If String.IsNullOrEmpty(txtUserInput.Text) AndAlso Not _keepFocusOnDocumentAfterCommands Then
+                                        txtUserInput.Focus()
+                                    End If
                                 End Sub)
 
             ' Add to in-memory history
@@ -1751,8 +1726,18 @@ Public Class frmAIChat
             _selectedToolsForChat = Nothing
         End If
 
-        ' Update tooling log checkbox enabled state
-        chkShowToolingLog.Enabled = chkEnableTooling.Checked AndAlso chkEnableTooling.Enabled
+        UpdateToolingControlsState()
+    End Sub
+
+    ''' <summary>
+    ''' Handles chkAdvancedTools click. Persists the advanced-tools gate and clears cached effective tool selection.
+    ''' </summary>
+    Private Sub chkAdvancedTools_Click(sender As Object, e As EventArgs)
+        My.Settings.AdvancedToolsEnabled = chkAdvancedTools.Checked
+        My.Settings.Save()
+
+        _selectedToolsForChat = Nothing
+        UpdateToolingControlsState()
     End Sub
 
     ''' <summary>
@@ -1822,13 +1807,14 @@ Public Class frmAIChat
     End Sub
 
     ''' <summary>
-    ''' Updates enabled/disabled state for tooling-related controls based on current model capabilities.
+    ''' Updates enabled/disabled state for tooling-related controls.
     ''' </summary>
     ''' <remarks>
-    ''' Disables tooling when the effective model (primary/secondary/alternate) does not advertise tool support.
-    ''' When tooling is disabled, cached tool selection (_selectedToolsForChat) is cleared.
-    ''' On first call, sets chkShowToolingLog from INI_ToolingLogWindow; subsequent calls preserve the user's toggle.
-    ''' The checkbox remains set (but disabled) on non-tooling models so the (t) trigger can still honour it.
+    ''' The tools button and the enable-tooling checkbox are available when either the
+    ''' current model supports tooling or a tooling-capable ToolDefaultModel exists for "(t)".
+    ''' 
+    ''' When only ToolDefaultModel is available, checking "Enable tooling" means:
+    ''' treat every request as if it had "(t)".
     ''' </remarks>
     Private Sub UpdateToolingControlsState()
         Dim currentConfig As ModelConfig = Nothing
@@ -1839,22 +1825,22 @@ Public Class frmAIChat
             currentConfig = SharedMethods.GetCurrentConfig(_context)
         End If
 
-        ' Use shared function - checks APICall_ToolInstructions
-        Dim supportsTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsCurrentModelTooling As Boolean = SharedMethods.ModelSupportsTooling(currentConfig)
+        Dim supportsToolTrigger As Boolean =
+            SharedMethods.HasToolingCapableSpecialTaskModel(_context, _context.INI_AlternateModelPath, "ToolDefaultModel")
 
-        chkEnableTooling.Enabled = supportsTooling
-        btnTools.Enabled = supportsTooling
+        Dim toolingUiAvailable As Boolean = supportsCurrentModelTooling OrElse supportsToolTrigger
 
-        ' Log checkbox is only enabled when the current model actually supports tooling
-        ' (not merely because a ToolDefaultModel exists — (t) uses it transiently)
-        chkShowToolingLog.Enabled = supportsTooling
+        chkEnableTooling.Enabled = toolingUiAvailable
+        chkAdvancedTools.Enabled = toolingUiAvailable AndAlso chkEnableTooling.Checked
+        btnTools.Enabled = toolingUiAvailable
+        chkShowToolingLog.Enabled = toolingUiAvailable
 
-        If Not supportsTooling Then
+        If Not toolingUiAvailable Then
             chkEnableTooling.Checked = False
             _selectedToolsForChat = Nothing
         End If
 
-        ' Only set checkbox from INI on first initialization; preserve user's mid-session toggle afterward
         If Not _toolingControlsInitialized Then
             chkShowToolingLog.Checked = _context.INI_ToolingLogWindow
             _toolingControlsInitialized = True
@@ -2174,7 +2160,14 @@ Public Class frmAIChat
     ''' Both plain text and HTML history persisted before close.
     ''' </remarks>
     Private Sub frmAIChat_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
+
         If e.KeyCode = Keys.Escape Then
+
+            Try
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+            Catch
+            End Try
+
             ' Trim conversation to capacity limit
             Dim conversation As String = txtChatHistory.Text
             If conversation.Length > _context.INI_ChatCap Then
@@ -2192,6 +2185,12 @@ Public Class frmAIChat
     ''' Handles btnExit click. Same behavior as ESC key (saves state and closes).
     ''' </summary>
     Private Sub btnExit_Click(sender As Object, e As EventArgs)
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         ' Trim conversation to capacity limit
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
@@ -2216,6 +2215,12 @@ Public Class frmAIChat
     ''' RestoreBounds ensures correct position/size restored when user maximized/minimized.
     ''' </remarks>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         ' Trim and save conversation
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
@@ -2241,19 +2246,6 @@ Public Class frmAIChat
     ' Input Keyboard Handlers
     ' =========================================================================
 
-    ''' <summary>
-    ''' Legacy keyboard handler for user input. Triggers Send on Ctrl+Enter.
-    ''' </summary>
-    ''' <remarks>
-    ''' This handler is not currently attached to any control but preserved for compatibility.
-    ''' Modern behavior uses UserInput_KeyDown which sends on Enter (not Ctrl+Enter).
-    ''' </remarks>
-    Private Sub oldUserInput_KeyDown(sender As Object, e As KeyEventArgs)
-        If e.Control AndAlso e.KeyCode = Keys.Enter Then
-            btnSend.PerformClick()
-            e.Handled = True
-        End If
-    End Sub
 
     ''' <summary>
     ''' Handles KeyDown event for txtUserInput. Sends message on Enter, allows Shift+Enter for newline.
@@ -2267,16 +2259,55 @@ Public Class frmAIChat
     ''' Handler attached in frmAIChat_Load event.
     ''' </remarks>
     Private Sub UserInput_KeyDown(sender As Object, e As KeyEventArgs)
+        If e.Control AndAlso e.KeyCode = Keys.P Then
+            Dim lastPrompt As String = My.Settings.LastPromptChat
+
+            If Not String.IsNullOrWhiteSpace(lastPrompt) Then
+                Dim insertionIndex As Integer = txtUserInput.SelectionStart
+                Dim selectionLength As Integer = txtUserInput.SelectionLength
+
+                Dim newText As String =
+                    txtUserInput.Text.Remove(insertionIndex, selectionLength).Insert(insertionIndex, lastPrompt)
+
+                txtUserInput.Text = newText
+                txtUserInput.SelectionStart = insertionIndex + lastPrompt.Length
+                txtUserInput.SelectionLength = 0
+            End If
+
+            e.SuppressKeyPress = True
+            e.Handled = True
+            Return
+        End If
+
         If e.KeyCode = Keys.Enter Then
             If e.Shift Then
-                ' Allow Shift+Enter to insert newline (default TextBox behavior)
                 Return
             Else
-                ' Enter alone sends message
                 e.SuppressKeyPress = True
                 btnSend.PerformClick()
                 e.Handled = True
             End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Handles slash-triggered prompt library insertion for the chat input box.
+    ''' </summary>
+    Private Sub UserInput_KeyPress(sender As Object, e As KeyPressEventArgs)
+        If e.KeyChar <> "/"c Then Return
+        If Not _context.INI_PromptLib Then Return
+
+        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+            SharedMethods.HandlePromptLibrarySlash(
+                txtUserInput,
+                _context.INI_PromptLibPath,
+                _context.INI_PromptLibPathLocal,
+                _context,
+                My.Settings.LastPromptChat
+            )
+
+        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
+            e.Handled = True
         End If
     End Sub
 
@@ -2677,11 +2708,17 @@ Public Class frmAIChat
     ''' <param name="input">Text potentially containing command blocks</param>
     ''' <returns>Text with commands removed and whitespace normalized</returns>
     Public Function RemoveCommands(input As String) As String
+        If input Is Nothing Then Return ""
+
         Dim output As String = input
+
         Try
-            ' Remove command blocks along with surrounding whitespace/linebreaks
-            Dim commandPattern As String = "\s*[\r\n]*\s*\[#[^:]+:\s*@@[^@]+@@\s*(?:§§[^§]*§§)?\s*#\]\s*[\r\n]*\s*"
-            Dim regex As New Regex(commandPattern)
+            ' Keep this pattern aligned with ParseCommands:
+            ' - single @ is allowed inside @@...@@
+            ' - single § is allowed inside §§...§§
+            ' - only @@ and §§ close their respective arguments
+            Dim commandPattern As String = "\s*[\r\n]*\s*\[#(?<cmd>[^:]+):\s*@@(?<arg1>(?:[^@]|@(?!@))*?)@@\s*(?:§§(?<arg2>(?:[^§]|§(?!§))*?)§§)?\s*#\]\s*[\r\n]*\s*"
+            Dim regex As New Regex(commandPattern, RegexOptions.Singleline)
             output = regex.Replace(input, "")
 
             ' Collapse 3+ consecutive line breaks to single newline
@@ -2706,9 +2743,139 @@ Public Class frmAIChat
     ''' <summary>Tracks commands that failed execution for error reporting to chat</summary>
     Private FailedCommandsList As New List(Of String)()
 
+    ''' <summary>Start position of the last document action performed by chat commands.</summary>
+    Private _lastActionStart As Integer = -1
+
+    ''' <summary>End position of the last document action performed by chat commands.</summary>
+    Private _lastActionEnd As Integer = -1
+
     ' =========================================================================
     ' Main Command Execution Orchestrator
     ' =========================================================================
+
+    ''' <summary>
+    ''' Stores the last active-document range changed or commented by a chat command.
+    ''' </summary>
+    Private Sub RememberLastActionRange(startPos As Integer, endPos As Integer)
+        Try
+            Dim doc As Microsoft.Office.Interop.Word.Document = Globals.ThisAddIn.Application.ActiveDocument
+            If doc Is Nothing Then Return
+
+            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+
+            If safeEnd < safeStart Then
+                safeEnd = safeStart
+            End If
+
+            _lastActionStart = safeStart
+            _lastActionEnd = safeEnd
+        Catch
+            _lastActionStart = -1
+            _lastActionEnd = -1
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Selects a range in the currently active document and scrolls it into view.
+    ''' </summary>
+    Private Function SelectAndShowActiveDocumentRange(startPos As Integer, endPos As Integer) As Boolean
+        Try
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc Is Nothing Then Return False
+
+            Dim safeStart As Integer = Math.Max(doc.Content.Start, Math.Min(startPos, doc.Content.End))
+            Dim safeEnd As Integer = Math.Max(doc.Content.Start, Math.Min(endPos, doc.Content.End))
+
+            If safeEnd < safeStart Then
+                safeEnd = safeStart
+            End If
+
+            app.Activate()
+            doc.Activate()
+
+            Dim targetRange As Microsoft.Office.Interop.Word.Range = doc.Range(safeStart, safeEnd)
+            targetRange.Select()
+
+            Try
+                Dim scrollTarget As Object = targetRange
+                app.ActiveWindow.ScrollIntoView(scrollTarget, True)
+            Catch
+                ' Selection is already sufficient if ScrollIntoView is unavailable.
+            End Try
+
+            Return True
+        Catch ex As Exception
+            Debug.WriteLine($"SelectAndShowActiveDocumentRange failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Executes a navigation command in the currently active document.
+    ''' Use "last" to jump to the last chat-command action.
+    ''' </summary>
+    Private Function ExecuteGotoCommand(targetText As String, Optional onlySelection As Boolean = False) As Boolean
+        Try
+            targetText = CleanArgument(targetText)
+
+            If String.IsNullOrWhiteSpace(targetText) OrElse
+           targetText.Equals("last", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("lastaction", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("last action", StringComparison.OrdinalIgnoreCase) OrElse
+           targetText.Equals("last point of action", StringComparison.OrdinalIgnoreCase) Then
+
+                If _lastActionStart >= 0 AndAlso _lastActionEnd >= _lastActionStart Then
+                    Return SelectAndShowActiveDocumentRange(_lastActionStart, _lastActionEnd)
+                End If
+
+                Debug.WriteLine("Goto: No last action range is available.")
+                Return False
+            End If
+
+            Dim app As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+            If app Is Nothing OrElse app.Documents Is Nothing OrElse app.Documents.Count = 0 Then Return False
+
+            Dim doc As Microsoft.Office.Interop.Word.Document = app.ActiveDocument
+            If doc Is Nothing Then Return False
+
+            targetText = DecodeParagraphMarks(targetText)
+
+            Dim sel As Microsoft.Office.Interop.Word.Selection = doc.Application.Selection
+            Dim scopeStart As Integer
+            Dim scopeEnd As Integer
+
+            If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
+                scopeStart = sel.Range.Start
+                scopeEnd = sel.Range.End
+            Else
+                scopeStart = doc.Content.Start
+                scopeEnd = doc.Content.End
+            End If
+
+            Try
+                sel.SetRange(scopeStart, scopeEnd)
+            Catch exScope As System.Exception
+                Debug.WriteLine($"ExecuteGotoCommand: pre-find SetRange failed: {exScope.Message}")
+            End Try
+
+            If Globals.ThisAddIn.FindLongTextInChunks(targetText, sel, True) Then
+                Dim foundStart As Integer = sel.Start
+                Dim foundEnd As Integer = sel.End
+                Return SelectAndShowActiveDocumentRange(foundStart, foundEnd)
+            End If
+
+            Debug.WriteLine($"Goto: Target text not found: '{targetText}'.")
+            Return False
+
+        Catch ex As Exception
+            Debug.WriteLine($"ExecuteGotoCommand failed: {ex.Message}")
+            Return False
+        End Try
+    End Function
 
     ''' <summary>
     ''' Executes parsed bot commands on the active Word document.
@@ -2742,6 +2909,7 @@ Public Class frmAIChat
         CommandsList = ""
         FailedCommandsList.Clear()
         Dim LastCommandsList As String = ""
+        Dim activateDocumentAfterCommands As Boolean = False
 
         Dim wordApp As Microsoft.Office.Interop.Word.Application
         Dim doc As Word.Document = Globals.ThisAddIn.Application.ActiveDocument
@@ -2749,9 +2917,6 @@ Public Class frmAIChat
         ' ═════════════════════════════════════════════════════════════════════════════
         ' ENSURE CURSOR IN MAIN STORY (NOT HEADER/FOOTER/COMMENT/FOOTNOTE)
         ' ═════════════════════════════════════════════════════════════════════════════
-        ' Word can be editing special stories (headers, footers, footnotes, comments).
-        ' If not in main text story, force return to print view and move to main document
-        ' without creating a selection, then collapse to insertion point.
         Try
             wordApp = Globals.ThisAddIn.Application
 
@@ -2760,28 +2925,20 @@ Public Class frmAIChat
                 Dim currentSel As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
                 Dim currentStory As Word.WdStoryType = currentSel.StoryType
 
-                ' Only act if NOT already in main text story
                 If currentStory <> Word.WdStoryType.wdMainTextStory Then
-                    ' Force print view to exit special editing modes
                     wordApp.ActiveWindow.View.Type = Microsoft.Office.Interop.Word.WdViewType.wdPrintView
 
-                    ' Move to start of main document story without selecting
                     Dim mainStoryRange As Word.Range = currentDoc.StoryRanges(Word.WdStoryType.wdMainTextStory)
                     mainStoryRange.Collapse(Word.WdCollapseDirection.wdCollapseStart)
                     mainStoryRange.Select()
 
-                    ' Collapse to insertion point (no selection)
                     currentSel.Collapse(Word.WdCollapseDirection.wdCollapseStart)
                 End If
             End If
         Catch ex As Exception
-            ' Best-effort; continue even if this fails
             Debug.WriteLine($"Warning: Could not reset to main story: {ex.Message}")
         End Try
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' PREPARE WORD VIEW FOR COMMAND EXECUTION
-        ' ═════════════════════════════════════════════════════════════════════════════
         If commands.Count() > 0 Then
             Globals.ThisAddIn.Application.Activate()
             System.Threading.Thread.Sleep(200)
@@ -2793,13 +2950,9 @@ Public Class frmAIChat
             End With
         End If
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' ITERATE AND EXECUTE EACH COMMAND
-        ' ═════════════════════════════════════════════════════════════════════════════
         For Each pc In commands
             Debug.WriteLine($"Command: '{pc.Command}' with '{pc.Argument1}' '{pc.Argument2}'")
 
-            ' Check for ESC key abort
             If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And 1) <> 0 Then
                 Exit For
             End If
@@ -2807,12 +2960,24 @@ Public Class frmAIChat
             Dim commandSuccess As Boolean = True
             Dim commandDescription As String = ""
 
+            If Not OnlySelection Then
+                Select Case pc.Command.ToLower()
+                    Case "find", "addcomment", "replace", "insertafter", "insertbefore", "goto", "jump", "show", "select"
+                        Try
+                            If wordApp IsNot Nothing AndAlso wordApp.ActiveDocument IsNot Nothing AndAlso wordApp.Selection IsNot Nothing Then
+                                wordApp.Selection.SetRange(wordApp.ActiveDocument.Content.Start, wordApp.ActiveDocument.Content.End)
+                            End If
+                        Catch exScope As System.Exception
+                            Debug.WriteLine($"ExecuteAnyCommands: pre-command SetRange failed: {exScope.Message}")
+                        End Try
+                End Select
+            End If
+
             Select Case pc.Command.ToLower()
                 Case "find"
                     commandDescription = $"Finding '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteFindCommand(pc.Argument1, OnlySelection)
 
@@ -2820,7 +2985,6 @@ Public Class frmAIChat
                     commandDescription = $"Adding comment '{pc.Argument2}' to the text '{pc.Argument1}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteAddComment(pc.Argument1, pc.Argument2, OnlySelection)
 
@@ -2828,7 +2992,6 @@ Public Class frmAIChat
                     commandDescription = $"Replying to comment '{pc.Argument1}' with '{pc.Argument2}'"
                     CommandsList = commandDescription & Environment.NewLine & CommandsList
                     LastCommandsList = CommandsList
-                    'InfoBox.ShowInfoBox("Executing bot commands ('Esc' to abort):" & Environment.NewLine & Environment.NewLine & CommandsList)
                     System.Threading.Thread.Sleep(500)
                     commandSuccess = ExecuteReplyToCommentByIdToken(pc.Argument1, pc.Argument2)
 
@@ -2869,12 +3032,19 @@ Public Class frmAIChat
                     Debug.WriteLine("ExecuteInsert")
                     commandSuccess = ExecuteInsertCommand(pc.Argument1)
 
+                Case "goto", "jump", "show", "select"
+                    commandDescription = $"Showing '{pc.Argument1}'"
+                    CommandsList = commandDescription & Environment.NewLine & CommandsList
+                    LastCommandsList = CommandsList
+                    System.Threading.Thread.Sleep(250)
+                    commandSuccess = ExecuteGotoCommand(pc.Argument1, OnlySelection)
+                    activateDocumentAfterCommands = activateDocumentAfterCommands OrElse commandSuccess
+
                 Case Else
                     commandDescription = $"Unknown command: '{pc.Command}'"
                     commandSuccess = False
             End Select
 
-            ' Track failed commands for reporting
             If Not commandSuccess AndAlso Not String.IsNullOrWhiteSpace(commandDescription) Then
                 FailedCommandsList.Add($"Failed: {commandDescription}")
             End If
@@ -2884,33 +3054,49 @@ Public Class frmAIChat
             End If
         Next
 
-        ' ═════════════════════════════════════════════════════════════════════════════
-        ' CLEANUP AND RESTORE
-        ' ═════════════════════════════════════════════════════════════════════════════
         If commands.Count() > 0 Then
-            ' Remove MarkerChar (U+E000) cleanup markers from document
-            'InfoBox.ShowInfoBox("Cleaning up ... almost done.")
             ReplaceSpecialCharacter(OnlySelection)
 
             InfoBox.ShowInfoBox("")
 
-            ' Restore revision view with markups visible
             With wordApp.ActiveWindow.View
                 .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
                 .ShowRevisionsAndComments = True
             End With
         End If
 
-        ' Release COM object
         If wordApp IsNot Nothing Then
             System.Runtime.InteropServices.Marshal.ReleaseComObject(wordApp)
             wordApp = Nothing
         End If
 
         Me.TopMost = topmost
-        Me.Focus()
 
-        ' Report any failures to chat
+        Dim documentActivated As Boolean = False
+
+        If activateDocumentAfterCommands Then
+            Try
+                Dim activeApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
+                If activeApp IsNot Nothing Then
+                    activeApp.Activate()
+
+                    If activeApp.ActiveDocument IsNot Nothing Then
+                        activeApp.ActiveDocument.Activate()
+                    End If
+
+                    documentActivated = True
+                End If
+            Catch
+                documentActivated = False
+            End Try
+        End If
+
+        _keepFocusOnDocumentAfterCommands = documentActivated
+
+        If Not documentActivated Then
+            Me.Focus()
+        End If
+
         If FailedCommandsList.Count > 0 Then
             ReportFailedCommands()
         End If
@@ -3038,17 +3224,18 @@ Public Class frmAIChat
                    doc.Content.Duplicate)
 
             ' Find and replace all MarkerChar instances
-            With rng.Find
-                .ClearFormatting()
-                .Text = MarkerChar
-                .Replacement.ClearFormatting()
-                .Replacement.Text = ""
-                .Forward = True
-                .Wrap = Word.WdFindWrap.wdFindStop
-                Do While .Execute(Replace:=Word.WdReplace.wdReplaceOne)
-                    ' Keep looping until none left
-                Loop
-            End With
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                With rng.Find
+                    .ClearFormatting()
+                    .Text = MarkerChar
+                    .Replacement.ClearFormatting()
+                    .Replacement.Text = ""
+                    .Forward = True
+                    .Wrap = Word.WdFindWrap.wdFindStop
+                    Do While .Execute(Replace:=Word.WdReplace.wdReplaceOne)
+                    Loop
+                End With
+            End Using
         Catch ex As Exception
             MsgBox("Error in ReplaceSpecialCharacter: " & ex.Message, MsgBoxStyle.Critical)
         Finally
@@ -3235,17 +3422,17 @@ Public Class frmAIChat
     ' =========================================================================
 
     ''' <summary>
-    ''' Adds Word comment to all occurrences of search term in document or selection.
+    ''' Adds a Word comment to the first occurrence of search term in document or selection.
     ''' Uses FindLongTextInChunks for reliable matching in large documents.
     ''' </summary>
     ''' <param name="searchTerm">Text to search for as comment anchor</param>
     ''' <param name="commentText">Comment body text (prefixed with AN6)</param>
     ''' <param name="onlySelection">True to restrict to current selection</param>
-    ''' <returns>True if at least one comment added</returns>
+    ''' <returns>True if one comment was added</returns>
     ''' <remarks>
-    ''' Creates empty comment then fills body (avoids issues with special characters).
-    ''' Applies Markdown formatting if chkConvertMarkdown enabled via InsertMarkdownToComment.
-    ''' Restores original selection after operation with boundary guards.
+    ''' Chat-generated addcomment commands are expected to target the first matching anchor.
+    ''' This avoids adding duplicate comments to repeated short phrases and prevents loops
+    ''' caused by Word moving the active selection into the comment after Comments.Add.
     ''' </remarks>
     Private Function ExecuteAddComment(
         ByVal searchTerm As String,
@@ -3255,17 +3442,18 @@ Public Class frmAIChat
         Dim app As Microsoft.Office.Interop.Word.Application = Nothing
         Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
 
-        ' Validate inputs
         If String.IsNullOrWhiteSpace(searchTerm) Then
             Debug.WriteLine("AddComments: Search term is empty.")
             Return False
         End If
+
         If String.IsNullOrWhiteSpace(commentText) Then
             Debug.WriteLine("AddComments: Comment text is empty.")
             Return False
         End If
 
-        ' Get Word application and active document
+        searchTerm = DecodeParagraphMarks(searchTerm)
+
         Try
             Try
                 app = CType(System.Runtime.InteropServices.Marshal.GetActiveObject("Word.Application"), Microsoft.Office.Interop.Word.Application)
@@ -3283,6 +3471,7 @@ Public Class frmAIChat
             Debug.WriteLine("AddComments: No active document found.")
             Return False
         End Try
+
         If doc Is Nothing Then
             Debug.WriteLine("AddComments: No active document found.")
             Return False
@@ -3292,57 +3481,64 @@ Public Class frmAIChat
         Dim originalSelStart As Integer = sel.Start
         Dim originalSelEnd As Integer = sel.End
 
-        ' Determine working range
-        Dim workRange As Microsoft.Office.Interop.Word.Range
+        Dim scopeStart As Integer
+        Dim scopeEnd As Integer
         If onlySelection AndAlso sel IsNot Nothing AndAlso Not String.IsNullOrEmpty(sel.Text) Then
-            workRange = sel.Range.Duplicate
+            scopeStart = sel.Range.Start
+            scopeEnd = sel.Range.End
         Else
-            workRange = doc.Content.Duplicate
+            scopeStart = doc.Content.Start
+            scopeEnd = doc.Content.End
         End If
 
-        ' Initialize selection to working range
-        sel.SetRange(workRange.Start, workRange.End)
-        Dim limitEnd As Integer = workRange.End
-
-        Dim added As Integer = 0
-
         Try
-            ' Iterate all matches using robust chunk finder
-            Do While Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) = True
-                If sel Is Nothing Then Exit Do
+            ' Search only inside the intended working range.
+            Try
+                sel.SetRange(scopeStart, scopeEnd)
+            Catch exScope As System.Exception
+                Debug.WriteLine($"ExecuteAddComment: pre-find SetRange failed: {exScope.Message}")
+            End Try
 
-                Try
-                    ' Anchor comment to found range
-                    Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
-                    Dim newComment As Microsoft.Office.Interop.Word.Comment = Nothing
+            If Not Globals.ThisAddIn.FindLongTextInChunks(searchTerm, sel) Then
+                Debug.WriteLine($"AddComments: Search term not found: '{searchTerm}'.")
+                Return False
+            End If
 
-                    ' Create empty comment then fill body (avoids special char issues)
-                    newComment = doc.Comments.Add(anchor, String.Empty)
+            If sel Is Nothing OrElse sel.Start >= sel.End Then
+                Debug.WriteLine($"AddComments: Invalid found range for term '{searchTerm}'.")
+                Return False
+            End If
 
-                    ' Apply Markdown formatting if enabled
-                    If chkConvertMarkdown.Checked Then
-                        ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
-                    Else
-                        newComment.Range.Text = AN6 & ": " & commentText
-                    End If
+            Dim anchor As Microsoft.Office.Interop.Word.Range = sel.Range.Duplicate
+            Dim anchorStart As Integer = anchor.Start
+            Dim anchorEnd As Integer = anchor.End
 
-                    added += 1
-                Catch
-                    ' Ignore errors and continue with next occurrence
-                End Try
+            If anchorStart < scopeStart OrElse anchorEnd > scopeEnd Then
+                Debug.WriteLine($"AddComments: Found range outside working range for term '{searchTerm}'.")
+                Return False
+            End If
 
-                ' Advance selection beyond current match
-                sel.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+            Using ThisAddIn.BeginMarkupAuthorScope(app)
+                Dim newComment As Microsoft.Office.Interop.Word.Comment = doc.Comments.Add(anchor, String.Empty)
 
-                ' Safety: stop if reached end of working region
-                If sel.Start >= limitEnd Then Exit Do
+                If chkConvertMarkdown.Checked Then
+                    ThisAddIn.InsertMarkdownToComment(newComment.Range, AN6 & ": " & commentText)
+                Else
+                    newComment.Range.Text = AN6 & ": " & commentText
+                End If
+            End Using
 
-                sel.SetRange(sel.Start, limitEnd)
-            Loop
+            Debug.WriteLine($"AddComments: Added one comment for term '{searchTerm}' at [{anchorStart},{anchorEnd}].")
+
+            RememberLastActionRange(anchorStart, anchorEnd)
+
+            Return True
+
         Catch ex As System.Exception
             Debug.WriteLine($"AddComments failed: {ex.Message}")
+            Return False
+
         Finally
-            ' Restore original selection with boundary guards
             Try
                 Dim s As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelStart, doc.Content.End))
                 Dim e As Integer = Math.Max(doc.Content.Start, Math.Min(originalSelEnd, doc.Content.End))
@@ -3350,10 +3546,8 @@ Public Class frmAIChat
             Catch
             End Try
         End Try
-
-        Debug.WriteLine($"AddComments: Added {added} comments for term '{searchTerm}'.")
-        Return added > 0
     End Function
+
 
     ' =========================================================================
     ' Find Command
@@ -3533,6 +3727,8 @@ Public Class frmAIChat
 
         Try
             Debug.WriteLine("ExecuteReplaceCommand: START")
+            LogReplaceDiag(New String("-"c, 100))
+            LogReplaceDiag("START")
 
             Try
                 doc = Globals.ThisAddIn.Application.ActiveDocument
@@ -3559,6 +3755,7 @@ Public Class frmAIChat
             newText = If(newText, String.Empty)
 
             Debug.WriteLine($"ExecuteReplaceCommand: oldText='{oldText}' ({oldText.Length} chars), newText='{newText}' ({newText.Length} chars)")
+            LogReplaceDiag($"Inputs: OnlySelection={OnlySelection}; oldTextLen={oldText.Length}; newTextLen={newText.Length}; oldText='{PreviewForLog(oldText)}'; newText='{PreviewForLog(newText)}'")
 
             If String.IsNullOrWhiteSpace(oldText) Then
                 CommandsList = $"Note: Empty search term (ignored)." & Environment.NewLine & CommandsList
@@ -3577,6 +3774,7 @@ Public Class frmAIChat
             Dim savedSelectionStart As Integer = doc.Application.Selection.Start
             Dim savedSelectionEnd As Integer = doc.Application.Selection.End
             Debug.WriteLine($"ExecuteReplaceCommand: savedSelection=[{savedSelectionStart},{savedSelectionEnd}]")
+            LogReplaceDiag($"Saved selection=[{savedSelectionStart},{savedSelectionEnd}] {DescribeSelectionState(doc.Application.Selection)}")
 
             ' Define search boundaries
             Dim searchEnd As Integer
@@ -3596,12 +3794,30 @@ Public Class frmAIChat
             Dim maxIterations As Integer = 5000
             Dim iterationCount As Integer = 0
             Dim lastFoundEnd As Integer = -1
+            Dim requestedSearchStart As Integer = doc.Application.Selection.Start
 
             Debug.WriteLine("ExecuteReplaceCommand: PASS 1 - scanning for matches...")
 
-            Do While Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True) = True
+            Do
+                LogReplaceDiag($"PASS1 before Find: nextIteration={iterationCount + 1}; searchEnd={searchEnd}; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                Dim findReturned As Boolean = False
+                Try
+                    findReturned = Globals.ThisAddIn.FindLongTextInChunks(oldText, doc.Application.Selection, True)
+                Catch ex As Exception
+                    LogReplaceDiag($"PASS1 FindLongTextInChunks THREW: {ex.GetType().Name}: {ex.Message}")
+                    Throw
+                End Try
+
+                LogReplaceDiag($"PASS1 after Find: returned={findReturned}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                If Not findReturned Then
+                    Exit Do
+                End If
+
                 If doc.Application.Selection Is Nothing Then
                     Debug.WriteLine("ExecuteReplaceCommand: Selection is Nothing after Find, exiting loop")
+                    LogReplaceDiag("PASS1 Selection is Nothing after Find")
                     Exit Do
                 End If
 
@@ -3610,45 +3826,96 @@ Public Class frmAIChat
                 If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
                     CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                     Debug.WriteLine("ExecuteReplaceCommand: ESC pressed, aborting")
+                    LogReplaceDiag("PASS1 ESC pressed, aborting")
                     Return False
                 End If
 
                 iterationCount += 1
                 If iterationCount > maxIterations Then
                     CommandsList = $"Warning: Max search iterations ({maxIterations}) reached." & Environment.NewLine & CommandsList
-                    Debug.WriteLine($"ExecuteReplaceCommand: Max iterations reached")
+                    Debug.WriteLine("ExecuteReplaceCommand: Max iterations reached")
+                    LogReplaceDiag($"PASS1 maxIterations reached ({maxIterations})")
                     Exit Do
                 End If
 
                 Dim selStart As Integer = doc.Application.Selection.Start
                 Dim selEnd As Integer = doc.Application.Selection.End
-                Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}]")
+                Debug.WriteLine($"ExecuteReplaceCommand: PASS1 iteration {iterationCount}, found at [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart})")
+                LogReplaceDiag($"PASS1 iteration={iterationCount}; found=[{selStart},{selEnd}]; requestedSearchStart={requestedSearchStart}; lastFoundEnd={lastFoundEnd}")
 
                 ' Validate match is within search bounds
                 If selStart >= searchEnd Then
                     Debug.WriteLine($"ExecuteReplaceCommand: match start {selStart} >= searchEnd {searchEnd}, exiting")
+                    LogReplaceDiag($"PASS1 exiting because selStart {selStart} >= searchEnd {searchEnd}")
                     Exit Do
                 End If
 
-                ' ─── Reject matches that did not advance past the previous one ───
-                ' FindLongTextInChunks / Word Find can return matches BEFORE the
-                ' selection start in tables.  When that happens the match end will
-                ' be <= lastFoundEnd.  Force the selection past the previous match
-                ' and retry instead of recording a duplicate.
-                If selEnd <= lastFoundEnd Then
-                    Debug.WriteLine($"ExecuteReplaceCommand: match [{selStart},{selEnd}] not past lastFoundEnd={lastFoundEnd}, forcing advance")
+                ' Reject matches that cross a table-cell boundary.
+                ' The canonical fallback in FindLongTextAnchoredFast (Strategy 4)
+                ' joins adjacent cell text into a single canonical stream and can
+                ' return a hit that spans cells. Word's Selection then auto-
+                ' expands to include both cells, which corrupts the replacement.
+                Try
+                    Dim probeRange As Word.Range = doc.Range(selStart, Math.Min(selStart + 1, doc.Content.End))
+                    Dim startInTable As Boolean = False
+                    Try
+                        startInTable = CBool(probeRange.Information(Word.WdInformation.wdWithInTable))
+                    Catch
+                        startInTable = False
+                    End Try
 
-                    ' Increment lastFoundEnd so repeated failures keep moving forward
-                    ' instead of retrying the same forcePos indefinitely.
-                    lastFoundEnd += 1
-                    Dim forcePos As Integer = lastFoundEnd
+                    If startInTable Then
+                        Dim startCellEnd As Integer = -1
+                        Try
+                            If probeRange.Cells.Count > 0 Then
+                                startCellEnd = probeRange.Cells(1).Range.End
+                            End If
+                        Catch
+                            startCellEnd = -1
+                        End Try
+
+                        If startCellEnd > 0 AndAlso selEnd > startCellEnd Then
+                            LogReplaceDiag($"PASS1 REJECTING cell-crossing match [{selStart},{selEnd}]; startCellEnd={startCellEnd}")
+                            Debug.WriteLine($"ExecuteReplaceCommand: rejecting cell-crossing match [{selStart},{selEnd}], cellEnd={startCellEnd}")
+
+                            Dim escapePos As Integer = Math.Min(startCellEnd, searchEnd)
+                            If escapePos <= requestedSearchStart Then
+                                Exit Do
+                            End If
+
+                            doc.Application.Selection.SetRange(escapePos, escapePos)
+                            requestedSearchStart = escapePos
+                            lastFoundEnd = Math.Max(lastFoundEnd, escapePos - 1)
+                            Continue Do
+                        End If
+                    End If
+                Catch ex As Exception
+                    LogReplaceDiag($"PASS1 cell-containment check failed: {ex.Message}")
+                End Try
+
+                ' Reject hits that move backwards or that do not advance.
+                ' In tables Word can re-return the same logical cell match with a
+                ' different End position because of cell markers, so checking End
+                ' alone is not sufficient.
+                Dim hitWentBackwards As Boolean = selStart < requestedSearchStart
+                Dim hitDidNotAdvance As Boolean = selEnd <= lastFoundEnd
+
+                If hitWentBackwards OrElse hitDidNotAdvance Then
+                    Debug.WriteLine($"ExecuteReplaceCommand: rejecting stale/backward hit [{selStart},{selEnd}] (requestedSearchStart={requestedSearchStart}, lastFoundEnd={lastFoundEnd})")
+                    LogReplaceDiag($"PASS1 rejecting stale/backward hit; hitWentBackwards={hitWentBackwards}; hitDidNotAdvance={hitDidNotAdvance}; {DescribeSelectionState(doc.Application.Selection)}")
+
+                    Dim forcePos As Integer = Math.Max(requestedSearchStart + 1, lastFoundEnd + 1)
 
                     If forcePos >= searchEnd Then
                         Debug.WriteLine("ExecuteReplaceCommand: forced position past searchEnd, exiting")
+                        LogReplaceDiag($"PASS1 forcePos {forcePos} >= searchEnd {searchEnd}; exiting")
                         Exit Do
                     End If
+
                     doc.Application.Selection.SetRange(forcePos, searchEnd)
+                    requestedSearchStart = forcePos
                     Debug.WriteLine($"ExecuteReplaceCommand: forced selection to [{forcePos},{searchEnd}]")
+                    LogReplaceDiag($"PASS1 forced selection=[{forcePos},{searchEnd}] {DescribeSelectionState(doc.Application.Selection)}")
                     Continue Do
                 End If
 
@@ -3656,10 +3923,12 @@ Public Class frmAIChat
                 lastFoundEnd = selEnd
                 matchPositions.Add((selStart, selEnd))
                 Debug.WriteLine($"ExecuteReplaceCommand: stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
+                LogReplaceDiag($"PASS1 stored match #{matchPositions.Count} at [{selStart},{selEnd}]")
 
                 ' Advance past current match
                 doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                 Debug.WriteLine($"ExecuteReplaceCommand: collapsed to {doc.Application.Selection.Start}")
+                LogReplaceDiag($"PASS1 after collapse: {DescribeSelectionState(doc.Application.Selection)}")
 
                 ' Handle table cell boundaries to avoid getting stuck at cell end marker
                 Try
@@ -3668,10 +3937,13 @@ Public Class frmAIChat
                         isInTable = CBool(doc.Application.Selection.Information(Word.WdInformation.wdWithInTable))
                     Catch ex As Exception
                         Debug.WriteLine($"ExecuteReplaceCommand: wdWithInTable check failed: {ex.Message}")
+                        LogReplaceDiag($"PASS1 wdWithInTable check failed: {ex.Message}")
                     End Try
 
                     If isInTable Then
                         Debug.WriteLine("ExecuteReplaceCommand: in table, checking cell boundary")
+                        LogReplaceDiag($"PASS1 in table before boundary handling: {DescribeSelectionState(doc.Application.Selection)}")
+
                         Dim cel As Word.Cell = Nothing
                         Try
                             If doc.Application.Selection.Cells.Count > 0 Then
@@ -3679,34 +3951,54 @@ Public Class frmAIChat
                             End If
                         Catch ex As Exception
                             Debug.WriteLine($"ExecuteReplaceCommand: Cells access failed: {ex.Message}")
+                            LogReplaceDiag($"PASS1 Cells access failed: {ex.Message}")
                         End Try
 
                         If cel IsNot Nothing Then
                             Dim selEndPos As Integer = doc.Application.Selection.End
                             Dim celRangeEnd As Integer = cel.Range.End
+                            LogReplaceDiag($"PASS1 table boundary check: selEndPos={selEndPos}; cellEnd={celRangeEnd}")
+
                             If selEndPos >= celRangeEnd - 1 Then
                                 doc.Application.Selection.SetRange(celRangeEnd, celRangeEnd)
                                 Debug.WriteLine($"ExecuteReplaceCommand: jumped past cell end to {celRangeEnd}")
+                                LogReplaceDiag($"PASS1 jumped past cell end to {celRangeEnd}; {DescribeSelectionState(doc.Application.Selection)}")
                             End If
                         End If
                     End If
                 Catch ex As Exception
                     Debug.WriteLine($"ExecuteReplaceCommand: table navigation failed: {ex.Message}")
+                    LogReplaceDiag($"PASS1 table navigation failed: {ex.Message}")
                 End Try
 
                 ' Check if past search boundary
                 Dim currentPos As Integer = doc.Application.Selection.Start
                 Debug.WriteLine($"ExecuteReplaceCommand: after advance, position={currentPos}, searchEnd={searchEnd}")
+                LogReplaceDiag($"PASS1 after advance: currentPos={currentPos}; searchEnd={searchEnd}; {DescribeSelectionState(doc.Application.Selection)}")
+
                 If currentPos >= searchEnd Then
                     Debug.WriteLine("ExecuteReplaceCommand: past searchEnd, exiting loop")
+                    LogReplaceDiag($"PASS1 exiting because currentPos {currentPos} >= searchEnd {searchEnd}")
                     Exit Do
                 End If
 
-                ' Extend selection to remaining search scope
+                ' Extend selection to remaining search scope.
+                ' In whole-document searches, keep the selection collapsed.
+                ' A non-collapsed Selection that crosses table cells can snap back
+                ' to the start of the previous cell, which causes the same hit to
+                ' be returned again and again.
                 Try
-                    doc.Application.Selection.SetRange(currentPos, searchEnd)
+                    If OnlySelection Then
+                        doc.Application.Selection.SetRange(currentPos, searchEnd)
+                    Else
+                        doc.Application.Selection.SetRange(currentPos, currentPos)
+                    End If
+
+                    requestedSearchStart = currentPos
+                    LogReplaceDiag($"PASS1 prepared next search range=[{currentPos},{If(OnlySelection, searchEnd, currentPos)}] {DescribeSelectionState(doc.Application.Selection)}")
                 Catch ex As Exception
                     Debug.WriteLine($"ExecuteReplaceCommand: SetRange({currentPos},{searchEnd}) failed: {ex.Message}")
+                    LogReplaceDiag($"PASS1 SetRange({currentPos},{searchEnd}) failed: {ex.Message}")
                     Exit Do
                 End Try
             Loop
@@ -3728,40 +4020,99 @@ Public Class frmAIChat
             Debug.WriteLine("ExecuteReplaceCommand: PASS 2 - replacing in reverse order...")
             Dim replaceCount As Integer = 0
 
-            For i As Integer = matchPositions.Count - 1 To 0 Step -1
-                Dim mStart As Integer = matchPositions(i).Start
-                Dim mEnd As Integer = matchPositions(i).End
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                For i As Integer = matchPositions.Count - 1 To 0 Step -1
+                    Dim mStart As Integer = matchPositions(i).Start
+                    Dim mEnd As Integer = matchPositions(i).End
 
-                Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
-
-                Try
-                    ' Select the matched text using stored positions
-                    Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
-                    doc.Application.Selection.SetRange(mStart, mEnd)
-                    Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
-
-                    ' Atomic replacement
-                    Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{newText}'")
-                    doc.Application.Selection.Text = newText
-                    Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
-
-                    ' Apply Markdown conversion if enabled and text was inserted
-                    If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                    ' Avoid replacing the cell's terminal paragraph mark.
+                    ' If the match ends one character before the cell end (i.e. on
+                    ' the cell's last vbCr), shrink the match so the cell marker
+                    ' is not touched, and strip the trailing paragraph mark from
+                    ' newText so the replacement does not push content into the
+                    ' next cell.
+                    Dim adjustedNewText As String = newText
+                    Try
+                        Dim probe As Word.Range = doc.Range(mStart, mEnd)
+                        Dim isInCell As Boolean = False
                         Try
-                            Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
-                            Globals.ThisAddIn.ConvertMarkdownToWord()
-                            Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
-                        Catch ex As Exception
-                            Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                            isInCell = CBool(probe.Information(Word.WdInformation.wdWithInTable))
+                        Catch
+                            isInCell = False
                         End Try
-                    End If
 
-                    replaceCount += 1
-                Catch ex As Exception
-                    Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
-                    Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
-                End Try
-            Next
+                        If isInCell AndAlso probe.Cells.Count > 0 Then
+                            Dim cellRangeEnd As Integer = probe.Cells(1).Range.End
+                            ' Word stores cell-end marker as the last character of cell range
+                            If mEnd = cellRangeEnd - 1 Then
+                                Dim tailChar As String = doc.Range(mEnd - 1, mEnd).Text
+                                If tailChar = vbCr OrElse tailChar = vbLf Then
+                                    mEnd -= 1
+                                    LogReplaceDiag($"PASS2 shrunk match to avoid cell paragraph mark; new mEnd={mEnd}")
+                                End If
+                                If adjustedNewText.EndsWith(vbCrLf, StringComparison.Ordinal) Then
+                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 2)
+                                ElseIf adjustedNewText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                       adjustedNewText.EndsWith(vbLf, StringComparison.Ordinal) Then
+                                    adjustedNewText = adjustedNewText.Substring(0, adjustedNewText.Length - 1)
+                                End If
+                                LogReplaceDiag($"PASS2 trimmed trailing paragraph mark from newText; len={adjustedNewText.Length}")
+                            End If
+                        End If
+                    Catch ex As Exception
+                        LogReplaceDiag($"PASS2 cell-boundary trim failed: {ex.Message}")
+                    End Try
+
+
+                    Debug.WriteLine($"ExecuteReplaceCommand: PASS2 replacing match #{i} at [{mStart},{mEnd}]")
+
+                    Try
+                        ' Select the matched text using stored positions
+                        Debug.WriteLine($"ExecuteReplaceCommand: calling SetRange({mStart},{mEnd})")
+                        doc.Application.Selection.SetRange(mStart, mEnd)
+                        Debug.WriteLine($"ExecuteReplaceCommand: SetRange OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                            ' Old replacement path so Markdown can be converted afterwards.
+                            Debug.WriteLine($"ExecuteReplaceCommand: assigning Selection.Text = '{adjustedNewText}'")
+                            doc.Application.Selection.Text = adjustedNewText
+                            Debug.WriteLine($"ExecuteReplaceCommand: Selection.Text assigned OK, selection=[{doc.Application.Selection.Start},{doc.Application.Selection.End}]")
+
+                            Dim actionEnd As Integer = Math.Min(mStart + newText.Length, doc.Content.End)
+                            RememberLastActionRange(mStart, actionEnd)
+
+                            Try
+                                Debug.WriteLine("ExecuteReplaceCommand: applying ConvertMarkdownToWord")
+                                Globals.ThisAddIn.ConvertMarkdownToWord()
+                                Debug.WriteLine("ExecuteReplaceCommand: ConvertMarkdownToWord OK")
+                            Catch ex As Exception
+                                Debug.WriteLine($"ExecuteReplaceCommand: ConvertMarkdownToWord failed: {ex.Message}")
+                            End Try
+                        Else
+                            ' Surgical replacement path for plain-text tracked edits.
+                            Dim patchRange As Word.Range = doc.Range(mStart, mEnd)
+                            Dim originalPatchText As String = patchRange.Text
+                            Dim preserveTrailingCr As Boolean =
+                                originalPatchText.EndsWith(vbCr, StringComparison.Ordinal) OrElse
+                                originalPatchText.EndsWith(vbLf, StringComparison.Ordinal)
+
+                            Debug.WriteLine("ExecuteReplaceCommand: applying surgical replacement")
+                            Globals.ThisAddIn.ApplySurgicalReplacement(
+                                originalPatchText,
+                                adjustedNewText,
+                                patchRange,
+                                preserveTrailingCr)
+
+                            RememberLastActionRange(patchRange.Start, patchRange.End)
+                        End If
+
+                        replaceCount += 1
+                    Catch ex As Exception
+                        Debug.WriteLine($"ExecuteReplaceCommand: ERROR replacing match #{i} at ({mStart},{mEnd}): {ex.GetType().Name}: {ex.Message}")
+                        Debug.WriteLine($"ExecuteReplaceCommand: StackTrace: {ex.StackTrace}")
+                    End Try
+                Next
+            End Using
 
             Debug.WriteLine($"ExecuteReplaceCommand: PASS 2 complete, replaced {replaceCount} of {matchPositions.Count}")
 
@@ -3812,6 +4163,61 @@ Public Class frmAIChat
             End Try
         End Try
     End Function
+
+    Private Shared Function PreviewForLog(value As String, Optional maxLen As Integer = 120) As String
+        If value Is Nothing Then Return "<null>"
+
+        Dim s As String = value.
+            Replace(vbCr, "\r").
+            Replace(vbLf, "\n").
+            Replace(ChrW(7), "\cell")
+
+        If s.Length > maxLen Then
+            s = s.Substring(0, maxLen) & "…"
+        End If
+
+        Return s
+    End Function
+
+    <System.Diagnostics.Conditional("DEBUG")>
+    Private Sub LogReplaceDiag(message As String)
+        If String.IsNullOrWhiteSpace(message) Then Return
+        Debug.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [ExecuteReplaceCommand] {message}")
+    End Sub
+
+    Private Function DescribeSelectionState(sel As Word.Selection) As String
+        Try
+            If sel Is Nothing Then
+                Return "selection=<null>"
+            End If
+
+            Dim preview As String = "<unavailable>"
+            Try
+                preview = PreviewForLog(If(sel.Text, String.Empty), 80)
+            Catch
+            End Try
+
+            Dim isInTable As Boolean = False
+            Dim cellInfo As String = ""
+
+            Try
+                isInTable = CBool(sel.Information(Word.WdInformation.wdWithInTable))
+
+                If isInTable AndAlso sel.Cells.Count > 0 Then
+                    Dim currentCell As Word.Cell = sel.Cells(1)
+                    cellInfo =
+                        $" cell=[row={currentCell.RowIndex},col={currentCell.ColumnIndex}] cellRange=[{currentCell.Range.Start},{currentCell.Range.End}]"
+                End If
+            Catch ex As Exception
+                cellInfo = $" cellInfoError='{ex.Message}'"
+            End Try
+
+            Return $"selection=[{sel.Start},{sel.End}] len={Math.Max(0, sel.End - sel.Start)} inTable={isInTable}{cellInfo} text='{preview}'"
+        Catch ex As Exception
+            Return $"selectionStateError='{ex.Message}'"
+        End Try
+    End Function
+
 
     ' =========================================================================
     ' Insert Before/After Command
@@ -3886,135 +4292,139 @@ Public Class frmAIChat
             If searchText.StartsWith(" ") OrElse searchText.EndsWith(" ") Then searchAttempts.Add(searchText.Trim())
             searchAttempts = searchAttempts.Distinct().ToList()
 
-            ' Try each search variant until match found
-            For Each currentSearchText In searchAttempts
-                If found Then Exit For
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                ' Try each search variant until match found
+                For Each currentSearchText In searchAttempts
+                    If found Then Exit For
 
-                Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
-                doc.Application.Selection.SetRange(workrange.Start, workrange.End)
+                    Debug.WriteLine($"Trying search variant: '{currentSearchText}'")
+                    doc.Application.Selection.SetRange(workrange.Start, workrange.End)
 
-                Dim maxIterations As Integer = 1000
-                Dim iterationCount As Integer = 0
-                Dim lastProcessedPosition As Integer = -1
+                    Dim maxIterations As Integer = 1000
+                    Dim iterationCount As Integer = 0
+                    Dim lastProcessedPosition As Integer = -1
 
-                Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True) = True
+                    Do While Globals.ThisAddIn.FindLongTextInChunks(currentSearchText, doc.Application.Selection, True) = True
 
-                    If doc.Application.Selection Is Nothing Then Exit Do
+                        If doc.Application.Selection Is Nothing Then Exit Do
 
-                    System.Windows.Forms.Application.DoEvents()
-                    If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
-                        CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
-                        Exit Do
-                    End If
-
-                    ' Safety: prevent infinite loops
-                    iterationCount += 1
-                    If iterationCount > maxIterations Then
-                        Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
-                        Exit Do
-                    End If
-
-                    ' Detect stuck state (same position)
-                    If doc.Application.Selection.Start = lastProcessedPosition Then
-                        Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
-                        doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
-                        doc.Application.Selection.Move(Word.WdUnits.wdCharacter, 1)
-                        Continue Do
-                    End If
-                    lastProcessedPosition = doc.Application.Selection.Start
-
-                    Dim foundRange As Word.Range = doc.Application.Selection.Range.Duplicate
-
-                    ' Skip TOC ranges to prevent corruption
-                    Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
-                    If tocEnd > 0 Then
-                        Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
-                        Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
-                        Dim continuePos As Integer = Math.Min(tocEnd, searchLimit)
-                        If continuePos >= searchLimit Then
+                        System.Windows.Forms.Application.DoEvents()
+                        If (GetAsyncKeyState(System.Windows.Forms.Keys.Escape) And &H8000) <> 0 Then
+                            CommandsList = $"Operation cancelled by user (ESC)." & Environment.NewLine & CommandsList
                             Exit Do
-                        Else
-                            doc.Application.Selection.SetRange(continuePos, searchLimit)
+                        End If
+
+                        ' Safety: prevent infinite loops
+                        iterationCount += 1
+                        If iterationCount > maxIterations Then
+                            Debug.WriteLine($"ExecuteInsertBeforeAfterCommand: Max iterations ({maxIterations}) reached")
+                            Exit Do
+                        End If
+
+                        ' Detect stuck state (same position)
+                        If doc.Application.Selection.Start = lastProcessedPosition Then
+                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Stuck at same position, advancing")
+                            doc.Application.Selection.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
+                            doc.Application.Selection.Move(Word.WdUnits.wdCharacter, 1)
                             Continue Do
                         End If
-                    End If
+                        lastProcessedPosition = doc.Application.Selection.Start
 
-                    found = True
-                    Debug.WriteLine($"Found match at position {foundRange.Start}")
+                        Dim foundRange As Word.Range = doc.Application.Selection.Range.Duplicate
 
-                    Dim foundStart As Integer = foundRange.Start
-                    Dim foundEnd As Integer = foundRange.End
-                    Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
-
-                    ' Handle document end boundary (End includes final paragraph mark)
-                    Dim docContentEnd As Integer = doc.Content.End
-                    If insertPosition >= docContentEnd Then
-                        If Not InsertBefore Then
-                            insertPosition = docContentEnd - 1
-                        End If
-                    End If
-                    insertPosition = Math.Max(doc.Content.Start, Math.Min(insertPosition, docContentEnd - 1))
-
-                    Try
-                        ' Primary method: create Range and insert
-                        Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
-                        insertRange.Text = newText
-
-                        ' Apply Markdown if enabled
-                        If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                            Try
-                                Dim conversionStart As Integer = insertPosition
-                                Dim conversionEnd As Integer = Math.Min(insertPosition + Len(newText), doc.Content.End)
-                                doc.Range(conversionStart, conversionEnd).Select()
-                                Globals.ThisAddIn.ConvertMarkdownToWord()
-                            Catch
-                                ' Best effort
-                            End Try
-                        End If
-                    Catch rangeEx As Exception
-                        ' Fallback: use Selection to insert
-                        Debug.WriteLine($"Range creation failed at {insertPosition}, trying alternative")
-                        Try
-                            doc.Application.Selection.SetRange(insertPosition, insertPosition)
-                            doc.Application.Selection.Text = newText
-                            If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
-                                Globals.ThisAddIn.ConvertMarkdownToWord()
+                        ' Skip TOC ranges to prevent corruption
+                        Dim tocEnd As Integer = TocEndIfInside(foundRange, doc)
+                        If tocEnd > 0 Then
+                            Debug.WriteLine("ExecuteInsertBeforeAfterCommand: Match in TOC -> skipping")
+                            Dim searchLimit As Integer = If(OnlySelection, selectionEnd, doc.Content.End)
+                            Dim continuePos As Integer = Math.Min(tocEnd, searchLimit)
+                            If continuePos >= searchLimit Then
+                                Exit Do
+                            Else
+                                doc.Application.Selection.SetRange(continuePos, searchLimit)
+                                Continue Do
                             End If
-                        Catch altEx As Exception
-                            Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
-                            Continue Do
+                        End If
+
+                        found = True
+                        Debug.WriteLine($"Found match at position {foundRange.Start}")
+
+                        Dim foundStart As Integer = foundRange.Start
+                        Dim foundEnd As Integer = foundRange.End
+                        Dim insertPosition As Integer = If(InsertBefore, foundStart, foundEnd)
+
+                        ' Handle document end boundary (End includes final paragraph mark)
+                        Dim docContentEnd As Integer = doc.Content.End
+                        If insertPosition >= docContentEnd Then
+                            If Not InsertBefore Then
+                                insertPosition = docContentEnd - 1
+                            End If
+                        End If
+                        insertPosition = Math.Max(doc.Content.Start, Math.Min(insertPosition, docContentEnd - 1))
+
+                        Try
+                            ' Primary method: create Range and insert
+                            Dim insertRange As Word.Range = doc.Range(insertPosition, insertPosition)
+                            insertRange.Text = newText
+
+                            RememberLastActionRange(insertPosition, Math.Min(insertPosition + Len(newText), doc.Content.End))
+
+                            ' Apply Markdown if enabled
+                            If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                                Try
+                                    Dim conversionStart As Integer = insertPosition
+                                    Dim conversionEnd As Integer = Math.Min(insertPosition + Len(newText), doc.Content.End)
+                                    doc.Range(conversionStart, conversionEnd).Select()
+                                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                                Catch
+                                    ' Best effort
+                                End Try
+                            End If
+                        Catch rangeEx As Exception
+                            ' Fallback: use Selection to insert
+                            Debug.WriteLine($"Range creation failed at {insertPosition}, trying alternative")
+                            Try
+                                doc.Application.Selection.SetRange(insertPosition, insertPosition)
+                                doc.Application.Selection.Text = newText
+                                If chkConvertMarkdown.Checked AndAlso newText.Length > 0 Then
+                                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                                End If
+                            Catch altEx As Exception
+                                Debug.WriteLine($"Alternative insertion failed: {altEx.Message}")
+                                Continue Do
+                            End Try
                         End Try
-                    End Try
 
-                    ' Calculate next search position
-                    Dim continuePosition As Integer
-                    If InsertBefore Then
-                        continuePosition = insertPosition + Len(newText) + (foundEnd - foundStart)
-                    Else
-                        continuePosition = insertPosition + Len(newText)
-                    End If
+                        ' Calculate next search position
+                        Dim continuePosition As Integer
+                        If InsertBefore Then
+                            continuePosition = insertPosition + Len(newText) + (foundEnd - foundStart)
+                        Else
+                            continuePosition = insertPosition + Len(newText)
+                        End If
 
-                    ' Ensure forward progress
-                    If continuePosition <= lastProcessedPosition Then
-                        continuePosition = lastProcessedPosition + 1
-                    End If
+                        ' Ensure forward progress
+                        If continuePosition <= lastProcessedPosition Then
+                            continuePosition = lastProcessedPosition + 1
+                        End If
 
-                    ' Adjust selection end if text inserted
-                    If OnlySelection Then
-                        selectionEnd = selectionEnd + Len(newText)
-                    End If
+                        ' Adjust selection end if text inserted
+                        If OnlySelection Then
+                            selectionEnd = selectionEnd + Len(newText)
+                        End If
 
-                    ' Check if reached end of search range
-                    If OnlySelection Then
-                        If continuePosition >= selectionEnd Then Exit Do
-                        Dim safeEnd As Integer = Math.Min(selectionEnd, doc.Content.End)
-                        doc.Application.Selection.SetRange(continuePosition, safeEnd)
-                    Else
-                        If continuePosition >= doc.Content.End Then Exit Do
-                        doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
-                    End If
-                Loop
-            Next
+                        ' Check if reached end of search range
+                        If OnlySelection Then
+                            If continuePosition >= selectionEnd Then Exit Do
+                            Dim safeEnd As Integer = Math.Min(selectionEnd, doc.Content.End)
+                            doc.Application.Selection.SetRange(continuePosition, safeEnd)
+                        Else
+                            If continuePosition >= doc.Content.End Then Exit Do
+                            doc.Application.Selection.SetRange(continuePosition, doc.Content.End)
+                        End If
+                    Loop
+                Next
+            End Using
 
             If Not found Then
                 CommandsList = $"Note: The search term was not found." & Environment.NewLine & CommandsList
@@ -4072,14 +4482,19 @@ Public Class frmAIChat
             newText = newText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
 
             doc.TrackRevisions = True
-            Dim selection = doc.Application.Selection
-            selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
-            selection.Text = newText
+            Using ThisAddIn.BeginMarkupAuthorScope(doc.Application)
+                Dim selection = doc.Application.Selection
+                selection.Collapse(Word.WdCollapseDirection.wdCollapseStart)
 
-            ' Apply Markdown formatting if enabled
-            If chkConvertMarkdown.Checked Then
-                Globals.ThisAddIn.ConvertMarkdownToWord()
-            End If
+                Dim insertStart As Integer = selection.Start
+                selection.Text = newText
+
+                RememberLastActionRange(insertStart, Math.Min(insertStart + newText.Length, doc.Content.End))
+
+                If chkConvertMarkdown.Checked Then
+                    Globals.ThisAddIn.ConvertMarkdownToWord()
+                End If
+            End Using
 
             Return True
         Catch ex As Exception
@@ -4344,12 +4759,15 @@ $"html,body{{height:100%;margin:0;padding:0;background:#fff;color:#000;}}
 body{{font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:{fontPt}pt;line-height:1.45;}}
 #chat{{padding:6px 8px;}}
 .msg{{margin:6px 0;word-wrap:break-word;}}
-.msg .who{{font-weight:600;margin-right:4px;}}
+.msg:after{{content:'';display:block;clear:both;}}
+.msg .who{{font-weight:600;margin-right:4px;float:left;}}
+.msg .content{{display:block;overflow:hidden;}}
 .msg.user .who{{color:#333;}}
 .msg.assistant .who{{color:#003366;}}
 .msg.thinking .content{{opacity:.75;font-style:italic;}}
-/* No top gap when content is block-rendered */
+/* No top/bottom gap when content is block-rendered */
 .msg .content > *:first-child{{margin-top:0;}}
+.msg .content > *:last-child{{margin-bottom:0;}}
 a{{color:#0068c9;text-decoration:underline;cursor:pointer;}}
 a:visited{{color:#5a3694;}}
 ul,ol{{margin:6px 0 6px 22px;}}

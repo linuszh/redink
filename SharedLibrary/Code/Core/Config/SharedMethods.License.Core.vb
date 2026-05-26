@@ -36,7 +36,39 @@ Namespace SharedLibrary
 #Region "License Constants"
 
         ' API Configuration
-        Private Const LicenseApiBaseUrl As String = "https://redink.ai/?wc-api=wc-am-api"
+
+        ' Default license source identifier (matches INI value `LicenseSource = redink.ai`).
+        Private Const DefaultLicenseSource As String = "redink.ai"
+
+        ' Hardcoded mapping of alternative license sources to their API base URLs.
+        ' The key is the value users set in the INI under `LicenseSource`.
+        ' "redink.ai" is the built-in default and uses the standard redink.ai endpoint.
+        ' Add additional license servers here as needed.
+        Private Shared ReadOnly LicenseApiBaseUrls As New Dictionary(Of String, String)(StringComparer.OrdinalIgnoreCase) From {
+            {DefaultLicenseSource, "https://redink.ai/?wc-api=wc-am-api"},
+            {"alt-server", "https://redink.ai/?wc-api=wc-am-api"}
+        }
+
+        ' Currently selected license source (loaded from INI in LoadBasicLicenseSettings).
+        Private Shared _licenseSource As String = DefaultLicenseSource
+
+        ''' <summary>
+        ''' Resolves the active license API base URL based on the configured `LicenseSource`
+        ''' (INI key `LicenseSource`). Defaults to the redink.ai endpoint if unset or unknown.
+        ''' </summary>
+        Private Shared ReadOnly Property LicenseApiBaseUrl As String
+            Get
+                Dim source = If(String.IsNullOrWhiteSpace(_licenseSource), DefaultLicenseSource, _licenseSource.Trim())
+                Dim url As String = Nothing
+                If LicenseApiBaseUrls.TryGetValue(source, url) Then
+                    Return url
+                End If
+                ' Unknown source - log and fall back to default.
+                LogLicenseEvent("License Source", $"Unknown LicenseSource '{source}' - falling back to '{DefaultLicenseSource}'", alwaysLog:=True)
+                Return LicenseApiBaseUrls(DefaultLicenseSource)
+            End Get
+        End Property
+
         Private Const ApiTimeoutMs As Integer = 10000
         Private Const ApiRetryCount As Integer = 3
 
@@ -342,6 +374,13 @@ Namespace SharedLibrary
 
                 ' Load LicenseContact from config
                 LicenseContact = If(configDict.ContainsKey("LicenseContact"), configDict("LicenseContact"), "")
+
+                ' Load LicenseSource from config (INI key: LicenseSource).
+                ' Default is "redink.ai", which selects the built-in redink.ai API base URL.
+                ' Any other value must match an entry in LicenseApiBaseUrls; unknown values
+                ' fall back to the default at resolution time (see LicenseApiBaseUrl property).
+                Dim cfgSource As String = If(configDict.ContainsKey("LicenseSource"), configDict("LicenseSource"), "")
+                _licenseSource = If(String.IsNullOrWhiteSpace(cfgSource), DefaultLicenseSource, cfgSource.Trim())
 
                 ' Load LicenseNoWarning from config
                 LicenseNoWarning = ParseBoolean(configDict, "LicenseNoWarning", False)

@@ -1,23 +1,38 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
-
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
+' For license to use see https://redink.ai.
+'
 ' =============================================================================
 ' File: ThisAddIn.Processing.vb
-' Purpose: Text processing helpers for the Outlook add-in: Word-based document comparison
-'          (tracked changes flattened), inline diff (DiffPlex) with custom markup tags,
-'          Markdown conversion from Word formatting, formatted insertion routines,
-'          RTF to plain text conversion, parsing of markup tag sequences, and word count.
+' Purpose:
+'   Provides the Outlook add-in text-processing pipeline for comparing, transforming,
+'   and inserting content in the active compose window. Supports Word-based document
+'   comparison, DiffPlex-based inline diffs, Markdown conversion from Word ranges,
+'   tagged markup parsing, formatted insertion, RTF/plain-text normalization, and
+'   selection word counting.
+'
+' Key Responsibilities:
+'   - Compare two texts via Word `CompareDocuments` and flatten revisions into static
+'     formatting for insertion into the current Outlook editor.
+'   - Build inline word-level diffs with DiffPlex and encode insertions/deletions
+'     using internal pseudo tags for later rendering.
+'   - Convert Word content ranges to Markdown, including headings, lists, bold,
+'     italic, underline, and strikethrough handling.
+'   - Insert formatted comparison output quickly into the compose window using HTML
+'     fragments or incremental span-based formatting.
+'   - Parse internal markup tag sequences into text/format segments for rendering.
+'   - Normalize RTF input to plain text and provide small text-processing utilities.
+'   - Measure the current Outlook editor selection for word-count related features.
 '
 ' Architecture:
-' - CompareAndInsertTextCompareDocs: uses Word CompareDocuments API to build formatting markup, applies static styling, pastes into current compose window.
-' - CompareAndInsertText: builds a word-level diff via DiffPlex, encodes insert/delete spans with pseudo tags for later HTML/format rendering.
-' - ConvertRangeToMarkdown: traverses a Word.Range; maps headings, lists, and basic character formatting (bold/italic/underline/strikethrough) into Markdown or inline HTML escapes.
-' - ReplaceWithinRange: controlled find/replace loop with boundary preservation; single replacement iterations and rollback if exceeding original range.
-' - InsertFormattedTextFast / InsertFormattedText: two insertion paths (HTML fragment vs incremental tagged spans) applying blue underline for insertions and red strikethrough for deletions.
-' - ParseText: linear tag parser producing parallel arrays of segments and formatting codes.
-' - ConvertRtfToPlainText: regex-based RTF control word stripping and hex escape decoding.
-' - RGB: utility composing a DWORD color.
-' - GetSelectedTextLength: acquires selection, filters for HTML/RTF mail, counts words via whitespace split.
+'   - Comparison Layer: `CompareAndInsertTextCompareDocs` uses Microsoft Word's
+'     compare engine; `CompareAndInsertText` uses DiffPlex for inline diffs.
+'   - Transformation Layer: `ConvertRangeToMarkdown`, `ReplaceWithinRange`, and
+'     related helpers rewrite formatted Word content into Markdown-compatible text.
+'   - Rendering Layer: `InsertFormattedTextFast`, `InsertFormattedText`, and
+'     `ParseText` convert tagged diff output into visible editor formatting.
+'   - Utility Layer: RTF/plain-text conversion, color helpers, and selection-length
+'     helpers support the higher-level processing flow.
 ' =============================================================================
 
 Option Explicit On
@@ -203,6 +218,24 @@ Partial Public Class ThisAddIn
 
     End Sub
 
+    Private Shared Function ShouldExpandRangeToIncludeOwnParagraphMark(rng As Word.Range) As Boolean
+        If rng Is Nothing Then Return False
+        If rng.End >= rng.Document.Content.End - 1 Then Return False
+        If rng.End <= rng.Start Then Return False
+
+        Try
+            Dim lastIncludedChar As String = rng.Document.Range(rng.End - 1, rng.End).Text
+            If lastIncludedChar = vbCr OrElse lastIncludedChar = vbLf Then
+                Return False
+            End If
+
+            Dim nextChar As String = rng.Document.Range(rng.End, rng.End + 1).Text
+            Return nextChar = vbCr OrElse nextChar = vbLf
+        Catch
+            Return False
+        End Try
+    End Function
+
     ''' <summary>
     ''' Converts Word paragraphs and character formatting in a range to Markdown equivalents (headings, lists, bold, italic, underline via HTML <u>, strikethrough).
     ''' </summary>
@@ -211,14 +244,20 @@ Partial Public Class ThisAddIn
         Dim listRegex As New Regex("^(\s*)([-*+]|\d+[\.\)])\s+", RegexOptions.Compiled)
 
         Dim rng As Word.Range = WorkingRange.Duplicate
-        If rng.End < rng.Document.Content.End - 1 Then
+        Dim expandedEndForParagraphMark As Boolean = False
+
+        If ShouldExpandRangeToIncludeOwnParagraphMark(rng) Then
             rng.End = rng.End + 1
+            expandedEndForParagraphMark = True
         End If
 
+        Dim originalEnd As Integer = rng.End
         Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
 
         ' 0) Headings & lists
         For Each para As Microsoft.Office.Interop.Word.Paragraph In rng.Paragraphs
+            If para.Range.Start >= originalEnd Then Continue For
+
             Dim styleName As String = CType(para.Style, Microsoft.Office.Interop.Word.Style).NameLocal
 
             Select Case styleName
@@ -415,11 +454,82 @@ Partial Public Class ThisAddIn
                             rep.StrikeThrough = False
                         End Sub)
 
+        RemoveEmptyMarkdownFormattingMarkers(rng)
+
         ' Restore selection
-        rng.End = rng.End - 1
+        If expandedEndForParagraphMark AndAlso rng.End > rng.Start Then
+            rng.End = rng.End - 1
+        End If
+
         rng.Select()
 
     End Sub
+
+
+    Private Shared Sub RemoveEmptyMarkdownFormattingMarkers(rng As Word.Range)
+        If rng Is Nothing Then Return
+
+        Dim originalStart As Integer = rng.Start
+        Dim text As String = rng.Text
+
+        If String.IsNullOrEmpty(text) Then Return
+
+        Dim cleaned As String = CleanMarkdownTextForLlm(text)
+
+        If cleaned = text Then Return
+
+        rng.Text = cleaned
+        rng.SetRange(originalStart, originalStart + cleaned.Length)
+    End Sub
+
+    Private Shared Function CleanMarkdownTextForLlm(text As String) As String
+        If String.IsNullOrEmpty(text) Then Return text
+
+        Dim newline As String = vbCrLf
+        If text.Contains(vbCrLf) Then
+            newline = vbCrLf
+        ElseIf text.Contains(vbCr) Then
+            newline = vbCr
+        ElseIf text.Contains(vbLf) Then
+            newline = vbLf
+        End If
+
+        Dim normalized As String = text.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf)
+        Dim lines As String() = normalized.Split(ControlChars.Lf)
+
+        For i As Integer = 0 To lines.Length - 1
+            Dim line As String = lines(i)
+            Dim trimmed As String = line.Trim()
+            Dim compact As String = Regex.Replace(trimmed, "[ \t]", "")
+
+            ' Remove lines that contain only generated Markdown markers.
+            ' Examples:
+            '   *
+            '   **
+            '   ***
+            '   ****
+            '   *** ***
+            '   ~~~~
+            '   <u></u>
+            If Regex.IsMatch(compact, "^(?:\*{1,12}|~{2,12}|<u></u>)$", RegexOptions.IgnoreCase) Then
+                lines(i) = ""
+                Continue For
+            End If
+
+            ' Remove generated empty bold/bold+italic/strike marker runs at line end.
+            ' Examples:
+            '   Text****
+            '   Text******
+            '   Text~~~~
+            line = Regex.Replace(line, "(\S)(?:\*{4,12}|~{4,12})([ \t]*)$", "$1$2")
+
+            lines(i) = line
+        Next
+
+        Return String.Join(newline, lines)
+    End Function
+
+
 
     ''' <summary>
     ''' Performs iterative find/replace operations within a constrained range; prevents replacements from exceeding original bounds.
@@ -848,5 +958,73 @@ Partial Public Class ThisAddIn
             Return 0
         End Try
     End Function
+
+    ''' <summary>
+    ''' Shows an interactive "Review changes" dialog comparing the original selection and the
+    ''' LLM corrected text. The user can accept/reject individual word-level changes. The
+    ''' reviewed result is appended at the end of the current email body, below a
+    ''' "REVIEWED:" marker, similar to how DiffW (method 3) shows its markup window after
+    ''' the corrected text has already been inserted.
+    ''' </summary>
+    Private Sub ReviewChangesAndInsertAtEnd(originalText As String, suggestedText As String)
+
+        If String.IsNullOrEmpty(originalText) AndAlso String.IsNullOrEmpty(suggestedText) Then Return
+
+        Dim reviewed As String = String.Empty
+
+        Using dlg As New ReviewChangesDialog(originalText, suggestedText)
+            Dim res As DialogResult = dlg.ShowDialog()
+            If res <> DialogResult.OK Then Return
+            reviewed = If(dlg.ReviewedText, String.Empty)
+        End Using
+
+        If String.IsNullOrWhiteSpace(reviewed) Then Return
+
+        Dim inspector As Microsoft.Office.Interop.Outlook.Inspector = Nothing
+        Dim wordDoc As Microsoft.Office.Interop.Word.Document = Nothing
+
+        Try
+            inspector = ComRetry(Function() TryCast(Globals.ThisAddIn.Application.ActiveInspector,
+                                                    Microsoft.Office.Interop.Outlook.Inspector))
+            If inspector Is Nothing Then Return
+
+            wordDoc = ComRetry(Function() TryCast(inspector.WordEditor,
+                                                  Microsoft.Office.Interop.Word.Document))
+            If wordDoc Is Nothing Then Return
+
+            Dim app As Microsoft.Office.Interop.Word.Application = wordDoc.Application
+            Dim oldScreen As Boolean = app.ScreenUpdating
+            app.ScreenUpdating = False
+
+            Try
+                ' Append at the end of the body (after the already-inserted corrected text)
+                Dim endRange As Microsoft.Office.Interop.Word.Range = wordDoc.Content
+                endRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+
+                Dim headerText As String = vbCrLf & vbCrLf & "REVIEWED:" & vbCrLf
+                endRange.InsertAfter(headerText & reviewed & vbCrLf)
+
+                ' Position selection at end so the user immediately sees the reviewed block
+                Dim sel As Microsoft.Office.Interop.Word.Selection = app.Selection
+                sel.SetRange(endRange.End, endRange.End)
+
+            Finally
+                app.ScreenUpdating = oldScreen
+            End Try
+
+        Catch ex As System.Exception
+            MessageBox.Show("Error in ReviewChangesAndInsertAtEnd: " & ex.Message,
+                            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+        Finally
+            If wordDoc IsNot Nothing Then
+                Marshal.ReleaseComObject(wordDoc)
+                wordDoc = Nothing
+            End If
+            If inspector IsNot Nothing Then
+                Marshal.ReleaseComObject(inspector)
+                inspector = Nothing
+            End If
+        End Try
+    End Sub
 
 End Class

@@ -273,10 +273,18 @@ Partial Public Class ThisAddIn
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ListAttachments,
             .ModelDescription = "List Attachments (built-in)",
             .ToolInstructionsPrompt =
-                AP_Tool_ListAttachments & ": Lists all attachments of the current email with name, type, and size.",
+                If(_chatAgentActive,
+                   AP_Tool_ListAttachments & ": Lists files currently loaded into the active Local Agent session. " &
+                   "IMPORTANT: This does NOT list files that merely exist in the connected workspace. " &
+                   "Use agent_workspace_list to inspect workspace files and agent_workspace_stage to load them first.",
+                   AP_Tool_ListAttachments & ": Lists all attachments of the current email with name, type, and size."),
             .ToolDefinition =
                 "{""name"":""" & AP_Tool_ListAttachments & """," &
-                """description"":""Lists all email attachments with their filename, type, size, and processing status""," &
+                """description"":""" &
+                If(_chatAgentActive,
+                   "Lists files currently loaded into the Local Agent session. Does not list unstaged workspace files; use agent_workspace_list and agent_workspace_stage for workspace access.",
+                   "Lists all email attachments with their filename, type, size, and processing status") &
+                """," &
                 """parameters"":{""type"":""object"",""properties"":{},""required"":[]}}"
         })
 
@@ -628,10 +636,13 @@ Partial Public Class ThisAddIn
                 "}},""description"":""Conditional formatting rules""}," &
                 """charts"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """type"":{""type"":""string"",""enum"":[""column"",""bar"",""line"",""pie"",""area"",""scatter"",""doughnut""]}," &
-                """data_range"":{""type"":""string""},""title"":{""type"":""string""}," &
-                """position"":{""type"":""string""},""width"":{""type"":""number""},""height"":{""type"":""number""}," &
-                """sheet_name"":{""type"":""string""}" &
-                "}},""description"":""Charts to create""}," &
+                """data_range"":{""type"":""string"",""description"":""Worksheet range used as the chart source data""}," &
+                """title"":{""type"":""string"",""description"":""Optional chart title""}," &
+                """position"":{""type"":""string"",""description"":""Top-left anchor cell for the embedded chart, e.g. 'E2'""}," &
+                """width"":{""type"":""number"",""description"":""Chart width in Excel points. If omitted, defaults to 480. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 480 points is about 6.67 inches.""}," &
+                """height"":{""type"":""number"",""description"":""Chart height in Excel points. If omitted, defaults to 300. IMPORTANT: Use Excel points, not inches, centimeters, or cell counts. Example: 300 points is about 4.17 inches.""}," &
+                """sheet_name"":{""type"":""string"",""description"":""Optional worksheet name on which to place the chart. Defaults to the first sheet.""}" &
+                "}},""description"":""Charts to create. Width and height are specified in Excel points; if omitted, the default size is 480 x 300 points.""}," &
                 """named_ranges"":{""type"":""array"",""items"":{""type"":""object"",""properties"":{" &
                 """name"":{""type"":""string""},""range"":{""type"":""string""}" &
                 "}},""description"":""Named ranges""}," &
@@ -883,51 +894,73 @@ Partial Public Class ThisAddIn
                 .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateAudioFile,
                 .ModelDescription = "Create Audio File — Podcast or Audiobook (built-in)",
                 .ToolInstructionsPrompt =
-                    AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
-                    "Supports two modes: " &
-                    "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
-                    "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
-                    "(2) 'audiobook' — reads the text paragraph by paragraph with alternating voices for variety. " &
-                    "Use this when the user wants a straightforward narration or audio version of a document. " &
-                    "The text parameter accepts the full text to convert. For document attachments, first use " &
-                    "read_attachment to extract the text, then pass the extracted text to this tool. " &
-                    "If the user specifies a particular voice (e.g., 'use the voice alloy'), pass it as voice_a or voice_b. " &
-                    "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
-                    "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
-                    "IMPORTANT: The 'language' parameter MUST match the language of the text content (e.g. 'de-DE' for German, 'fr-FR' for French). " &
-                    "This is critical for Google TTS to select the correct voice and for proper pronunciation." &
-                    engineHint &
-                    " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
-                    "Output is an MP3 file attached to the reply.",
+                AP_Tool_CreateAudioFile & ": Generates an MP3 audio file from text content using text-to-speech. " &
+                "Supports two modes: " &
+                "(1) 'podcast' — converts the text into an engaging two-speaker dialogue (host and guest) via LLM, " &
+                "then generates multi-voice audio. Use this when the user wants a podcast, dialogue, or discussion format. " &
+                "(2) 'audiobook' — reads the text as narrated audio. " &
+                "Use this when the user wants a straightforward narration or audio version of a document. " &
+                "The text parameter accepts the full text to convert. For document attachments, first use " &
+                "read_attachment to extract the text, then pass the extracted text to this tool. " &
+                "For podcast mode, speaker names and TTS voice IDs are different. " &
+                "Use host_name and guest_name for the names of the persons in the generated script. " &
+                "Use host_gender and guest_gender to let the code select appropriate voices. " &
+                "If the user says 'Marie and Marc' or gives other person names, treat them as speaker names, not as TTS voice IDs. " &
+                "Do NOT put ordinary human names into voice_a or voice_b. " &
+                "Only use voice_a or voice_b when the user explicitly provides a real provider voice ID such as an OpenAI voice name or a full Google voice ID. " &
+                "For audiobook mode, use single_voice=true when the user wants a normal single narrator or simple audio file. " &
+                "Use narrator_gender to choose the narrator voice for single-voice audiobook mode. " &
+                "Only use single_voice=false when the user explicitly wants alternating narration voices. " &
+                "If no speaker names are provided in podcast mode, choose suitable names. " &
+                "If no genders are provided in podcast mode, choose sensible genders from context; if still unclear, use female for the host and male for the guest. " &
+                "Available OpenAI voices: alloy (female), ash (male), ballad (male), coral (female), echo (male), " &
+                "fable (male), nova (female), onyx (male), sage (male), shimmer (female), verse (male). " &
+                "IMPORTANT: You MUST provide the 'language' parameter and it MUST match the language of the text content " &
+                "using a full BCP-47 locale such as 'de-DE', 'de-CH', 'fr-FR', or 'en-US'. " &
+                "Do NOT omit language and do NOT rely on defaults. " &
+                "For German text, especially when it contains umlauts such as ä, ö, ü, or ß, use 'de-DE' or 'de-CH' as appropriate. " &
+                "Preserve the original spelling in the text exactly as written; do not replace umlauts or ß with simplified forms." &
+                engineHint &
+                " For podcast mode, the duration parameter controls target script length (e.g., '5 minutes', '10 minutes'). " &
+                "Output is an MP3 file attached to the reply.",
                 .ToolDefinition =
                     "{""name"":""" & AP_Tool_CreateAudioFile & """," &
                     """description"":""Generates an MP3 audio file from text using text-to-speech. " &
                     "Supports 'podcast' mode (two-speaker dialogue generated by LLM) and 'audiobook' mode " &
-                    "(paragraph-by-paragraph narration with alternating voices). " &
+                    "(single-voice or alternating narration). " &
                     "For document attachments, first extract text using read_attachment, then pass it here. " &
-                    "CRITICAL: Set 'language' to match the text language (e.g. 'de-DE' for German). " &
-                    "For non-English text, set engine='google' for native pronunciation.""," &
+                    "CRITICAL: You MUST set 'language' to the actual language of the text using a full BCP-47 locale such as " &
+                    "'de-DE', 'de-CH', 'fr-FR', or 'en-US'. Do NOT omit it. " &
+                    "For German text with umlauts (ä, ö, ü, ß), use 'de-DE' or 'de-CH' and preserve the original spelling exactly. " &
+                    "For non-English text, prefer engine='google' for native pronunciation. " &
+                    "Use host_name and guest_name for podcast speaker names, host_gender and guest_gender for podcast voice selection, " &
+                    "single_voice and narrator_gender for simple audiobook narration, and reserve voice_a and voice_b for explicit provider voice IDs only.""," &
                     """parameters"":{""type"":""object"",""properties"":{" &
                     """text"":{""type"":""string"",""description"":""The full text content to convert to audio. " &
+                    "Preserve original spelling exactly, including diacritics and special characters such as ä, ö, ü, and ß. " &
                     "For large documents, pass the complete extracted text.""}," &
                     """mode"":{""type"":""string"",""enum"":[""podcast"",""audiobook""]," &
                     """description"":""Audio generation mode. 'podcast' = LLM-generated two-speaker dialogue. " &
-                    "'audiobook' = direct paragraph-by-paragraph narration. Default: 'audiobook'""}," &
-                    """language"":{""type"":""string"",""description"":""Language code for TTS (e.g., 'en-US', 'de-DE', 'fr-FR', 'en', 'de'). " &
-                    "MUST match the language of the text content. This is critical for correct pronunciation. Default: 'en-US'""}," &
+                    "'audiobook' = narrated audio. Default: 'audiobook'""}," &
+                    """language"":{""type"":""string"",""description"":""REQUIRED. Full BCP-47 language code matching the text content, " &
+                    "for example 'en-US', 'de-DE', 'de-CH', or 'fr-FR'. This is critical for correct pronunciation. " &
+                    "For German text with umlauts, use 'de-DE' or 'de-CH' as appropriate.""}," &
                     """engine"":{""type"":""string"",""enum"":[""google"",""openai"",""auto""]," &
                     """description"":""TTS engine to use. 'google' = Google Cloud TTS (best for non-English languages). " &
                     "'openai' = OpenAI TTS (best for English). 'auto' = automatically select based on language. Default: 'auto'""}," &
-                    """voice_a"":{""type"":""string"",""description"":""Primary voice name (host in podcast mode, narrator A in audiobook). " &
-                    "If omitted, a default voice is used.""}," &
-                    """voice_b"":{""type"":""string"",""description"":""Secondary voice name (guest in podcast mode, narrator B in audiobook). " &
-                    "If omitted, a default voice is used.""}," &
-                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). " &
-                    "Ignored in audiobook mode. Default: '5 minutes'""}," &
+                    """host_name"":{""type"":""string"",""description"":""Podcast mode only. Name of the host / speaker A. This is a person name for the generated script, not a TTS voice ID.""}," &
+                    """guest_name"":{""type"":""string"",""description"":""Podcast mode only. Name of the guest / speaker B. This is a person name for the generated script, not a TTS voice ID.""}," &
+                    """host_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Podcast mode only. Gender of the host / speaker A. Used to select the voice. If omitted, the caller should choose sensibly; default fallback is female.""}," &
+                    """guest_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Podcast mode only. Gender of the guest / speaker B. Used to select the voice. If omitted, the caller should choose sensibly; default fallback is male.""}," &
+                    """single_voice"":{""type"":""boolean"",""description"":""Audiobook mode only. true = one narrator voice for the whole audio. false = alternating narration voices. For a normal simple audio file, use true.""}," &
+                    """narrator_gender"":{""type"":""string"",""enum"":[""female"",""male""],""description"":""Audiobook mode only. Narrator gender for single_voice=true. Used to select the narrator voice. Default fallback is female.""}," &
+                    """voice_a"":{""type"":""string"",""description"":""Optional explicit provider TTS voice ID for host / narrator A. Do NOT use ordinary human names here. Example OpenAI: 'nova'. Example Google: 'de-DE-Chirp3-HD-Achernar'.""}," &
+                    """voice_b"":{""type"":""string"",""description"":""Optional explicit provider TTS voice ID for guest / narrator B. Do NOT use ordinary human names here. Example OpenAI: 'ash'. Example Google: 'de-DE-Chirp3-HD-Achird'.""}," &
+                    """duration"":{""type"":""string"",""description"":""Target duration for podcast mode (e.g., '5 minutes', '10 minutes', '20 minutes'). Ignored in audiobook mode. Default: '5 minutes'""}," &
                     """instructions"":{""type"":""string"",""description"":""Specific instructions for the podcast script generation (e.g., 'Focus on the financial details', 'Be humorous', 'Explain for a child'). Optional.""}," &
                     """context"":{""type"":""string"",""description"":""Additional context or background info to help generating the podcast script. Optional.""}," &
                     """output_filename"":{""type"":""string"",""description"":""Filename for the output MP3 file (default: 'audiobook.mp3')""}" &
-                    "},""required"":[""text""]}}"
+                    "},""required"":[""text"",""language""]}}"
             })
         End If
 
@@ -978,115 +1011,19 @@ Partial Public Class ThisAddIn
         End If
 
         ' ── web_grounding ──
-        ' Register if:
-        '   (a) AutoPilot session with web grounding enabled, OR
-        '   (b) Chat agent session (always offer web grounding if models are configured)
-        Dim enableWebGrounding As Boolean = False
         If _apConfig IsNot Nothing AndAlso _apConfig.EnableWebGrounding Then
-            enableWebGrounding = True
-        ElseIf _chatAgentActive Then
-            ' Chat agent mode: always enable web grounding if models are available
-            enableWebGrounding = True
-        End If
+            Dim webGroundingTool =
+                SharedLibrary.Agents.WebGroundingTool.Build(
+                    _context,
+                    enforcePrivacy:=_apConfig.EnablePrivacyProtection,
+                    toolPriority:=997,
+                    displaySuffix:="")
 
-        If enableWebGrounding Then
-            Dim webGroundingAvailable As Boolean = IsWebGroundingAvailable(_context)
-            Dim deepResearchAvailable As Boolean = IsDeepResearchAvailable(_context)
-
-            If webGroundingAvailable OrElse deepResearchAvailable Then
-                Dim modeEnum As String
-                Dim modeDescription As String
-                Dim modeInstructions As String
-
-                If webGroundingAvailable AndAlso deepResearchAvailable Then
-                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard"",""deep_research""]," &
-                        """description"":""'standard' for quick factual lookups, current events, verifying claims, or finding specific information. " &
-                        "'deep_research' for complex multi-faceted questions requiring comprehensive analysis, comparison of multiple sources, " &
-                        "or in-depth investigation. deep_research returns an extensive report. Default: 'standard'""},"
-                    modeDescription = "Supports two modes: 'standard' for quick lookups and 'deep_research' for comprehensive investigation that returns an extensive report."
-                    modeInstructions = "Choose mode='standard' for quick factual queries and mode='deep_research' for complex, multi-faceted questions " &
-                        "requiring thorough analysis from multiple sources. deep_research produces a detailed, structured report with multiple sections."
-                ElseIf webGroundingAvailable Then
-                    modeEnum = """mode"":{""type"":""string"",""enum"":[""standard""]," &
-                        """description"":""Only 'standard' mode is available. Used for factual lookups and current information. Default: 'standard'""},"
-                    modeDescription = "Uses the web grounding model for factual lookups and current information."
-                    modeInstructions = "Only 'standard' mode is available."
-                Else
-                    modeEnum = """mode"":{""type"":""string"",""enum"":[""deep_research""]," &
-                        """description"":""Only 'deep_research' mode is available. Used for comprehensive, multi-source investigation. Returns an extensive report. Default: 'deep_research'""},"
-                    modeDescription = "Uses the deep research model for comprehensive, multi-source investigation that returns an extensive report."
-                    modeInstructions = "Only 'deep_research' mode is available. It produces a detailed, structured report with multiple sections."
-                End If
-
-                Dim privacyConstraint As String = ""
-                Dim privacyConstraintDef As String = ""
-                Dim privacyConstraintQueryParam As String = ""
-                Dim privacyConstraintContextParam As String = ""
-
-                If (_apConfig IsNot Nothing AndAlso _apConfig.EnablePrivacyProtection) OrElse
-                   (_apConfig Is Nothing AndAlso _context.INI_EnablePrivacyForSearch) Then
-                    privacyConstraint =
-                        "PRIVACY CONSTRAINT: The query is sent to an external AI model with web access. " &
-                        "You MUST NOT include any personal data, confidential information, private names, " &
-                        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
-                        "account numbers, or any other non-public information in the query. " &
-                        "Only well-known public figures, public institutions, published legislation, " &
-                        "and other clearly public information may appear in the query. "
-                    privacyConstraintDef =
-                        "PRIVACY: The query is sent to an external model. MUST NOT contain personal data, confidential information, or non-public details."
-                    privacyConstraintQueryParam =
-                        "MUST NOT contain personal data, confidential information, or any non-public details."
-                    privacyConstraintContextParam =
-                        " Same privacy constraints apply — no personal or confidential data."
-                End If
-
-                tools.Add(New ModelConfig() With {
-                    .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_WebGrounding,
-                    .ModelDescription = "Web Grounding / Deep Research (built-in)",
-                    .ToolInstructionsPrompt =
-                        AP_Tool_WebGrounding & ": Searches the internet using a web-grounding AI model to retrieve current, factual, " &
-                        "or verifiable information. The model ALWAYS searches the internet — it never answers from memory alone. " &
-                        "Results ALWAYS include citations with source URLs. " &
-                        "Use this when the user's question requires up-to-date data, fact-checking, " &
-                        "research, or information you are not confident about. " &
-                        modeInstructions & " " &
-                        "The 'query' parameter should contain a clear, focused search question or topic. " &
-                        privacyConstraint &
-                        "RESPONSE HANDLING — MANDATORY SOURCE CITATION RULES: " &
-                        "The tool returns the raw JSON response from the grounding model. " &
-                        "You MUST extract and present the COMPLETE answer text from the response. Do NOT summarize or shorten it. " &
-                        "For deep_research results, the response contains an extensive report — include it in FULL. " &
-                        "CRITICAL — SOURCES ARE MANDATORY: " &
-                        "Your reply MUST contain a clearly labeled 'Sources' or 'References' section at the end. " &
-                        "You MUST extract ALL citations, sources, and grounding metadata from the JSON " &
-                        "(look for keys such as 'citations', 'citationSources', 'citationMetadata', 'groundingMetadata', " &
-                        "'groundingSupports', 'groundingChunks', 'webSearchQueries', 'searchEntryPoint', 'sources', 'uri', 'url', 'title'). " &
-                        "Every single source URL found in the response MUST appear as a clickable Markdown link in your reply: [Title](URL) or [URL](URL) if no title. " &
-                        "If the response contains inline citation markers (e.g. [1], [2]), keep them AND provide the numbered source list. " &
-                        "FAILURE TO INCLUDE SOURCES IS A CRITICAL ERROR. If you cannot find any URLs in the response JSON, " &
-                        "explicitly state: 'No source URLs were returned by the search engine.' " &
-                        "NEVER omit sources that are present in the response. NEVER invent or fabricate URLs that are not in the response. " &
-                        "A reply without a Sources section when the tool returned URLs is INVALID and MUST be corrected.",
-                    .ToolDefinition =
-                        "{""name"":""" & AP_Tool_WebGrounding & """," &
-                        """description"":""Searches the internet using a web-grounding AI model. The model ALWAYS performs a live internet search " &
-                        "and ALWAYS returns citations with source URLs. Returns the full JSON response including " &
-                        "the answer text and all grounding sources/citations. " &
-                        modeDescription & " " &
-                        "IMPORTANT: When processing the result, you MUST include the complete answer AND all source URLs as clickable links " &
-                        "in a dedicated 'Sources' section. A reply without sources when the tool returned URLs is invalid. " &
-                        "For deep_research mode, include the full extensive report without summarizing. " &
-                        If(privacyConstraintDef <> "", privacyConstraintDef, "") & """," &
-                        """parameters"":{""type"":""object"",""properties"":{" &
-                        """query"":{""type"":""string"",""description"":""The search question or topic. Must be clear and focused." &
-                        If(privacyConstraintQueryParam <> "", " " & privacyConstraintQueryParam, "") & """}," &
-                        modeEnum &
-                        """context"":{""type"":""string"",""description"":""Optional additional context to help the grounding model understand the query better." &
-                        If(privacyConstraintContextParam <> "", privacyConstraintContextParam, "") & """}" &
-                        "},""required"":[""query""]}}"
-                })
+            If webGroundingTool IsNot Nothing Then
+                tools.Add(webGroundingTool)
             End If
         End If
+
 
         ' ── manage_scheduled_tasks ──
         If _apConfig IsNot Nothing AndAlso _apConfig.EnableScheduler Then
@@ -1240,6 +1177,11 @@ Partial Public Class ThisAddIn
                 "},""required"":[""reason""]}}"
         })
 
+        For Each tool As ModelConfig In tools
+            If tool Is Nothing Then Continue For
+            tool.ModelDescription = StripSelectorOwnedToolSuffixes(tool.ModelDescription)
+        Next
+
         Return tools
 
     End Function
@@ -1263,74 +1205,277 @@ Partial Public Class ThisAddIn
             context As ToolExecutionContext,
             Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
 
+        Dim outputSnapshot As Dictionary(Of String, Long) = SnapshotAutoPilotOutputFiles()
+        Dim response As ToolResponse = Nothing
+
         Select Case toolCall.ToolName
             Case AP_Tool_ProcessWordDoc
-                Return Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteProcessWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_ExtractPdfText
-                Return Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
+                response = Await ExecuteExtractPdfTextTool(toolCall, context, cancellationToken)
             Case AP_Tool_MergePdfs
-                Return Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteMergePdfsTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReadAttachment
-                Return Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReadAttachmentTool(toolCall, context, cancellationToken)
             Case AP_Tool_ListAttachments
-                Return ExecuteListAttachmentsTool(toolCall, context)
+                response = ExecuteListAttachmentsTool(toolCall, context)
             Case AP_Tool_DescribeBinary
-                Return Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
+                response = Await ExecuteDescribeBinaryTool(toolCall, context, cancellationToken)
             Case AP_Tool_CommentWordDoc
-                Return Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCommentWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_CommentPdf
-                Return Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCommentPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_CompareWordDocs
-                Return Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCompareWordDocsTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReadWordDocDetails
-                Return Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReadWordDocDetailsTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreatePdfFromText
-                Return ExecuteCreatePdfFromTextTool(toolCall, context)
+                response = ExecuteCreatePdfFromTextTool(toolCall, context)
             Case AP_Tool_ExtractExcelData
-                Return ExecuteExtractExcelDataTool(toolCall, context)
+                response = ExecuteExtractExcelDataTool(toolCall, context)
             Case AP_Tool_SplitPdf
-                Return ExecuteSplitPdfTool(toolCall, context)
+                response = ExecuteSplitPdfTool(toolCall, context)
             Case AP_Tool_AddPdfWatermark
-                Return ExecuteAddPdfWatermarkTool(toolCall, context)
+                response = ExecuteAddPdfWatermarkTool(toolCall, context)
             Case AP_Tool_WordToPdf
-                Return Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteWordToPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_SearchInAttachments
-                Return Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteSearchInAttachmentsTool(toolCall, context, cancellationToken)
             Case AP_Tool_SummarizeThread
-                Return ExecuteSummarizeThreadTool(toolCall, context)
+                response = ExecuteSummarizeThreadTool(toolCall, context)
             Case AP_Tool_PdfToWord
-                Return Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
+                response = Await ExecutePdfToWordTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateWordDoc
-                Return Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateWordDocTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateExcel
-                Return Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateExcelTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreatePowerPoint
-                Return Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreatePowerPointTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateCodeFile
-                Return Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateCodeFileTool(toolCall, context, cancellationToken)
             Case AP_Tool_ExtractDataFromAttachments
-                Return Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
+                response = Await ExecuteExtractDataFromAttachmentsTool(toolCall, context, cancellationToken)
             Case AP_Tool_RedactPdf
-                Return Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteRedactPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_OverlayPdf
-                Return Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
+                response = Await ExecuteOverlayPdfTool(toolCall, context, cancellationToken)
             Case AP_Tool_CreateAudioFile
-                Return Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
+                response = Await ExecuteCreateAudioFileTool(toolCall, context, cancellationToken)
             Case AP_Tool_GenerateImage
-                Return Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
+                response = Await ExecuteGenerateImageTool(toolCall, context, cancellationToken)
             Case AP_Tool_WebGrounding
-                Return Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
+                response = Await ExecuteWebGroundingTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageScheduledTasks
-                Return Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageScheduledTasksTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserMemory
-                Return Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserFiles
-                Return Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+                response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
-                Return Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
+                response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
                 Return Nothing
         End Select
+
+        Return NormalizeAutoPilotToolResponse(toolCall, response, outputSnapshot)
+    End Function
+
+    Private Function SnapshotAutoPilotOutputFiles() As Dictionary(Of String, Long)
+        Dim snapshot As New Dictionary(Of String, Long)(StringComparer.OrdinalIgnoreCase)
+
+        If _apCurrentAttachments Is Nothing Then
+            Return snapshot
+        End If
+
+        For Each att In _apCurrentAttachments
+            If att Is Nothing OrElse att.OutputFiles Is Nothing Then Continue For
+
+            For Each outputPath In att.OutputFiles
+                Dim normalized As String = If(outputPath, "").Trim()
+                If normalized = "" Then Continue For
+
+                Dim stamp As Long = Long.MinValue
+
+                Try
+                    If File.Exists(normalized) Then
+                        Dim info As New FileInfo(normalized)
+                        stamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
+                    End If
+                Catch
+                End Try
+
+                snapshot(normalized) = stamp
+            Next
+        Next
+
+        Return snapshot
+    End Function
+
+    Private Function GetProducedAutoPilotOutputFiles(previousSnapshot As IDictionary(Of String, Long)) As List(Of String)
+        Dim produced As New List(Of String)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If _apCurrentAttachments Is Nothing Then
+            Return produced
+        End If
+
+        For Each att In _apCurrentAttachments
+            If att Is Nothing OrElse att.OutputFiles Is Nothing Then Continue For
+
+            For Each outputPath In att.OutputFiles
+                Dim normalized As String = If(outputPath, "").Trim()
+                If normalized = "" Then Continue For
+                If Not File.Exists(normalized) Then Continue For
+
+                Dim currentStamp As Long = Long.MinValue
+
+                Try
+                    Dim info As New FileInfo(normalized)
+                    currentStamp = File.GetLastWriteTimeUtc(normalized).Ticks Xor info.Length
+                Catch
+                End Try
+
+                Dim previousStamp As Long = Long.MinValue
+                Dim wasKnown As Boolean =
+                    previousSnapshot IsNot Nothing AndAlso
+                    previousSnapshot.TryGetValue(normalized, previousStamp)
+
+                If Not wasKnown OrElse previousStamp <> currentStamp Then
+                    If seen.Add(normalized) Then
+                        produced.Add(normalized)
+                    End If
+                End If
+            Next
+        Next
+
+        Return produced
+    End Function
+
+    Private Shared Function TryParseToolResultToken(responseText As String) As JToken
+        Dim raw As String = If(responseText, "").Trim()
+        If raw = "" Then
+            Return Nothing
+        End If
+
+        Try
+            Return JToken.Parse(raw)
+        Catch
+            Return Nothing
+        End Try
+    End Function
+
+    Private Shared Function HasNormalizedToolResultMetadata(responseText As String) As Boolean
+        Dim obj As JObject = TryCast(TryParseToolResultToken(responseText), JObject)
+        If obj Is Nothing Then
+            Return False
+        End If
+
+        Return obj("producesIntermediateData") IsNot Nothing OrElse
+               obj("producesUserDeliverable") IsNot Nothing OrElse
+               obj("outputArtifactRef") IsNot Nothing OrElse
+               obj("outputFilePath") IsNot Nothing OrElse
+               obj("outputFileName") IsNot Nothing OrElse
+               obj("created") IsNot Nothing OrElse
+               obj("saved") IsNot Nothing OrElse
+               obj("exported") IsNot Nothing
+    End Function
+
+    Private Function BuildNormalizedAutoPilotToolResult(toolName As String,
+                                                        summary As String,
+                                                        producesIntermediateData As Boolean,
+                                                        producesUserDeliverable As Boolean,
+                                                        outputFiles As IList(Of String),
+                                                        sourcePayload As JToken) As String
+        Dim normalizedSummary As String = If(summary, "").Trim()
+
+        If normalizedSummary = "" Then
+            normalizedSummary =
+                If(producesUserDeliverable,
+                   "User-facing deliverable created.",
+                   "Structured tool result available.")
+        End If
+
+        Dim obj As New JObject(
+            New JProperty("toolName", If(toolName, "")),
+            New JProperty("summary", normalizedSummary),
+            New JProperty("producesIntermediateData", producesIntermediateData),
+            New JProperty("producesUserDeliverable", producesUserDeliverable))
+
+        If producesUserDeliverable Then
+            obj("created") = True
+        End If
+
+        If outputFiles IsNot Nothing AndAlso outputFiles.Count > 0 Then
+            Dim outputNames As New JArray()
+
+            For Each outputPath In outputFiles
+                Dim outputName As String = Path.GetFileName(If(outputPath, ""))
+                If outputName = "" Then Continue For
+                outputNames.Add(outputName)
+            Next
+
+            If outputNames.Count > 0 Then
+                Dim firstOutputName As String = outputNames(0).ToString()
+                obj("outputFileName") = firstOutputName
+                obj("outputFilePath") = firstOutputName
+                obj("outputArtifactRef") = firstOutputName
+                obj("outputFiles") = outputNames
+            End If
+        End If
+
+        If sourcePayload IsNot Nothing Then
+            obj("result") = sourcePayload
+        End If
+
+        Return obj.ToString(Newtonsoft.Json.Formatting.None)
+    End Function
+
+    Private Function NormalizeAutoPilotToolResponse(toolCall As ToolCall,
+                                                    toolResponse As ToolResponse,
+                                                    outputSnapshot As IDictionary(Of String, Long)) As ToolResponse
+        If toolResponse Is Nothing OrElse Not toolResponse.Success Then
+            Return toolResponse
+        End If
+
+        Dim parsedToken As JToken = TryParseToolResultToken(toolResponse.Response)
+
+        If HasNormalizedToolResultMetadata(toolResponse.Response) Then
+            If String.IsNullOrWhiteSpace(toolResponse.ResultKind) Then
+                toolResponse.ResultKind =
+                    If(TypeOf parsedToken Is JArray, "json_array", "json_object")
+            End If
+
+            Return toolResponse
+        End If
+
+        Dim producedOutputs As List(Of String) = GetProducedAutoPilotOutputFiles(outputSnapshot)
+
+        If producedOutputs.Count > 0 Then
+            toolResponse.Response =
+                BuildNormalizedAutoPilotToolResult(
+                    If(toolCall?.ToolName, toolResponse.ToolName),
+                    toolResponse.Response,
+                    producesIntermediateData:=False,
+                    producesUserDeliverable:=True,
+                    outputFiles:=producedOutputs,
+                    sourcePayload:=If(TypeOf parsedToken Is JObject OrElse TypeOf parsedToken Is JArray, parsedToken, Nothing))
+            toolResponse.ResultKind = "json_object"
+            Return toolResponse
+        End If
+
+        If TypeOf parsedToken Is JObject OrElse TypeOf parsedToken Is JArray Then
+            toolResponse.Response =
+                BuildNormalizedAutoPilotToolResult(
+                    If(toolCall?.ToolName, toolResponse.ToolName),
+                    "Structured tool result available.",
+                    producesIntermediateData:=True,
+                    producesUserDeliverable:=False,
+                    outputFiles:=Nothing,
+                    sourcePayload:=parsedToken)
+            toolResponse.ResultKind = "json_object"
+        End If
+
+        Return toolResponse
     End Function
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -3080,6 +3225,7 @@ Partial Public Class ThisAddIn
             Dim chartObject As Microsoft.Office.Interop.Excel.ChartObject = Nothing
             Dim chart As Microsoft.Office.Interop.Excel.Chart = Nothing
             Dim dataRangeObj As Microsoft.Office.Interop.Excel.Range = Nothing
+
             Try
                 Dim chartType = If(chartObj.Value(Of String)("type"), "column").ToLowerInvariant()
                 Dim dataRange = chartObj.Value(Of String)("data_range")
@@ -3100,13 +3246,9 @@ Partial Public Class ThisAddIn
                     targetWs = CType(wb.Sheets(1), Microsoft.Office.Interop.Excel.Worksheet)
                 End If
 
-                ' Parse width/height
-                Dim chartWidth As Double = 480
-                Dim chartHeight As Double = 300
-                Dim wToken = chartObj("width")
-                If wToken IsNot Nothing Then Double.TryParse(wToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartWidth)
-                Dim hToken = chartObj("height")
-                If hToken IsNot Nothing Then Double.TryParse(hToken.ToString(), Globalization.NumberStyles.Any, Globalization.CultureInfo.InvariantCulture, chartHeight)
+                ' Parse width/height with normalization
+                Dim chartWidth As Double = NormalizeChartDimension(chartObj("width"), 480, 320)
+                Dim chartHeight As Double = NormalizeChartDimension(chartObj("height"), 300, 220)
 
                 ' Get position from cell
                 posCell = targetWs.Range(position)
@@ -3129,11 +3271,23 @@ Partial Public Class ThisAddIn
                 ' Add chart as embedded ChartObject
                 chartObjects = CType(targetWs.ChartObjects(), Microsoft.Office.Interop.Excel.ChartObjects)
                 chartObject = chartObjects.Add(posLeft, posTop, chartWidth, chartHeight)
+
+                Try
+                    chartObject.Placement = Microsoft.Office.Interop.Excel.XlPlacement.xlFreeFloating
+                Catch
+                End Try
+
                 chart = chartObject.Chart
 
                 dataRangeObj = targetWs.Range(dataRange)
                 chart.SetSourceData(dataRangeObj)
                 chart.ChartType = xlChartType
+
+                Try
+                    chartObject.Width = chartWidth
+                    chartObject.Height = chartHeight
+                Catch
+                End Try
 
                 If Not String.IsNullOrWhiteSpace(chartTitle) Then
                     chart.HasTitle = True
@@ -3164,6 +3318,42 @@ Partial Public Class ThisAddIn
             End Try
         Next
     End Sub
+
+    ''' <summary>
+    ''' Normalizes chart dimensions for Excel.
+    ''' Excel expects points. Very small values are usually intended as inches.
+    ''' </summary>
+    Private Shared Function NormalizeChartDimension(
+            token As JToken,
+            defaultPoints As Double,
+            minPoints As Double) As Double
+
+        Dim value As Double = defaultPoints
+
+        If token IsNot Nothing Then
+            Dim parsed As Double
+            If Double.TryParse(token.ToString(),
+                               Globalization.NumberStyles.Any,
+                               Globalization.CultureInfo.InvariantCulture,
+                               parsed) Then
+                value = parsed
+            End If
+        End If
+
+        If value <= 0 Then value = defaultPoints
+
+        ' Heuristic:
+        ' Values like 4, 5, 6 are usually meant as inches, not points.
+        If value <= 24 Then
+            value *= 72.0
+        End If
+
+        If value < minPoints Then
+            value = minPoints
+        End If
+
+        Return value
+    End Function
 
     ''' <summary>
     ''' Applies print/page setup to a worksheet.
@@ -5256,13 +5446,68 @@ Partial Public Class ThisAddIn
     '  TOOL EXECUTION: web_grounding
     ' ═══════════════════════════════════════════════════════════════════════════
 
+
+    Private Async Function ExecuteWebGroundingTool(
+        toolCall As ToolCall,
+        context As ToolExecutionContext,
+        Optional cancellationToken As CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName,
+        .Timestamp = DateTime.UtcNow,
+        .OriginalCallJson = toolCall.RawJson
+    }
+
+        Try
+            response.Response =
+            Await SharedLibrary.Agents.WebGroundingTool.ExecuteAsync(
+                _context,
+                toolCall.Arguments,
+                cancellationToken,
+                logStep:=Sub(message)
+                             context.Log(message)
+                             ApDashboardLog(message, "step")
+                         End Sub,
+                logInfo:=Sub(message)
+                             context.Log(message)
+                             ApDashboardLog("✓ " & message, "info")
+                         End Sub,
+                logWarn:=Sub(message)
+                             context.Log(message, "warn")
+                             ApDashboardLog("⚠ " & message, "warn")
+                         End Sub)
+
+            response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+            If Not response.Success Then
+                response.ErrorMessage = "web_grounding returned no usable result."
+                response.Response = response.ErrorMessage
+            End If
+
+        Catch ex As OperationCanceledException
+            response.Success = False
+            response.ErrorMessage = "Operation was cancelled."
+            response.Response = response.ErrorMessage
+
+        Catch ex As Exception
+            response.Success = False
+            response.ErrorMessage = ex.Message
+            response.Response = $"Error during web grounding: {ex.Message}"
+            context.Log(response.Response, "warn")
+            ApDashboardLog($"⚠ Web grounding error: {ex.Message}", "warn")
+        End Try
+
+        Return response
+    End Function
+
     ''' <summary>
     ''' Executes a web grounding or deep research query by switching to the
     ''' appropriate special task model, calling the LLM with INI_Response_2="JSON"
     ''' to receive the full JSON response (including grounding metadata/citations),
     ''' and returning the raw JSON to the tooling model for interpretation.
     ''' </summary>
-    Private Async Function ExecuteWebGroundingTool(
+    Private Async Function oldExecuteWebGroundingTool(
             toolCall As ToolCall,
             context As ToolExecutionContext,
             ct As CancellationToken) As Task(Of ToolResponse)
@@ -8056,6 +8301,28 @@ Partial Public Class ThisAddIn
             Case Else
                 Return False
         End Select
+    End Function
+
+    Private Shared Function StripSelectorOwnedToolSuffixes(value As String) As String
+        Dim result As String = If(value, "").Trim()
+
+        If result.EndsWith(" (Outlook only)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (Outlook only)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (Word only)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (Word only)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (built-in)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (built-in)".Length).TrimEnd()
+        End If
+
+        If result.EndsWith(" (internal)", StringComparison.OrdinalIgnoreCase) Then
+            result = result.Substring(0, result.Length - " (internal)".Length).TrimEnd()
+        End If
+
+        Return result
     End Function
 
 End Class

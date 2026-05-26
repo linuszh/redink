@@ -84,7 +84,7 @@ Partial Public Class ThisAddIn
     ' - ParaFormatInline: Boolean flag to format paragraphs inline.
     ' - InPlace: Boolean flag to indicate that the output should replace the selected text.
     ' - DoMarkup: Boolean flag to indicate that the output should be provided as a markup of the selected text.
-    ' - MarkupMethod: Integer to indicate the markup method to be used: 1 = Word, 2 = Diff, 3 = Regex
+    ' - MarkupMethod: Integer to indicate the markup method to be used: 1 = Word, 2 = Diff Surgical, 3 = DiffW, 4 = Regex, 5 = Diff Legacy
     ' - PutInClipboard: Boolean flag to output the processed text in the clipboard.
     ' - PutInBubbles: Boolean flag to output the processed text in bubbles
     ' - SelectionMandatory: Boolean flag to enforce text selection before processing.
@@ -224,24 +224,52 @@ Partial Public Class ThisAddIn
         End If
 
         ' Route comment-bubble selections to a comment pipeline
-        If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+
+        Dim activeComment As Word.Comment = Nothing
+        If TryResolveActiveComment(selection, activeComment) Then
             Dim bubbleSel As Word.Range = Nothing
+
             Try
-                bubbleSel = selection.Range.Duplicate
+                If selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                    bubbleSel = selection.Range.Duplicate
+                ElseIf activeComment IsNot Nothing Then
+                    bubbleSel = activeComment.Range.Duplicate
+                End If
             Catch
                 bubbleSel = Nothing
             End Try
 
-
             Return Await ProcessSelectedTextInActiveCommentBubble(
-                                SysCommand,
-                                CheckMaxToken,
-                                bubbleSel,
-                                UseSecondAPI:=UseSecondAPI,
-                                SelectionMandatory:=SelectionMandatory,
-                                FileObject:=FileObject
-                            )
+                    SysCommand,
+                    CheckMaxToken,
+                    bubbleSel,
+                    UseSecondAPI:=UseSecondAPI,
+                    SelectionMandatory:=SelectionMandatory,
+                    FileObject:=FileObject,
+                    DoMarkup:=DoMarkup,
+                    MarkupMethod:=MarkupMethod
+                )
         End If
+
+
+        'If selection IsNot Nothing AndAlso selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+        'Dim bubbleSel As Word.Range = Nothing
+        'Try
+        'bubbleSel = selection.Range.Duplicate
+        'Catch
+        'bubbleSel = Nothing
+        'End Try
+
+
+        'Return Await ProcessSelectedTextInActiveCommentBubble(
+        'SysCommand,
+        'CheckMaxToken,
+        'bubbleSel,
+        'UseSecondAPI:=UseSecondAPI,
+        'SelectionMandatory:=SelectionMandatory,
+        'FileObject:=FileObject
+        '                   )
+        'End If
 
         If selection IsNot Nothing AndAlso
    (selection.StoryType = Word.WdStoryType.wdFootnotesStory OrElse
@@ -564,6 +592,19 @@ Partial Public Class ThisAddIn
         Dim selection As Microsoft.Office.Interop.Word.Selection = application.Selection
         Dim currentdoc As Word.Document = selection.Document
 
+        Dim savedUiWindow As Word.Window = Nothing
+        Dim savedUiSelection As Word.Range = Nothing
+
+        Try
+            savedUiWindow = application.ActiveWindow
+            If application.Selection IsNot Nothing AndAlso application.Selection.Range IsNot Nothing Then
+                savedUiSelection = application.Selection.Range.Duplicate
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"Saving UI context failed: {ex.Message}")
+        End Try
+
+
         ' ============= ENSURE WE'RE IN MAIN STORY WITHOUT CHANGING SELECTION =============
         Try
             If currentdoc IsNot Nothing AndAlso selection IsNot Nothing Then
@@ -619,6 +660,7 @@ Partial Public Class ThisAddIn
         Try
 
             Dim SelectedText As String = ""
+            Dim SerializedSelectedText As String = ""
             Dim rng As Range
             Dim i As Integer
             Dim NoFormatting As Boolean = False
@@ -1019,19 +1061,22 @@ Partial Public Class ThisAddIn
 
                     End If
 
+                    SerializedSelectedText = SelectedText
+
                     Debug.WriteLine($"4dRange Start = {rng.Start} Selection Start = {selection.Start}")
                     Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
                     Debug.WriteLine("SelectedText: " & SelectedText)
+                    Debug.WriteLine("SerializedSelectedText: " & SerializedSelectedText)
 
                     Dim MaxToken As Integer = If(UseSecondAPI, INI_MaxOutputToken_2, INI_MaxOutputToken)
                     Dim EstimatedTokens As Integer = EstimateTokenCount(SelectedText)
 
                     If CheckMaxToken And MaxToken > 0 AndAlso EstimatedTokens > MaxToken AndAlso (InPlace Or DoMarkup) AndAlso Not DoSilent Then
-                        ShowCustomMessageBox("Your selected text Is larger than the maximum output your LLM can supposedly generate. Therefore, the output may be shorter than expected based on maximum tokens supported, which Is " & MaxToken & " tokens. Your input (with formatting information, as the case may be) has an estimated to be " & EstimatedTokens & " tokens). Therefore, check whether the output Is complete.", AN, 15)
+                        ShowCustomMessageBox("Your selected text Is larger than the maximum output your LLM can supposedly generate. Therefore, the output may be shorter than expected based On maximum tokens supported, which Is " & MaxToken & " tokens. Your input (With formatting information, As the Case may be) has an estimated To be " & EstimatedTokens & " tokens). Therefore, check whether the output Is complete.", AN, 15)
                     End If
 
                     If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 5) AndAlso Len(SelectedText) > INI_MarkupDiffCap AndAlso Not DoSilent Then
-                        Dim MarkupChange As Integer = SLib.ShowCustomYesNoBox($"The selected text exceeds the defined cap for the Diff markup method at {INI_MarkupDiffCap} chars (your selection has {Len(SelectedText)} chars). {If(KeepFormat, "This may be because HTML codes have been inserted to keep the formatting (you can turn this off in the settings). ", "")}How do you want to continue?", "Use Diff in Window compare instead", If(MarkupMethod = 2, "Use Diff", "Use Diff Classic"))
+                        Dim MarkupChange As Integer = SLib.ShowCustomYesNoBox($"The selected text exceeds the defined cap For the Diff markup method at {INI_MarkupDiffCap} chars (your selection has {Len(SelectedText)} chars). {If(KeepFormat, "This may be because HTML codes have been inserted to keep the formatting (you can turn this off in the settings). ", "")}How Do you want To Continue?", "Use Diff In Window compare instead", If(MarkupMethod = 2, "Use Diff", "Use Diff Classic"))
                         Select Case MarkupChange
                             Case 1
                                 MarkupMethod = 3
@@ -1043,7 +1088,7 @@ Partial Public Class ThisAddIn
                     End If
 
                     If DoMarkup And MarkupMethod = 4 And Len(SelectedText) > INI_MarkupRegexCap AndAlso Not DoSilent Then
-                        Dim MarkupChange As Integer = SLib.ShowCustomYesNoBox($"The selected text exceeds the defined cap for the Regex markup method at {INI_MarkupRegexCap} chars (your selection has {Len(SelectedText)} chars). {If(KeepFormat, "This may be because HTML codes have been inserted to keep the formatting (you can turn this off in the settings). ", "")}How do you want to continue?", "Use Word compare instead", "Use Regex")
+                        Dim MarkupChange As Integer = SLib.ShowCustomYesNoBox($"The selected text exceeds the defined cap For the Regex markup method at {INI_MarkupRegexCap} chars (your selection has {Len(SelectedText)} chars). {If(KeepFormat, "This may be because HTML codes have been inserted to keep the formatting (you can turn this off in the settings). ", "")}How Do you want To Continue?", "Use Word compare instead", "Use Regex")
                         Select Case MarkupChange
                             Case 1
                                 MarkupMethod = 1
@@ -1081,6 +1126,10 @@ Partial Public Class ThisAddIn
 
                 Dim MarkdownInstruction As String = ""
                 If MarkupMethod = 2 Then MarkdownInstruction = " " & SP_Add_NoMarkdown
+
+                ' Restore the user's original UI context before the long-running model call.
+                ' The processing target is kept separately in rng / bookmarks.
+                RestoreUiContext(application, savedUiWindow, savedUiSelection)
 
                 ' If tools are selected and the model supports tooling, enter the tool execution loop
                 If SelectedTools IsNot Nothing AndAlso SelectedTools.Count > 0 AndAlso UseSecondAPI Then
@@ -1155,12 +1204,21 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
+                If Not String.IsNullOrEmpty(SelectedText) AndAlso Not String.IsNullOrEmpty(LLMResult) Then
+                    LLMResult = ReprojectOriginalBreakCharacters(SelectedText, LLMResult)
+                End If
+
                 Debug.WriteLine($"LLMResult 3 = '{LLMResult}'")
                 Debug.WriteLine($"TrailingCR = {trailingCR} Count = {trailingCRcount}")
 
                 Debug.WriteLine($"6Range Start = {rng.Start} Selection Start = {selection.Start}")
                 Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
                 Debug.WriteLine(vbCrLf & Left(rng.Text, 400) & vbCrLf)
+
+                ' Re-bind Word's live Selection to the processing target before any writeback.
+                ActivateProcessingContext(rng)
+                selection = application.Selection
+                rng = selection.Range
 
                 If Not String.IsNullOrEmpty(LLMResult) Then
 
@@ -1497,14 +1555,25 @@ Partial Public Class ThisAddIn
 
                         If DoShowModel Then LLMResult = $"Model: {ModelName}" & vbCrLf & vbCrLf & LLMResult
 
-                        ' ── use visible text for markup comparison ──
+                        ' ── use serialized text for diff-based markup methods; visible text otherwise ──
                         Dim revCountLate As Integer = 0
+                        Dim visibleSelectedText As String = ""
                         Try : revCountLate = rng.Revisions.Count : Catch : End Try
                         If revCountLate > 0 Then
-                            SelectedText = GetVisibleText(rng)
+                            visibleSelectedText = GetVisibleText(rng)
                         Else
-                            SelectedText = selection.Text
+                            visibleSelectedText = selection.Text
                         End If
+
+                        If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 3 OrElse MarkupMethod = 5) Then
+                            SelectedText = SerializedSelectedText
+                        Else
+                            SelectedText = visibleSelectedText
+                        End If
+
+                        Debug.WriteLine("==== SelectedText used for markup compare ====")
+                        Debug.WriteLine(SelectedText.Replace(" ", "·").Replace(vbCr, "\r").Replace(vbLf, "\n"))
+
 
                         SLib.InsertTextWithFormat(LLMResult, rng, InPlace)
                         If DoMarkup Then
@@ -1547,14 +1616,24 @@ Partial Public Class ThisAddIn
 
                         wordApp.ScreenUpdating = False
 
-                        ' ── use visible text for markup comparison ──
+                        ' ── use serialized text for diff-based markup methods; visible text otherwise ──
                         Dim revCountLate As Integer = 0
+                        Dim visibleSelectedText As String = ""
                         Try : revCountLate = rng.Revisions.Count : Catch : End Try
                         If revCountLate > 0 Then
-                            SelectedText = GetVisibleText(rng)
+                            visibleSelectedText = GetVisibleText(rng)
                         Else
-                            SelectedText = selection.Text
+                            visibleSelectedText = selection.Text
                         End If
+
+                        If DoMarkup AndAlso (MarkupMethod = 2 OrElse MarkupMethod = 3 OrElse MarkupMethod = 5) Then
+                            SelectedText = SerializedSelectedText
+                        Else
+                            SelectedText = visibleSelectedText
+                        End If
+
+                        Debug.WriteLine("==== SelectedText used for markup compare ====")
+                        Debug.WriteLine(SelectedText.Replace(" ", "·").Replace(vbCr, "\r").Replace(vbLf, "\n"))
 
                         Debug.WriteLine($"7Range Start = {rng.Start} Selection Start = {selection.Start}")
                         Debug.WriteLine($"Range End = {rng.End} Selection End = {selection.End}")
@@ -1955,20 +2034,14 @@ Partial Public Class ThisAddIn
 
 
 
-    ''' Returns the "accepted" view of a range's text by temporarily selecting it,
-    ''' switching to Final view, and reading Selection.Text 
-    ''' Restores the original view and selection afterwards.
-    ''' Falls back to raw Range.Text when there are no revisions or on error.
+    ''' <summary>
+    ''' Returns the visible text of a range in Final view, excluding deleted revisions.
+    ''' Falls back to raw <see cref="Range.Text"/> when there are no revisions
+    ''' or when the Final-view extraction fails.
     ''' </summary>
     ''' <param name="src">Word range to extract visible text from.</param>
-    ''' <returns>Text with deletions omitted and insertions kept.</returns>
-    ''' Returns the "accepted" view of a range's text by temporarily selecting it,
-    ''' switching to Final view, and reading Selection.Text 
-    ''' Restores the original view and selection afterwards.
-    ''' Falls back to raw Range.Text when there are no revisions or on error.
-    ''' </summary>
-    ''' <param name="src">Word range to extract visible text from.</param>
-    ''' <returns>Text with deletions omitted and insertions kept.</returns>
+    ''' <returns>Text with deletions omitted and insertions preserved.</returns>
+
     Public Function GetVisibleText(ByVal src As Range) As String
         Try
             ' 1) Catch null/empty range
@@ -2066,6 +2139,7 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+
     ''' <summary>
     ''' Merges overlapping or adjacent integer intervals, returning a sorted list of non-overlapping ranges.
     ''' </summary>
@@ -2141,62 +2215,65 @@ Partial Public Class ThisAddIn
 
             Dim regexIndex As Integer = 0
 
-            For Each regexPair In regexList
-                Try
+            Using BeginMarkupAuthorScope(app)
+                For Each regexPair In regexList
+                    Try
 
-                    System.Windows.Forms.Application.DoEvents()
+                        System.Windows.Forms.Application.DoEvents()
 
-                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
-                        Exited = True
-                        Exit For
-                    End If
-
-                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then
-                        Exited = True
-                        Exit For
-                    End If
-
-                    selectedRange.Select()
-                    SearchAndReplace(regexPair.Pattern, regexPair.Replacement, True, specialChar)
-
-                    GlobalProgressMax = regexList.Count + 1
-
-                    ' Update the current progress value and status label.
-                    GlobalProgressValue = regexIndex + 1
-                    GlobalProgressLabel = $"Search & Replace command {regexIndex + 1} of {regexList.Count}"
-
-                    regexIndex += 1
-
-                Catch ex As Exception
-                    errorCount += 1
-                End Try
-            Next
-
-            selectedRange.Select()
-
-            If Not Exited Then
-
-                GlobalProgressValue = regexIndex + 1
-                GlobalProgressLabel = $"Cleaning up..."
-
-                ' Loop through and replace occurrences of the character
-                Dim replacementsMade As Boolean = False
-                Do
-                    With selectedRange.Find
-                        .ClearFormatting()
-                        .Text = specialChar
-                        .Replacement.ClearFormatting()
-                        .Replacement.Text = "" ' Replace with empty string
-                        .Forward = True
-                        .Wrap = Word.WdFindWrap.wdFindStop ' Do not loop around
-                        If .Execute(Replace:=Word.WdReplace.wdReplaceOne) Then
-                            replacementsMade = True
-                        Else
-                            Exit Do
+                        If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then
+                            Exited = True
+                            Exit For
                         End If
-                    End With
-                Loop
-            End If
+
+                        If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then
+                            Exited = True
+                            Exit For
+                        End If
+
+                        selectedRange.Select()
+                        SearchAndReplace(regexPair.Pattern, regexPair.Replacement, True, specialChar)
+
+                        GlobalProgressMax = regexList.Count + 1
+
+                        ' Update the current progress value and status label.
+                        GlobalProgressValue = regexIndex + 1
+                        GlobalProgressLabel = $"Search & Replace command {regexIndex + 1} of {regexList.Count}"
+
+                        regexIndex += 1
+
+                    Catch ex As Exception
+                        errorCount += 1
+                    End Try
+                Next
+
+
+                selectedRange.Select()
+
+                If Not Exited Then
+
+                    GlobalProgressValue = regexIndex + 1
+                    GlobalProgressLabel = $"Cleaning up..."
+
+                    ' Loop through and replace occurrences of the character
+                    Dim replacementsMade As Boolean = False
+                    Do
+                        With selectedRange.Find
+                            .ClearFormatting()
+                            .Text = specialChar
+                            .Replacement.ClearFormatting()
+                            .Replacement.Text = "" ' Replace with empty string
+                            .Forward = True
+                            .Wrap = Word.WdFindWrap.wdFindStop ' Do not loop around
+                            If .Execute(Replace:=Word.WdReplace.wdReplaceOne) Then
+                                replacementsMade = True
+                            Else
+                                Exit Do
+                            End If
+                        End With
+                    Loop
+                End If
+            End Using
 
             ProgressBarModule.CancelOperation = True
 
@@ -2783,6 +2860,10 @@ Partial Public Class ThisAddIn
         Dim originalScreenUpdating As Boolean = wordApp.ScreenUpdating
         Dim rng As Word.Range
 
+        ' Track the target document's TrackRevisions state so we can restore it
+        Dim targetDoc As Word.Document = targetrange.Document
+        Dim originalTrackRevisions As Boolean = targetDoc.TrackRevisions
+
         Try
             ' Disable screen updating to reduce flickers
             wordApp.ScreenUpdating = False
@@ -2826,20 +2907,35 @@ Partial Public Class ThisAddIn
                 CompareFields:=False,
                 CompareComments:=False,
                 CompareMoves:=False,
-                RevisedAuthor:=Application.UserName
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp)
             )
 
             ' Copy the comparison document's content while keeping the original format
             comparisonDoc.Content.Copy()
 
+            ' Disable TrackRevisions on the target document BEFORE pasting.
+            ' If TrackRevisions is on, Word will record the entire paste as
+            ' a new tracked insertion ON TOP of the revisions already embedded
+            ' in the comparison document — causing the changed parts to appear
+            ' both as tracked changes and as plain (duplicated) text.
+            targetDoc.TrackRevisions = False
+
             ' Insert the compared content at the specified range
             targetrange.Paste()
+
+            ' Re-enable TrackRevisions so that the pasted revisions (from the
+            ' comparison document) are visible and any subsequent user edits
+            ' continue to be tracked.
+            targetDoc.TrackRevisions = True
 
         Catch ex As System.Exception
             MessageBox.Show("Error in CompareAndInsertComparedoc: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         Finally
             ' Restore screen updating
             wordApp.ScreenUpdating = originalScreenUpdating
+
+            ' Restore the original TrackRevisions state
+            targetDoc.TrackRevisions = originalTrackRevisions
 
             ' Restore the original author name
             'wordApp.UserName = originalAuthor
@@ -2854,9 +2950,9 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
+
     ''' <summary>
-    ''' Generates inline diff markup using DiffPlex, converting word-by-word changes into [INS_START]/[DEL_START] tags.
-    ''' Optionally shows result in a preview window or inserts directly into target range.
+    ''' Generates inline diff markup using shared diff logic, optionally showing the result in a preview window or inserting it into the target range.
     ''' </summary>
     ''' <param name="text1">Original text.</param>
     ''' <param name="text2">Revised text.</param>
@@ -2868,133 +2964,34 @@ Partial Public Class ThisAddIn
     Private Sub CompareAndInsert(text1 As String, text2 As String, targetRange As Range, Optional ShowInWindow As Boolean = False, Optional TextforWindow As String = "A text with these changes will be inserted ('Esc' to abort):", Optional paraformatinline As Boolean = False, Optional noformatting As Boolean = True, Optional trailingCR As Boolean = False)
         Try
 
-            Dim diffBuilder As New InlineDiffBuilder(New Differ())
-            Dim sText As String = String.Empty
-
             Debug.WriteLine("A Text1 = " & text1)
             Debug.WriteLine("A Text2 = " & text2)
 
-            If Not trailingCR Then text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+            Dim sText As String =
+                BuildInlineDiffMarkup(
+                    text1,
+                    text2,
+                    trimTrailingLineBreaksOnRevised:=Not trailingCR)
 
-            ' Pre-process the texts to replace line breaks with a unique marker
-            text1 = text1.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
-            text2 = text2.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
-
-            ' Normalize the texts by removing extra spaces
-            text1 = text1.Replace("  ", " ").Trim()
-            text2 = text2.Replace("  ", " ").Trim()
-
-            Debug.WriteLine("B Text1 = " & text1)
-            Debug.WriteLine("B Text2 = " & text2)
-
-            ' Split the texts into words and convert them into a line-by-line format
-            ' In Worte splitten (ohne leere Einträge) und zeilenweise darstellen
-            '--- 1) pull out all {{…}} fields into a list and replace them with placeholders:
-            Dim mergefields As New List(Of String)
-            text1 = System.Text.RegularExpressions.Regex.Replace(text1, "\{\{.*?\}\}",
-                Function(m)
-                    mergefields.Add(m.Value)
-                    Return $"[[MF{mergefields.Count - 1}]]"
-                End Function)
-            text2 = System.Text.RegularExpressions.Regex.Replace(text2, "\{\{.*?\}\}",
-                Function(m)
-                    mergefields.Add(m.Value)
-                    Return $"[[MF{mergefields.Count - 1}]]"
-                End Function)
-
-            ' Split the texts into words and convert them into a line-by-line format
-            ' 3) In Worte splitten (ohne leere Einträge) und zeilenweise darstellen
-            Dim words1 As String = String.Join(
-              Environment.NewLine,
-              text1.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
-                    )
-            Dim words2 As String = String.Join(
-              Environment.NewLine,
-              text2.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries)
-                    )
-            ' Generate word-based diff using DiffPlex
-            Dim diffResult As DiffPaneModel = diffBuilder.BuildDiffModel(words1, words2)
-
-            '--- 4) emit tags *per run* rather than per word:
-            Dim prevType = ChangeType.Unchanged
-            For i = 0 To diffResult.Lines.Count - 1
-                Dim line = diffResult.Lines(i)
-                Dim nextType = If(i < diffResult.Lines.Count - 1, diffResult.Lines(i + 1).Type, ChangeType.Unchanged)
-
-                ' open tag when entering an Insert or Delete run
-                If line.Type = ChangeType.Inserted AndAlso prevType <> ChangeType.Inserted Then
-                    sText &= "[INS_START]"
-                ElseIf line.Type = ChangeType.Deleted AndAlso prevType <> ChangeType.Deleted Then
-                    sText &= "[DEL_START]"
-                End If
-
-                ' the word itself
-                sText &= line.Text.Trim() & " "
-
-                ' close tag when exiting a run
-                If line.Type = ChangeType.Inserted AndAlso nextType <> ChangeType.Inserted Then
-                    sText &= "[INS_END] "
-                ElseIf line.Type = ChangeType.Deleted AndAlso nextType <> ChangeType.Deleted Then
-                    sText &= "[DEL_END] "
-                End If
-
-                prevType = line.Type
-            Next
-
-            '--- 5) put your merge‑fields back in-place:
-            For idx = 0 To mergefields.Count - 1
-                sText = sText.Replace($"[[MF{idx}]]", mergefields(idx))
-            Next
-
-            Debug.WriteLine("1 = " & sText)
-
-            ' Remove preceding and trailing spaces around placeholders
-            sText = sText.Replace("{vbCr}", "{vbCrLf}")
-            sText = sText.Replace("{vbLf}", "{vbCrLf}")
-            sText = sText.Replace(" {vbCrLf} ", "{vbCrLf}")
-            sText = sText.Replace(" {vbCrLf}", "{vbCrLf}")
-            sText = sText.Replace("{vbCrLf} ", "{vbCrLf}")
-
-            Debug.WriteLine("2 = " & sText)
-
-            ' Remove instances of line breaks surrounded by [DEL_START] and [DEL_END]
-            sText = sText.Replace("[DEL_START]{vbCrLf}[DEL_END] ", "")
-            sText = sText.Replace("[DEL_START]{vbCrLf}{vbCrLf}[DEL_END] ", "")
-            sText = sText.Replace("{vbCrLf}[DEL_END] ", "{vbCrLf}[DEL_END]")
-
-            ' Include instances of line breaks surrounded by [INS_START] and [INS_END] without the [INS...] text
-            sText = sText.Replace("[INS_START]{vbCrLf}[INS_END] ", "{vbCrLf}")
-            sText = sText.Replace("[INS_START]{vbCrLf}{vbCrLf}[INS_END] ", "{vbCrLf}{vbCrLf}")
-            sText = sText.Replace("{vbCrLf}[INS_END] ", "{vbCrLf}[INS_END]")
-
-            ' Entferne alle überflüssigen Leerzeilen-Platzhalter am Ende
-
-            Debug.WriteLine("3 = " & sText)
-
-            sText = sText.Replace(vbCrLf, "").Replace(vbCr, "").Replace(vbLf, "")
-
-            ' Replace placeholders with actual line breaks
-            sText = sText.Replace("{vbCrLf}", vbCrLf)
-
-            ' Adjust overlapping tags
-            sText = sText.Replace("[DEL_END] [INS_START]", "[DEL_END][INS_START]")
-            sText = sText.Replace("[INS_START][INS_END] ", "")
-            'sText = RemoveInsDelTagsInPlaceholders(sText)
+            Debug.WriteLine("Diff markup = " & sText)
 
             ' Insert formatted text into the specified range
             If Not ShowInWindow Then
                 Debug.WriteLine("Text with tags: " & vbCrLf & "'" & sText & "'" & vbCrLf & vbCrLf)
+
                 ' Trim trailing line breaks that may have been added during diff processing
                 sText = sText.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+
                 InsertMarkupText(sText, targetRange)
             Else
                 sText = Regex.Replace(sText, "\{\{.*?\}\}", String.Empty)
 
-                Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & "\r\r" & sText)
+                Dim htmlContent As String = ConvertMarkupToRTF(TextforWindow & vbCrLf & vbCrLf & sText)
 
-                System.Threading.Tasks.Task.Run(Sub()
-                                                    ShowRTFCustomMessageBox(htmlContent, RestoreWindow:=True)
-                                                End Sub)
+                System.Threading.Tasks.Task.Run(
+                    Sub()
+                        ShowRTFCustomMessageBox(htmlContent, RestoreWindow:=True)
+                    End Sub)
             End If
 
         Catch ex As System.Exception
@@ -3003,7 +3000,8 @@ Partial Public Class ThisAddIn
     End Sub
 
 
-    ' ========================== Surgical Markup (MarkupMethod 5) ==========================
+
+    ' ========================== Surgical Markup (MarkupMethod 2) ==========================
 
     ''' <summary>
     ''' Represents a single word-level run from the DiffPlex output: Unchanged, Inserted, or Deleted.
@@ -3014,32 +3012,135 @@ Partial Public Class ThisAddIn
         Public Text As String
     End Structure
 
+    Private Enum SpecialPlaceholderKind
+        None = 0
+        WFLD = 1
+        WFNT = 2
+        WENT = 3
+        PFOR = 4
+    End Enum
+
     ''' <summary>
-    ''' Surgically applies word-level changes to an existing Word range using tracked changes,
-    ''' preserving existing revisions, formatting, footnotes, and field codes in unchanged regions.
+    ''' Applies an in-place tracked-change patch to <paramref name="targetRange"/> by diffing the
+    ''' original serialized text against the revised LLM output and then replaying only the minimal
+    ''' edits into the live Word document.
     '''
-    ''' Instead of deleting the entire target range and rebuilding it (as InsertMarkupText does),
-    ''' this method uses DiffPlex to identify changed word runs, then uses Range.Find to locate
-    ''' unchanged anchor phrases in the live document. Only the changed regions are mutated via
-    ''' tracked insertions and deletions.
+    ''' This routine is the add-in's "surgical" markup engine. Unlike the legacy markup paths
+    ''' (`InsertMarkupText`, full-range replacement, or Word compare-document workflows), it does
+    ''' not rebuild the entire selected range. Instead, it keeps the existing Word content in place
+    ''' and mutates only the regions that actually changed. This is important because a full rebuild
+    ''' can destroy or destabilize live Word constructs such as:
     '''
-    ''' The ShowInWindow parameter is deliberately excluded — that use case remains with CompareAndInsert.
+    ''' - existing tracked revisions outside the changed fragment,
+    ''' - fields and merge-field placeholders,
+    ''' - footnote and endnote reference anchors,
+    ''' - paragraph/list structure,
+    ''' - manual line breaks and paragraph breaks,
+    ''' - formatting in unchanged runs.
+    '''
+    ''' High-level algorithm:
+    '''
+    ''' 1. Preserve editor state
+    '''    Screen updating and document tracking are temporarily adjusted so the patch can be applied
+    '''    deterministically and without visual flicker. The original Word state is restored in
+    '''    <c>Finally</c>.
+    '''
+    ''' 2. Tokenize protected placeholders
+    '''    Special inline placeholders such as <c>{{WFLD:...}}</c>, <c>{{WFNT:...}}</c>,
+    '''    <c>{{WENT:...}}</c>, and <c>{{PFOR:...}}</c> are first replaced with stable synthetic
+    '''    tokens shared between original and revised text. This prevents DiffPlex from splitting
+    '''    placeholder internals and allows them to survive round-trips through the diff pipeline.
+    '''
+    ''' 3. Normalize structural breaks into explicit tokens
+    '''    Paragraph breaks, line feeds, and manual line breaks are converted to explicit diff tokens
+    '''    before tokenization. This allows the diff engine to reason about structural separators as
+    '''    first-class units instead of burying them inside word tokens. After diffing, those tokens
+    '''    are converted back to their original Word representations.
+    '''
+    ''' 4. Build a word-oriented diff
+    '''    The method uses DiffPlex <c>InlineDiffBuilder</c> on token streams rather than raw text.
+    '''    Tokens are joined line-by-line, diffed, and then reassembled into <c>DiffRun</c> items.
+    '''    Consecutive runs of the same <c>ChangeType</c> are merged, except for structural tokens
+    '''    such as whitespace, placeholders, and break tokens, which are intentionally kept isolated
+    '''    so Word-boundary-sensitive edits can be handled safely.
+    '''
+    ''' 5. Restore placeholder text and break characters
+    '''    Once the raw diff runs have been built, synthetic placeholder tokens are restored to their
+    '''    original placeholder text and break markers are converted back to live Word characters.
+    '''
+    ''' 6. Skip dangerous no-op structural replacements
+    '''    Break-only replacement clusters are explicitly ignored. This protects manual line breaks,
+    '''    paragraph breaks, and bullet/list structure from being rewritten merely because the model
+    '''    returned a different textual newline convention.
+    '''
+    ''' 7. Walk the live Word range from left to right
+    '''    A duplicate live cursor is collapsed to the start of <paramref name="targetRange"/> and
+    '''    then advanced through the document while each diff run is processed:
+    '''
+    '''    - Unchanged text is used as an anchor to advance the cursor.
+    '''    - Placeholder runs are advanced using Word-aware placeholder handling.
+    '''    - Whitespace runs are matched character-by-character.
+    '''    - Break runs are matched against Word's internal break representation.
+    '''    - Text runs are located via <c>Range.Find</c> with normalization suitable for Word.
+    '''
+    '''    The cursor is never advanced blindly unless anchor matching fails, in which case a bounded
+    '''    estimate is used as a fallback to preserve forward progress.
+    '''
+    ''' 8. Apply change clusters as tracked deletions/insertions
+    '''    Adjacent non-unchanged runs are grouped into a single cluster. Each cluster is converted
+    '''    into one or more <c>SurgicalOperationCandidate</c> instances representing possible ways
+    '''    to perform the edit in Word.
+    '''
+    '''    Replacement clusters and pure deletions are handled differently:
+    '''
+    '''    - Replacements prefer consuming a trailing whitespace run together with the replaced word
+    '''      so that Word does not swallow or duplicate separators around the tracked change.
+    '''    - Pure deletions absorb adjacent whitespace only when the deleted content is word-like;
+    '''      punctuation-only deletions intentionally avoid absorbing surrounding spaces.
+    '''
+    '''    Each candidate is searched in the live document beginning at the current cursor position.
+    '''    On the first successful match, the method performs a tracked deletion and then, if needed,
+    '''    a tracked insertion at the same logical point.
+    '''
+    ''' 9. Final visual cleanup
+    '''    After all clusters have been processed, the affected region is temporarily viewed in Final
+    '''    view and repeated double spaces are collapsed in the rendered result. This cleanup is kept
+    '''    local to the edited range.
+    '''
+    ''' Cancellation / responsiveness:
+    '''
+    ''' - The loop periodically pumps the Windows message queue via <c>Application.DoEvents()</c>.
+    ''' - <c>Esc</c> is checked repeatedly so the user can abort a long-running patch.
+    '''
+    ''' Design goals:
+    '''
+    ''' - preserve unchanged Word content exactly where possible,
+    ''' - minimize COM mutations,
+    ''' - keep revisions readable and localized,
+    ''' - protect placeholders and structural elements,
+    ''' - avoid rebuilding the entire selection.
+    '''
+    ''' Limitations:
+    '''
+    ''' Because Word's live text model is not a plain string, exact anchor matching can still fail in
+    ''' the presence of complex revisions, fields, list formatting, or unexpected whitespace/break
+    ''' normalization by the model. In such cases the method falls back conservatively and logs the
+    ''' decision through the debug trace instead of forcing a potentially destructive rewrite.
     ''' </summary>
-    ''' <param name="text1">Original text (what the user selected / what the LLM saw).</param>
-    ''' <param name="text2">LLM result text.</param>
-    ''' <param name="targetRange">The live Word range to patch in place.</param>
-    ''' <param name="trailingCR">Whether the original text ended with a carriage return.</param>
+    ''' <param name="text1">Original serialized text seen by the diff engine.</param>
+    ''' <param name="text2">Revised serialized text returned by the LLM after post-processing.</param>
+    ''' <param name="targetRange">Live Word range to be patched in place with tracked revisions.</param>
+    ''' <param name="trailingCR">True when the original source ended in a trailing paragraph break that must be preserved.</param>
     Private Sub CompareAndInsertSurgical(text1 As String, text2 As String, targetRange As Range, Optional trailingCR As Boolean = False)
         Dim wordApp As Microsoft.Office.Interop.Word.Application = Globals.ThisAddIn.Application
-
-        ' ── FIX: Always use the document that owns the target range, never ActiveDocument.
-        '    When multiple documents are open, ActiveDocument can change mid-operation
-        '    (e.g., during DoEvents or view switches), causing TrackRevisions to toggle
-        '    on the wrong document and insertions to land in the wrong place.
         Dim doc As Microsoft.Office.Interop.Word.Document = targetRange.Document
 
         Dim originalTrack As Boolean = doc.TrackRevisions
         Dim originalUpdate As Boolean = wordApp.ScreenUpdating
+
+        Const maxFindTextLength As Integer = 200
+        Const uiYieldIntervalMs As Integer = 40
+        Dim manualLineBreak As String = ChrW(11).ToString()
 
         Try
             wordApp.ScreenUpdating = False
@@ -3047,95 +3148,117 @@ Partial Public Class ThisAddIn
 
             Debug.WriteLine("SurgicalMarkup: text1 length=" & text1.Length & " text2 length=" & text2.Length)
 
-            If Not trailingCR Then text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+            If Not trailingCR Then
+                text2 = text2.TrimEnd(vbCr, vbLf).TrimEnd(vbCr, vbLf)
+            End If
 
             ' ======================================================================
-            ' STEP 1: Tokenize merge-field placeholders so they diff as single units
+            ' STEP 1: Tokenize special placeholders with stable shared IDs
             ' ======================================================================
-            Dim mergefields As New List(Of String)
-            text1 = System.Text.RegularExpressions.Regex.Replace(text1, "\{\{.*?\}\}",
-                Function(m)
-                    mergefields.Add(m.Value)
-                    Return $"[[MF{mergefields.Count - 1}]]"
-                End Function)
-            text2 = System.Text.RegularExpressions.Regex.Replace(text2, "\{\{.*?\}\}",
-                Function(m)
-                    mergefields.Add(m.Value)
-                    Return $"[[MF{mergefields.Count - 1}]]"
-                End Function)
+            Dim mergefields As List(Of String) = TokenizeSpecialPlaceholdersForDiff(text1, text2)
 
             ' ======================================================================
-            ' STEP 2: Normalize line breaks to single tokens (same as CompareAndInsert)
+            ' STEP 2: Normalize line breaks to explicit tokens
             ' ======================================================================
-            text1 = text1.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
-            text2 = text2.Replace(vbCrLf, " {vbCrLf} ").Replace(vbCr, " {vbCr} ").Replace(vbLf, " {vbLf} ")
-            text1 = text1.Replace("  ", " ").Trim()
-            text2 = text2.Replace("  ", " ").Trim()
+            text1 = text1.Replace(manualLineBreak, " {vbVt} ").
+                          Replace(vbCrLf, " {vbCrLf} ").
+                          Replace(vbCr, " {vbCr} ").
+                          Replace(vbLf, " {vbLf} ")
+            text2 = text2.Replace(manualLineBreak, " {vbVt} ").
+                          Replace(vbCrLf, " {vbCrLf} ").
+                          Replace(vbCr, " {vbCr} ").
+                          Replace(vbLf, " {vbLf} ")
 
             ' ======================================================================
-            ' STEP 3: Word-level diff via DiffPlex (same approach as CompareAndInsert)
+            ' STEP 3: Word-level diff via DiffPlex
             ' ======================================================================
-            Dim words1 As String = String.Join(Environment.NewLine, text1.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries))
-            Dim words2 As String = String.Join(Environment.NewLine, text2.Split(New Char() {" "c}, StringSplitOptions.RemoveEmptyEntries))
+            Dim tokenList1 As List(Of String) = TokenizeDiffUnits(text1)
+            Dim tokenList2 As List(Of String) = TokenizeDiffUnits(text2)
+
+            Debug.WriteLine("==== Surgical raw text1 ====")
+            Debug.WriteLine(DebugVisualizeToken(text1))
+            Debug.WriteLine("==== Surgical raw text2 ====")
+            Debug.WriteLine(DebugVisualizeToken(text2))
+            DebugDumpTokenList("Surgical tokenList1", tokenList1)
+            DebugDumpTokenList("Surgical tokenList2", tokenList2)
+
+            Dim words1 As String = String.Join(Environment.NewLine, tokenList1)
+            Dim words2 As String = String.Join(Environment.NewLine, tokenList2)
 
             Dim diffBuilder As New InlineDiffBuilder(New Differ())
             Dim diffResult As DiffPaneModel = diffBuilder.BuildDiffModel(words1, words2)
 
             ' ======================================================================
-            ' STEP 4: Merge consecutive same-type words into runs,
-            '         but NEVER merge a line-break token with adjacent word tokens.
-            '         Line-break tokens must remain as standalone runs so they get
-            '         the specialized peek-advance handler in STEP 8 instead of
-            '         Range.Find (which mismatches when \r is at the start/end).
+            ' STEP 4: Merge consecutive same-type tokens into runs.
+            '         Line-break, placeholder, and whitespace tokens stay isolated.
             ' ======================================================================
-            Dim runs As New List(Of DiffRun)
+            Dim runs As New List(Of DiffRun)(System.Math.Max(4, diffResult.Lines.Count))
             Dim currentRunType As ChangeType = ChangeType.Unchanged
             Dim currentRunWords As New List(Of String)
+            Dim lastTokenText As String = Nothing
 
             For i As Integer = 0 To diffResult.Lines.Count - 1
                 Dim line = diffResult.Lines(i)
-                Dim wordText As String = line.Text.Trim()
-                If String.IsNullOrEmpty(wordText) Then Continue For
+                Dim wordText As String = If(line.Text, String.Empty)
+                If wordText.Length = 0 Then Continue For
 
-                ' Detect if this word is a line-break token (still in placeholder form)
-                Dim isLB As Boolean = (wordText = "{vbCrLf}" OrElse wordText = "{vbCr}" OrElse wordText = "{vbLf}")
+                Dim isLB As Boolean = IsDiffLineBreakToken(wordText)
+                Dim isPlaceholderToken As Boolean = IsDiffPlaceholderToken(wordText)
+                Dim isWhitespaceToken As Boolean = IsDiffWhitespaceToken(wordText)
 
-                ' Flush the current run if:
-                '   (a) the type changed, OR
-                '   (b) this word is a line-break token (must be its own run), OR
-                '   (c) the previous word was a line-break token (must not merge with it)
-                Dim prevWasLB As Boolean = (currentRunWords.Count > 0 AndAlso
-                    (currentRunWords.Last() = "{vbCrLf}" OrElse currentRunWords.Last() = "{vbCr}" OrElse currentRunWords.Last() = "{vbLf}"))
+                Dim prevWasLB As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffLineBreakToken(lastTokenText))
+                Dim prevWasPlaceholder As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffPlaceholderToken(lastTokenText))
+                Dim prevWasWhitespace As Boolean = (currentRunWords.Count > 0 AndAlso IsDiffWhitespaceToken(lastTokenText))
 
-                If (line.Type <> currentRunType OrElse isLB OrElse prevWasLB) AndAlso currentRunWords.Count > 0 Then
-                    runs.Add(New DiffRun With {.RunType = currentRunType, .Text = String.Join(" ", currentRunWords)})
+                If (line.Type <> currentRunType OrElse
+                    isLB OrElse
+                    isPlaceholderToken OrElse
+                    isWhitespaceToken OrElse
+                    prevWasLB OrElse
+                    prevWasPlaceholder OrElse
+                    prevWasWhitespace) AndAlso currentRunWords.Count > 0 Then
+
+                    runs.Add(New DiffRun With {
+                        .RunType = currentRunType,
+                        .Text = String.Concat(currentRunWords)
+                    })
                     currentRunWords.Clear()
                 End If
+
                 currentRunType = line.Type
                 currentRunWords.Add(wordText)
+                lastTokenText = wordText
             Next
+
             If currentRunWords.Count > 0 Then
-                runs.Add(New DiffRun With {.RunType = currentRunType, .Text = String.Join(" ", currentRunWords)})
+                runs.Add(New DiffRun With {
+                    .RunType = currentRunType,
+                    .Text = String.Concat(currentRunWords)
+                })
             End If
 
+            DebugDumpRuns("Runs after STEP 4 (before restore)", runs)
+
             ' ======================================================================
-            ' STEP 5: Restore merge-field placeholders and line-break tokens in runs
+            ' STEP 5: Restore placeholders and line breaks in runs
             ' ======================================================================
-            For ri As Integer = 0 To runs.Count - 1
-                Dim r As DiffRun = runs(ri)
-                ' Restore merge fields
-                For idx As Integer = 0 To mergefields.Count - 1
-                    r.Text = r.Text.Replace($"[[MF{idx}]]", mergefields(idx))
-                Next
-                ' Restore line breaks
+            For riRestore As Integer = 0 To runs.Count - 1
+                Dim r As DiffRun = runs(riRestore)
+
+                r.Text = RestoreTokenizedSpecialPlaceholders(r.Text, mergefields)
+
+                r.Text = r.Text.Replace("{vbVt}", manualLineBreak)
                 r.Text = r.Text.Replace("{vbCr}", "{vbCrLf}")
                 r.Text = r.Text.Replace("{vbLf}", "{vbCrLf}")
                 r.Text = r.Text.Replace("{vbCrLf}", vbCrLf)
-                runs(ri) = r
+
+                runs(riRestore) = r
             Next
 
+            DebugDumpRuns("Runs after STEP 5 (after restore)", runs)
+
             ' ======================================================================
-            ' STEP 6: Quick check — if nothing changed, exit early
+            ' STEP 6: Quick exit if unchanged
             ' ======================================================================
             Dim hasChanges As Boolean = runs.Any(Function(r) r.RunType <> ChangeType.Unchanged)
             If Not hasChanges Then
@@ -3144,260 +3267,332 @@ Partial Public Class ThisAddIn
             End If
 
             ' ======================================================================
-            ' STEP 7: Strip merge-field placeholders from deleted runs
-            '         (same logic as InsertMarkupText)
+            ' STEP 7: Strip special placeholders from deleted runs
             ' ======================================================================
-            For ri As Integer = 0 To runs.Count - 1
-                If runs(ri).RunType = ChangeType.Deleted Then
-                    Dim r As DiffRun = runs(ri)
+            For riStrip As Integer = 0 To runs.Count - 1
+                If runs(riStrip).RunType = ChangeType.Deleted Then
+                    Dim r As DiffRun = runs(riStrip)
                     r.Text = System.Text.RegularExpressions.Regex.Replace(
                         r.Text,
                         "\{\{(?:WFLD|WFNT|WENT|PFOR):.*?\}\}",
                         String.Empty)
-                    runs(ri) = r
+                    runs(riStrip) = r
                 End If
             Next
 
-            ' ======================================================================
-            ' STEP 8: Walk the runs and apply surgical changes via Find + Track Changes
-            ' ======================================================================
-            Dim cursor As Range = targetRange.Duplicate
-            cursor.Collapse(WdCollapseDirection.wdCollapseStart)
+            Using BeginMarkupAuthorScope(wordApp)
 
-            Dim rangeEnd As Integer = targetRange.End
+                ' ======================================================================
+                ' STEP 8: Walk runs and apply changes
+                ' ======================================================================
+                Dim cursor As Range = targetRange.Duplicate
+                cursor.Collapse(WdCollapseDirection.wdCollapseStart)
 
-            For ri As Integer = 0 To runs.Count - 1
-                Dim run As DiffRun = runs(ri)
+                Dim rangeEnd As Integer = targetRange.End
+                Dim ri As Integer = 0
+                Dim uiYieldStopwatch As Stopwatch = Stopwatch.StartNew()
 
-                System.Windows.Forms.Application.DoEvents()
-                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit For
-
-                ' Skip empty runs (can happen after merge-field stripping)
-                If String.IsNullOrEmpty(run.Text) OrElse String.IsNullOrWhiteSpace(run.Text) Then Continue For
-
-                ' Determine whether we need a leading space before this run.
-                Dim needsLeadingSpace As Boolean = False
-                Dim isLineBreakRun As Boolean = (run.Text = vbCr OrElse run.Text = vbLf OrElse
-                                                  run.Text = vbCrLf OrElse
-                                                  run.Text.Trim(vbCr, vbLf, " "c).Length = 0)
-                If ri > 0 AndAlso Not isLineBreakRun Then
-                    Dim prevRun As DiffRun = runs(ri - 1)
-                    Dim prevIsLineBreak As Boolean = (prevRun.Text = vbCr OrElse prevRun.Text = vbLf OrElse
-                                                      prevRun.Text = vbCrLf OrElse
-                                                      prevRun.Text.Trim(vbCr, vbLf, " "c).Length = 0)
-                    If Not prevIsLineBreak Then
-                        Dim prevText As String = prevRun.Text
-                        Dim curText As String = run.Text
-                        If Not String.IsNullOrWhiteSpace(prevText) AndAlso
-                           Not String.IsNullOrWhiteSpace(curText) AndAlso
-                           Not prevText.EndsWith(vbCr) AndAlso Not prevText.EndsWith(vbLf) AndAlso
-                           Not prevText.EndsWith(" ") AndAlso
-                           Not curText.StartsWith(vbCr) AndAlso Not curText.StartsWith(vbLf) AndAlso
-                           Not curText.StartsWith(" ") Then
-                            needsLeadingSpace = True
-                        End If
+                Do While ri < runs.Count
+                    If uiYieldStopwatch.ElapsedMilliseconds >= uiYieldIntervalMs Then
+                        System.Windows.Forms.Application.DoEvents()
+                        uiYieldStopwatch.Restart()
                     End If
-                End If
 
-                Select Case run.RunType
+                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit Do
+                    If (GetAsyncKeyState(VK_ESCAPE) And 1) <> 0 Then Exit Do
 
-                    Case ChangeType.Unchanged
-                        ' ----------------------------------------------------------
-                        ' UNCHANGED: Find this text in the document to advance cursor
-                        ' ----------------------------------------------------------
+                    Dim run As DiffRun = runs(ri)
 
-                        ' Line-break-only runs: peek-advance past paragraph marks
-                        ' instead of using Range.Find (which is unreliable for lone ¶).
-                        If isLineBreakRun Then
-                            Dim runTextForCount As String = run.Text
-                            runTextForCount = runTextForCount.Replace(vbCrLf, vbCr)
-                            runTextForCount = runTextForCount.Replace(vbLf, vbCr)
+                    If run.Text Is Nothing OrElse run.Text.Length = 0 Then
+                        ri += 1
+                        Continue Do
+                    End If
 
-                            Dim crCount As Integer = 0
-                            For Each ch As Char In runTextForCount
-                                If ch = vbCr Then crCount += 1
-                            Next
-                            If crCount = 0 Then crCount = 1
+                    Dim runText As String = run.Text
+                    Debug.WriteLine($"RUN {ri:000}: {run.RunType} cursor={cursor.Start} rangeEnd={rangeEnd} text='{DebugVisualizeToken(runText)}'")
 
-                            Dim pos As Integer = cursor.Start
-                            Dim advanced As Integer = 0
-                            Do While advanced < crCount AndAlso pos < rangeEnd
-                                Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
-                                If peekRange.Text = vbCr Then
-                                    advanced += 1
+                    Select Case run.RunType
+
+                        Case ChangeType.Unchanged
+                            Dim isLineBreakRun As Boolean = IsDiffLineBreakToken(runText)
+                            Dim isWhitespaceRun As Boolean = IsDiffWhitespaceToken(runText)
+                            Dim isSpecialPlaceholderRunCurrent As Boolean = IsSpecialPlaceholderRun(runText)
+
+                            If isSpecialPlaceholderRunCurrent Then
+                                Dim beforeCursor As Integer = cursor.Start
+
+                                AdvanceCursorPastSpecialPlaceholder(doc, cursor, rangeEnd, runText)
+
+                                Dim nextChar As String = "<eor>"
+                                If cursor.Start < rangeEnd Then
+                                    nextChar = DebugVisualizeToken(doc.Range(cursor.Start, System.Math.Min(cursor.Start + 1, rangeEnd)).Text)
                                 End If
-                                pos += 1
-                            Loop
-                            cursor.SetRange(pos, pos)
-                        Else
-                            ' Word-content run: use Range.Find to advance cursor.
-                            ' Because line-break tokens are now always in their own runs
-                            ' (STEP 4 fix), this text never starts or ends with \r,
-                            ' so Range.Find won't match the wrong paragraph mark.
-                            Dim searchRange As Range = doc.Range(cursor.Start, rangeEnd)
-                            Dim findText As String = run.Text
+                                Debug.WriteLine($"    Placeholder advance: {beforeCursor} -> {cursor.Start}; nextChar='{nextChar}'")
 
-                            ' Word Find has a 255-char limit; for longer anchors, use first 200 chars
-                            Dim truncated As Boolean = False
-                            If findText.Length > 200 Then
-                                findText = findText.Substring(0, 200)
-                                truncated = True
-                            End If
+                            ElseIf isLineBreakRun Then
+                                Dim expectedBreaks As String = NormalizeLineBreakRunForWordRange(runText)
+                                If expectedBreaks.Length = 0 Then expectedBreaks = vbCr
 
-                            ' Normalize CRs for search: Word uses vbCr internally
-                            findText = findText.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
+                                Dim pos As Integer = cursor.Start
+                                Dim matched As Integer = 0
 
-                            Dim found As Boolean = False
-                            With searchRange.Find
-                                .ClearFormatting()
-                                .Text = findText
-                                .Forward = True
-                                .Wrap = WdFindWrap.wdFindStop
-                                .Format = False
-                                .MatchCase = False
-                                .MatchWholeWord = False
-                                .MatchWildcards = False
-                                found = .Execute()
-                            End With
+                                Do While matched < expectedBreaks.Length AndAlso pos < rangeEnd
+                                    Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
+                                    Dim expectedChar As String = expectedBreaks.Substring(matched, 1)
 
-                            If found Then
-                                If truncated Then
-                                    Dim fullLen As Integer = run.Text.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr).Length
-                                    Dim estimatedEnd As Integer = searchRange.Start + fullLen
-                                    If estimatedEnd > rangeEnd Then estimatedEnd = rangeEnd
-                                    cursor.SetRange(estimatedEnd, estimatedEnd)
-                                Else
-                                    cursor.SetRange(searchRange.End, searchRange.End)
-                                End If
-                            Else
-                                Debug.WriteLine($"SurgicalMarkup: Anchor not found, advancing by estimate. Run text='{Left(run.Text, 80)}'")
-                                Dim estimatedLen As Integer = run.Text.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr).Length
-                                Dim newPos As Integer = System.Math.Min(cursor.Start + estimatedLen, rangeEnd)
-                                cursor.SetRange(newPos, newPos)
-                            End If
-                        End If
-
-                    Case ChangeType.Deleted
-                        ' ----------------------------------------------------------
-                        ' DELETED: Find the deleted text and delete with tracking
-                        ' ----------------------------------------------------------
-                        Dim delText As String = run.Text.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
-                        If String.IsNullOrEmpty(delText) Then Continue For
-
-                        Dim searchRange As Range = doc.Range(cursor.Start, rangeEnd)
-                        Dim findText As String = delText
-                        If findText.Length > 200 Then findText = findText.Substring(0, 200)
-
-                        Dim found As Boolean = False
-                        With searchRange.Find
-                            .ClearFormatting()
-                            .Text = findText
-                            .Forward = True
-                            .Wrap = WdFindWrap.wdFindStop
-                            .Format = False
-                            .MatchCase = False
-                            .MatchWholeWord = False
-                            .MatchWildcards = False
-                            found = .Execute()
-                        End With
-
-                        If found Then
-                            If delText.Length > 200 Then
-                                Dim fullEnd As Integer = searchRange.Start + delText.Length
-                                If fullEnd > rangeEnd Then fullEnd = rangeEnd
-                                searchRange.SetRange(searchRange.Start, fullEnd)
-                            End If
-
-                            Dim nextIsInsert As Boolean = (ri + 1 < runs.Count AndAlso runs(ri + 1).RunType = ChangeType.Inserted)
-                            If nextIsInsert Then
-                                Dim peekEnd As Integer = searchRange.End
-                                If peekEnd < rangeEnd Then
-                                    Dim peekRange As Range = doc.Range(peekEnd, System.Math.Min(peekEnd + 1, rangeEnd))
-                                    If peekRange.Text = " " Then
-                                        searchRange.SetRange(searchRange.Start, peekEnd + 1)
+                                    If peekRange.Text = expectedChar Then
+                                        matched += 1
                                     End If
+                                    pos += 1
+                                Loop
+
+                                cursor.SetRange(pos, pos)
+
+                            ElseIf isWhitespaceRun Then
+                                Dim expected As String = runText
+                                Dim pos As Integer = cursor.Start
+                                Dim matched As Integer = 0
+
+                                Do While matched < expected.Length AndAlso pos < rangeEnd
+                                    Dim peekRange As Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
+                                    Dim expectedChar As String = expected.Substring(matched, 1)
+
+                                    If peekRange.Text = expectedChar Then
+                                        matched += 1
+                                        pos += 1
+                                    Else
+                                        Exit Do
+                                    End If
+                                Loop
+
+                                cursor.SetRange(pos, pos)
+
+                            Else
+                                Dim searchRange As Range = doc.Range(cursor.Start, rangeEnd)
+                                Dim runFindText As String = NormalizeForWordFind(runText)
+
+                                Dim wasTruncated As Boolean = False
+                                Dim found As Boolean = ExecuteWordFind(searchRange, runFindText, wasTruncated, maxFindTextLength)
+
+                                If found Then
+                                    If wasTruncated Then
+                                        Dim fullLen As Integer = runFindText.Length
+                                        Dim estimatedEnd As Integer = searchRange.Start + fullLen
+                                        If estimatedEnd > rangeEnd Then estimatedEnd = rangeEnd
+                                        cursor.SetRange(estimatedEnd, estimatedEnd)
+                                    Else
+                                        cursor.SetRange(searchRange.End, searchRange.End)
+                                    End If
+                                Else
+                                    Debug.WriteLine($"SurgicalMarkup: Anchor not found, advancing by estimate. Run text='{Left(runText, 80)}'")
+                                    Dim estimatedLen As Integer = runFindText.Length
+                                    Dim newPos As Integer = System.Math.Min(cursor.Start + estimatedLen, rangeEnd)
+                                    cursor.SetRange(newPos, newPos)
                                 End If
                             End If
 
-                            doc.TrackRevisions = True
-                            searchRange.Delete()
-                            doc.TrackRevisions = False
+                            ri += 1
 
-                            cursor.SetRange(searchRange.Start, searchRange.Start)
-                            rangeEnd = targetRange.End
-                        Else
-                            Debug.WriteLine($"SurgicalMarkup: Deleted text not found, skipping. Text='{Left(delText, 80)}'")
-                        End If
+                        Case ChangeType.Deleted, ChangeType.Inserted
+                            Dim clusterStartIndex As Integer = ri
+                            Dim cluster As New List(Of DiffRun)
 
-                    Case ChangeType.Inserted
-                        ' ----------------------------------------------------------
-                        ' INSERTED: Insert new text at the cursor with tracking
-                        ' ----------------------------------------------------------
-                        Dim insText As String = run.Text.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
-                        If String.IsNullOrEmpty(insText) Then Continue For
+                            Do While ri < runs.Count AndAlso runs(ri).RunType <> ChangeType.Unchanged
+                                If runs(ri).Text IsNot Nothing AndAlso runs(ri).Text.Length > 0 Then
+                                    cluster.Add(runs(ri))
+                                End If
+                                ri += 1
+                            Loop
 
-                        Dim prevWasDelete As Boolean = (ri > 0 AndAlso runs(ri - 1).RunType = ChangeType.Deleted)
-                        If needsLeadingSpace AndAlso Not prevWasDelete Then
-                            insText = " " & insText
-                        End If
+                            If cluster.Count = 0 Then
+                                Continue Do
+                            End If
 
-                        ' Check if next run starts with a line break — if so, no trailing space
-                        Dim nextIsUnchanged As Boolean = (ri + 1 < runs.Count AndAlso runs(ri + 1).RunType = ChangeType.Unchanged)
-                        Dim nextStartsWithLineBreak As Boolean = False
-                        If nextIsUnchanged Then
-                            Dim nxt As String = runs(ri + 1).Text
-                            nextStartsWithLineBreak = (nxt.StartsWith(vbCrLf) OrElse
-                                                       nxt.StartsWith(vbCr) OrElse
-                                                       nxt.StartsWith(vbLf) OrElse
-                                                       nxt = vbCr OrElse nxt = vbLf OrElse nxt = vbCrLf OrElse
-                                                       nxt.Trim(vbCr, vbLf, " "c).Length = 0)
-                        End If
-                        If nextIsUnchanged AndAlso Not nextStartsWithLineBreak AndAlso
-                           Not insText.EndsWith(" ") AndAlso
-                           Not insText.EndsWith(vbCr) AndAlso Not insText.EndsWith(vbLf) Then
-                            insText = insText & " "
-                        End If
+                            Dim hasDeleted As Boolean = cluster.Any(Function(x) x.RunType = ChangeType.Deleted)
+                            Dim hasInserted As Boolean = cluster.Any(Function(x) x.RunType = ChangeType.Inserted)
 
-                        cursor.Collapse(WdCollapseDirection.wdCollapseStart)
+                            Dim deletedCoreBuilder As New System.Text.StringBuilder()
+                            Dim insertedCoreBuilder As New System.Text.StringBuilder()
 
-                        doc.TrackRevisions = True
-                        cursor.InsertAfter(insText)
-                        doc.TrackRevisions = False
+                            For Each clusterRun As DiffRun In cluster
+                                Select Case clusterRun.RunType
+                                    Case ChangeType.Deleted
+                                        deletedCoreBuilder.Append(clusterRun.Text)
+                                    Case ChangeType.Inserted
+                                        insertedCoreBuilder.Append(clusterRun.Text)
+                                End Select
+                            Next
 
-                        cursor.SetRange(cursor.End, cursor.End)
-                        rangeEnd = targetRange.End
+                            Dim deletedCoreText As String = NormalizeForWordFind(deletedCoreBuilder.ToString())
+                            Dim insertedCoreText As String = NormalizeForWordFind(insertedCoreBuilder.ToString())
 
-                End Select
-            Next
+                            ' Safety guard:
+                            ' Never mutate a break-only replacement. This protects manual line breaks
+                            ' (ChrW(11)), paragraph breaks, and bullet/list paragraphs from being
+                            ' destroyed when the model returns vbLf instead of the original Word break.
+                            If hasDeleted AndAlso hasInserted AndAlso
+                               IsOnlyBreakCharacters(deletedCoreText) AndAlso
+                               IsOnlyBreakCharacters(insertedCoreText) Then
 
-            ' ======================================================================
-            ' STEP 9: Final cleanup — remove double spaces in final view
-            ' ======================================================================
-            ' ── FIX: Use doc.ActiveWindow (the target document's window), not wordApp.ActiveWindow
-            With doc.ActiveWindow.View
-                .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                .ShowRevisionsAndComments = False
-            End With
+                                Debug.WriteLine($"    Break-only replacement skipped; preserving original break(s). delete='{DebugVisualizeToken(deletedCoreText)}' insert='{DebugVisualizeToken(insertedCoreText)}'")
 
-            doc.TrackRevisions = False
-            Dim cleanupRange As Range = doc.Range(targetRange.Start, targetRange.End)
-            With cleanupRange.Find
-                .ClearFormatting()
-                .Replacement.ClearFormatting()
-                .Text = "  "
-                .Replacement.Text = " "
-                .Forward = True
-                .Wrap = WdFindWrap.wdFindStop
-                .Format = False
-                .MatchWildcards = False
-            End With
-            Do
-            Loop While cleanupRange.Find.Execute(Replace:=WdReplace.wdReplaceAll)
+                                Dim advanceTo As Integer = System.Math.Min(cursor.Start + deletedCoreText.Length, rangeEnd)
+                                cursor.SetRange(advanceTo, advanceTo)
 
-            With doc.ActiveWindow.View
-                .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
-                .ShowRevisionsAndComments = True
-            End With
+                                Continue Do
+                            End If
+
+                            Dim trailingWhitespace As String = Nothing
+                            Dim hasTrailingWhitespace As Boolean =
+                                ri < runs.Count AndAlso
+                                runs(ri).RunType = ChangeType.Unchanged AndAlso
+                                IsDiffWhitespaceToken(runs(ri).Text)
+
+                            If hasTrailingWhitespace Then
+                                trailingWhitespace = runs(ri).Text
+                            End If
+
+                            Dim leadingWhitespace As String = Nothing
+                            Dim hasLeadingWhitespace As Boolean =
+                                clusterStartIndex > 0 AndAlso
+                                runs(clusterStartIndex - 1).RunType = ChangeType.Unchanged AndAlso
+                                IsDiffWhitespaceToken(runs(clusterStartIndex - 1).Text)
+
+                            If hasLeadingWhitespace Then
+                                leadingWhitespace = runs(clusterStartIndex - 1).Text
+                            End If
+
+                            Dim operationCandidates As New List(Of SurgicalOperationCandidate)
+
+                            If hasDeleted AndAlso hasInserted Then
+                                ' Replacement:
+                                ' Prefer absorbing the following whitespace on both sides of the replacement.
+                                ' This avoids Word swallowing the separator after a tracked word replacement,
+                                ' but does not put spaces on both sides of the deleted revision.
+                                If hasTrailingWhitespace Then
+                                    operationCandidates.Add(New SurgicalOperationCandidate With {
+                                        .DeleteText = deletedCoreText & trailingWhitespace,
+                                        .InsertText = insertedCoreText & trailingWhitespace,
+                                        .SearchStart = cursor.Start,
+                                        .ConsumeTrailingWhitespaceRun = True
+                                    })
+                                End If
+
+                                operationCandidates.Add(New SurgicalOperationCandidate With {
+                                    .DeleteText = deletedCoreText,
+                                    .InsertText = insertedCoreText,
+                                    .SearchStart = cursor.Start,
+                                    .ConsumeTrailingWhitespaceRun = False
+                                })
+
+                            ElseIf hasDeleted Then
+                                ' Pure deletion:
+                                ' Only absorb whitespace when deleting word-like content.
+                                ' Do not absorb whitespace for punctuation-only deletions, e.g. "," -> "",
+                                ' because that would turn "FlyHigh, gemäss" into "FlyHighgemäss".
+                                If ShouldAbsorbWhitespaceForPureDeletion(deletedCoreText) AndAlso hasTrailingWhitespace Then
+                                    operationCandidates.Add(New SurgicalOperationCandidate With {
+                                        .DeleteText = deletedCoreText & trailingWhitespace,
+                                        .InsertText = String.Empty,
+                                        .SearchStart = cursor.Start,
+                                        .ConsumeTrailingWhitespaceRun = True
+                                    })
+                                End If
+
+                                operationCandidates.Add(New SurgicalOperationCandidate With {
+                                    .DeleteText = deletedCoreText,
+                                    .InsertText = String.Empty,
+                                    .SearchStart = cursor.Start,
+                                    .ConsumeTrailingWhitespaceRun = False
+                                })
+
+                                If ShouldAbsorbWhitespaceForPureDeletion(deletedCoreText) AndAlso hasLeadingWhitespace Then
+                                    operationCandidates.Add(New SurgicalOperationCandidate With {
+                                        .DeleteText = leadingWhitespace & deletedCoreText,
+                                        .InsertText = String.Empty,
+                                        .SearchStart = System.Math.Max(targetRange.Start, cursor.Start - leadingWhitespace.Length),
+                                        .ConsumeTrailingWhitespaceRun = False
+                                    })
+                                End If
+
+                            ElseIf hasInserted Then
+                                operationCandidates.Add(New SurgicalOperationCandidate With {
+                                    .DeleteText = String.Empty,
+                                    .InsertText = insertedCoreText,
+                                    .SearchStart = cursor.Start,
+                                    .ConsumeTrailingWhitespaceRun = False
+                                })
+                            End If
+
+                            Debug.WriteLine($"    Cluster delete-core='{DebugVisualizeToken(deletedCoreText)}' insert-core='{DebugVisualizeToken(insertedCoreText)}'")
+
+                            Dim operationSucceeded As Boolean = False
+                            Dim appliedOperation As SurgicalOperationCandidate = Nothing
+
+                            For Each op As SurgicalOperationCandidate In operationCandidates
+                                Debug.WriteLine($"    Trying operation delete='{DebugVisualizeToken(op.DeleteText)}' insert='{DebugVisualizeToken(op.InsertText)}' from {op.SearchStart} to {rangeEnd}")
+
+                                If String.IsNullOrEmpty(op.DeleteText) Then
+                                    appliedOperation = op
+                                    operationSucceeded = True
+                                    Exit For
+                                End If
+
+                                Dim candidateRange As Range = doc.Range(op.SearchStart, rangeEnd)
+                                Dim candidateWasTruncated As Boolean = False
+
+                                If ExecuteWordFind(candidateRange, op.DeleteText, candidateWasTruncated, maxFindTextLength) Then
+                                    If candidateWasTruncated Then
+                                        Dim fullEnd As Integer = candidateRange.Start + op.DeleteText.Length
+                                        If fullEnd > rangeEnd Then fullEnd = rangeEnd
+                                        candidateRange.SetRange(candidateRange.Start, fullEnd)
+                                    End If
+
+                                    Dim deleteStart As Integer = candidateRange.Start
+
+                                    doc.TrackRevisions = True
+                                    candidateRange.Delete()
+                                    doc.TrackRevisions = False
+
+                                    cursor.SetRange(deleteStart, deleteStart)
+                                    rangeEnd = targetRange.End
+
+                                    appliedOperation = op
+                                    operationSucceeded = True
+                                    Exit For
+                                End If
+                            Next
+
+                            If Not operationSucceeded Then
+                                Debug.WriteLine($"SurgicalMarkup: Cluster operation not applied. Delete='{DebugVisualizeToken(deletedCoreText)}' Insert='{DebugVisualizeToken(insertedCoreText)}'")
+                                Continue Do
+                            End If
+
+                            If appliedOperation.ConsumeTrailingWhitespaceRun Then
+                                ri += 1
+                            End If
+
+                            If Not String.IsNullOrEmpty(appliedOperation.InsertText) Then
+                                cursor.Collapse(WdCollapseDirection.wdCollapseStart)
+
+                                doc.TrackRevisions = True
+                                cursor.InsertAfter(appliedOperation.InsertText)
+                                doc.TrackRevisions = False
+
+                                cursor.SetRange(cursor.End, cursor.End)
+                                rangeEnd = targetRange.End
+                            End If
+
+                        Case Else
+                            Debug.WriteLine($"SurgicalMarkup: Unexpected ChangeType '{run.RunType}' at run {ri}")
+                            ri += 1
+
+                    End Select
+                Loop
+
+                doc.TrackRevisions = False
+                CollapseDoubleSpacesInFinalView(doc, targetRange.Start, targetRange.End)
+            End Using
 
         Catch ex As System.Exception
             Debug.WriteLine("SurgicalMarkup error: " & ex.Message & vbCrLf & ex.StackTrace)
@@ -3408,6 +3603,765 @@ Partial Public Class ThisAddIn
             wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
         End Try
     End Sub
+
+    Public Sub ApplySurgicalReplacement(originalText As String, newText As String, targetRange As Range, Optional trailingCR As Boolean = False)
+        CompareAndInsertSurgical(originalText, newText, targetRange, trailingCR)
+    End Sub
+
+    ''' <summary>
+    ''' Represents one candidate surgical edit operation for a diff cluster.
+    ''' Stores the text to delete, the text to insert, the search start position,
+    ''' and whether a trailing whitespace token should be consumed after success.
+    ''' </summary>
+    Private Class SurgicalOperationCandidate
+        Public Property DeleteText As String
+        Public Property InsertText As String
+        Public Property SearchStart As Integer
+        Public Property ConsumeTrailingWhitespaceRun As Boolean
+    End Class
+
+    ''' <summary>
+    ''' Determines whether a pure deletion should absorb one adjacent whitespace run.
+    ''' Whitespace is absorbed only for word-like deletions so that accepting the
+    ''' tracked deletion does not leave double spaces. Punctuation-only deletions
+    ''' deliberately do not absorb whitespace.
+    ''' </summary>
+    ''' <param name="deletedText">Normalized deleted text for the cluster.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when adjacent whitespace should be absorbed;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function ShouldAbsorbWhitespaceForPureDeletion(ByVal deletedText As String) As Boolean
+        If String.IsNullOrEmpty(deletedText) Then
+            Return False
+        End If
+
+        If IsOnlyBreakCharacters(deletedText) Then
+            Return False
+        End If
+
+        For Each ch As Char In deletedText
+            If Char.IsLetterOrDigit(ch) Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' Checks whether the supplied text consists only of break characters
+    ''' used by Word processing in this file, namely carriage return, line feed,
+    ''' or manual line break (<c>ChrW(11)</c>).
+    ''' </summary>
+    ''' <param name="value">Text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the text contains only break characters;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function IsOnlyBreakCharacters(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then
+            Return False
+        End If
+
+        For Each ch As Char In value
+            If ch <> ControlChars.Cr AndAlso
+               ch <> ControlChars.Lf AndAlso
+               ch <> ChrW(11) Then
+
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
+
+    ''' <summary>
+    ''' Reprojects the original break-character sequence onto revised text.
+    ''' This preserves the original mix of paragraph breaks, line feeds,
+    ''' and manual line breaks after LLM post-processing, provided that the
+    ''' number of break slots still matches after trimming trailing extras.
+    ''' </summary>
+    ''' <param name="originalText">Original source text whose break characters must be preserved.</param>
+    ''' <param name="revisedText">Revised text returned by the model.</param>
+    ''' <returns>
+    ''' The revised text with original break characters restored where possible;
+    ''' otherwise the unchanged revised text.
+    ''' </returns>
+    Private Shared Function ReprojectOriginalBreakCharacters(ByVal originalText As String, ByVal revisedText As String) As String
+        If String.IsNullOrEmpty(originalText) OrElse String.IsNullOrEmpty(revisedText) Then
+            Return revisedText
+        End If
+
+        Dim originalBreaks As List(Of String) = ExtractBreakTokens(originalText)
+        If originalBreaks.Count = 0 Then
+            Return revisedText
+        End If
+
+        Dim revisedBreaks As List(Of String) = ExtractBreakTokens(revisedText)
+        Dim revisedParts As List(Of String) = SplitTextByBreakTokens(revisedText)
+
+        ' LLMs often add one or more trailing line breaks. Remove only surplus
+        ' trailing breaks where the trailing text part is empty.
+        Do While revisedBreaks.Count > originalBreaks.Count AndAlso
+                 revisedParts.Count > 1 AndAlso
+                 revisedParts(revisedParts.Count - 1).Length = 0
+
+            revisedParts.RemoveAt(revisedParts.Count - 1)
+            revisedBreaks.RemoveAt(revisedBreaks.Count - 1)
+        Loop
+
+        ' Existing post-processing may have trimmed a trailing break. If the original
+        ' had trailing breaks, restore missing trailing break slots without changing text.
+        Do While revisedBreaks.Count < originalBreaks.Count AndAlso
+                 TextEndsWithBreak(originalText)
+
+            revisedBreaks.Add(String.Empty)
+            revisedParts.Add(String.Empty)
+        Loop
+
+        If revisedBreaks.Count <> originalBreaks.Count Then
+            Debug.WriteLine($"BreakReproject skipped: original count={originalBreaks.Count}, revised count={revisedBreaks.Count}")
+            Return revisedText
+        End If
+
+        Dim sb As New System.Text.StringBuilder(revisedText.Length + originalBreaks.Sum(Function(b) b.Length))
+
+        For i As Integer = 0 To originalBreaks.Count - 1
+            If i < revisedParts.Count Then
+                sb.Append(revisedParts(i))
+            End If
+
+            sb.Append(originalBreaks(i))
+        Next
+
+        If revisedParts.Count > originalBreaks.Count Then
+            sb.Append(revisedParts(originalBreaks.Count))
+        End If
+
+        Dim result As String = sb.ToString()
+        Debug.WriteLine($"BreakReproject applied: break count={originalBreaks.Count}")
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Splits text into content segments separated by break tokens.
+    ''' Break tokens themselves are not returned; each list element represents
+    ''' the text between two consecutive breaks.
+    ''' </summary>
+    ''' <param name="value">Text to split.</param>
+    ''' <returns>A list of non-break text segments in source order.</returns>
+
+    Private Shared Function SplitTextByBreakTokens(ByVal value As String) As List(Of String)
+        Dim result As New List(Of String)
+        Dim sb As New System.Text.StringBuilder()
+
+        If String.IsNullOrEmpty(value) Then
+            result.Add(String.Empty)
+            Return result
+        End If
+
+        Dim i As Integer = 0
+        Do While i < value.Length
+            Dim ch As Char = value.Chars(i)
+
+            If ch = ControlChars.Cr Then
+                result.Add(sb.ToString())
+                sb.Clear()
+
+                If i + 1 < value.Length AndAlso value.Chars(i + 1) = ControlChars.Lf Then
+                    i += 2
+                Else
+                    i += 1
+                End If
+
+            ElseIf ch = ControlChars.Lf OrElse ch = ChrW(11) Then
+                result.Add(sb.ToString())
+                sb.Clear()
+                i += 1
+
+            Else
+                sb.Append(ch)
+                i += 1
+            End If
+        Loop
+
+        result.Add(sb.ToString())
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Determines whether the supplied text ends with any supported break character,
+    ''' including carriage return, line feed, or manual line break (<c>ChrW(11)</c>).
+    ''' </summary>
+    ''' <param name="value">Text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the text ends with a break character;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function TextEndsWithBreak(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+
+        Dim lastChar As Char = value.Chars(value.Length - 1)
+        Return lastChar = ControlChars.Cr OrElse
+               lastChar = ControlChars.Lf OrElse
+               lastChar = ChrW(11)
+    End Function
+
+
+    ''' <summary>
+    ''' Extracts all break tokens from the supplied text while preserving their original form,
+    ''' including CRLF, CR, LF, and Word manual line breaks (<c>ChrW(11)</c>).
+    ''' </summary>
+    ''' <param name="value">Input text to scan for break characters.</param>
+    ''' <returns>A list of break tokens in source order.</returns>
+
+    Private Shared Function ExtractBreakTokens(ByVal value As String) As List(Of String)
+        Dim result As New List(Of String)
+
+        If String.IsNullOrEmpty(value) Then
+            Return result
+        End If
+
+        Dim i As Integer = 0
+        Do While i < value.Length
+            Dim ch As Char = value.Chars(i)
+
+            If ch = ControlChars.Cr Then
+                If i + 1 < value.Length AndAlso value.Chars(i + 1) = ControlChars.Lf Then
+                    result.Add(vbCrLf)
+                    i += 2
+                Else
+                    result.Add(vbCr)
+                    i += 1
+                End If
+            ElseIf ch = ControlChars.Lf Then
+                result.Add(vbLf)
+                i += 1
+            ElseIf ch = ChrW(11) Then
+                result.Add(ChrW(11).ToString())
+                i += 1
+            Else
+                i += 1
+            End If
+        Loop
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Normalizes text for Word <c>Find</c> operations by converting all line-ending
+    ''' variants to Word's internal paragraph marker representation.
+    ''' </summary>
+    ''' <param name="value">Input text to normalize.</param>
+    ''' <returns>Text normalized for Word search operations.</returns>
+
+    Private Shared Function NormalizeForWordFind(ByVal value As String) As String
+        If String.IsNullOrEmpty(value) Then
+            Return String.Empty
+        End If
+
+        Return value.Replace(vbCrLf, vbCr).Replace(vbLf, vbCr)
+    End Function
+
+    ''' <summary>
+    ''' Normalizes a line-break run for range-based comparisons against Word text.
+    ''' Paragraph break variants are converted to Word's internal paragraph marker,
+    ''' while manual line breaks are preserved unchanged.
+    ''' </summary>
+    ''' <param name="value">The break run to normalize.</param>
+    ''' <returns>A normalized break sequence suitable for Word range matching.</returns>
+
+    Private Shared Function NormalizeLineBreakRunForWordRange(ByVal value As String) As String
+        If String.IsNullOrEmpty(value) Then
+            Return String.Empty
+        End If
+
+        Dim manualLineBreak As String = ChrW(11).ToString()
+
+        Return value.
+            Replace(manualLineBreak, manualLineBreak).
+            Replace(vbCrLf, vbCr).
+            Replace(vbLf, vbCr)
+    End Function
+
+
+    ''' <summary>
+    ''' Executes a Word <c>Find</c> on the supplied range using a plain-text search.
+    ''' Long search text is truncated to the configured maximum length to avoid
+    ''' expensive or fragile searches on very large fragments.
+    ''' </summary>
+    ''' <param name="searchRange">The Word range to search.</param>
+    ''' <param name="findText">The text to find.</param>
+    ''' <param name="wasTruncated">
+    ''' Set to <see langword="True"/> when <paramref name="findText"/> was truncated
+    ''' before executing the search.
+    ''' </param>
+    ''' <param name="maxLength">Maximum search-text length allowed for the operation.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the text was found; otherwise <see langword="False"/>.
+    ''' </returns>
+
+    Private Shared Function ExecuteWordFind(
+        ByVal searchRange As Range,
+        ByVal findText As String,
+        ByRef wasTruncated As Boolean,
+        Optional ByVal maxLength As Integer = 200) As Boolean
+
+        wasTruncated = False
+
+        If searchRange Is Nothing OrElse String.IsNullOrEmpty(findText) Then
+            Return False
+        End If
+
+        If findText.Length > maxLength Then
+            findText = findText.Substring(0, maxLength)
+            wasTruncated = True
+        End If
+
+        With searchRange.Find
+            .ClearFormatting()
+            .Text = findText
+            .Forward = True
+            .Wrap = WdFindWrap.wdFindStop
+            .Format = False
+            .MatchCase = False
+            .MatchWholeWord = False
+            .MatchWildcards = False
+            Return .Execute()
+        End With
+    End Function
+
+
+    ''' <summary>
+    ''' Collapses visible double spaces within the edited range while the document is shown in
+    ''' Final view, preventing whitespace artifacts left behind by tracked deletions or replacements.
+    ''' </summary>
+    ''' <param name="doc">Document containing the edited range.</param>
+    ''' <param name="startPos">Approximate start of the cleanup window.</param>
+    ''' <param name="endPos">Approximate end of the cleanup window.</param>
+    Private Shared Sub CollapseDoubleSpacesInFinalView(
+        ByVal doc As Word.Document,
+        ByVal startPos As Integer,
+        ByVal endPos As Integer)
+
+        If doc Is Nothing Then
+            Return
+        End If
+
+        Dim safeStart As Integer = System.Math.Max(doc.Content.Start, System.Math.Min(startPos - 8, doc.Content.End))
+        Dim safeEnd As Integer = System.Math.Max(safeStart, System.Math.Min(endPos + 8, doc.Content.End))
+
+        With doc.ActiveWindow.View
+            .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
+            .ShowRevisionsAndComments = False
+        End With
+
+        Dim cleanupRange As Range = doc.Range(safeStart, safeEnd)
+        With cleanupRange.Find
+            .ClearFormatting()
+            .Replacement.ClearFormatting()
+            .Text = "  "
+            .Replacement.Text = " "
+            .Forward = True
+            .Wrap = WdFindWrap.wdFindStop
+            .Format = False
+            .MatchWildcards = False
+        End With
+
+        cleanupRange.Find.Execute(Replace:=WdReplace.wdReplaceAll)
+
+        With doc.ActiveWindow.View
+            .RevisionsView = WdRevisionsView.wdRevisionsViewFinal
+            .ShowRevisionsAndComments = True
+        End With
+    End Sub
+
+    ''' <summary>
+    ''' Determines whether a token is one of the synthetic placeholder tokens created for the
+    ''' surgical diff pipeline, e.g. <c>[[MF0]]</c>.
+    ''' </summary>
+    ''' <param name="value">Token text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the token represents a protected placeholder;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function IsDiffPlaceholderToken(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+        If value.Length < 7 Then Return False
+        If Not value.StartsWith("[[MF", StringComparison.Ordinal) Then Return False
+        If Not value.EndsWith("]]", StringComparison.Ordinal) Then Return False
+
+        Dim tokenIndexText As String = value.Substring(4, value.Length - 6)
+        Dim tokenIndex As Integer
+        Return Integer.TryParse(tokenIndexText, tokenIndex)
+    End Function
+
+    ''' <summary>
+    ''' Determines whether a token represents a structural break unit used by the surgical diff
+    ''' pipeline, including normalized break markers and their restored runtime equivalents.
+    ''' </summary>
+    ''' <param name="value">Token text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the token is treated as a line-break token;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function IsDiffLineBreakToken(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+
+        Return value = "{vbCrLf}" OrElse
+               value = "{vbCr}" OrElse
+               value = "{vbLf}" OrElse
+               value = "{vbVt}" OrElse
+               value = vbCrLf OrElse
+               value = vbCr OrElse
+               value = vbLf OrElse
+               value = ChrW(11).ToString()
+    End Function
+
+
+    ''' <summary>
+    ''' Tokenizes text into diff units used by the surgical diff pipeline.
+    ''' Tokens include placeholder markers, normalized break markers, whitespace,
+    ''' word-like runs, and single-character punctuation.
+    ''' </summary>
+    ''' <param name="text">Text to tokenize.</param>
+    ''' <returns>A list of diff tokens in source order.</returns>
+    Private Shared Function TokenizeDiffUnits(ByVal text As String) As List(Of String)
+        Dim result As New List(Of String)
+
+        If String.IsNullOrEmpty(text) Then
+            Return result
+        End If
+
+        Dim pattern As String =
+            "\[\[MF\d+\]\]|\{vbCrLf\}|\{vbCr\}|\{vbLf\}|\{vbVt\}|\s+|[\p{L}\p{M}\p{N}_]+|[^\s]"
+
+        For Each m As Match In Regex.Matches(text, pattern, RegexOptions.Singleline)
+            If m.Success AndAlso m.Length > 0 Then
+                result.Add(m.Value)
+            End If
+        Next
+
+        Return result
+    End Function
+
+    ''' <summary>
+    ''' Determines whether a token consists only of horizontal whitespace
+    ''' that should be treated as a standalone diff token.
+    ''' </summary>
+    ''' <param name="value">Token text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the token contains only spaces or tabs;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function IsDiffWhitespaceToken(ByVal value As String) As Boolean
+        If String.IsNullOrEmpty(value) Then Return False
+
+        For Each ch As Char In value
+            If ch <> " "c AndAlso ch <> vbTab Then
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Advances the surgical cursor past a special placeholder already present in the
+    ''' Word document, such as field, footnote, endnote, or paragraph-format markers.
+    ''' This keeps unchanged placeholders aligned with the live document text.
+    ''' </summary>
+    ''' <param name="doc">The Word document being edited.</param>
+    ''' <param name="cursor">The current live cursor range used by the surgical patcher.</param>
+    ''' <param name="rangeEnd">Upper bound of the editable target range.</param>
+    ''' <param name="placeholderText">The placeholder token from the diff stream.</param>
+    Private Shared Sub AdvanceCursorPastSpecialPlaceholder(
+        ByVal doc As Word.Document,
+        ByVal cursor As Word.Range,
+        ByVal rangeEnd As Integer,
+        ByVal placeholderText As String)
+
+        If doc Is Nothing OrElse cursor Is Nothing OrElse String.IsNullOrWhiteSpace(placeholderText) Then
+            Return
+        End If
+
+        Dim kind As SpecialPlaceholderKind = SpecialPlaceholderKind.None
+        If Not TryGetSpecialPlaceholderKind(placeholderText, kind) Then
+            Return
+        End If
+
+        Select Case kind
+            Case SpecialPlaceholderKind.PFOR
+                Return
+
+            Case SpecialPlaceholderKind.WFNT, SpecialPlaceholderKind.WENT
+                Dim probeEnd As Integer = System.Math.Min(rangeEnd, cursor.Start + 2)
+                Dim pos As Integer = cursor.Start
+
+                Do While pos < probeEnd
+                    Dim probe As Word.Range = doc.Range(pos, System.Math.Min(pos + 1, rangeEnd))
+                    If probe.Text = ChrW(2) Then
+                        cursor.SetRange(pos + 1, pos + 1)
+                        Return
+                    End If
+                    pos += 1
+                Loop
+
+                Dim fallbackPos As Integer = System.Math.Min(cursor.Start + 1, rangeEnd)
+                cursor.SetRange(fallbackPos, fallbackPos)
+
+            Case SpecialPlaceholderKind.WFLD
+                Return
+        End Select
+    End Sub
+
+    ''' <summary>
+    ''' Determines whether a fully restored diff run consists of a single special placeholder
+    ''' such as a field, footnote, endnote, or paragraph-format marker.
+    ''' </summary>
+    ''' <param name="value">Run text to inspect.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the run is exactly one recognized special placeholder;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function IsSpecialPlaceholderRun(value As String) As Boolean
+        Dim kind As SpecialPlaceholderKind = SpecialPlaceholderKind.None
+        Return TryGetSpecialPlaceholderKind(value, kind)
+    End Function
+
+    ''' <summary>
+    ''' Parses the placeholder kind prefix of a restored placeholder token and maps it to the
+    ''' internal <c>SpecialPlaceholderKind</c> enumeration.
+    ''' </summary>
+    ''' <param name="value">Placeholder text to inspect.</param>
+    ''' <param name="kind">Receives the resolved placeholder kind when parsing succeeds.</param>
+    ''' <returns>
+    ''' <see langword="True"/> when the placeholder kind could be recognized;
+    ''' otherwise <see langword="False"/>.
+    ''' </returns>
+    Private Shared Function TryGetSpecialPlaceholderKind(
+        ByVal value As String,
+        ByRef kind As SpecialPlaceholderKind) As Boolean
+
+        kind = SpecialPlaceholderKind.None
+
+        If String.IsNullOrWhiteSpace(value) Then
+            Return False
+        End If
+
+        Dim s As String = value.Trim()
+
+        If s.Length < 10 Then
+            Return False
+        End If
+
+        If Not s.StartsWith("{{", StringComparison.Ordinal) OrElse Not s.EndsWith("}}", StringComparison.Ordinal) Then
+            Return False
+        End If
+
+        Dim colonPos As Integer = s.IndexOf(":"c)
+        If colonPos <= 2 Then
+            Return False
+        End If
+
+        Dim kindText As String = s.Substring(2, colonPos - 2)
+
+        Select Case kindText
+            Case "WFLD"
+                kind = SpecialPlaceholderKind.WFLD
+            Case "WFNT"
+                kind = SpecialPlaceholderKind.WFNT
+            Case "WENT"
+                kind = SpecialPlaceholderKind.WENT
+            Case "PFOR"
+                kind = SpecialPlaceholderKind.PFOR
+            Case Else
+                Return False
+        End Select
+
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' Converts spaces and control characters into a debug-visible representation so token and run
+    ''' traces can be read unambiguously in the Output window.
+    ''' </summary>
+    ''' <param name="value">Text to visualize for diagnostics.</param>
+    ''' <returns>A printable diagnostic representation of the supplied text.</returns>
+    <Conditional("DEBUG")>
+    Private Shared Function DebugVisualizeToken(ByVal value As String) As String
+        If value Is Nothing Then Return "<Nothing>"
+
+        Return value.
+            Replace(" ", "·").
+            Replace(vbTab, "\t").
+            Replace(vbCrLf, "\r\n").
+            Replace(vbCr, "\r").
+            Replace(vbLf, "\n")
+    End Function
+
+
+    ''' <summary>
+    ''' Writes a numbered diagnostic dump of diff tokens to the debug output.
+    ''' </summary>
+    ''' <param name="caption">Heading written before the token list.</param>
+    ''' <param name="tokens">Token sequence to dump.</param>
+    <Conditional("DEBUG")>
+    Private Shared Sub DebugDumpTokenList(ByVal caption As String, ByVal tokens As IEnumerable(Of String))
+        Debug.WriteLine("==== " & caption & " ====")
+
+        Dim i As Integer = 0
+        For Each token As String In tokens
+            Debug.WriteLine($"{i:000}: '{DebugVisualizeToken(token)}'")
+            i += 1
+        Next
+
+        If i = 0 Then
+            Debug.WriteLine("<empty>")
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Writes a numbered diagnostic dump of diff runs to the debug output.
+    ''' </summary>
+    ''' <param name="caption">Heading written before the run list.</param>
+    ''' <param name="runs">Run sequence to dump.</param>
+    <Conditional("DEBUG")>
+    Private Shared Sub DebugDumpRuns(ByVal caption As String, ByVal runs As IEnumerable(Of DiffRun))
+        Debug.WriteLine("==== " & caption & " ====")
+
+        Dim i As Integer = 0
+        For Each run As DiffRun In runs
+            Debug.WriteLine($"{i:000}: {run.RunType} => '{DebugVisualizeToken(run.Text)}'")
+            i += 1
+        Next
+
+        If i = 0 Then
+            Debug.WriteLine("<empty>")
+        End If
+    End Sub
+
+
+    ''' <summary>
+    ''' Replaces all protected placeholder payloads in both texts with stable shared placeholder
+    ''' tokens so the diff engine treats them as atomic units.
+    ''' </summary>
+    ''' <param name="text1">Original text to rewrite in place.</param>
+    ''' <param name="text2">Revised text to rewrite in place.</param>
+    ''' <returns>
+    ''' A list mapping placeholder-token indexes back to their original placeholder text.
+    ''' </returns>
+    Private Shared Function TokenizeSpecialPlaceholdersForDiff(
+        ByRef text1 As String,
+        ByRef text2 As String) As List(Of String)
+
+        Dim placeholdersByIndex As New List(Of String)
+        Dim tokenByPlaceholder As New Dictionary(Of String, String)(StringComparer.Ordinal)
+
+        Dim nextIndex As Integer = 0
+
+        Dim replacePlaceholder As MatchEvaluator =
+            Function(m As Match) As String
+                Dim placeholder As String = m.Value
+                Dim token As String = Nothing
+
+                If Not tokenByPlaceholder.TryGetValue(placeholder, token) Then
+                    token = $"[[MF{nextIndex}]]"
+                    tokenByPlaceholder.Add(placeholder, token)
+                    placeholdersByIndex.Add(placeholder)
+                    nextIndex += 1
+                End If
+
+                Return token
+            End Function
+
+        text1 = System.Text.RegularExpressions.Regex.Replace(
+            text1,
+            "\{\{.*?\}\}",
+            replacePlaceholder,
+            RegexOptions.Singleline)
+
+        text2 = System.Text.RegularExpressions.Regex.Replace(
+            text2,
+            "\{\{.*?\}\}",
+            replacePlaceholder,
+            RegexOptions.Singleline)
+
+        Return placeholdersByIndex
+    End Function
+
+    ''' <summary>
+    ''' Restores synthetic placeholder tokens such as <c>[[MF0]]</c> back to their original
+    ''' placeholder payloads after diff processing.
+    ''' </summary>
+    ''' <param name="input">Text containing synthetic placeholder tokens.</param>
+    ''' <param name="placeholdersByIndex">Index-to-placeholder mapping created during tokenization.</param>
+    ''' <returns>The input text with all known placeholder tokens restored.</returns>
+    Private Shared Function RestoreTokenizedSpecialPlaceholders(
+        ByVal input As String,
+        ByVal placeholdersByIndex As List(Of String)) As String
+
+        If String.IsNullOrEmpty(input) OrElse placeholdersByIndex Is Nothing OrElse placeholdersByIndex.Count = 0 Then
+            Return input
+        End If
+
+        For idx As Integer = 0 To placeholdersByIndex.Count - 1
+            input = input.Replace($"[[MF{idx}]]", placeholdersByIndex(idx))
+        Next
+
+        Return input
+    End Function
+
+    Private Structure InlineCharFormatSnapshot
+        Public FontName As String
+        Public FontSize As Single?
+        Public Bold As Integer?
+        Public Italic As Integer?
+        Public Underline As Word.WdUnderline?
+        Public Color As Long?
+    End Structure
+
+    Private Shared Function CaptureInlineCharFormatSnapshot(sourceRange As Word.Range) As InlineCharFormatSnapshot
+        Dim result As New InlineCharFormatSnapshot
+
+        If sourceRange Is Nothing Then Return result
+
+        Try
+            With sourceRange.Font
+                If Not String.IsNullOrWhiteSpace(.Name) AndAlso .Name <> CStr(Word.WdConstants.wdUndefined) Then
+                    result.FontName = .Name
+                End If
+
+                If .Size <> CSng(Word.WdConstants.wdUndefined) AndAlso .Size > 0 Then
+                    result.FontSize = .Size
+                End If
+
+                If .Bold <> Word.WdConstants.wdUndefined Then
+                    result.Bold = .Bold
+                End If
+
+                If .Italic <> Word.WdConstants.wdUndefined Then
+                    result.Italic = .Italic
+                End If
+
+                If .Underline <> Word.WdConstants.wdUndefined Then
+                    result.Underline = CType(.Underline, Word.WdUnderline)
+                End If
+
+                If .Color <> Word.WdConstants.wdUndefined Then
+                    result.Color = .Color
+                End If
+            End With
+        Catch ex As System.Exception
+            Debug.WriteLine("CaptureInlineCharFormatSnapshot failed: " & ex.Message)
+        End Try
+
+        Return result
+    End Function
+
 
     ''' <summary>
     ''' Parses markup tags ([INS_START]/[DEL_START]) and applies them to Word with track changes, stripping merge fields from deleted runs.
@@ -3428,138 +4382,142 @@ Partial Public Class ThisAddIn
         Dim endPosNoCR As Integer
 
         Try
+
             wordApp.ScreenUpdating = False
             doc.TrackRevisions = False
 
+            Using BeginMarkupAuthorScope(wordApp)
 
-            ' A) Preserve the trailing ¶ so the next paragraph never joins in
-            docStart = doc.Content.Start
-            startPos = targetRange.Start
-            endPosNoCR = targetRange.End
+                ' A) Preserve the trailing ¶ so the next paragraph never joins in
+                docStart = doc.Content.Start
+                startPos = targetRange.Start
+                endPosNoCR = targetRange.End
 
-            If endPosNoCR > docStart Then
-                Dim checkRange As Microsoft.Office.Interop.Word.Range =
-                doc.Range(endPosNoCR - 1, endPosNoCR)
-                If checkRange.Text = vbCr Then
-                    endPosNoCR -= 1
-                End If
-            End If
-
-            If endPosNoCR >= startPos Then
-                doc.Range(startPos, endPosNoCR).Delete()
-            End If
-
-            targetRange.SetRange(startPos, startPos)
-
-            ' Merge contiguous INS- and DEL-tags with only spaces in between
-            Dim txt As String = inputText
-            txt = RemoveMergeFormatFromBraces(txt)
-
-            ' Strip merge-fields out of **closed** delete-runs:
-            txt = System.Text.RegularExpressions.Regex.Replace(
-            txt,
-            "\[DEL_START\]([\s\S]*?)\[DEL_END\]",
-            Function(m As System.Text.RegularExpressions.Match) As String
-                Return "[DEL_START]" &
-                       System.Text.RegularExpressions.Regex.Replace(
-                           m.Groups(1).Value,
-                           "\{\{(?:WFLD|WFNT|WENT|PFOR):.*?\}\}",
-                           String.Empty
-                       ) &
-                       "[DEL_END]"
-            End Function,
-            System.Text.RegularExpressions.RegexOptions.Singleline
-        )
-
-            ' Strip merge-fields out of **open** delete-runs (no closing tag),
-            ' but only if really no [DEL_END] follows:
-            txt = System.Text.RegularExpressions.Regex.Replace(
-            txt,
-            "\[DEL_START\]((?:(?!\[DEL_END\]).)*)$",
-            Function(m As System.Text.RegularExpressions.Match) As String
-                Return "[DEL_START]" &
-                       System.Text.RegularExpressions.Regex.Replace(
-                           m.Groups(1).Value,
-                           "\{\{(?:WFLD|WFNT|WENT|PFOR):.*?\}\}",
-                           String.Empty
-                       )
-            End Function,
-            System.Text.RegularExpressions.RegexOptions.Singleline
-        )
-
-            Debug.WriteLine("Stripped txt1 = " & txt)
-
-            txt = System.Text.RegularExpressions.Regex.Replace(txt, "\[INS_END\](\s*)\[INS_START\]", "$1")
-            txt = System.Text.RegularExpressions.Regex.Replace(txt, "\[DEL_END\](\s*)\[DEL_START\]", "$1")
-
-            Debug.WriteLine("Stripped txt2 = " & txt)
-
-            While txt.Length > 0
-                System.Windows.Forms.Application.DoEvents()
-                If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit While
-
-                ' Locate next opening tag
-                Dim insPos As Integer = txt.IndexOf("[INS_START]", StringComparison.Ordinal)
-                Dim delPos As Integer = txt.IndexOf("[DEL_START]", StringComparison.Ordinal)
-
-                Dim nextTagPos As Integer
-                Dim tagType As String = Nothing
-                If insPos = -1 AndAlso delPos = -1 Then
-                    nextTagPos = -1
-                ElseIf insPos = -1 OrElse (delPos <> -1 AndAlso delPos < insPos) Then
-                    nextTagPos = delPos : tagType = "DEL"
-                Else
-                    nextTagPos = insPos : tagType = "INS"
+                If endPosNoCR > docStart Then
+                    Dim checkRange As Microsoft.Office.Interop.Word.Range =
+                    doc.Range(endPosNoCR - 1, endPosNoCR)
+                    If checkRange.Text = vbCr Then
+                        endPosNoCR -= 1
+                    End If
                 End If
 
-                ' Plain text before the next tag
-                If nextTagPos = -1 OrElse nextTagPos > 0 Then
-                    Dim plain As String = If(nextTagPos = -1, txt, txt.Substring(0, nextTagPos))
-                    If plain.Length > 0 Then
+                If endPosNoCR >= startPos Then
+                    doc.Range(startPos, endPosNoCR).Delete()
+                End If
+
+                targetRange.SetRange(startPos, startPos)
+
+                ' Merge contiguous INS- and DEL-tags with only spaces in between
+                Dim txt As String = inputText
+                txt = RemoveMergeFormatFromBraces(txt)
+
+                ' Strip merge-fields out of **closed** delete-runs:
+                txt = System.Text.RegularExpressions.Regex.Replace(
+                txt,
+                "\[DEL_START\]([\s\S]*?)\[DEL_END\]",
+                Function(m As System.Text.RegularExpressions.Match) As String
+                    Return "[DEL_START]" &
+                           System.Text.RegularExpressions.Regex.Replace(
+                               m.Groups(1).Value,
+                               "\{\{(?:WFLD|WFNT|WENT|PFOR):.*?\}\}",
+                               String.Empty
+                           ) &
+                           "[DEL_END]"
+                End Function,
+                System.Text.RegularExpressions.RegexOptions.Singleline
+            )
+
+                ' Strip merge-fields out of **open** delete-runs (no closing tag),
+                ' but only if really no [DEL_END] follows:
+                txt = System.Text.RegularExpressions.Regex.Replace(
+                txt,
+                "\[DEL_START\]((?:(?!\[DEL_END\]).)*)$",
+                Function(m As System.Text.RegularExpressions.Match) As String
+                    Return "[DEL_START]" &
+                           System.Text.RegularExpressions.Regex.Replace(
+                               m.Groups(1).Value,
+                               "\{\{(?:WFLD|WFNT|WENT|PFOR):.*?\}\}",
+                               String.Empty
+                           )
+                End Function,
+                System.Text.RegularExpressions.RegexOptions.Singleline
+            )
+
+                Debug.WriteLine("Stripped txt1 = " & txt)
+
+                txt = System.Text.RegularExpressions.Regex.Replace(txt, "\[INS_END\](\s*)\[INS_START\]", "$1")
+                txt = System.Text.RegularExpressions.Regex.Replace(txt, "\[DEL_END\](\s*)\[DEL_START\]", "$1")
+
+                Debug.WriteLine("Stripped txt2 = " & txt)
+
+                While txt.Length > 0
+                    System.Windows.Forms.Application.DoEvents()
+                    If (GetAsyncKeyState(VK_ESCAPE) And &H8000) <> 0 Then Exit While
+
+                    ' Locate next opening tag
+                    Dim insPos As Integer = txt.IndexOf("[INS_START]", StringComparison.Ordinal)
+                    Dim delPos As Integer = txt.IndexOf("[DEL_START]", StringComparison.Ordinal)
+
+                    Dim nextTagPos As Integer
+                    Dim tagType As String = Nothing
+                    If insPos = -1 AndAlso delPos = -1 Then
+                        nextTagPos = -1
+                    ElseIf insPos = -1 OrElse (delPos <> -1 AndAlso delPos < insPos) Then
+                        nextTagPos = delPos : tagType = "DEL"
+                    Else
+                        nextTagPos = insPos : tagType = "INS"
+                    End If
+
+                    ' Plain text before the next tag
+                    If nextTagPos = -1 OrElse nextTagPos > 0 Then
+                        Dim plain As String = If(nextTagPos = -1, txt, txt.Substring(0, nextTagPos))
+                        If plain.Length > 0 Then
+                            doc.TrackRevisions = False
+                            targetRange.InsertAfter(plain)
+                            targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
+                        End If
+                    End If
+                    If nextTagPos = -1 Then Exit While
+
+                    If tagType = "INS" Then
+                        ' INSERT block
+                        txt = txt.Substring(nextTagPos + "[INS_START]".Length)
+                        Dim endIns As Integer = txt.IndexOf("[INS_END]", StringComparison.Ordinal)
+                        Dim insText As String = If(endIns = -1, txt, txt.Substring(0, endIns))
+                        If endIns <> -1 Then txt = txt.Substring(endIns + "[INS_END]".Length)
+                        doc.TrackRevisions = True
+                        targetRange.InsertAfter(insText)
+                        targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                         doc.TrackRevisions = False
-                        targetRange.InsertAfter(plain)
+
+                    Else
+                        ' DELETION block
+                        txt = txt.Substring(nextTagPos + "[DEL_START]".Length)
+                        Dim endDel As Integer = txt.IndexOf("[DEL_END]", StringComparison.Ordinal)
+                        Dim delText As String = If(endDel = -1, txt, txt.Substring(0, endDel))
+                        If endDel <> -1 Then txt = txt.Substring(endDel + "[DEL_END]".Length)
+
+                        ' Absorb following space/CR
+                        If txt.StartsWith(" ") Then
+                            delText &= " " : txt = txt.Substring(1)
+                        ElseIf txt.StartsWith(vbCrLf) Then
+                            delText &= vbCrLf : txt = txt.Substring(2)
+                        ElseIf txt.StartsWith(vbCr) Then
+                            delText &= vbCr : txt = txt.Substring(1)
+                        End If
+
+                        ' a) Insert (silent)
+                        doc.TrackRevisions = False
+                        targetRange.Text = delText
+                        ' b) Delete (with tracking)
+                        doc.TrackRevisions = True
+                        targetRange.Delete()
+                        doc.TrackRevisions = False
                         targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
                     End If
-                End If
-                If nextTagPos = -1 Then Exit While
+                End While
 
-                If tagType = "INS" Then
-                    ' INSERT block
-                    txt = txt.Substring(nextTagPos + "[INS_START]".Length)
-                    Dim endIns As Integer = txt.IndexOf("[INS_END]", StringComparison.Ordinal)
-                    Dim insText As String = If(endIns = -1, txt, txt.Substring(0, endIns))
-                    If endIns <> -1 Then txt = txt.Substring(endIns + "[INS_END]".Length)
-                    doc.TrackRevisions = True
-                    targetRange.InsertAfter(insText)
-                    targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
-                    doc.TrackRevisions = False
-
-                Else
-                    ' DELETION block
-                    txt = txt.Substring(nextTagPos + "[DEL_START]".Length)
-                    Dim endDel As Integer = txt.IndexOf("[DEL_END]", StringComparison.Ordinal)
-                    Dim delText As String = If(endDel = -1, txt, txt.Substring(0, endDel))
-                    If endDel <> -1 Then txt = txt.Substring(endDel + "[DEL_END]".Length)
-
-                    ' Absorb following space/CR
-                    If txt.StartsWith(" ") Then
-                        delText &= " " : txt = txt.Substring(1)
-                    ElseIf txt.StartsWith(vbCrLf) Then
-                        delText &= vbCrLf : txt = txt.Substring(2)
-                    ElseIf txt.StartsWith(vbCr) Then
-                        delText &= vbCr : txt = txt.Substring(1)
-                    End If
-
-                    ' a) Insert (silent)
-                    doc.TrackRevisions = False
-                    targetRange.Text = delText
-                    ' b) Delete (with tracking)
-                    doc.TrackRevisions = True
-                    targetRange.Delete()
-                    doc.TrackRevisions = False
-                    targetRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
-                End If
-            End While
+            End Using
 
         Catch ex As System.Exception
             Debug.WriteLine("InsertMarkupText error: " & ex.Message & vbCrLf & inputText)
@@ -3580,22 +4538,19 @@ Partial Public Class ThisAddIn
             Dim insertedRange As Microsoft.Office.Interop.Word.Range =
             doc.Range(startPos, endPosInserted2)
 
-            ' Find/Replace for two spaces → one space
+            ' Find/Replace for runs of two or more spaces → one space
             With insertedRange.Find
                 .ClearFormatting()
                 .Replacement.ClearFormatting()
-                .Text = "  "    ' exactly two spaces
+                .Text = "[ ]{2,}"
                 .Replacement.Text = " "
                 .Forward = True
                 .Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
                 .Format = False
-                .MatchWildcards = False
+                .MatchWildcards = True
             End With
 
-            ' As long as a replacement still occurs, repeat
-            Do
-                ' Execute returns True if something was replaced
-            Loop While insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
+            insertedRange.Find.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceAll)
 
             With doc.ActiveWindow.View
                 .RevisionsView = Microsoft.Office.Interop.Word.WdRevisionsView.wdRevisionsViewFinal
@@ -3612,6 +4567,7 @@ Partial Public Class ThisAddIn
             targetRange.SetRange(startPos, endPosInserted)
             wordApp.Selection.SetRange(targetRange.Start, targetRange.End)
         End Try
+
     End Sub
 
 
@@ -4044,6 +5000,111 @@ Partial Public Class ThisAddIn
         End If
 
         Return String.Empty
+    End Function
+
+    ''' <summary>
+    ''' Restores the user's previous UI window and selection after processing temporarily moved
+    ''' focus away from the original editing context.
+    ''' </summary>
+    ''' <param name="app">Word application instance.</param>
+    ''' <param name="savedWindow">Previously active window.</param>
+    ''' <param name="savedSelection">Previously active selection range.</param>
+    Private Sub RestoreUiContext(ByVal app As Word.Application,
+                             ByVal savedWindow As Word.Window,
+                             ByVal savedSelection As Word.Range)
+        Try
+            If savedWindow IsNot Nothing Then
+                savedWindow.Activate()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreUiContext(window) failed: {ex.Message}")
+        End Try
+
+        Try
+            If savedSelection IsNot Nothing Then
+                savedSelection.Select()
+            End If
+        Catch ex As Exception
+            Debug.WriteLine($"RestoreUiContext(selection) failed: {ex.Message}")
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Reactivates the live Word UI context for the supplied processing range so subsequent
+    ''' write-back operations run against the intended document window and selection.
+    ''' </summary>
+    ''' <param name="targetRange">Range that should become the active processing selection.</param>
+    Private Sub ActivateProcessingContext(ByVal targetRange As Word.Range)
+        Try
+            If targetRange Is Nothing Then Return
+
+            Dim targetWindow As Word.Window = targetRange.Document.ActiveWindow
+            If targetWindow IsNot Nothing Then
+                targetWindow.Activate()
+            End If
+
+            targetRange.Select()
+        Catch ex As Exception
+            Debug.WriteLine($"ActivateProcessingContext failed: {ex.Message}")
+        End Try
+    End Sub
+
+    Private Shared Function TryResolveActiveComment(
+    ByVal Selection As Word.Selection,
+    ByRef activeComment As Word.Comment) As Boolean
+
+        activeComment = Nothing
+
+        If Selection Is Nothing OrElse Selection.Range Is Nothing Then Return False
+
+        Dim doc As Word.Document = Nothing
+        Try
+            doc = Selection.Range.Document
+        Catch
+            doc = Nothing
+        End Try
+        If doc Is Nothing Then Return False
+
+        Try
+            If Selection.StoryType = Word.WdStoryType.wdCommentsStory Then
+                For Each c As Word.Comment In doc.Comments
+                    If Selection.Range.Start >= c.Range.Start AndAlso
+                       Selection.Range.End <= c.Range.End Then
+                        activeComment = c
+                        Return True
+                    End If
+                Next
+            End If
+        Catch
+        End Try
+
+        Try
+            Dim cursorPos As Integer = Selection.Range.Start
+
+            For Each c As Word.Comment In doc.Comments
+                Dim anchor As Word.Range = Nothing
+
+                Try
+                    anchor = c.Scope
+                Catch
+                    Try
+                        anchor = c.Reference
+                    Catch
+                        anchor = Nothing
+                    End Try
+                End Try
+
+                If anchor IsNot Nothing AndAlso
+                   cursorPos >= anchor.Start AndAlso
+                   cursorPos <= anchor.End Then
+                    activeComment = c
+                    Return True
+                End If
+            Next
+        Catch
+        End Try
+
+        Return False
     End Function
 
 End Class

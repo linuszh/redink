@@ -143,6 +143,184 @@ Partial Public Class ThisAddIn
         Public Property IsEmpty As Boolean
     End Class
 
+
+    Private Shared Function IsRemoteDocumentPath(documentPath As String) As Boolean
+        If String.IsNullOrWhiteSpace(documentPath) Then
+            Return False
+        End If
+
+        Dim uri As Uri = Nothing
+        If Uri.TryCreate(documentPath, UriKind.Absolute, uri) Then
+            Return Not uri.IsFile
+        End If
+
+        Return documentPath.StartsWith("http://", StringComparison.OrdinalIgnoreCase) OrElse
+           documentPath.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+    End Function
+
+    Private Shared Function CreateDocumentCopyFromSavedSource(sourcePath As String, destinationPath As String, fileFormat As WdSaveFormat) As Boolean
+        Dim secondaryWordApp As Word.Application = Nothing
+        Dim secondaryDoc As Word.Document = Nothing
+
+        Try
+            If Not IsRemoteDocumentPath(sourcePath) AndAlso File.Exists(sourcePath) Then
+                File.Copy(sourcePath, destinationPath, overwrite:=True)
+                Return File.Exists(destinationPath)
+            End If
+
+            secondaryWordApp = New Word.Application With {
+            .Visible = False,
+            .DisplayAlerts = WdAlertLevel.wdAlertsNone
+        }
+
+            secondaryDoc = secondaryWordApp.Documents.Open(
+            FileName:=sourcePath,
+            ReadOnly:=True,
+            Visible:=False,
+            AddToRecentFiles:=False)
+
+            secondaryDoc.SaveAs2(
+            FileName:=destinationPath,
+            FileFormat:=fileFormat,
+            AddToRecentFiles:=False)
+
+            Return File.Exists(destinationPath)
+
+        Finally
+            If secondaryDoc IsNot Nothing Then
+                Try : secondaryDoc.Close(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(secondaryDoc) : Catch : End Try
+            End If
+
+            If secondaryWordApp IsNot Nothing Then
+                Try : secondaryWordApp.Quit(WdSaveOptions.wdDoNotSaveChanges) : Catch : End Try
+                Try : Marshal.FinalReleaseComObject(secondaryWordApp) : Catch : End Try
+            End If
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Creates a temporary working copy of the currently active Word document for the document-processing pipeline.
+    ''' If the document has unsaved changes, the user can save first, use the last saved version, or cancel.
+    ''' </summary>
+    Friend Function TryCreateActiveDocumentProcessingCopy(ByRef tempCopyPath As String) As Boolean
+        Dim wordApp As Word.Application = Nothing
+        Dim activeDoc As Word.Document = Nothing
+        Dim tempFolder As String = Nothing
+
+        Try
+            wordApp = Globals.ThisAddIn.Application
+            If wordApp Is Nothing OrElse wordApp.Documents Is Nothing OrElse wordApp.Documents.Count = 0 Then
+                ShowCustomMessageBox("No Word document is currently open.")
+                Return False
+            End If
+
+            activeDoc = wordApp.ActiveDocument
+            If activeDoc Is Nothing Then
+                ShowCustomMessageBox("No active Word document was found.")
+                Return False
+            End If
+
+            Dim sourceName As String = activeDoc.Name
+            If String.IsNullOrWhiteSpace(sourceName) Then
+                ShowCustomMessageBox("The active document could not be identified.")
+                Return False
+            End If
+
+            If String.IsNullOrWhiteSpace(activeDoc.Path) Then
+                ShowCustomMessageBox("The active document has never been saved. Please save it first, then try again.")
+                Return False
+            End If
+
+            Dim ext As String = Path.GetExtension(sourceName).ToLowerInvariant()
+            If ext <> ".doc" AndAlso ext <> ".docx" Then
+                ShowCustomMessageBox($"The active document type '{ext}' is not supported for this workflow.")
+                Return False
+            End If
+
+            tempFolder = Path.Combine(Path.GetTempPath(), $"{AN2}_active_doc_{Guid.NewGuid():N}")
+            Directory.CreateDirectory(tempFolder)
+            tempCopyPath = Path.Combine(tempFolder, Path.GetFileName(sourceName))
+
+            If Not activeDoc.Saved Then
+                Dim saveChoice As Integer = ShowCustomYesNoBox(
+                "The active Word document has unsaved changes." & vbCrLf & vbCrLf &
+                "How would you like to continue?",
+                "Save current version and continue",
+                "Use last saved version",
+                AN & " Active Document",
+                extraButtonText:="Cancel",
+                extraButtonAction:=Sub()
+                                   End Sub,
+                CloseAfterExtra:=True)
+
+                If saveChoice = 0 Then
+                    tempCopyPath = Nothing
+                    Return False
+                End If
+
+                If saveChoice = 1 Then
+                    activeDoc.Save()
+                End If
+            End If
+
+            Dim targetFormat As WdSaveFormat =
+            If(ext = ".doc", WdSaveFormat.wdFormatDocument97, WdSaveFormat.wdFormatXMLDocument)
+
+            If Not CreateDocumentCopyFromSavedSource(activeDoc.FullName, tempCopyPath, targetFormat) Then
+                Throw New IOException("The temporary working copy could not be created.")
+            End If
+
+            Return True
+
+        Catch ex As Exception
+            tempCopyPath = Nothing
+
+            If Not String.IsNullOrWhiteSpace(tempFolder) AndAlso Directory.Exists(tempFolder) Then
+                Try : Directory.Delete(tempFolder, recursive:=True) : Catch : End Try
+            End If
+
+            ShowCustomMessageBox($"Could not prepare the active document: {ex.Message}")
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' Returns a non-conflicting file path in the specified directory.
+    ''' If the requested filename already exists, appends " (n)" before the extension.
+    ''' </summary>
+    Private Shared Function GetNonConflictingFilePath(directoryPath As String, fileName As String) As String
+        Dim candidatePath As String = Path.Combine(directoryPath, fileName)
+        If Not File.Exists(candidatePath) Then Return candidatePath
+
+        Dim baseName As String = Path.GetFileNameWithoutExtension(fileName)
+        Dim ext As String = Path.GetExtension(fileName)
+        Dim counter As Integer = 1
+
+        Do
+            candidatePath = Path.Combine(directoryPath, $"{baseName} ({counter}){ext}")
+            If Not File.Exists(candidatePath) Then Return candidatePath
+            counter += 1
+        Loop
+    End Function
+
+    ''' <summary>
+    ''' Moves a file to the current user's Desktop using a non-conflicting filename if needed.
+    ''' </summary>
+    Private Shared Function MoveFileToDesktop(sourcePath As String) As String
+        If String.IsNullOrWhiteSpace(sourcePath) Then Return Nothing
+        If Not File.Exists(sourcePath) Then
+            Throw New FileNotFoundException("The source file to move was not found.", sourcePath)
+        End If
+
+        Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        Dim destinationPath As String = GetNonConflictingFilePath(desktopPath, Path.GetFileName(sourcePath))
+
+        File.Move(sourcePath, destinationPath)
+        Return destinationPath
+    End Function
+
+
     ''' <summary>
     ''' Entry point for translation: prompts for file/directory and target language, then translates documents.
     ''' </summary>
@@ -230,8 +408,18 @@ Partial Public Class ThisAddIn
     ''' Supports both Word (.doc/.docx) and PowerPoint (.pptx) files with automatic dispatch.
     ''' </summary>
     ''' <param name="mode">The processing mode (Translate or Correct).</param>
+    ''' <summary>
+    ''' Main processing method that handles both translation and correction modes.
+    ''' Supports both Word (.doc/.docx) and PowerPoint (.pptx) files with automatic dispatch.
+    ''' </summary>
+    ''' <param name="mode">The processing mode (Translate or Correct).</param>
     Private Async Function ProcessWordDocuments(mode As DocumentProcessMode) As System.Threading.Tasks.Task
         Dim selectedPath As String = ""
+        Dim usedActiveDocument As Boolean = False
+        Dim activeDocumentTempFolder As String = Nothing
+        Dim keepActiveDocumentTempFolder As Boolean = False
+        Dim desktopResultPaths As New List(Of String)()
+
         Dim modeVerb As String = If(mode = DocumentProcessMode.Translate, "translate", If(_isFreestyle, "adapt", "correct"))
         Dim modeVerbPast As String = If(mode = DocumentProcessMode.Translate, "translated", If(_isFreestyle, "adapted", "corrected"))
         Dim modeVerbGerund As String = If(mode = DocumentProcessMode.Translate, "Translating", If(_isFreestyle, "Adapting", "Correcting"))
@@ -239,18 +427,24 @@ Partial Public Class ThisAddIn
 
         ' Effective correction suffix (used throughout for correction mode)
         Dim effectiveCorrectedSuffix As String = If(String.IsNullOrWhiteSpace(_correctSuffixOverride), CorrectedFileSuffix, _correctSuffixOverride)
+
         If INI_AllowLegacyDocFiles Then
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
             Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.doc;*.docx;*.pptx|Word Documents|*.doc;*.docx|Word Document (*.docx)|*.docx|Word 97-2003 (*.doc)|*.doc|PowerPoint (*.pptx)|*.pptx"
         Else
-            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}"
+            Globals.ThisAddIn.DragDropFormLabel = $"Select a Word or PowerPoint document or folder to {modeVerb}, or use the currently active Word document"
             Globals.ThisAddIn.DragDropFormFilter = "Supported Documents|*.docx;*.pptx|Word Document (*.docx)|*.docx|PowerPoint (*.pptx)|*.pptx"
         End If
 
         Try
-            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory, allowUseActiveDocument:=True)
                 If frm.ShowDialog() = DialogResult.OK Then
                     selectedPath = frm.SelectedFilePath
+                    usedActiveDocument = frm.UsedActiveDocument
+
+                    If usedActiveDocument AndAlso Not String.IsNullOrWhiteSpace(selectedPath) Then
+                        activeDocumentTempFolder = Path.GetDirectoryName(selectedPath)
+                    End If
                 End If
             End Using
         Finally
@@ -384,8 +578,8 @@ Partial Public Class ThisAddIn
             Dim exProc As String = Path.GetFileName(groups(exampleKey).ProcessedFiles(0))
 
             Dim suffixDesc As String = If(mode = DocumentProcessMode.Translate,
-    $"'{targetLanguage}' translation (suffix '_{targetLanguageToken}')",
-    $"modified version (suffix '{effectiveCorrectedSuffix}')")
+                $"'{targetLanguage}' translation (suffix '_{targetLanguageToken}')",
+                $"modified version (suffix '{effectiveCorrectedSuffix}')")
 
             Dim msg As New StringBuilder()
             msg.AppendLine($"Found {pairedGroups.Count} document(s) that already have an existing {suffixDesc}.")
@@ -449,8 +643,8 @@ Partial Public Class ThisAddIn
             Dim exProc As String = Path.GetFileName(groups(exampleKey).ProcessedFiles(0))
 
             Dim suffixDesc As String = If(mode = DocumentProcessMode.Translate,
-    $"'{targetLanguage}' (suffix '_{targetLanguageToken}')",
-    $"modified (suffix '{effectiveCorrectedSuffix}')")
+                $"'{targetLanguage}' (suffix '_{targetLanguageToken}')",
+                $"modified (suffix '{effectiveCorrectedSuffix}')")
 
             Dim msg2 As New StringBuilder()
             msg2.AppendLine($"Found {processedOnlyGroups.Count} {modeNoun.ToLower()}-only file(s) for {suffixDesc}, without a matching base file.")
@@ -535,11 +729,15 @@ Partial Public Class ThisAddIn
                     Dim nameWithoutExt As String = Path.GetFileNameWithoutExtension(filePath)
                     Dim outputExt As String = If(isPptx, ".pptx", ".docx")
                     Dim outputPath As String
+                    Dim compareOutputPath As String = Nothing
 
                     If mode = DocumentProcessMode.Translate Then
                         outputPath = Path.Combine(dir, $"{nameWithoutExt}_{targetLanguageToken}{outputExt}")
                     Else
                         outputPath = Path.Combine(dir, $"{nameWithoutExt}{effectiveCorrectedSuffix}{outputExt}")
+                        If Not isPptx Then
+                            compareOutputPath = GetCompareFilePath(outputPath)
+                        End If
                     End If
 
                     Dim success As Boolean
@@ -559,11 +757,32 @@ Partial Public Class ThisAddIn
                             Dim compareSuccess As Boolean = CreateWordCompareDocument(filePath, outputPath)
                             If Not compareSuccess Then
                                 failedFiles.Add($"{fileName}: Corrected but compare document creation failed")
-                                successCount += 1 ' Still count as success since correction worked
-                            Else
-                                successCount += 1
                             End If
-                        Else
+                        End If
+
+                        Dim desktopMoveSucceeded As Boolean = True
+
+                        If usedActiveDocument Then
+                            Try
+                                Dim movedOutputPath As String = MoveFileToDesktop(outputPath)
+                                If Not String.IsNullOrWhiteSpace(movedOutputPath) Then
+                                    desktopResultPaths.Add(movedOutputPath)
+                                End If
+
+                                If Not String.IsNullOrWhiteSpace(compareOutputPath) AndAlso File.Exists(compareOutputPath) Then
+                                    Dim movedComparePath As String = MoveFileToDesktop(compareOutputPath)
+                                    If Not String.IsNullOrWhiteSpace(movedComparePath) Then
+                                        desktopResultPaths.Add(movedComparePath)
+                                    End If
+                                End If
+                            Catch ex As Exception
+                                desktopMoveSucceeded = False
+                                keepActiveDocumentTempFolder = True
+                                failedFiles.Add($"{fileName}: Processed but moving result(s) to the Desktop failed - {ex.Message}")
+                            End Try
+                        End If
+
+                        If desktopMoveSucceeded Then
                             successCount += 1
                         End If
                     Else
@@ -577,6 +796,16 @@ Partial Public Class ThisAddIn
             ProgressBarModule.CancelOperation = True
             _useFormattingMarkers = False
         End Try
+
+        If usedActiveDocument AndAlso
+           Not keepActiveDocumentTempFolder AndAlso
+           Not String.IsNullOrWhiteSpace(activeDocumentTempFolder) AndAlso
+           Directory.Exists(activeDocumentTempFolder) Then
+            Try
+                Directory.Delete(activeDocumentTempFolder, recursive:=True)
+            Catch
+            End Try
+        End If
 
         ' Summary
         Dim summary As New StringBuilder()
@@ -594,6 +823,23 @@ Partial Public Class ThisAddIn
             If hasWordFiles Then
                 summary.AppendLine($"Compare documents created with tracked changes")
             End If
+        End If
+
+        If usedActiveDocument AndAlso desktopResultPaths.Count > 0 Then
+            summary.AppendLine()
+            summary.AppendLine("Result files saved to Desktop:")
+            For Each resultPath In desktopResultPaths.Take(10)
+                summary.AppendLine($"  • {Path.GetFileName(resultPath)}")
+            Next
+            If desktopResultPaths.Count > 10 Then
+                summary.AppendLine($"  ... and {desktopResultPaths.Count - 10} more")
+            End If
+        End If
+
+        If usedActiveDocument AndAlso keepActiveDocumentTempFolder AndAlso Not String.IsNullOrWhiteSpace(activeDocumentTempFolder) Then
+            summary.AppendLine()
+            summary.AppendLine("Temporary files were kept because moving the result failed:")
+            summary.AppendLine($"  {activeDocumentTempFolder}")
         End If
 
         If failedFiles.Count > 0 Then
@@ -673,7 +919,7 @@ Partial Public Class ThisAddIn
                 CompareTextboxes:=True,
                 CompareFields:=True,
                 CompareComments:=True,
-                RevisedAuthor:=wordApp.UserName,
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                 IgnoreAllComparisonWarnings:=True
             )
 
@@ -908,7 +1154,7 @@ Partial Public Class ThisAddIn
             End If
 
             ' Process paragraphs in batches (sending ONLY plain text to LLM)            
-            Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, Path.GetFileName(docxPath))
+            Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, Path.GetFileName(docxPath), "main body")
             If Not success Then Return False
 
             ' Apply processed text back to XML nodes
@@ -966,7 +1212,7 @@ Partial Public Class ThisAddIn
             If processableParagraphs.Count = 0 Then Return True
 
             ' Process comment paragraphs
-            Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} (Comments)")
+            Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} (Comments)", "comments")
             If Not success Then Return False
 
             ' Apply processed text
@@ -1009,8 +1255,10 @@ Partial Public Class ThisAddIn
                     Dim processableParagraphs = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
                     If processableParagraphs.Count = 0 Then Continue For
 
-                    Dim componentType As String = If(Path.GetFileName(filePath).StartsWith("header", StringComparison.OrdinalIgnoreCase), "Headers", "Footers")
-                    Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} ({componentType})")
+                    Dim isHeader As Boolean = Path.GetFileName(filePath).StartsWith("header", StringComparison.OrdinalIgnoreCase)
+                    Dim componentType As String = If(isHeader, "Headers", "Footers")
+                    Dim contentScope As String = If(isHeader, "header", "footer")
+                    Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} ({componentType})", contentScope)
                     If success Then
                         ApplyTranslationsToXml(paragraphs)
                         xmlDoc.Save(filePath)
@@ -1290,17 +1538,15 @@ Partial Public Class ThisAddIn
     ''' When formatting markers are enabled, includes | markers and instructs the LLM to preserve them.
     ''' </summary>
     Private Async Function ProcessParagraphBatches(
-        paragraphs As List(Of TranslateParagraphInfo),
-        targetLanguage As String,
-        mode As DocumentProcessMode,
-        Optional fileContext As String = "") As System.Threading.Tasks.Task(Of Boolean)
+    paragraphs As List(Of TranslateParagraphInfo),
+    targetLanguage As String,
+    mode As DocumentProcessMode,
+    Optional fileContext As String = "",
+    Optional contentScope As String = "") As System.Threading.Tasks.Task(Of Boolean)
 
         Dim processableParagraphs = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
         If processableParagraphs.Count = 0 Then Return True
 
-        ' ─── Record non-breaking spaces for later restoration ───
-        ' The LLM will normalize U+00A0, U+202F, etc. to regular spaces.
-        ' We record context around each occurrence so we can restore them.
         Dim nbspRecords As New Dictionary(Of Integer, List(Of NonBreakingSpaceInfo))()
         For i As Integer = 0 To processableParagraphs.Count - 1
             Dim recorded = RecordNonBreakingSpaces(processableParagraphs(i).FullText)
@@ -1309,7 +1555,6 @@ Partial Public Class ThisAddIn
             End If
         Next
 
-        ' Select appropriate system prompt based on mode
         Dim systemPrompt As String
         If mode = DocumentProcessMode.Translate Then
             TranslateLanguage = targetLanguage
@@ -1319,19 +1564,24 @@ Partial Public Class ThisAddIn
             systemPrompt = InterpolateAtRuntime(effectivePrompt)
         End If
 
-        ' Append formatting marker instructions to system prompt when enabled
         If _useFormattingMarkers Then
             systemPrompt = systemPrompt & vbCrLf & vbCrLf & SP_Add_Markers
         End If
 
-        ' Append note-reference marker instruction if any paragraphs contain them
         Dim hasNoteRefMarkers As Boolean = processableParagraphs.Any(Function(p) p.FullText.Contains(NoteRefMarker))
         If hasNoteRefMarkers Then
             systemPrompt = systemPrompt & vbCrLf & vbCrLf &
-                "Some paragraphs contain the character ‖ (double vertical line). " &
-                "This marks the position of a footnote or endnote reference. " &
-                "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
-                "Do NOT move, add, or remove any ‖ characters."
+            "Some paragraphs contain the character ‖ (double vertical line). " &
+            "This marks the position of a footnote or endnote reference. " &
+            "CRITICAL: Keep each ‖ at EXACTLY the same position relative to the surrounding words. " &
+            "Do NOT move, add, or remove any ‖ characters."
+        End If
+
+        If Not String.IsNullOrWhiteSpace(contentScope) Then
+            systemPrompt = systemPrompt & vbCrLf & vbCrLf &
+                $"Section context: The text to process comes from the document's {contentScope}. " &
+                "Use this only as context for tone, conventions, and typical phrasing. " &
+                "Do not add labels, headings, or explanations, and do not mention the section unless the source text already does."
         End If
 
         Dim batchIndex As Integer = 0
@@ -1514,6 +1764,37 @@ Partial Public Class ThisAddIn
         Next
     End Sub
 
+
+
+    ''' <summary>
+    ''' Determines whether the processed paragraph text is visibly unchanged.
+    ''' If unchanged, the original XML runs are left untouched so Word formatting,
+    ''' bookmarks, fields, proofing runs, and other run-level metadata remain exactly
+    ''' as they were.
+    ''' </summary>
+    ''' <param name="para">The paragraph being processed.</param>
+    ''' <param name="translatedText">The LLM-processed paragraph text.</param>
+    ''' <returns><c>True</c> if the visible paragraph text did not change.</returns>
+    Private Function IsParagraphTextVisiblyUnchanged(para As TranslateParagraphInfo, translatedText As String) As Boolean
+        If para Is Nothing OrElse translatedText Is Nothing Then Return False
+
+        Dim originalVisibleText As String = If(para.FullText, "")
+        Dim processedVisibleText As String = translatedText
+
+        If para.TextRuns IsNot Nothing AndAlso para.TextRuns.Any(Function(r) r.HasNoteReferenceBefore) Then
+            originalVisibleText = originalVisibleText.Replace(NoteRefMarker, "")
+            processedVisibleText = processedVisibleText.Replace(NoteRefMarker, "")
+        End If
+
+        ' Only strip formatting markers when this paragraph was actually sent in marker mode
+        ' and the original visible text itself does not already contain pipe characters.
+        If para.MarkerText IsNot Nothing AndAlso Not originalVisibleText.Contains(RunBoundaryMarker) Then
+            processedVisibleText = processedVisibleText.Replace(RunBoundaryMarker, "")
+        End If
+
+        Return String.Equals(originalVisibleText, processedVisibleText, StringComparison.Ordinal)
+    End Function
+
     ''' <summary>
     ''' Applies translated/corrected text back to XML nodes, preserving all formatting.
     ''' Partitions runs at footnote/endnote reference boundaries so that text
@@ -1530,6 +1811,11 @@ Partial Public Class ThisAddIn
             If para.TextRuns.Count = 0 Then Continue For
 
             Dim translatedText As String = para.TranslatedText
+
+            ' If the visible text did not change, do not touch any w:t nodes.
+            ' This is the safest way to prevent formatting drift caused by re-splitting
+            ' text across Word runs.
+            If IsParagraphTextVisiblyUnchanged(para, translatedText) Then Continue For
 
             ' Simple case: only one run
             If para.TextRuns.Count = 1 Then
@@ -2139,8 +2425,10 @@ Partial Public Class ThisAddIn
                 Dim processableParagraphs = paragraphs.Where(Function(p) Not p.IsEmpty).ToList()
                 If processableParagraphs.Count = 0 Then Continue For
 
-                Dim componentType As String = If(fileName = "footnotes.xml", "Footnotes", "Endnotes")
-                Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} ({componentType})")
+                Dim isFootnotes As Boolean = fileName.Equals("footnotes.xml", StringComparison.OrdinalIgnoreCase)
+                Dim componentType As String = If(isFootnotes, "Footnotes", "Endnotes")
+                Dim contentScope As String = If(isFootnotes, "footnotes", "endnotes")
+                Dim success As Boolean = Await ProcessParagraphBatches(paragraphs, targetLanguage, mode, $"{mainFileName} ({componentType})", contentScope)
                 If success Then
                     ApplyTranslationsToXml(paragraphs)
                     xmlDoc.Save(filePath)

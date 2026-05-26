@@ -375,6 +375,11 @@ Public Class Ribbon2
         Globals.ThisAddIn.MainMenu("ApplyMyStyle")
     End Sub
 
+    Private Sub RI_M365_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_M365.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "M365_Outlook invoked")
+        Globals.ThisAddIn.MainMenu("M365")
+    End Sub
+
     Private Sub RI_MailMover_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_MailMover.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "MailMover_Outlook invoked")
         Globals.ThisAddIn.MainMenu("MailMover")
@@ -388,6 +393,13 @@ Public Class Ribbon2
     Private Sub RI_DefineMyStyle_Click_1(sender As Object, e As RibbonControlEventArgs) Handles RI_DefineMyStyle.Click
         SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "DefineMyStyle_Outlook invoked")
         Globals.ThisAddIn.DefineMyStyle()
+    End Sub
+
+    Private Sub RI_KnowledgeStores_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_KnowledgeStores.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "KnowledgeStores_Outlook invoked")
+        Using frm As New KnowledgeStoreForm(ThisAddIn._context)
+            frm.ShowDialog()
+        End Using
     End Sub
 
     Private Sub RI_HelpMe_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_HelpMe.Click

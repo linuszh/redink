@@ -176,7 +176,11 @@ Partial Public Class ThisAddIn
     ''' The file content (optionally wrapped in XML document tags), or an empty string
     ''' if the file could not be read or contained no extractable text.
     ''' </returns>
-    Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
+    Private Async Function LoadSingleFileAsync(filePath As String,
+                                               isWrapped As Boolean,
+                                               ctx As FileLoadingContext,
+                                               Optional isFromDirectory As Boolean = False,
+                                               Optional askWorksheetSelection As Boolean = False) As Task(Of String)
         Try
             Dim doOCR As Boolean = False
             Dim askUser As Boolean = False
@@ -210,13 +214,16 @@ Partial Public Class ThisAddIn
                 askUser = False
             End If
 
+            ' Keep normal file loading silent, but allow worksheet picker for explicit single-workbook loads
+            Dim silentLoad As Boolean = Not askWorksheetSelection
+
             ' Load file content with determined OCR settings
             Dim fileResult = Await GetFileContentEx(
                 optionalFilePath:=filePath,
-                Silent:=True,
+                Silent:=silentLoad,
                 DoOCR:=doOCR,
-                AskUser:=askUser
-            )
+                AskUser:=askUser,
+                AskWorksheetSelection:=askWorksheetSelection)
 
             ' Track PDFs that may have incomplete content
             If fileResult.PdfMayBeIncomplete Then
@@ -580,8 +587,12 @@ Partial Public Class ThisAddIn
                     Dim replacementText As String = ""
 
                     If Not String.IsNullOrWhiteSpace(selectedFile) Then
-                        ' Start progress bar on first actual file load (after all user dialogs)
-                        If Not progressBarStarted Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
+                        Dim askWorksheetSelection As Boolean =
+                            IO.Path.GetExtension(selectedFile).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        ' Start progress bar only when no worksheet-selection dialog is expected
+                        If Not askWorksheetSelection AndAlso Not progressBarStarted Then
                             progressBarStarted = True
                             ProgressBarModule.CancelOperation = False
                             ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
@@ -589,11 +600,28 @@ Partial Public Class ThisAddIn
                             ProgressBarModule.GlobalProgressLabel = "Loading external files..."
                             ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
                         End If
-                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
-                        ProgressBarModule.GlobalProgressLabel = $"Loading file {processedTriggers + 1} of {totalTriggers}: {IO.Path.GetFileName(selectedFile)}..."
-                        ProgressBarModule.GlobalProgressMax = totalTriggers
-                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
-                        replacementText = Await LoadSingleFileAsync(selectedFile, isWrapped, ctx, isFromDirectory:=False)
+
+                        If progressBarStarted Then
+                            ProgressBarModule.GlobalProgressLabel = $"Loading file {processedTriggers + 1} of {totalTriggers}: {IO.Path.GetFileName(selectedFile)}..."
+                            ProgressBarModule.GlobalProgressMax = totalTriggers
+                        End If
+
+                        replacementText = Await LoadSingleFileAsync(
+                            selectedFile,
+                            isWrapped,
+                            ctx,
+                            isFromDirectory:=False,
+                            askWorksheetSelection:=askWorksheetSelection)
+
+                        ' Start progress bar after selection if it was deferred
+                        If askWorksheetSelection AndAlso Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = processedTriggers
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
                     Else
                         Dim answer As Integer = ShowCustomYesNoBox(
                         "No file selected. Do you want to continue or abort?",
@@ -682,8 +710,11 @@ Partial Public Class ThisAddIn
 
                     ' Determine if it's a file or directory
                     If IO.File.Exists(candidatePath) Then
-                        ' Start progress bar for file loading (no user dialogs ahead)
-                        If Not progressBarStarted Then
+                        Dim askWorksheetSelection As Boolean =
+                            IO.Path.GetExtension(candidatePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        ' Start progress bar only when no worksheet-selection dialog is expected
+                        If Not askWorksheetSelection AndAlso Not progressBarStarted Then
                             progressBarStarted = True
                             ProgressBarModule.CancelOperation = False
                             ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
@@ -692,11 +723,28 @@ Partial Public Class ThisAddIn
                             ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
                         End If
 
-                        ProgressBarModule.GlobalProgressLabel = $"Loading {processedTriggers + 1} of {totalTriggers}: {IO.Path.GetFileName(candidatePath)}..."
-                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        If progressBarStarted Then
+                            ProgressBarModule.GlobalProgressLabel = $"Loading {processedTriggers + 1} of {totalTriggers}: {IO.Path.GetFileName(candidatePath)}..."
+                            ProgressBarModule.GlobalProgressMax = totalTriggers
+                        End If
 
-                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
-                        replacementText = Await LoadSingleFileAsync(candidatePath, isWrapped, ctx, isFromDirectory:=False)
+                        replacementText = Await LoadSingleFileAsync(
+                            candidatePath,
+                            isWrapped,
+                            ctx,
+                            isFromDirectory:=False,
+                            askWorksheetSelection:=askWorksheetSelection)
+
+                        ' Start progress bar after selection if it was deferred
+                        If askWorksheetSelection AndAlso Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = processedTriggers
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
+
                     ElseIf IO.Directory.Exists(candidatePath) Then
                         ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
                         replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
@@ -1326,6 +1374,7 @@ Partial Public Class ThisAddIn
         Else
             If Not NoSelectedCells Then
                 If DoRange Then
+                    FormulaInstruction = INI_FormulaInstruction
                     Dim result As Boolean = Await ProcessSelectedRange(SP_RangeOfCells, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS, BatchPath)
                 Else
                     Dim result As Boolean = Await ProcessSelectedRange(SP_FreestyleText, True, DoRange, DoFormulas, DoBubbles, False, UseSecondAPI, 0, True, DoColor, DoPane, FileObject, InsertWS)
@@ -1371,7 +1420,10 @@ Partial Public Class ThisAddIn
             {"PromptLibPath", "Prompt library file"},
             {"PromptLibPathLocal", "Prompt library file (local)"},
             {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
-            {"Location", "Location information to use, e.g., in 'Freestyle'"}
+            {"Location", "Location information to use, e.g., in 'Freestyle'"},
+            {"KnowledgeStorePath", "Knowledge store file (central)"},
+            {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
+            {"FormulaInstruction", "Additional formula instructions:"}
         }
         Dim SettingsTips As New Dictionary(Of String, String) From {
             {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1388,7 +1440,10 @@ Partial Public Class ThisAddIn
             {"PromptLibPath", "The filename (including path, support environmental variables) for your prompt library (if any)"},
             {"PromptLibPathLocal", "The filename (including path, support environmental variables) for your local prompt library (if any)"},
             {"DefaultPrefix", "You can define here the default prefix to use within 'Freestyle' if no other prefix is used (will be added authomatically)."},
-            {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."}
+            {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
+            {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
+            {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
+            {"FormulaInstruction", "This optional instruction will be added to the Freestyle system prompt for steering the creation of formulas (e.g., to have them created in a local language using local separators)."}
         }
         ShowSettingsWindow(Settings, SettingsTips)
         Dim splash As New SplashScreen("Updating menu following your changes ...")

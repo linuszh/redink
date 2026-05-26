@@ -41,6 +41,7 @@
 Option Strict On
 Option Explicit On
 
+Imports System.Diagnostics
 Imports System.IO
 Imports System.Threading.Tasks
 Imports SharedLibrary.SharedLibrary
@@ -130,7 +131,10 @@ Partial Public Class ThisAddIn
                 do2ndModel = CType(Nothing, Boolean?)
             End If
 
-            Dim p0 As New SLib.InputParameter("Prompt for analysis (leave empty for multiline)", promptDefault)
+            Dim p0 As New SLib.InputParameter("Prompt for analysis", promptDefault) With {
+                .Multiline = True,
+                .MultilineHeight = 150
+            }
             Dim p1 As New SLib.InputParameter("Chunk size (number of files per LLM call)", chunkDefault)
             Dim p2 As New SLib.InputParameter("Max characters per file (0 = no limit)", maxCharsDefault)
             Dim p3 As New SLib.InputParameter("Starting file number (0 = from beginning)", startFileDefault)
@@ -167,23 +171,6 @@ Partial Public Class ThisAddIn
             UseSecondAPI = False
             If TypeOf prms(8).Value Is Boolean Then
                 UseSecondAPI = CBool(prms(8).Value)
-            End If
-
-            ' If the prompt field was left empty or too short, open the multiline input box
-            ' so the user can compose a detailed, multi-line prompt comfortably.
-            If OtherPrompt.Trim().Length < 5 Then
-                Dim multilinePrompt As String = ShowCustomInputBox(
-                    "Please enter your analysis prompt (multiline supported):",
-                    $"{AN} Text File Analyzer",
-                    SimpleInput:=False,
-                    DefaultValue:=GetSetting("DIR_Prompt", OtherPrompt))
-
-                If multilinePrompt = "ESC" OrElse String.IsNullOrWhiteSpace(multilinePrompt) Then
-                    ShowCustomMessageBox("No prompt provided — aborting.")
-                    Return
-                End If
-
-                OtherPrompt = multilinePrompt
             End If
 
             SaveSetting("DIR_Prompt", OtherPrompt)
@@ -226,6 +213,11 @@ Partial Public Class ThisAddIn
             Dim ws As Microsoft.Office.Interop.Excel.Worksheet = CType(Globals.ThisAddIn.Application.ActiveSheet, Microsoft.Office.Interop.Excel.Worksheet)
             Dim outRow As Integer = Math.Max(1, resultStartLine)
             Dim outCol As Integer = Math.Max(1, resultStartCol)
+
+            If Not PromptForFreshWorksheetIfNeeded(ws, outRow, outCol, $"{AN} Text File Analyzer") Then
+                Return
+            End If
+
             Dim headerInserted As Boolean = False
             Dim insertedRowsTotal As Integer = 0
 
@@ -396,12 +388,25 @@ Partial Public Class ThisAddIn
                                             If filePathByIndex.TryGetValue(lineKey, fullPath) Then
                                                 ' Single file index — replace with clickable hyperlink showing filename
                                                 Dim displayName As String = Path.GetFileName(fullPath)
-                                                ws.Hyperlinks.Add(
-                                                    Anchor:=cell,
-                                                    Address:=fullPath,
-                                                    TextToDisplay:=displayName)
-                                                ' Ensure the cell text shows the filename, not the number
-                                                cell.Value = displayName
+                                                Try
+                                                    ' Excel Hyperlinks.Add fails (0x800A03EC) when the address
+                                                    ' exceeds ~255 chars or contains characters Excel cannot handle.
+                                                    Dim safeAddress As String = fullPath
+                                                    If safeAddress.Length > 255 Then
+                                                        ' Too long for Excel hyperlink — just show the filename
+                                                        cell.Value = displayName
+                                                    Else
+                                                        ws.Hyperlinks.Add(
+                                                Anchor:=cell,
+                                                Address:="file:///" & safeAddress.Replace("\", "/"),
+                                                TextToDisplay:=displayName)
+                                                        cell.Value = displayName
+                                                    End If
+                                                Catch exLink As Exception
+                                                    ' Hyperlink creation failed — fall back to plain filename
+                                                    cell.Value = displayName
+                                                    Debug.WriteLine($"Hyperlink failed for '{fullPath}': {exLink.Message}")
+                                                End Try
                                             Else
                                                 ' Try as a range key (e.g. "3-5") from diagnostic/error rows,
                                                 ' or as a bare integer that wasn't in the dictionary

@@ -305,7 +305,7 @@ Partial Public Class ThisAddIn
                 CompareFields:=True,
                 CompareComments:=True,
                 CompareMoves:=True,
-                RevisedAuthor:=Environment.UserName,
+                RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                 IgnoreAllComparisonWarnings:=False
             )
             If compareDoc Is Nothing Then
@@ -685,7 +685,7 @@ Partial Public Class ThisAddIn
                     CompareFields:=False,
                     CompareComments:=False,
                     CompareMoves:=True,
-                    RevisedAuthor:=Environment.UserName,
+                    RevisedAuthor:=GetMarkupAuthorOrCurrent(wordApp),
                     IgnoreAllComparisonWarnings:=True
                 )
 
@@ -2065,6 +2065,8 @@ Partial Public Class ThisAddIn
         Dim doOcr As Boolean = False
         Dim askUserPerFile As Boolean = False
         Dim flattenBeforeOcr As Boolean = False
+        Dim useMarkdownOutputForFlattenedOcr As Boolean = False
+        Dim ocrMarkdownInstruction As String = String.Empty
 
         If pdfCount >= 2 AndAlso SharedMethods.IsOcrAvailable(_context) Then
             Dim ocrChoice As Integer = ShowCustomYesNoBox(
@@ -2110,6 +2112,24 @@ Partial Public Class ThisAddIn
                 Return ' User aborted
             End If
             flattenBeforeOcr = (flattenChoice = 1)
+        End If
+
+        ' Only ask about Markdown if OCR is enabled AND PDFs will be flattened first
+        If doOcr AndAlso flattenBeforeOcr Then
+            Dim markdownChoice As Integer = ShowCustomYesNoBox(
+                "Do you want OCR results for those flattened PDFs to be saved as Markdown files (.md) instead of plain text (.txt)?" & vbCrLf & vbCrLf &
+                "If yes, the OCR prompt will explicitly request Markdown output and the saved file extension will be changed to .md.",
+                "Yes, save OCR results as Markdown",
+                "No, keep plain text")
+            If markdownChoice = 0 Then
+                Return ' User aborted
+            End If
+
+            useMarkdownOutputForFlattenedOcr = (markdownChoice = 1)
+
+            If useMarkdownOutputForFlattenedOcr Then
+                ocrMarkdownInstruction = Add_OcrMarkdownInstruction
+            End If
         End If
 
         ' Create output subdirectory if needed
@@ -2162,6 +2182,9 @@ Partial Public Class ThisAddIn
                     ' Determine OCR settings for this file
                     Dim isPdf As Boolean = IO.Path.GetExtension(filePath).Equals(".pdf", StringComparison.OrdinalIgnoreCase)
                     Dim useOcrForThisFile As Boolean = isPdf AndAlso doOcr
+                    Dim useMarkdownForThisFile As Boolean =
+                        isPdf AndAlso useOcrForThisFile AndAlso flattenBeforeOcr AndAlso useMarkdownOutputForFlattenedOcr
+                    Dim outputExtension As String = If(useMarkdownForThisFile, ".md", ".txt")
 
                     ' If flattening is requested for PDFs, flatten to temp file first
                     Dim effectiveFilePath As String = filePath
@@ -2189,8 +2212,13 @@ Partial Public Class ThisAddIn
                     Try
                         ' Read file content — askUser=False ensures Hidesplash=True in PerformOCR/ReadBinaryFileViaLLM,
                         ' preventing the countdown splash from interrupting batch processing.
-                        ' The user has already made all choices upfront (OCR on/off, flatten on/off).
-                        Dim content As String = Await GetFileContent(effectiveFilePath, Silent:=True, DoOCR:=useOcrForThisFile, AskUser:=False)
+                        ' The user has already made all choices upfront (OCR on/off, flatten on/off, Markdown on/off).
+                        Dim content As String = Await GetFileContent(
+                            effectiveFilePath,
+                            Silent:=True,
+                            DoOCR:=useOcrForThisFile,
+                            AskUser:=False,
+                            OcrAdditionalInstruction:=If(useMarkdownForThisFile, ocrMarkdownInstruction, ""))
 
                         If String.IsNullOrWhiteSpace(content) Then
                             emptyContentFiles.Add($"{fileName} ({IO.Path.GetExtension(filePath).ToLowerInvariant()})")
@@ -2215,15 +2243,14 @@ Partial Public Class ThisAddIn
                                         IO.Directory.CreateDirectory(targetDir)
                                     End If
                                 End If
-                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & ".txt")
+                                outputPath = IO.Path.Combine(outputBaseDir, relativePath & outputExtension)
                             Else
-                                outputPath = IO.Path.Combine(outputBaseDir, fileName & ".txt")
+                                outputPath = IO.Path.Combine(outputBaseDir, fileName & outputExtension)
                             End If
                         Else
-                            outputPath = filePath & ".txt"
+                            outputPath = filePath & outputExtension
                         End If
 
-                        ' Save as text file
                         IO.File.WriteAllText(outputPath, content, System.Text.Encoding.UTF8)
                         successCount += 1
 
@@ -2265,6 +2292,9 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"OCR was enabled for PDF files.")
             If flattenBeforeOcr Then
                 summary.AppendLine($"PDFs were flattened to images before OCR ({flattenedPdfCount} file(s)).")
+                If useMarkdownOutputForFlattenedOcr Then
+                    summary.AppendLine("Flattened PDF OCR results were saved as Markdown (.md).")
+                End If
             End If
         End If
 
@@ -2999,19 +3029,129 @@ Partial Public Class ThisAddIn
         Return removed
     End Function
 
+
     ''' <summary>
-    ''' Prompts user to select a text file and inserts its content at the current cursor position.
+    ''' Prompts user to select a file and inserts its content at the current cursor position.
+    ''' For PDFs, if OCR is available, the user can choose a formatting-preserving import
+    ''' that uses flattening + OCR + Markdown insertion.
     ''' </summary>
-    ''' <remarks>
-    ''' Uses GetFileContent helper with optional object detection based on INI_APICall_Object configuration.
-    ''' Collapses selection to end point before insertion.
-    ''' </remarks>
     Public Async Sub ImportTextFile()
-        Dim sel As Word.Range = Globals.ThisAddIn.Application.Selection.Range
-        Dim Doc = Await GetFileContent(Nothing, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
-        sel.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
-        sel.Text = Doc
-        sel.Select()
+        Dim app As Word.Application = Globals.ThisAddIn.Application
+        Dim sel As Word.Range = app.Selection.Range
+        Dim filePath As String = GetFileName()
+
+        If String.IsNullOrWhiteSpace(filePath) Then
+            Exit Sub
+        End If
+
+        Dim docText As String = String.Empty
+        Dim ext As String = IO.Path.GetExtension(filePath).ToLowerInvariant()
+        Dim preserveFormattingImport As Boolean = False
+        Dim tempFlattenedPath As String = Nothing
+        Dim splash As Slib.SplashScreen = Nothing
+
+        Try
+            If ext = ".pdf" AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim preserveChoice As Integer = ShowCustomYesNoBox(
+                    "Do you want to preserve the formatting/structure when importing this PDF?" & vbCrLf & vbCrLf &
+                    "If yes, the PDF will be flattened, OCR will be performed, and the OCR result will be inserted as Markdown so that Word can render the formatting.",
+                    "Yes, preserve formatting",
+                    "No, import as plain text",
+                    AN & " Import File")
+
+                If preserveChoice = 0 Then
+                    Exit Sub
+                End If
+
+                preserveFormattingImport = (preserveChoice = 1)
+            End If
+
+            If preserveFormattingImport Then
+                Dim effectiveFilePath As String = filePath
+
+                splash = New Slib.SplashScreen("Preparing PDF for OCR ...")
+                splash.Show()
+                splash.Refresh()
+                System.Windows.Forms.Application.DoEvents()
+
+                Try
+                    splash.UpdateMessage("Flattening PDF for OCR ...")
+                    tempFlattenedPath = IO.Path.Combine(IO.Path.GetTempPath(), $"{AN2}_import_flatten_{Guid.NewGuid():N}.pdf")
+                    Await System.Threading.Tasks.Task.Run(Sub() FlattenPdfToImageOnly(filePath, tempFlattenedPath, 200))
+                    effectiveFilePath = tempFlattenedPath
+                Catch
+                    effectiveFilePath = filePath
+                    If tempFlattenedPath IsNot Nothing Then
+                        Try
+                            If IO.File.Exists(tempFlattenedPath) Then
+                                IO.File.Delete(tempFlattenedPath)
+                            End If
+                        Catch
+                        End Try
+                    End If
+                    tempFlattenedPath = Nothing
+                End Try
+
+                splash.UpdateMessage("AI is extracting the PDF content via OCR ...")
+                System.Windows.Forms.Application.DoEvents()
+
+                docText = Await GetFileContent(
+                    effectiveFilePath,
+                    False,
+                    True,
+                    False,
+                    False,
+                    OcrAdditionalInstruction:=Add_OcrMarkdownInstruction)
+
+                If String.IsNullOrWhiteSpace(docText) Then
+                    Exit Sub
+                End If
+
+                splash.UpdateMessage("Inserting OCR result into Word ...")
+                System.Windows.Forms.Application.DoEvents()
+            Else
+                docText = Await GetFileContent(filePath, False, Not String.IsNullOrWhiteSpace(INI_APICall_Object))
+
+                If String.IsNullOrWhiteSpace(docText) Then
+                    Exit Sub
+                End If
+            End If
+
+            sel.Collapse(Direction:=Word.WdCollapseDirection.wdCollapseEnd)
+            sel.Select()
+
+            If preserveFormattingImport Then
+                InsertTextWithMarkdown(app.Selection, docText, False)
+
+                Dim pattern As String = "\{\{(WFLD|WENT|WFNT):.*?\}\}"
+                If Regex.IsMatch(docText, pattern) Then
+                    Dim rng As Word.Range = app.Selection.Range
+                    RestoreSpecialTextElements(rng)
+                    rng.Document.Fields.Update()
+                End If
+            Else
+                sel.Text = docText
+                sel.Select()
+            End If
+
+        Finally
+            If splash IsNot Nothing Then
+                Try
+                    splash.Close()
+                    splash.Dispose()
+                Catch
+                End Try
+            End If
+
+            If tempFlattenedPath IsNot Nothing Then
+                Try
+                    If IO.File.Exists(tempFlattenedPath) Then
+                        IO.File.Delete(tempFlattenedPath)
+                    End If
+                Catch
+                End Try
+            End If
+        End Try
     End Sub
 
     ''' <summary>
@@ -3495,6 +3635,9 @@ Partial Public Class ThisAddIn
     ''' extracts text (excluding final paragraph marks) → calls CompareAndInsert or CompareAndInsertComparedoc
     ''' based on INI_MarkupMethodHelper setting (1 = CompareDoc method, other = direct insert method).
     ''' Empty paragraphs (length ≤ 1 after trim) are ignored in counting.
+    ''' For markup method 2 (surgical), arguments are swapped: text2 becomes the "original" and text1
+    ''' becomes the "revised", because secondRange already contains text2 and the surgical method
+    ''' patches the target range in-place (it expects the range to contain the original text).
     ''' </remarks>
     Public Sub CompareSelectionHalves()
 
@@ -3545,7 +3688,8 @@ Partial Public Class ThisAddIn
         If INI_MarkupMethodHelper = 1 Then
             CompareAndInsertComparedoc(text1, text2, secondRange)
         ElseIf INI_MarkupMethodHelper = 2 Then
-            CompareAndInsertSurgical(text1, text2, secondRange)
+
+            CompareAndInsertSurgical(text2, text1, secondRange)
         Else
             CompareAndInsert(text1, text2, secondRange, INI_MarkupMethodHelper = 3, "These are the differences of the second (set of) paragraph(s) of the text selected:", True)
         End If
@@ -4571,6 +4715,108 @@ Partial Public Class ThisAddIn
             End Using
         End Using
     End Sub
+
+    Private NotInheritable Class MarkupAuthorScope
+        Implements IDisposable
+
+        Private ReadOnly _app As Word.Application
+        Private ReadOnly _originalUserName As String
+        Private ReadOnly _originalUserInitials As String
+        Private _shouldRestore As Boolean
+
+        Public Sub New(app As Word.Application)
+            _app = app
+            If _app Is Nothing Then Exit Sub
+
+            Try
+                _originalUserName = If(_app.UserName, String.Empty)
+            Catch
+                _originalUserName = String.Empty
+            End Try
+
+            Try
+                _originalUserInitials = If(_app.UserInitials, String.Empty)
+            Catch
+                _originalUserInitials = String.Empty
+            End Try
+
+            Dim markupAuthor As String = GetMarkupAuthorOrCurrent(_app)
+            If String.IsNullOrWhiteSpace(markupAuthor) Then Exit Sub
+            If String.Equals(markupAuthor, _originalUserName, StringComparison.Ordinal) Then Exit Sub
+
+            Try
+                _app.UserName = markupAuthor
+                _app.UserInitials = BuildMarkupAuthorInitials(markupAuthor, _originalUserInitials)
+                _shouldRestore = True
+            Catch
+                _shouldRestore = False
+            End Try
+        End Sub
+
+        Public Sub Dispose() Implements IDisposable.Dispose
+            If Not _shouldRestore OrElse _app Is Nothing Then Return
+
+            Try
+                _app.UserName = _originalUserName
+            Catch
+            End Try
+
+            Try
+                _app.UserInitials = _originalUserInitials
+            Catch
+            End Try
+        End Sub
+    End Class
+
+    Friend Shared Function GetMarkupAuthorOrCurrent(app As Word.Application) As String
+        Dim markupAuthor As String = String.Empty
+
+        Try
+            markupAuthor = If(Globals.ThisAddIn.INI_MarkupAuthor, String.Empty).Trim()
+        Catch
+            markupAuthor = String.Empty
+        End Try
+
+        If Not String.IsNullOrWhiteSpace(markupAuthor) Then
+            Return markupAuthor
+        End If
+
+        If app Is Nothing Then Return String.Empty
+
+        Try
+            Return If(app.UserName, String.Empty)
+        Catch
+            Return String.Empty
+        End Try
+    End Function
+
+    Private Shared Function BuildMarkupAuthorInitials(markupAuthor As String, fallbackInitials As String) As String
+        If String.IsNullOrWhiteSpace(markupAuthor) Then Return fallbackInitials
+
+        Dim parts As String() =
+            markupAuthor.Trim().Split(New Char() {" "c, ControlChars.Tab}, StringSplitOptions.RemoveEmptyEntries)
+
+        If parts.Length = 0 Then Return fallbackInitials
+
+        Dim initials As String = String.Empty
+
+        For Each part As String In parts
+            If part.Length > 0 Then
+                initials &= Char.ToUpperInvariant(part(0))
+                If initials.Length >= 3 Then Exit For
+            End If
+        Next
+
+        If initials.Length = 1 AndAlso parts(0).Length > 1 Then
+            initials &= Char.ToUpperInvariant(parts(0)(1))
+        End If
+
+        Return If(initials.Length > 0, initials, fallbackInitials)
+    End Function
+
+    Friend Shared Function BeginMarkupAuthorScope(app As Word.Application) As IDisposable
+        Return New MarkupAuthorScope(app)
+    End Function
 
 
 

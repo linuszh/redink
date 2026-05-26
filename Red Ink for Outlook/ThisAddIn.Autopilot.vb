@@ -138,7 +138,7 @@ Partial Public Class ThisAddIn
         "If you need immediate assistance, you can also use the " & AN & " add-in's corresponding feature to have your tasks done right away. Use 'Help me, Inky' or the chatbot on https://redink.ai if you need instructions. Last but not least, a similar 'agent mode' is available in the Local Chat feature in the Outlook add-in if configured accordingly. " &
         "— " & AN6
 
-    Private Const AP_MaxToolIterations As Integer = 30
+    Private Const AP_MaxToolIterations As Integer = 50
 
     ''' <summary>
     ''' Product IDs whose Pro license holders are permitted to use AutoPilot.
@@ -166,6 +166,7 @@ Partial Public Class ThisAddIn
     '  1693 Pro -- NO
     '  2058-2063 Special License for AutoPilot
 
+
     ' ═══════════════════════════════════════════════════════════════════════════
     '  STATE
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -180,6 +181,13 @@ Partial Public Class ThisAddIn
     Private ReadOnly _apProcessingSemaphore As New SemaphoreSlim(1, 1)
     Private _apSelectedTools As List(Of ModelConfig) = Nothing
     Private _apUseSecondApi As Boolean = False
+
+    ''' <summary>
+    ''' Paths of knowledge-store source files copied into the temp directory.
+    ''' Only these are candidates for citation-based filtering — tool outputs
+    ''' from process_word_document, merge_pdfs, etc. are never filtered.
+    ''' </summary>
+    Private _apKnowledgeSourceCopies As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
 
     Private Shared ReadOnly AP_AutoReplySubjectPatterns As String() = {
         "automatic reply:", "automatische antwort:", "réponse automatique:",
@@ -325,13 +333,27 @@ Partial Public Class ThisAddIn
 
     ''' <summary>Shows the AutoPilot dashboard if it is available.</summary>
     Public Sub ShowAutoPilotDashboard()
-        If _apDashboard IsNot Nothing Then
-            Try
-                _apDashboard.Show()
-                _apDashboard.BringToFront()
-            Catch
-            End Try
-        End If
+        If _apDashboard Is Nothing Then Return
+
+        Dim showDashboard As System.Action =
+            Sub()
+                Try
+                    If _apDashboard Is Nothing OrElse _apDashboard.IsDisposed Then Return
+                    _apDashboard.Show()
+                    _apDashboard.BringToFront()
+                Catch
+                End Try
+            End Sub
+
+        Try
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                UiSyncContext.Post(Sub() showDashboard(), Nothing)
+            Else
+                showDashboard()
+            End If
+        Catch
+        End Try
     End Sub
 
     ''' <summary>Starts AutoPilot using the configuration dialog and saved settings.</summary>
@@ -398,53 +420,78 @@ Partial Public Class ThisAddIn
         If modelCanCallTools Then
             _apSelectedTools = New List(Of ModelConfig)()
             _apSelectedTools.AddRange(GetAutoPilotInternalTools())
-            If config.SelectedExternalTools IsNot Nothing Then _apSelectedTools.AddRange(config.SelectedExternalTools)
+
+            If config.SelectedExternalTools IsNot Nothing Then
+                _apSelectedTools.AddRange(
+                    NormalizeAutoPilotSelectableExternalTools(config.SelectedExternalTools))
+            End If
+
+            _apSelectedTools =
+                _apSelectedTools.
+                    Where(Function(tool)
+                              Return tool IsNot Nothing AndAlso
+                                     Not SharedLibrary.Agents.MemoryTools.IsMemoryTool(tool.ToolName)
+                          End Function).
+                    GroupBy(Function(tool) tool.ToolName, StringComparer.OrdinalIgnoreCase).
+                    Select(Function(group) group.First()).
+                    ToList()
         Else
             _apSelectedTools = Nothing
         End If
 
-        _apDashboard = New LogWindow()
-        _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
-        AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
-        AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
-        _apDashboard.ShowAbortJobButton(True)
-        _apDashboard.Show()
+        Dim initializeDashboard As System.Action =
+            Sub()
+                _apDashboard = New LogWindow()
+                _apDashboard.Text = $"{AN6} AutoPilot Dashboard"
+                AddHandler _apDashboard.CancelRequested, AddressOf AutoPilot_DashboardCancelRequested
+                AddHandler _apDashboard.AbortJobRequested, AddressOf AutoPilot_DashboardAbortJobRequested
+                _apDashboard.ShowAbortJobButton(True)
+                _apDashboard.Show()
 
-        ' Add Scheduler dashboard button if scheduler is enabled
-        If config.EnableScheduler Then
-            Try
-                ' Find the button panel (FlowLayoutPanel) in the dashboard
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnScheduler As New Button() With {
-                        .Text = "Scheduler",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
-                    buttonPanel.Controls.Add(btnScheduler)
-                End If
-            Catch
-            End Try
-        End If
+                ' Add Scheduler dashboard button if scheduler is enabled
+                If config.EnableScheduler Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
 
-        ' Add User Storage dashboard button if memory or files are enabled
-        If config.EnableUserMemory OrElse config.EnableUserFiles Then
-            Try
-                Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
-                    FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
-                If buttonPanel IsNot Nothing Then
-                    Dim btnUserStorage As New Button() With {
-                        .Text = "User Storage",
-                        .AutoSize = True,
-                        .Padding = New Padding(10, 5, 10, 5)
-                    }
-                    AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
-                    buttonPanel.Controls.Add(btnUserStorage)
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnScheduler As New Button() With {
+                                .Text = "Scheduler",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnScheduler.Click, Sub(s, e) ShowSchedulerDashboard()
+                            buttonPanel.Controls.Add(btnScheduler)
+                        End If
+                    Catch
+                    End Try
                 End If
-            Catch
-            End Try
+
+                ' Add User Storage dashboard button if memory or files are enabled
+                If config.EnableUserMemory OrElse config.EnableUserFiles Then
+                    Try
+                        Dim buttonPanel = _apDashboard.Controls.OfType(Of TableLayoutPanel)().
+                            FirstOrDefault()?.Controls.OfType(Of FlowLayoutPanel)().FirstOrDefault()
+
+                        If buttonPanel IsNot Nothing Then
+                            Dim btnUserStorage As New Button() With {
+                                .Text = "User Storage",
+                                .AutoSize = True,
+                                .Padding = New Padding(10, 5, 10, 5)
+                            }
+                            AddHandler btnUserStorage.Click, Sub(s, e) ShowUserStorageDashboard()
+                            buttonPanel.Controls.Add(btnUserStorage)
+                        End If
+                    Catch
+                    End Try
+                End If
+            End Sub
+
+        If UiSyncContext IsNot Nothing AndAlso
+           System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+            UiSyncContext.Send(Sub() initializeDashboard(), Nothing)
+        Else
+            initializeDashboard()
         End If
 
         Dim modelLabel As String
@@ -1871,7 +1918,11 @@ Partial Public Class ThisAddIn
                             systemPrompt, userPrompt,
                             _apSelectedTools, _apUseSecondApi,
                             hideSplash:=True, hideLogWindow:=True,
-                            cancellationToken:=ct, binaryOutputDirectory:=_apCurrentTempDir)
+                            cancellationToken:=ct,
+                            binaryOutputDirectory:=_apCurrentTempDir,
+                            workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                            memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                            memoryGroundingModeIsExplicit:=True)
                     Else
                         ' Use no-tools system prompt when tooling is disabled
                         Dim effectiveSystemPrompt = If(useToolsForThisMail, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
@@ -1990,8 +2041,12 @@ Partial Public Class ThisAddIn
                     response = StripInkyMemoryBlock(response)
                 End If
 
+                ' Remove knowledge-store source files not cited by the LLM
+                RemoveUncitedKnowledgeSourceCopies(response)
+
                 ' Collect result attachments from OutputFiles
                 Dim resultAttachments As List(Of String) = CollectResultAttachments(tempDir, attachmentPaths)
+
                 If resultAttachments.Count > 0 Then
                     ApDashboardLog($"Result attachments to send: {resultAttachments.Count}", "info")
                     For Each ra In resultAttachments
@@ -2042,6 +2097,7 @@ Partial Public Class ThisAddIn
                 Catch
                 End Try
                 _apCurrentToolCallLog = Nothing
+                _apKnowledgeSourceCopies.Clear()
             End Try
 
         Catch ex As OperationCanceledException
@@ -3098,39 +3154,62 @@ Partial Public Class ThisAddIn
     ''' attachment info AND falls back to scanning for new files in tempDir.
     ''' Only files within tempDir are eligible (security: path prefix check).
     ''' </summary>
-    Private Shared Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
+    Private Function CollectResultAttachments(tempDir As String, originalAttachments As List(Of AutoPilotAttachmentInfo)) As List(Of String)
         Dim results As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
         Dim tempDirFull = Path.GetFullPath(tempDir)
 
-        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs)
+        ' Files already surfaced in a previous turn (or pre-existing user uploads)
+        ' MUST NOT be returned again. The set is populated by
+        ' ResetChatAgentDeliverableTrackingForNewTurn() at the start of each turn.
+        Dim alreadySurfaced As HashSet(Of String) = _chatAgentSurfacedFiles
+        If alreadySurfaced Is Nothing Then
+            alreadySurfaced = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+        End If
+
+        ' 1. Collect from OutputFiles (registered by tools like process_word_document, merge_pdfs).
+        '    OutputFiles for the current turn are accumulated as tools run; prior-turn
+        '    entries were cleared by ResetChatAgentDeliverableTrackingForNewTurn().
         If originalAttachments IsNot Nothing Then
             For Each att In originalAttachments
                 If att.OutputFiles IsNot Nothing Then
                     For Each outputPath In att.OutputFiles
                         If Not String.IsNullOrEmpty(outputPath) AndAlso File.Exists(outputPath) Then
-                            ' Security: only include files inside the per-mail temp dir
-                            If Path.GetFullPath(outputPath).StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then
-                                results.Add(outputPath)
-                            End If
+                            Dim fullOut As String = Path.GetFullPath(outputPath)
+                            ' Security: only include files inside the per-turn temp dir.
+                            If Not fullOut.StartsWith(tempDirFull, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            ' Bleed protection: skip files already surfaced in a previous turn.
+                            If alreadySurfaced.Contains(fullOut) Then Continue For
+                            results.Add(fullOut)
                         End If
                     Next
                 End If
             Next
         End If
 
-        ' 2. Fallback: also scan for any new files in tempDir not in the original set
+        ' 2. Fallback: scan for files in tempDir that are (a) not in the original
+        '    upload set, AND (b) not in the already-surfaced set from prior turns.
         If Directory.Exists(tempDir) Then
             Dim originalPaths As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
             If originalAttachments IsNot Nothing Then
                 For Each att In originalAttachments
-                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(att.TempFilePath)
+                    If att.TempFilePath IsNot Nothing Then originalPaths.Add(Path.GetFullPath(att.TempFilePath))
                 Next
             End If
-            ' Scan all files recursively (tools may create output in subdirectories)
             For Each filePath In Directory.GetFiles(tempDir, "*.*", SearchOption.AllDirectories)
-                If Not originalPaths.Contains(filePath) Then results.Add(filePath)
+                Dim full As String = Path.GetFullPath(filePath)
+                If originalPaths.Contains(full) Then Continue For
+                If alreadySurfaced.Contains(full) Then Continue For
+                results.Add(full)
             Next
         End If
+
+        ' Promote everything returned this turn into the "already surfaced" set so
+        ' the next turn does not pick it up again — even if the OutputFiles tracking
+        ' on uploads is not perfectly cleared by the next reset.
+        For Each surfaced In results
+            alreadySurfaced.Add(surfaced)
+        Next
+        _chatAgentSurfacedFiles = alreadySurfaced
 
         Return results.ToList()
     End Function
@@ -3357,21 +3436,21 @@ Partial Public Class ThisAddIn
     '  DASHBOARD LOG — date+time, no duplicate timestamp
     ' ═══════════════════════════════════════════════════════════════════════════
 
+
     ''' <summary>
     ''' Appends a log entry to the AutoPilot dashboard.
     ''' Does NOT prepend a timestamp here because LogWindow.AppendLogInternal
-    ''' already adds [HH:mm:ss.fff]. Instead we prepend the date-only portion
-    ''' so the dashboard shows [HH:mm:ss.fff] [dd-MMM] message.
-    ''' When the Chat Agent is active, also routes to the tooling LogWindow
-    ''' so internal tool detail appears in the web agent dashboard.
+    ''' already adds [HH:mm:ss]. Instead we prepend the date-only portion so the
+    ''' dashboard shows [HH:mm:ss] [dd-MMM] message.
     ''' </summary>
     Private Sub ApDashboardLog(message As String, level As String)
         Debug.WriteLine($"[AutoPilot] [{level}] {message}")
+
         Try
             If _apDashboard IsNot Nothing Then
-                ' Prepend date portion only — LogWindow adds the time
                 Dim dateTag = DateTime.Now.ToString("dd-MMM", Globalization.CultureInfo.InvariantCulture)
                 Dim taggedMessage = $"[{dateTag}] {message}"
+
                 If _apDashboard.InvokeRequired Then
                     _apDashboard.BeginInvoke(New MethodInvoker(Sub() _apDashboard.AppendLog(taggedMessage, level)))
                 Else
@@ -3381,13 +3460,9 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
-        ' Route to the Chat Agent's tooling LogWindow (no date tag needed)
-        If _chatAgentActive AndAlso _activeToolingContext IsNot Nothing Then
-            Try
-                _activeToolingContext.Log(message, level)
-            Catch
-            End Try
-        End If
+        ' Intentionally do not mirror AutoPilot dashboard entries into the Local Chat
+        ' tooling log. Local Chat already receives direct context.Log(...) messages,
+        ' and mirroring here creates duplicate entries such as web_grounding progress.
     End Sub
 
     ''' <summary>Marks the dashboard operation as complete.</summary>
@@ -3424,37 +3499,80 @@ Partial Public Class ThisAddIn
     ' ═══════════════════════════════════════════════════════════════════════════
 
     ''' <summary>
-    ''' Builds an HTML "Sources used:" section from tool call entries.
-    ''' Only external tools (not internal document/attachment tools) are shown.
-    ''' Web retriever URLs are rendered as clickable hyperlinks.
+    ''' Returns True only for tool calls that represent real information sources
+    ''' for the "Sources used:" footer. Excludes helper/meta/classical tools.
+    ''' </summary>
+    Private Shared Function IsSourceEntryForFooter(entry As AutoPilotToolCallEntry) As Boolean
+        If entry Is Nothing OrElse Not entry.WasSuccessful Then Return False
+
+        Dim toolName As String = If(entry.ToolName, "").Trim()
+        If toolName = "" Then Return False
+
+        ' Never show loader/helper/meta tools.
+        If toolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        ' Real built-in source tools.
+        If toolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith(InternalKnowledgeToolNamePrefix, StringComparison.OrdinalIgnoreCase) OrElse
+           SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolName) OrElse
+           SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolName) Then
+            Return True
+        End If
+
+        ' Never show agent-layer or other classical/helper tools.
+        If toolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           SharedLibrary.Agents.MemoryTools.IsMemoryTool(toolName) OrElse
+           SharedLibrary.Agents.TextTools.IsTextTool(toolName) OrElse
+           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
+           SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
+           SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) Then
+            Return False
+        End If
+
+        ' External tools are treated as real sources by default
+        ' (e.g. Special Services tools), unless excluded above.
+        Return Not entry.IsInternalTool
+    End Function
+
+    ''' <summary>
+    ''' Builds an HTML "Sources used:" section from real source calls only.
+    ''' Includes source tools such as M365, Special Services, internet search,
+    ''' web grounding, web retrieval, and knowledge-store lookups.
+    ''' Excludes helper/meta/classical tools such as tool_loader, skills, agents,
+    ''' memory/text/workspace/js tools, and other non-source internals.
     ''' </summary>
     Private Shared Function BuildSourcesUsedHtml(toolCallLog As List(Of AutoPilotToolCallEntry)) As String
         If toolCallLog Is Nothing OrElse toolCallLog.Count = 0 Then Return ""
 
-        Dim externalCalls = toolCallLog.Where(Function(e) Not e.IsInternalTool).ToList()
-        If externalCalls.Count = 0 Then Return ""
+        Dim sourceCalls = toolCallLog.Where(Function(e) IsSourceEntryForFooter(e)).ToList()
+        If sourceCalls.Count = 0 Then Return ""
 
         Dim sb As New StringBuilder()
         sb.AppendLine("<div style='font-size:8pt;color:#999999;margin-top:16px;border-top:1px solid #eeeeee;padding-top:8px;'>")
         sb.AppendLine("<b style='color:#888888;'>Sources used:</b><br/>")
 
-        For Each entry In externalCalls
+        For Each entry In sourceCalls
             Dim toolLabel = If(Not String.IsNullOrEmpty(entry.ToolDisplayName), entry.ToolDisplayName, entry.ToolName)
             Dim icon = If(entry.WasSuccessful, "✓", "✗")
 
-            ' Check if this tool call has URLs (web retriever)
             If entry.Urls IsNot Nothing AndAlso entry.Urls.Count > 0 Then
-                ' Render each URL as a clickable link
                 For Each url In entry.Urls
                     Dim encodedUrl = System.Net.WebUtility.HtmlEncode(url)
                     sb.AppendLine($"&bull; {icon} <a href='{encodedUrl}' style='color:#4A90D9;text-decoration:underline;'>{encodedUrl}</a><br/>")
                 Next
             Else
-                ' Non-web tool: render as before with param summary
                 Dim paramInfo = ""
                 If Not String.IsNullOrEmpty(entry.ParamSummary) Then
                     paramInfo = $" — {System.Net.WebUtility.HtmlEncode(entry.ParamSummary)}"
                 End If
+
                 sb.AppendLine($"&bull; {icon} {System.Net.WebUtility.HtmlEncode(toolLabel)}{paramInfo}<br/>")
             End If
         Next
@@ -4475,7 +4593,11 @@ Partial Public Class ThisAddIn
                         systemPrompt, userPrompt,
                         _apSelectedTools, _apUseSecondApi,
                         hideSplash:=True, hideLogWindow:=True,
-                        cancellationToken:=ct, binaryOutputDirectory:=tempDir)
+                        cancellationToken:=ct,
+                        binaryOutputDirectory:=tempDir,
+                        workflowId:=SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId(),
+                        memoryGroundingMode:=SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+                        memoryGroundingModeIsExplicit:=True)
                 Else
                     Dim effectiveSystemPrompt = If(modelCanCallTools, systemPrompt, InterpolateAtRuntime(SP_AutoPilot_NoTools))
                     response = Await LLM(effectiveSystemPrompt, userPrompt,
@@ -4649,6 +4771,7 @@ Partial Public Class ThisAddIn
     Friend Class AutoPilotAttachmentInfo
         Public Property OriginalFileName As String
         Public Property TempFilePath As String
+        Public Property SourcePath As String
         Public Property Extension As String
         Public Property SizeBytes As Long
         Public Property IsOverSizeLimit As Boolean

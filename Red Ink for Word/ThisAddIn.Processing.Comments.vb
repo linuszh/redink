@@ -75,7 +75,9 @@ Partial Public Class ThisAddIn
         End Try
         If docRef Is Nothing Then Exit Sub
 
-        Dim originalRange As Microsoft.Office.Interop.Word.Range = Selection.Range.Duplicate
+        Dim originalStart As System.Int32 = Selection.Range.Start
+        Dim originalEnd As System.Int32 = Selection.Range.End
+        Debug.WriteLine($"SetBubbles: captured originalRange=[{originalStart},{originalEnd}] selection=[{Selection.Range.Start},{Selection.Range.End}]")
         Dim BubblecutHappened As System.Boolean = False
         Dim BubbleCount As System.Int32 = 0
         Dim MaxBubbles As System.Int32 = responseItems.Count
@@ -164,12 +166,23 @@ Partial Public Class ThisAddIn
                         End If
 
                         Try
-                            ' Ensure we start in MainText (best effort)
+                            ' DoEvents/balloon refresh after a previous Comments.Add can
+                            ' collapse the live Selection to the document end. Re-assert
+                            ' the search scope on every iteration, not only when the
+                            ' story changed.
                             Try
-                                If app.Selection IsNot Nothing AndAlso app.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
-                                    app.Selection.SetRange(Start:=originalRange.Start, End:=originalRange.End)
+                                If app.Selection IsNot Nothing AndAlso
+                                   app.Selection.StoryType <> Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
+                                    app.Selection.SetRange(Start:=originalStart, End:=originalEnd)
                                 End If
                             Catch exSet As System.Exception
+                            End Try
+
+                            Try
+                                Selection.SetRange(Start:=originalStart, End:=originalEnd)
+                                Debug.WriteLine($"SetBubbles: pre-find Selection forced to [{Selection.Range.Start},{Selection.Range.End}]")
+                            Catch exForce As System.Exception
+                                Debug.WriteLine($"SetBubbles: pre-find SetRange failed: {exForce.Message}")
                             End Try
 
                             ' === NO DoEvents between the finder and creating the stable range ===
@@ -191,38 +204,39 @@ Partial Public Class ThisAddIn
 
                                     If matchedRange IsNot Nothing AndAlso
                                    matchedRange.StoryType = Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory Then
-
-                                        If INI_MarkdownBubbles Then
-                                            Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
-                                            Try
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:="")
-                                            Catch exAdd As System.Runtime.InteropServices.COMException
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
-                                            Catch exAdd2 As System.Exception
-                                                cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
-                                            End Try
-
-                                            Try
-                                                If commentText.StartsWith("* ") Then
-                                                    commentText = $"{AN5}{Prefix}:" & vbCrLf & commentText
-                                                Else
-                                                    commentText = $"{AN5}{Prefix}: " & commentText
-                                                End If
-                                                Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                                                ' Ensure balloons visible during formatted insertion into the comment story
-                                                Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                                        Using BeginMarkupAuthorScope(app)
+                                            If INI_MarkdownBubbles Then
+                                                Dim cmt As Microsoft.Office.Interop.Word.Comment = Nothing
                                                 Try
-                                                    win.View.ShowRevisionsAndComments = True
-                                                    InsertMarkdownToComment(cRng, commentText) ' will not fight a hidden pane
-                                                Finally
-                                                    win.View.ShowRevisionsAndComments = prevShow
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:="")
+                                                Catch exAdd As System.Runtime.InteropServices.COMException
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
+                                                Catch exAdd2 As System.Exception
+                                                    cmt = Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(Range:=matchedRange, Text:=$"{AN5}{Prefix}: ")
                                                 End Try
-                                            Catch exMk As System.Exception
-                                                cmt.Range.Text = $"{AN5}{Prefix}: " & commentText
-                                            End Try
-                                        Else
-                                            Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(matchedRange, $"{AN5}{Prefix}: " & commentText)
-                                        End If
+
+                                                Try
+                                                    If commentText.StartsWith("* ") Then
+                                                        commentText = $"{AN5}{Prefix}:" & vbCrLf & commentText
+                                                    Else
+                                                        commentText = $"{AN5}{Prefix}: " & commentText
+                                                    End If
+                                                    Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                                                    ' Ensure balloons visible during formatted insertion into the comment story
+                                                    Dim prevShow As System.Boolean = win.View.ShowRevisionsAndComments
+                                                    Try
+                                                        win.View.ShowRevisionsAndComments = True
+                                                        InsertMarkdownToComment(cRng, commentText) ' will not fight a hidden pane
+                                                    Finally
+                                                        win.View.ShowRevisionsAndComments = prevShow
+                                                    End Try
+                                                Catch exMk As System.Exception
+                                                    cmt.Range.Text = $"{AN5}{Prefix}: " & commentText
+                                                End Try
+                                            Else
+                                                Globals.ThisAddIn.Application.ActiveDocument.Comments.Add(matchedRange, $"{AN5}{Prefix}: " & commentText)
+                                            End If
+                                        End Using
 
                                         BubbleCount += 1
                                     Else
@@ -250,7 +264,9 @@ Partial Public Class ThisAddIn
 
                     ' Best-effort restore
                     Try
-                        Selection.SetRange(Start:=originalRange.Start, End:=originalRange.End)
+                        Debug.WriteLine($"SetBubbles: restoring Selection to originalRange=[{originalStart},{originalEnd}] (current Selection=[{Selection.Range.Start},{Selection.Range.End}])")
+                        Selection.SetRange(Start:=originalStart, End:=originalEnd)
+                        Debug.WriteLine($"SetBubbles: after restore Selection=[{Selection.Range.Start},{Selection.Range.End}]")
                     Catch exRestore As System.Exception
                     End Try
                 Next
@@ -311,19 +327,25 @@ Partial Public Class ThisAddIn
             If ErrorList <> "" AndAlso ErrorList.ToLower() <> "esc" Then
                 SLib.PutInClipboard(ErrorList)
 
-                Dim tailRange As Microsoft.Office.Interop.Word.Range = originalRange.Duplicate
+                Dim tailRange As Microsoft.Office.Interop.Word.Range = docRef.Range(Start:=originalStart, End:=originalEnd)
                 tailRange.Collapse(Microsoft.Office.Interop.Word.WdCollapseDirection.wdCollapseEnd)
 
                 If INI_MarkdownBubbles Then
                     Try
-                        Dim cmt As Microsoft.Office.Interop.Word.Comment = docRef.Comments.Add(Range:=tailRange, Text:="")
-                        Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
-                        InsertMarkdownToComment(cRng, $"{AN5}{Prefix}:" & ErrorList)
+                        Using BeginMarkupAuthorScope(docRef.Application)
+                            Dim cmt As Microsoft.Office.Interop.Word.Comment = docRef.Comments.Add(Range:=tailRange, Text:="")
+                            Dim cRng As Microsoft.Office.Interop.Word.Range = cmt.Range
+                            InsertMarkdownToComment(cRng, $"{AN5}{Prefix}:" & ErrorList)
+                        End Using
                     Catch exMkSum As System.Exception
-                        docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                        Using BeginMarkupAuthorScope(docRef.Application)
+                            docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                        End Using
                     End Try
                 Else
-                    docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                    Using BeginMarkupAuthorScope(docRef.Application)
+                        docRef.Comments.Add(Range:=tailRange, Text:=$"{AN5}{Prefix}: " & ErrorList)
+                    End Using
                 End If
             End If
         Else
@@ -1144,29 +1166,31 @@ Partial Public Class ThisAddIn
 
         ' 3) Try to create a threaded reply if available, else fall back to appending inside the original comment range.
         Try
-            ' Preferred path: threaded reply (Word 2013+)
-            Dim newReply As Microsoft.Office.Interop.Word.Comment = Nothing
-            Try
-                ' Use the same anchor scope for the reply; text will be set via Range below.
-                newReply = target.Replies.Add(target.Scope, System.String.Empty)
-            Catch
-                ' Some versions may require a reference range; try Reference
+            Using BeginMarkupAuthorScope(app)
+                ' Preferred path: threaded reply (Word 2013+)
+                Dim newReply As Microsoft.Office.Interop.Word.Comment = Nothing
                 Try
-                    newReply = target.Replies.Add(target.Reference, System.String.Empty)
+                    ' Use the same anchor scope for the reply; text will be set via Range below.
+                    newReply = target.Replies.Add(target.Scope, System.String.Empty)
                 Catch
-                    newReply = Nothing
+                    ' Some versions may require a reference range; try Reference
+                    Try
+                        newReply = target.Replies.Add(target.Reference, System.String.Empty)
+                    Catch
+                        newReply = Nothing
+                    End Try
                 End Try
-            End Try
 
-            If newReply IsNot Nothing Then
-                If formatted Then
-                    ' Use provided formatter
-                    InsertMarkdownToComment(newReply.Range, replyText)
-                Else
-                    newReply.Range.Text = replyText
+                If newReply IsNot Nothing Then
+                    If formatted Then
+                        ' Use provided formatter
+                        InsertMarkdownToComment(newReply.Range, replyText)
+                    Else
+                        newReply.Range.Text = replyText
+                    End If
+                    Return True
                 End If
-                Return True
-            End If
+            End Using
         Catch ex As System.Exception
             ' fall through to non-threaded fallback
         End Try
@@ -1223,6 +1247,33 @@ Partial Public Class ThisAddIn
         End Using
     End Function
 
+    Private Shared Sub ShowCommentDiffWindow(ByVal originalText As String, ByVal revisedText As String)
+        Try
+            Dim normalizedOriginal As String = NormalizeCommentText(originalText)
+            Dim normalizedRevised As String = NormalizeCommentText(SafePlainFromMarkdownOrHtml(revisedText))
+
+            If String.Equals(normalizedOriginal, normalizedRevised, StringComparison.Ordinal) Then Return
+
+            Dim sText As String =
+            BuildInlineDiffMarkup(
+                normalizedOriginal,
+                normalizedRevised,
+                trimTrailingLineBreaksOnRevised:=False)
+
+            sText = System.Text.RegularExpressions.Regex.Replace(sText, "\{\{.*?\}\}", String.Empty)
+
+            Dim rtfContent As String =
+            ConvertMarkupToRTF("This is the markup of the comment change:" & vbCrLf & vbCrLf & sText)
+
+            System.Threading.Tasks.Task.Run(
+            Sub()
+                ShowRTFCustomMessageBox(rtfContent, RestoreWindow:=True)
+            End Sub)
+        Catch ex As Exception
+            Debug.WriteLine($"ShowCommentDiffWindow error: {ex.Message}")
+        End Try
+    End Sub
+
     ''' <summary>
     ''' Processes either the selected text inside the active comment bubble or (when there is no meaningful selection) the entire comment text,
     ''' by sending it to the LLM and writing the formatted result back into the comment story.
@@ -1233,6 +1284,8 @@ Partial Public Class ThisAddIn
     ''' <param name="UseSecondAPI">When true, routes the LLM call to the configured secondary API.</param>
     ''' <param name="SelectionMandatory">When true, shows an error if the resolved input text is empty.</param>
     ''' <param name="FileObject">Optional file object parameter forwarded to the LLM call.</param>
+    ''' <param name="DoMarkup">When true, treats the LLM output as Markdown/HTML and attempts to render it as rich content in the comment bubble; otherwise inserts as plain text.</param>
+    ''' <param name="MarkupMethod">When DoMarkup is true, specifies which rendering method to use (0 = default, 1 = legacy).</param>
     ''' <returns>Always returns an empty string; errors are reported via message boxes.</returns>
     Private Async Function ProcessSelectedTextInActiveCommentBubble(
     ByVal sysCommand As String,
@@ -1240,7 +1293,9 @@ Partial Public Class ThisAddIn
     ByVal bubbleSelection As Word.Range,
     ByVal UseSecondAPI As Boolean,
     ByVal SelectionMandatory As Boolean,
-    Optional ByVal FileObject As String = ""
+    Optional ByVal FileObject As String = "",
+    Optional ByVal DoMarkup As Boolean = False,
+    Optional ByVal MarkupMethod As Integer = 0
 ) As Task(Of String)
 
         Try
@@ -1248,7 +1303,6 @@ Partial Public Class ThisAddIn
             If app Is Nothing Then Return ""
 
             If bubbleSelection Is Nothing Then
-                ' Fallback: try to grab current selection, but do not depend on it
                 Try
                     bubbleSelection = app.Selection.Range.Duplicate
                 Catch
@@ -1261,7 +1315,12 @@ Partial Public Class ThisAddIn
                 Return ""
             End If
 
-            Dim doc As Word.Document = bubbleSelection.Document
+            Dim doc As Word.Document = Nothing
+            Try
+                doc = bubbleSelection.Document
+            Catch
+                doc = Nothing
+            End Try
             If doc Is Nothing Then Return ""
 
             ' 1) Resolve owning comment
@@ -1288,17 +1347,16 @@ Partial Public Class ThisAddIn
             End Try
 
             ' 3) Pick inputRange: selection if meaningful, else the whole comment
-            Dim inputRange As Word.Range = If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate)
+            Dim inputRange As Word.Range = GetEditableCommentRange(
+            If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate))
 
-            ' Best-effort: exclude the trailing end-of-comment marker / paragraph mark
-            Try
-                If inputRange.End > inputRange.Start Then inputRange.End -= 1
-            Catch
-            End Try
+            If inputRange Is Nothing Then
+                ShowCustomMessageBox("No editable comment range could be resolved.")
+                Return ""
+            End If
 
             Dim inputText As String = SafeRangeText(inputRange)
             If String.IsNullOrWhiteSpace(inputText) Then
-                ' Only complain if the comment is empty; otherwise SelectionMandatory does not apply here
                 If SelectionMandatory Then
                     ShowCustomMessageBox("The comment contains no text to process.")
                 End If
@@ -1342,44 +1400,73 @@ Partial Public Class ThisAddIn
             End If
 
             ' 6) Write back: selection or whole comment
-            Dim targetRange As Word.Range = If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate)
+            Dim targetRange As Word.Range = GetEditableCommentRange(
+            If(hasRealSelection, bubbleSelection.Duplicate, activeComment.Range.Duplicate))
 
-            Try
-                If targetRange.End > targetRange.Start Then targetRange.End -= 1
-            Catch
-            End Try
+            If targetRange Is Nothing Then
+                ShowCustomMessageBox("No editable target range could be resolved.")
+                Return ""
+            End If
 
-            ' Capture "before" snapshot (for post-condition)
-            Dim beforeText As String = ""
-            Try
-                beforeText = activeComment.Range.Text
-            Catch
-            End Try
-
-            ' Do the write
             Try
                 targetRange.Text = ""
-            Catch
-            End Try
-
-            InsertMarkdownToComment(targetRange, llmResult)
-
-            AbortCommentEditingBestEffort(app)
-
-            ' Force UI refresh (this is what makes the change show up if the user was editing)
-            ForceCommentUiRefresh(app, activeComment)
-
-            ' Post-condition: if comment still looks unchanged, instruct user
-            Dim afterText As String = ""
-            Try
-                afterText = activeComment.Range.Text
-            Catch
-            End Try
-
-            If String.Equals(beforeText, afterText, StringComparison.Ordinal) OrElse
-   String.IsNullOrWhiteSpace(afterText) Then
+                targetRange.Collapse(Word.WdCollapseDirection.wdCollapseStart)
+            Catch ex As Exception
+                Debug.WriteLine($"Comment clear failed: {ex.Message}")
                 ShowCustomMessageBox("Word is currently editing this comment. Please submit/close the comment editor (Esc/click outside), then retry.")
                 Return ""
+            End Try
+
+            Try
+                InsertMarkdownToComment(targetRange, llmResult)
+            Catch ex As Exception
+                Debug.WriteLine($"Comment insert failed: {ex.Message}")
+                ShowCustomMessageBox("Word is currently editing this comment. Please submit/close the comment editor (Esc/click outside), then retry.")
+                Return ""
+            End Try
+
+            ForceCommentUiRefresh(app, activeComment)
+
+            Dim afterText As String = ""
+
+            For i As Integer = 1 To 6
+                System.Windows.Forms.Application.DoEvents()
+                Await System.Threading.Tasks.Task.Delay(75)
+
+                Try
+                    afterText = NormalizeCommentText(activeComment.Range.Text)
+                Catch
+                    afterText = ""
+                End Try
+
+                If Not String.IsNullOrWhiteSpace(afterText) Then Exit For
+            Next
+
+            If String.IsNullOrWhiteSpace(afterText) Then
+                AbortCommentEditingBestEffort(app)
+                ForceCommentUiRefresh(app, activeComment)
+
+                For i As Integer = 1 To 4
+                    System.Windows.Forms.Application.DoEvents()
+                    Await System.Threading.Tasks.Task.Delay(75)
+
+                    Try
+                        afterText = NormalizeCommentText(activeComment.Range.Text)
+                    Catch
+                        afterText = ""
+                    End Try
+
+                    If Not String.IsNullOrWhiteSpace(afterText) Then Exit For
+                Next
+            End If
+
+            If String.IsNullOrWhiteSpace(afterText) Then
+                ShowCustomMessageBox("Word is currently editing this comment. Please submit/close the comment editor (Esc/click outside), then retry.")
+                Return ""
+            End If
+
+            If DoMarkup Then
+                ShowCommentDiffWindow(inputText, llmResult)
             End If
 
             Return ""
@@ -1435,6 +1522,32 @@ Partial Public Class ThisAddIn
             ' Best-effort only
         End Try
     End Sub
+
+    Private Shared Function GetEditableCommentRange(ByVal sourceRange As Word.Range) As Word.Range
+        If sourceRange Is Nothing Then Return Nothing
+
+        Dim editable As Word.Range = Nothing
+
+        Try
+            editable = sourceRange.Duplicate
+        Catch
+            editable = sourceRange
+        End Try
+
+        If editable Is Nothing Then Return Nothing
+        If editable.End <= editable.Start Then Return editable
+
+        Try
+            Dim lastChar As String = editable.Document.Range(editable.End - 1, editable.End).Text
+
+            If lastChar = vbCr OrElse lastChar = ChrW(7) Then
+                editable.End -= 1
+            End If
+        Catch
+        End Try
+
+        Return editable
+    End Function
 
 
 End Class

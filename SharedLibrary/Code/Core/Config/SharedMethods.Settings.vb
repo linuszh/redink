@@ -514,6 +514,10 @@ Namespace SharedLibrary
                                                        End If
                                                    Next
                                                    UpdateAppConfig(CapturedContext)
+
+                                                   ' Immediately apply the running background state without a restart
+                                                   KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
+
                                                    CapturedContext.MenusAdded = False
                                                End Sub
 
@@ -610,7 +614,11 @@ Namespace SharedLibrary
                                                     {"DefaultPrefix", "DefaultPrefix"},
                                                     {"ReplaceText2Override", "ReplaceText2Override"},
                                                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
-                                                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"}
+                                                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                                                    {"MarkupAuthor", "MarkupAuthor"},
+                                                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
+                                                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
+                                                    {"FormulaInstruction", "FormulaInstruction"}
                                                 }
 
                                            For Each settingKey In settingControls.Keys
@@ -647,7 +655,14 @@ Namespace SharedLibrary
                                                    End If
 
                                                    Try
-                                                       My.Settings.Item(mySettingsKey) = currentValue
+                                                       Dim isBool As Boolean
+                                                       If Boolean.TryParse(currentValue, isBool) Then
+                                                           My.Settings.Item(mySettingsKey) = isBool
+                                                       ElseIf currentValue = "True" OrElse currentValue = "False" Then
+                                                           My.Settings.Item(mySettingsKey) = CBool(currentValue)
+                                                       Else
+                                                           My.Settings.Item(mySettingsKey) = currentValue
+                                                       End If
                                                    Catch
                                                        ' Ignore if the My.Settings entry does not exist
                                                    End Try
@@ -658,6 +673,9 @@ Namespace SharedLibrary
                                                    ' Ignore save errors silently
                                                End Try
                                            End If
+
+                                           ' Immediately apply the running background state without a restart
+                                           KnowledgeStoreIdleService.SetEnabled(CapturedContext.INI_KnowledgeStoreBackgroundIndexing)
 
                                            CapturedContext.MenusAdded = False
                                            settingsForm.Close()
@@ -799,7 +817,7 @@ Namespace SharedLibrary
         "KeepFormat2", "KeepParaFormatInline", "ReplaceText2", "DoMarkupOutlook", "DoMarkupWord",
         "APIDebug", "AutoPilotAutoStart", "AutoPilotSchedulerLocalChat", "ISearch_Approve", "ISearch", "Lib", "ContextMenu", "NoLocalConfig", "SecondAPI", "APIEncrypted", "APIEncrypted_2",
         "OAuth2", "OAuth2_2", "PromptLib", "Ignore", "ToolingLogWindow", "ToolingDryRun", "ForceDrawioLocal", "AllowLegacyDocFiles", "EnablePrivacyForSearch",
-        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload"
+        "UpdateIni", "UpdateIniAllowRemote", "UpdateIniNoSignature", "UpdateIniSilentLog", "NoHelperDownload", "KnowledgeStoreUseLLMIndex", "KnowledgeStoreBackgroundIndexing"
             }
             Return booleanSettings.Contains(settingKey)
         End Function
@@ -936,6 +954,8 @@ Namespace SharedLibrary
                     Return context.INI_MarkupDiffCap.ToString()
                 Case "MarkupRegexCap"
                     Return context.INI_MarkupRegexCap.ToString()
+                Case "MarkupAuthor"
+                    Return context.INI_MarkupAuthor
                 Case "ChatCap"
                     Return context.INI_ChatCap.ToString()
                 Case "PreCorrection"
@@ -962,6 +982,10 @@ Namespace SharedLibrary
                     Return context.INI_FindClausePath
                 Case "FindClausePathLocal"
                     Return context.INI_FindClausePathLocal
+                Case "AgentResourcesPath"
+                    Return context.INI_AgentResourcesPath
+                Case "AgentResourcesPathLocal"
+                    Return context.INI_AgentResourcesPathLocal
                 Case "WebAgentPath"
                     Return context.INI_WebAgentPath
                 Case "WebAgentPathLocal"
@@ -998,6 +1022,12 @@ Namespace SharedLibrary
                     Return context.INI_AutoPilotAutoStart.ToString()
                 Case "AutoPilotSchedulerLocalChat"
                     Return context.INI_AutoPilotSchedulerLocalChat.ToString()
+                Case "M365ClientID"
+                    Return context.INI_M365ClientId
+                Case "M365TenantID"
+                    Return context.INI_M365TenantId
+                Case "M365Scopes"
+                    Return context.INI_M365Scopes
                 Case "ISearch"
                     Return context.INI_ISearch.ToString()
                 Case "ISearch_Approve"
@@ -1126,6 +1156,20 @@ Namespace SharedLibrary
                     Return context.INI_AssemblePath
                 Case "AssemblePathLocal"
                     Return context.INI_AssemblePathLocal
+                Case "KnowledgeStorePath"
+                    Return context.INI_KnowledgeStorePath
+                Case "KnowledgeStorePathLocal"
+                    Return context.INI_KnowledgeStorePathLocal
+                Case "KnowledgeStoreOwner"
+                    Return context.INI_KnowledgeStoreOwner
+                Case "KnowledgeStoreUseLLMIndex"
+                    Return context.INI_KnowledgeStoreUseLLMIndex.ToString()
+                Case "KnowledgeStoreBackgroundIndexing"
+                    Return context.INI_KnowledgeStoreBackgroundIndexing.ToString()
+                Case "KnowledgeStoreBackgroundIndexingWindow"
+                    Return context.INI_KnowledgeStoreBackgroundIndexingWindow
+                Case "FormulaInstruction"
+                    Return context.INI_FormulaInstruction
                 Case "AssembleExecMaxChars"
                     Return context.INI_AssembleExecMaxChars.ToString()
                 Case "AssembleMaxContextSummaryChars"
@@ -1270,6 +1314,8 @@ Namespace SharedLibrary
                     context.INI_MarkupDiffCap = Integer.Parse(value)
                 Case "MarkupRegexCap"
                     context.INI_MarkupRegexCap = Integer.Parse(value)
+                Case "MarkupAuthor"
+                    context.INI_MarkupAuthor = value
                 Case "ChatCap"
                     context.INI_ChatCap = Integer.Parse(value)
                 Case "PreCorrection"
@@ -1306,6 +1352,10 @@ Namespace SharedLibrary
                     context.INI_FindClausePath = value
                 Case "FindClausePathLocal"
                     context.INI_FindClausePathLocal = value
+                Case "AgentResourcesPath"
+                    context.INI_AgentResourcesPath = value
+                Case "AgentResourcesPathLocal"
+                    context.INI_AgentResourcesPathLocal = value
                 Case "DocCheckPath"
                     context.INI_DocCheckPath = value
                 Case "DocCheckPathLocal"
@@ -1332,6 +1382,12 @@ Namespace SharedLibrary
                     context.INI_AutoPilotAutoStart = Boolean.Parse(value)
                 Case "AutoPilotSchedulerLocalChat"
                     context.INI_AutoPilotSchedulerLocalChat = Boolean.Parse(value)
+                Case "M365ClientID"
+                    context.INI_M365ClientId = value
+                Case "M365TenantID"
+                    context.INI_M365TenantId = value
+                Case "M365Scopes"
+                    context.INI_M365Scopes = value
                 Case "ISearch"
                     context.INI_ISearch = Boolean.Parse(value)
                 Case "ISearch_Approve"
@@ -1450,6 +1506,20 @@ Namespace SharedLibrary
                     context.INI_AssemblePath = value
                 Case "AssemblePathLocal"
                     context.INI_AssemblePathLocal = value
+                Case "KnowledgeStorePath"
+                    context.INI_KnowledgeStorePath = value
+                Case "KnowledgeStorePathLocal"
+                    context.INI_KnowledgeStorePathLocal = value
+                Case "KnowledgeStoreOwner"
+                    context.INI_KnowledgeStoreOwner = value
+                Case "KnowledgeStoreUseLLMIndex"
+                    context.INI_KnowledgeStoreUseLLMIndex = Boolean.Parse(value)
+                Case "KnowledgeStoreBackgroundIndexing"
+                    context.INI_KnowledgeStoreBackgroundIndexing = Boolean.Parse(value)
+                Case "KnowledgeStoreBackgroundIndexingWindow"
+                    context.INI_KnowledgeStoreBackgroundIndexingWindow = value
+                Case "FormulaInstruction"
+                    context.INI_FormulaInstruction = value
                 Case "AssembleExecMaxChars"
                     context.INI_AssembleExecMaxChars = Integer.Parse(value)
                 Case "AssembleMaxContextSummaryChars"
@@ -1698,6 +1768,9 @@ Namespace SharedLibrary
                     {"OAuth2Scopes_2", context.INI_OAuth2Scopes_2},
                     {"OAuth2Endpoint_2", context.INI_OAuth2Endpoint_2},
                     {"OAuth2ATExpiry_2", context.INI_OAuth2ATExpiry_2.ToString()},
+                    {"M365ClientID", context.INI_M365ClientId},
+                    {"M365TenantID", context.INI_M365TenantId},
+                    {"M365Scopes", context.INI_M365Scopes},
                     {"ISearch", context.INI_ISearch.ToString()},
                     {"ISearch_Approve", context.INI_ISearch_Approve.ToString()},
                     {"ISearch_URL", context.INI_ISearch_URL},
@@ -1722,6 +1795,7 @@ Namespace SharedLibrary
                     {"MarkupMethodWord", context.INI_MarkupMethodWord.ToString()},
                     {"MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride},
                     {"MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride},
+                    {"MarkupAuthor", context.INI_MarkupAuthor},
                     {"ShortcutsWordExcel", context.INI_ShortcutsWordExcel},
                     {"ContextMenu", context.INI_ContextMenu.ToString()},
                     {"NoLocalConfig", context.INI_NoLocalConfig.ToString()},
@@ -1753,6 +1827,8 @@ Namespace SharedLibrary
                     {"SpecialServicePath", context.INI_SpecialServicePath},
                     {"FindClausePath", context.INI_FindClausePath},
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
+                    {"AgentResourcesPath", context.INI_AgentResourcesPath},
+                    {"AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
                     {"SnapshotLibPath", context.INI_SnapshotLibPath},
@@ -1799,6 +1875,9 @@ Namespace SharedLibrary
                     {"SP_MailReply", context.SP_MailReply},
                     {"SP_MailSumup", context.SP_MailSumup},
                     {"SP_MailSumup2", context.SP_MailSumup2},
+                    {"SP_AIMailSearch1", context.SP_AIMailSearch1},
+                    {"SP_AIMailSearch2", context.SP_AIMailSearch2},
+                    {"SP_AIMailSearch3", context.SP_AIMailSearch3},
                     {"SP_FreestyleText", context.SP_FreestyleText},
                     {"SP_FreestyleNoText", context.SP_FreestyleNoText},
                     {"SP_Freestyle_Document", context.SP_Freestyle_Document},
@@ -1876,6 +1955,13 @@ Namespace SharedLibrary
                     {"UpdateIniSilentLog", context.INI_UpdateIniSilentLog.ToString()},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
+                    {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
+                    {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
+                    {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"KnowledgeStoreBackgroundIndexing", context.INI_KnowledgeStoreBackgroundIndexing.ToString()},
+                    {"KnowledgeStoreBackgroundIndexingWindow", context.INI_KnowledgeStoreBackgroundIndexingWindow},
+                    {"FormulaInstruction", context.INI_FormulaInstruction},
                     {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
                     {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"SP_Assemble_Plan", context.SP_Assemble_Plan},
@@ -1889,7 +1975,11 @@ Namespace SharedLibrary
                     {"DefaultPrefix", "DefaultPrefix"},
                     {"ReplaceText2Override", "ReplaceText2Override"},
                     {"MarkupMethodWordOverride", "MarkupMethodWordOverride"},
-                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"}
+                    {"MarkupMethodOutlookOverride", "MarkupMethodOutlookOverride"},
+                    {"MarkupAuthor", "MarkupAuthor"},
+                    {"KnowledgeStoreBackgroundIndexing", "EnableKBBackgroundIndexing"},
+                    {"KnowledgeStoreBackgroundIndexingWindow", "KnowledgeStoreBackgroundIndexingWindow"},
+                    {"FormulaInstruction", "FormulaInstruction"}
                 }
 
                 ' Accumulate settings to persist to My.Settings at the end
@@ -1988,7 +2078,14 @@ Namespace SharedLibrary
                 If pendingMySettings.Count > 0 Then
                     For Each kvp In pendingMySettings
                         ' Use late-bound access to avoid requiring strongly-typed settings properties
-                        My.Settings.Item(kvp.Key) = kvp.Value
+                        Dim isBool As Boolean
+                        If Boolean.TryParse(kvp.Value, isBool) Then
+                            My.Settings.Item(kvp.Key) = isBool
+                        ElseIf kvp.Value = "True" OrElse kvp.Value = "False" Then
+                            My.Settings.Item(kvp.Key) = CBool(kvp.Value)
+                        Else
+                            My.Settings.Item(kvp.Key) = kvp.Value
+                        End If
                     Next
                     My.Settings.Save()
                 End If
@@ -2053,6 +2150,9 @@ Namespace SharedLibrary
                 {"SP_MailReply", Default_SP_MailReply},
                 {"SP_MailSumup", Default_SP_MailSumup},
                 {"SP_MailSumup2", Default_SP_MailSumup2},
+                {"SP_AIMailSearch1", Default_SP_AIMailSearch1},
+                {"SP_AIMailSearch2", Default_SP_AIMailsearch2},
+                {"SP_AIMailSearch3", Default_SP_AIMailsearch3},
                 {"SP_FreestyleText", Default_SP_FreestyleText},
                 {"SP_FreestyleNoText", Default_SP_FreestyleNoText},
                 {"SP_Freestyle_Document", Default_SP_Freestyle_Document},
@@ -2142,6 +2242,7 @@ Namespace SharedLibrary
                 {"UpdateIni", DEFAULT_BOOL_UPDATEINI},
                 {"UpdateIniAllowRemote", DEFAULT_BOOL_UPDATEINI_ALLOWREMOTE},
                 {"UpdateIniSilentLog", DEFAULT_BOOL_UPDATEINISILENTLOG},
+                {"M365Scopes", DEFAULT_M365SCOPES},
                 {"ISearch_URL", DEFAULT_ISEARCH_URL},
                 {"ISearch_ResponseMask1", DEFAULT_ISEARCH_RESPONSE_MASK_1},
                 {"ISearch_ResponseMask2", DEFAULT_ISEARCH_RESPONSE_MASK_2},
@@ -2276,7 +2377,7 @@ Namespace SharedLibrary
                 ' Validate IniFilePath
                 If Not System.IO.File.Exists(IniFilePath) Then
                     ShowCustomMessageBox($"The configuration file '{IniFilePath}' was not found.")
-                    Return
+            Return
                 End If
 
                 ' Create a temporary file for the updated configuration
@@ -2335,6 +2436,8 @@ Namespace SharedLibrary
                     {"SpecialServicePath", context.INI_SpecialServicePath},
                     {"FindClausePath", context.INI_FindClausePath},
                     {"FindClausePathLocal", context.INI_FindClausePathLocal},
+                    {"AgentResourcesPath", context.INI_AgentResourcesPath},
+                    {"AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal},
                     {"WebAgentPath", context.INI_WebAgentPath},
                     {"WebAgentPathLocal", context.INI_WebAgentPathLocal},
                     {"SnapshotLibPath", context.INI_SnapshotLibPath},
@@ -2357,6 +2460,12 @@ Namespace SharedLibrary
                     {"DiscussInkyPathLocal", context.INI_DiscussInkyPathLocal},
                     {"AssemblePath", context.INI_AssemblePath},
                     {"AssemblePathLocal", context.INI_AssemblePathLocal},
+                    {"KnowledgeStorePath", context.INI_KnowledgeStorePath},
+                    {"KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal},
+                    {"KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner},
+                    {"KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex.ToString()},
+                    {"AssembleExecMaxChars", context.INI_AssembleExecMaxChars.ToString()},
+                    {"AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars.ToString()},
                     {"UpdateCheckInterval", context.INI_UpdateCheckInterval.ToString()},
                     {"UpdatePath", context.INI_UpdatePath},
                     {"BrandingName", context.INI_BrandingName},
@@ -2876,6 +2985,8 @@ Namespace SharedLibrary
                                     Tuple.Create("AutoPilot", context.INI_AutoPilot, True, "", ""),
                                     Tuple.Create("Find Clause", context.INI_FindClausePath, False, AN2 & "-lib-", ".txt"),
                                     Tuple.Create("Find Clause (Local)", context.INI_FindClausePathLocal, False, AN2 & "-lib-", ".txt"),
+                                    Tuple.Create("Agent Resources", context.INI_AgentResourcesPath, False, "*", ".md"),
+                                    Tuple.Create("Agent Resources (Local)", context.INI_AgentResourcesPathLocal, False, "*", ".md"),
                                     Tuple.Create("DocCheck", context.INI_DocCheckPath, False, AN2 & "-dc-", ".txt"),
                                     Tuple.Create("DocCheck (Local)", context.INI_DocCheckPathLocal, False, AN2 & "-dc-", ".txt"),
                                     Tuple.Create("DocStyle", context.INI_DocStylePath, False, AN2 & "-ds-", ".json"),
@@ -3102,6 +3213,9 @@ Namespace SharedLibrary
             variableValues.Add("ReplaceText2Override", context.INI_ReplaceText2Override)
             variableValues.Add("DoMarkupOutlook", context.INI_DoMarkupOutlook)
             variableValues.Add("DoMarkupWord", context.INI_DoMarkupWord)
+            variableValues.Add("M365ClientID", context.INI_M365ClientId)
+            variableValues.Add("M365TenantID", context.INI_M365TenantId)
+            variableValues.Add("M365Scopes", context.INI_M365Scopes)
             variableValues.Add("ISearch", context.INI_ISearch)
             variableValues.Add("ISearch_Approve", context.INI_ISearch_Approve)
             variableValues.Add("ISearch_URL", context.INI_ISearch_URL)
@@ -3126,6 +3240,7 @@ Namespace SharedLibrary
             variableValues.Add("MarkupMethodWord", context.INI_MarkupMethodWord)
             variableValues.Add("MarkupMethodWordOverride", context.INI_MarkupMethodWordOverride)
             variableValues.Add("MarkupMethodOutlookOverride", context.INI_MarkupMethodOutlookOverride)
+            variableValues.Add("MarkupAuthor", context.INI_MarkupAuthor)
             variableValues.Add("ContextMenu", context.INI_ContextMenu)
             variableValues.Add("NoLocalConfig", context.INI_NoLocalConfig)
             variableValues.Add("CentralConfigClients", context.INI_CentralConfigClients)
@@ -3160,6 +3275,8 @@ Namespace SharedLibrary
             variableValues.Add("SpecialServicePath", context.INI_SpecialServicePath)
             variableValues.Add("FindClausePath", context.INI_FindClausePath)
             variableValues.Add("FindClausePathLocal", context.INI_FindClausePathLocal)
+            variableValues.Add("AgentResourcesPath", context.INI_AgentResourcesPath)
+            variableValues.Add("AgentResourcesPathLocal", context.INI_AgentResourcesPathLocal)
             variableValues.Add("WebAgentPath", context.INI_WebAgentPath)
             variableValues.Add("WebAgentPathLocal", context.INI_WebAgentPathLocal)
             variableValues.Add("SnapshotLibPath", context.INI_SnapshotLibPath)
@@ -3170,6 +3287,10 @@ Namespace SharedLibrary
             variableValues.Add("DocStylePathLocal", context.INI_DocStylePathLocal)
             variableValues.Add("AssemblePath", context.INI_AssemblePath)
             variableValues.Add("AssemblePathLocal", context.INI_AssemblePathLocal)
+            variableValues.Add("KnowledgeStorePath", context.INI_KnowledgeStorePath)
+            variableValues.Add("KnowledgeStorePathLocal", context.INI_KnowledgeStorePathLocal)
+            variableValues.Add("KnowledgeStoreOwner", context.INI_KnowledgeStoreOwner)
+            variableValues.Add("KnowledgeStoreUseLLMIndex", context.INI_KnowledgeStoreUseLLMIndex)
             variableValues.Add("AssembleExecMaxChars", context.INI_AssembleExecMaxChars)
             variableValues.Add("AssembleMaxContextSummaryChars", context.INI_AssembleMaxContextSummaryChars)
             variableValues.Add("PromptLib_Transcript", context.INI_PromptLibPath_Transcript)
@@ -3207,6 +3328,9 @@ Namespace SharedLibrary
             variableValues.Add("SP_MailReply", context.SP_MailReply)
             variableValues.Add("SP_MailSumup", context.SP_MailSumup)
             variableValues.Add("SP_MailSumup2", context.SP_MailSumup2)
+            variableValues.Add("SP_AIMailSearch1", context.SP_AIMailSearch1)
+            variableValues.Add("SP_AIMailSearch2", context.SP_AIMailSearch2)
+            variableValues.Add("SP_AIMailSearch3", context.SP_AIMailSearch3)
             variableValues.Add("SP_FreestyleText", context.SP_FreestyleText)
             variableValues.Add("SP_FreestyleNoText", context.SP_FreestyleNoText)
             variableValues.Add("SP_Freestyle_Document", context.SP_Freestyle_Document)
@@ -3401,6 +3525,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_MailReply") Then context.SP_MailReply = CStr(updatedValues("SP_MailReply"))
                 If updatedValues.ContainsKey("SP_MailSumup") Then context.SP_MailSumup = CStr(updatedValues("SP_MailSumup"))
                 If updatedValues.ContainsKey("SP_MailSumup2") Then context.SP_MailSumup2 = CStr(updatedValues("SP_MailSumup2"))
+                If updatedValues.ContainsKey("SP_AIMailSearch1") Then context.SP_AIMailSearch1 = CStr(updatedValues("SP_AIMailSearch1"))
+                If updatedValues.ContainsKey("SP_AIMailSearch2") Then context.SP_AIMailSearch2 = CStr(updatedValues("SP_AIMailSearch2"))
+                If updatedValues.ContainsKey("SP_AIMailSearch3") Then context.SP_AIMailSearch3 = CStr(updatedValues("SP_AIMailSearch3"))
                 If updatedValues.ContainsKey("SP_FreestyleText") Then context.SP_FreestyleText = CStr(updatedValues("SP_FreestyleText"))
                 If updatedValues.ContainsKey("SP_FreestyleNoText") Then context.SP_FreestyleNoText = CStr(updatedValues("SP_FreestyleNoText"))
                 If updatedValues.ContainsKey("SP_Freestyle_Document") Then context.SP_Freestyle_Document = CStr(updatedValues("SP_Freestyle_Document"))
@@ -3462,6 +3589,9 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SP_FindPrompts") Then context.SP_FindPrompts = CStr(updatedValues("SP_FindPrompts"))
                 If updatedValues.ContainsKey("SP_MergePrompt") Then context.SP_MergePrompt = CStr(updatedValues("SP_MergePrompt"))
                 If updatedValues.ContainsKey("SP_MergePrompt2") Then context.SP_MergePrompt2 = CStr(updatedValues("SP_MergePrompt2"))
+                If updatedValues.ContainsKey("M365ClientID") Then context.INI_M365ClientId = CStr(updatedValues("M365ClientID"))
+                If updatedValues.ContainsKey("M365TenantID") Then context.INI_M365TenantId = CStr(updatedValues("M365TenantID"))
+                If updatedValues.ContainsKey("M365Scopes") Then context.INI_M365Scopes = CStr(updatedValues("M365Scopes"))
                 If updatedValues.ContainsKey("ISearch") Then context.INI_ISearch = CBool(updatedValues("ISearch"))
                 If updatedValues.ContainsKey("ISearch_Approve") Then context.INI_ISearch_Approve = CBool(updatedValues("ISearch_Approve"))
                 If updatedValues.ContainsKey("ISearch_URL") Then context.INI_ISearch_URL = CStr(updatedValues("ISearch_URL"))
@@ -3485,6 +3615,7 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("MarkupMethodWord") Then context.INI_MarkupMethodWord = CInt(updatedValues("MarkupMethodWord"))
                 If updatedValues.ContainsKey("MarkupMethodWordOverride") Then context.INI_MarkupMethodWordOverride = CStr(updatedValues("MarkupMethodWordOverride"))
                 If updatedValues.ContainsKey("MarkupMethodOutlookOverride") Then context.INI_MarkupMethodOutlookOverride = CStr(updatedValues("MarkupMethodOutlookOverride"))
+                If updatedValues.ContainsKey("MarkupAuthor") Then context.INI_MarkupAuthor = CStr(updatedValues("MarkupAuthor"))
                 If updatedValues.ContainsKey("ShortcutsWordExcel") Then context.INI_ShortcutsWordExcel = CStr(updatedValues("ShortcutsWordExcel"))
                 If updatedValues.ContainsKey("ContextMenu") Then context.INI_ContextMenu = CBool(updatedValues("ContextMenu"))
                 If updatedValues.ContainsKey("NoLocalConfig") Then context.INI_NoLocalConfig = CBool(updatedValues("NoLocalConfig"))
@@ -3515,6 +3646,8 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("SpecialServicePath") Then context.INI_SpecialServicePath = CStr(updatedValues("SpecialServicePath"))
                 If updatedValues.ContainsKey("FindClausePath") Then context.INI_FindClausePath = CStr(updatedValues("FindClausePath"))
                 If updatedValues.ContainsKey("FindClausePathLocal") Then context.INI_FindClausePathLocal = CStr(updatedValues("FindClausePathLocal"))
+                If updatedValues.ContainsKey("AgentResourcesPath") Then context.INI_AgentResourcesPath = CStr(updatedValues("AgentResourcesPath"))
+                If updatedValues.ContainsKey("AgentResourcesPathLocal") Then context.INI_AgentResourcesPathLocal = CStr(updatedValues("AgentResourcesPathLocal"))
                 If updatedValues.ContainsKey("WebAgentPath") Then context.INI_WebAgentPath = CStr(updatedValues("WebAgentPath"))
                 If updatedValues.ContainsKey("WebAgentPathLocal") Then context.INI_WebAgentPathLocal = CStr(updatedValues("WebAgentPathLocal"))
                 If updatedValues.ContainsKey("SnapshotLibPath") Then context.INI_SnapshotLibPath = CStr(updatedValues("SnapshotLibPath"))
@@ -3545,6 +3678,10 @@ Namespace SharedLibrary
                 If updatedValues.ContainsKey("ISearch_ResponseURLStart") Then context.INI_ISearch_ResponseURLStart = CStr(updatedValues("ISearch_ResponseURLStart"))
                 If updatedValues.ContainsKey("AssemblePath") Then context.INI_AssemblePath = CStr(updatedValues("AssemblePath"))
                 If updatedValues.ContainsKey("AssemblePathLocal") Then context.INI_AssemblePathLocal = CStr(updatedValues("AssemblePathLocal"))
+                If updatedValues.ContainsKey("KnowledgeStorePath") Then context.INI_KnowledgeStorePath = CStr(updatedValues("KnowledgeStorePath"))
+                If updatedValues.ContainsKey("KnowledgeStorePathLocal") Then context.INI_KnowledgeStorePathLocal = CStr(updatedValues("KnowledgeStorePathLocal"))
+                If updatedValues.ContainsKey("KnowledgeStoreOwner") Then context.INI_KnowledgeStoreOwner = CStr(updatedValues("KnowledgeStoreOwner"))
+                If updatedValues.ContainsKey("KnowledgeStoreUseLLMIndex") Then context.INI_KnowledgeStoreUseLLMIndex = CBool(updatedValues("KnowledgeStoreUseLLMIndex"))
                 If updatedValues.ContainsKey("AssembleExecMaxChars") Then context.INI_AssembleExecMaxChars = CInt(updatedValues("AssembleExecMaxChars"))
                 If updatedValues.ContainsKey("AssembleMaxContextSummaryChars") Then context.INI_AssembleMaxContextSummaryChars = CInt(updatedValues("AssembleMaxContextSummaryChars"))
                 If updatedValues.ContainsKey("SP_Assemble_Plan") Then context.SP_Assemble_Plan = CStr(updatedValues("SP_Assemble_Plan"))

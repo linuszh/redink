@@ -611,13 +611,12 @@ Namespace SharedLibrary
         ''' </param>
         ''' <returns><c>True</c> if an ImageGeneration model is available; otherwise <c>False</c>.</returns>
         Public Shared Function IsImageGenerationAvailable(context As SharedContext.ISharedContext,
-                                                           Optional ByRef hasObjectCall As Boolean = False) As Boolean
+                                                          Optional ByRef hasObjectCall As Boolean = False) As Boolean
             hasObjectCall = False
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
@@ -626,17 +625,13 @@ Namespace SharedLibrary
                     hasObjectCall = Not String.IsNullOrWhiteSpace(context.INI_APICall_Object_2)
                 End If
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function
+
 
         ''' <summary>
         ''' Checks whether a WebGrounding special task model is configured and available.
@@ -648,21 +643,15 @@ Namespace SharedLibrary
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
                 available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "WebGrounding")
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function
@@ -677,57 +666,79 @@ Namespace SharedLibrary
             If context Is Nothing Then Return False
             If String.IsNullOrWhiteSpace(context.INI_AlternateModelPath) Then Return False
 
-            Dim backupConfig As ModelConfig = GetCurrentConfig(context)
-            Dim backupOriginalLoaded As Boolean = originalConfigLoaded
+            Dim scope = CaptureModelConfigScope(context)
             Dim available As Boolean = False
 
             Try
                 available = GetSpecialTaskModel(context, context.INI_AlternateModelPath, "DeepResearch")
             Catch
+            Finally
+                RestoreModelConfigScope(context, scope)
             End Try
-
-            ' Restore immediately — we only probed availability
-            If originalConfigLoaded Then
-                RestoreDefaults(context, originalConfig)
-            End If
-            originalConfigLoaded = backupOriginalLoaded
-            ApplyModelConfig(context, backupConfig)
 
             Return available
         End Function
 
         ''' <summary>
-        ''' Ensures a form is visible on at least one active screen.
-        ''' If off-screen (e.g. monitor disconnected), re-centers on the primary screen
-        ''' while respecting <see cref="Form.MinimumSize"/>.
+        ''' Ensures a form is fully reachable on an active screen.
+        ''' If monitors/resolution changed, the form is resized as needed and clamped into the
+        ''' nearest working area so that it remains accessible.
         ''' </summary>
         ''' <param name="frm">The form to check and reposition if necessary.</param>
         Public Shared Sub EnsureVisibleOnScreen(frm As System.Windows.Forms.Form)
-            If frm Is Nothing Then Return
+            If frm Is Nothing OrElse frm.IsDisposed Then Return
 
-            ' Guard against zero/corrupt size
+            Dim minWidth As Integer = 0
+            Dim minHeight As Integer = 0
+
             If frm.MinimumSize <> System.Drawing.Size.Empty Then
-                If frm.Width < frm.MinimumSize.Width OrElse frm.Height < frm.MinimumSize.Height Then
-                    frm.Size = New System.Drawing.Size(
-                        Math.Max(frm.MinimumSize.Width, frm.Width),
-                        Math.Max(frm.MinimumSize.Height, frm.Height))
+                minWidth = Math.Max(0, frm.MinimumSize.Width)
+                minHeight = Math.Max(0, frm.MinimumSize.Height)
+            End If
+
+            Dim newWidth As Integer = frm.Width
+            Dim newHeight As Integer = frm.Height
+
+            If newWidth <= 0 Then newWidth = Math.Max(minWidth, 200)
+            If newHeight <= 0 Then newHeight = Math.Max(minHeight, 120)
+
+            If minWidth > 0 Then newWidth = Math.Max(newWidth, minWidth)
+            If minHeight > 0 Then newHeight = Math.Max(newHeight, minHeight)
+
+            Dim targetBounds As New System.Drawing.Rectangle(frm.Left, frm.Top, newWidth, newHeight)
+            Dim area As System.Drawing.Rectangle = System.Windows.Forms.Screen.FromRectangle(targetBounds).WorkingArea
+
+            If area.Width > 0 Then
+                If minWidth > 0 AndAlso area.Width >= minWidth Then
+                    newWidth = Math.Max(minWidth, Math.Min(newWidth, area.Width))
+                Else
+                    newWidth = Math.Min(newWidth, area.Width)
                 End If
             End If
 
-            Dim isVisible = False
-            For Each scr As Screen In Screen.AllScreens
-                If scr.WorkingArea.IntersectsWith(frm.Bounds) Then
-                    isVisible = True
-                    Exit For
+            If area.Height > 0 Then
+                If minHeight > 0 AndAlso area.Height >= minHeight Then
+                    newHeight = Math.Max(minHeight, Math.Min(newHeight, area.Height))
+                Else
+                    newHeight = Math.Min(newHeight, area.Height)
                 End If
-            Next
-
-            If Not isVisible Then
-                Dim area = Screen.PrimaryScreen.WorkingArea
-                frm.Location = New System.Drawing.Point(
-                    area.Left + (area.Width - frm.Width) \ 2,
-                    area.Top + (area.Height - frm.Height) \ 2)
             End If
+
+            Dim newLeft As Integer
+            If newWidth >= area.Width Then
+                newLeft = area.Left
+            Else
+                newLeft = Math.Min(Math.Max(frm.Left, area.Left), area.Right - newWidth)
+            End If
+
+            Dim newTop As Integer
+            If newHeight >= area.Height Then
+                newTop = area.Top
+            Else
+                newTop = Math.Min(Math.Max(frm.Top, area.Top), area.Bottom - newHeight)
+            End If
+
+            frm.SetBounds(newLeft, newTop, newWidth, newHeight)
         End Sub
 
     End Class

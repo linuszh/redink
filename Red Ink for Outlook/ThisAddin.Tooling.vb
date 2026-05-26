@@ -1,43 +1,52 @@
 ﻿' Part of "Red Ink for Outlook"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: ThisAddin.Tooling.vb
-' Purpose:
-'   Implements a model-agnostic tool/function-calling loop for LLM interactions.
-'   Detects tool calls in model output, executes internal/external tools, and
-'   injects tool responses into subsequent model iterations until a final answer
-'   is produced or limits/cancellation are reached.
+' Purpose: Core model-agnostic tooling loop for LLM tool/function calling.
+'          Orchestrates tool selection, call detection/extraction, execution, and response injection.
 '
-' Responsibilities:
-'   - Tool loop orchestration via `ExecuteToolingLoop`:
-'       * Build enhanced system prompt with tool usage guidance.
-'       * Generate model-specific tool definition payloads for `INI_APICall_ToolInstructions_2`.
-'       * Invoke `LLM(...)` iteratively, detect tool calls, and inject responses via
-'         `INI_APICall_ToolResponses_2`.
-'       * Enforce iteration limits, timeouts, cancellation, and forced final synthesis.
-'   - Tool call parsing:
-'       * Detect tool calls via regex (`ContainsToolCalls`) using tooling model patterns.
-'       * Extract tool calls from JSON responses (`ExtractToolCalls`) via a model-provided map.
-'   - Tool execution:
-'       * Internal tool: `retrieve_web_content` with SSRF safeguards (WebView2 or HTTP fallback).
-'       * External tools: apply selected `ModelConfig`, build API call payloads, force JSON
-'         response mode, invoke the model, and restore prior config.
-'       * AutoPilot routing for internal tools when AutoPilot is active.
-'   - Tool selection and persistence:
-'       * Load tool configurations from `INI_SpecialServicePath`.
-'       * Add a built-in web retrieval tool.
-'       * Persist selected tool names and restore them on demand.
-'   - Diagnostics:
-'       * Optional per-run file logging via `ToolingFileLogger` (controlled by `INI_APIDebug`).
-'       * Optional UI logging via `LogWindow` when enabled.
+' Architecture:
+'  - Tooling Execution Loop (ExecuteToolingLoop):
+'      - Builds system prompt augmentation via BuildToolInstructionsPrompt.
+'      - Injects model-specific tool definitions into INI_APICall_ToolInstructions_2.
+'      - Iteratively calls LLM(...) until max iterations or no tool calls detected.
+'      - On each iteration:
+'          - ContainsToolCalls(): Regex-based tool call detection.
+'          - ExtractToolCalls(): JSON parsing + extraction map for tool call tokens.
+'          - ExecuteToolCall(): Per-tool execution (internal tools, external models, knowledge stores).
+'          - BuildToolResponsesForModel(): Packages ToolResponse objects for next LLM iteration.
+'          - Assigns response payload to INI_APICall_ToolResponses_2.
+'      - Handles duplicate execution detection, consecutive failures, and early abort conditions.
+'  - Tool Execution Modes:
+'      - Internal Web Tool: retrieve_web_content (URL-based content fetching via WebView2).
+'      - Internal M365 Tools: Bridge via ExecuteInternalM365Tool to SharedLibrary.M365ToolService.
+'      - Internal Knowledge Tools: Execute via knowledge store APIs with trigger building.
+'      - External Tools: Apply ModelConfig, prepare API payload, force JSON response, restore settings.
+'  - Tool Selection & Persistence:
+'      - LoadToolingServices(): Loads tools from INI_SpecialServicePath.
+'      - Adds internal web retrieval tool via GetInternalWebTool.
+'      - Persists selections through My.Settings.SelectedToolNames.
+'      - Restores via LoadPersistedToolSelection.
+'  - User Request & Task Tracking:
+'      - ResolveLatestUserRequestRaw(): Extracts latest user turn from dialog/prompt.
+'      - BuildLatestUserRequestMetadataBlock(): Authoritative [CURRENT_USER_REQUEST] block.
+'      - ResolveOptionalHostTaskSummary(): Optional task summary for host context.
+'      - BuildCompletedFactsPromptBlock(): Injects completed tool responses as facts for grounding.
+'  - Diagnostics & Logging:
+'      - ToolingFileLogger: Single-file per-run logging when INI_APIDebug is enabled.
+'      - Optional LogWindow UI when enabled.
+'      - BuildPromptDiagnosticStub(): SHA256-based diagnostic fingerprints for prompts.
+'  - State Management (ToolExecutionContext):
+'      - Tracks selected tools, iteration counters, all responses, cancellation, logs.
+'      - Holds active context during ExecuteToolingLoop (used by ApDashboardLog routing).
+'      - Persists SequencingState for memory grounding and tool call sequencing decisions.
 '
-' Notes:
-'   - This file is a partial definition of `ThisAddIn` and depends on shared configuration
-'     values (INI variables), `_context`, and the `LLM(...)` entry point provided elsewhere.
-'   - Web retrieval uses WebView2 when enabled to capture JavaScript-rendered content.
+' Data Classes:
+'  - ToolCall: Represents single tool call from LLM with CallId, ToolName, Arguments, RawJson.
+'  - ToolResponse: Outcome of tool execution with CallId, ToolName, Response, Success, ErrorMessage, Timestamp.
 ' =============================================================================
+
 
 Option Explicit On
 Option Strict Off
@@ -51,6 +60,7 @@ Imports System.Windows.Forms
 Imports Microsoft.Web.WebView2.Core
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
 Imports SharedLibrary.SharedLibrary.SharedMethods
@@ -60,89 +70,32 @@ Imports SharedLibrary.SharedLibrary.SharedMethods
 ''' </summary>
 Partial Public Class ThisAddIn
 
-    ''' <summary>
-    ''' Enables the WebView2-based implementation for internal web content retrieval.
-    ''' </summary>
-    Private Const UseWebView2 As Boolean = True
+    ''' <summary>User-friendly name for the tooling feature.</summary>
+    Public Const ToolFriendlyName As String = "Agents"
 
-    ''' <summary>
-    ''' Internal tool name used in model tool calls for web content retrieval.
-    ''' </summary>
-    Private Const InternalWebToolName As String = "retrieve_web_content"
+    ''' <summary>Auto-close delay for tooling log window.</summary>
+    Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
 
-    ''' <summary>
-    ''' Human-readable tool instructions shown to the model describing how to use the internal web tool.
-    ''' </summary>
-    Private Const InternalWebToolInstructionsPrompt As String =
-        "retrieve_web_content: Retrieves text content from one or more URLs. Use this to fetch information from websites when needed. " &
-        "SHAREPOINT/ONEDRIVE LIMITATION: This tool CANNOT access SharePoint, OneDrive, Microsoft Teams, or any other " &
-        "authenticated cloud storage URLs. URLs containing 'sharepoint.com', 'onedrive.com', '1drv.ms', " &
-        "'teams.microsoft.com', or ':f:/' point to resources that require authentication and will NOT return " &
-        "useful content. UNC paths (e.g. \\server\share\file.doc) that resolve to SharePoint will also fail. " &
-        "If the user asks you to retrieve content from such a link, do NOT call this tool. Instead, explain " &
-        "that you cannot remotely log into authenticated cloud storage and ask the user to download the file(s) " &
-        "and provide them as direct attachments."
+    Private Const SubAgentLargeToolResponseThresholdChars As Integer = 30000
+    Private Const SubAgentLargeToolResponseExcerptChars As Integer = 8000
 
-    ''' <summary>
-    ''' Canonical tool definition JSON used for the internal web tool.
-    ''' </summary>
-    Private Const InternalWebToolDefinition As String =
-        "{""name"":""retrieve_web_content"",""description"":""Retrieves the text content from one or more web URLs. " &
-        "IMPORTANT: Cannot access SharePoint, OneDrive, Teams, or other authenticated cloud storage URLs " &
-        "(sharepoint.com, onedrive.com, 1drv.ms, teams.microsoft.com, :f:/). " &
-        "Do NOT call this tool for such URLs — ask the user to download and attach the file(s) instead."",""parameters"":{""type"":""object"",""properties"":{""urls"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Array of URLs to retrieve content from""}},""required"":[""urls""]}}"
+    Private Const MaxDownloadedWebFileBytes As Long = 50L * 1024L * 1024L
+    Private Const WebToolTimeoutSeconds As Integer = 45
 
-    ' Internet Search Tooling (available only when INI_ISearch is enabled and INI_ISearch_URL is configured)
-
-    ''' <summary>
-    ''' Internal tool name used in model tool calls for internet search.
-    ''' </summary>
-    Private Const InternalSearchToolName As String = "internet_search"
-
-    ''' <summary>
-    ''' Canonical tool definition JSON used for the internal search tool.
-    ''' </summary>
-    Private Const InternalSearchToolDefinition As String =
-        "{""name"":""internet_search""," &
-        """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about. PRIVACY: The query is sent to an external search engine. Never include personal data, confidential information, private names, case details, contract terms, internal identifiers, or any non-public information in the query. Only public figures, public institutions, published legislation, and other clearly public information may appear. If a useful query cannot be formed without non-public data, do not call this tool.""," &
-        """parameters"":{""type"":""object"",""properties"":{" &
-        """query"":{""type"":""string"",""description"":""The search query. MUST NOT contain personal data, confidential details, or any non-public information. Use only generic, anonymized, or publicly known terms.""}," &
-        """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
-        """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
-
-    ''' <summary>
-    ''' Human-readable tool instructions shown to the model describing how to use the internal search tool.
-    ''' </summary>
-    Private Const InternalSearchToolInstructionsPrompt As String =
-        "internet_search: Searches the internet and returns readable text from the top result pages. " &
-        "Call this tool when you need current or factual information you are not confident about. " &
-        "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
-        "Return value includes the search query used, the URLs visited, and the page content for each qualifying result. " &
-        "IMPORTANT PRIVACY CONSTRAINT: The search query is sent to an external search engine. " &
-        "You MUST NOT include any personal data, confidential information, private names, " &
-        "case details, contract terms, internal identifiers, email addresses, phone numbers, " &
-        "account numbers, or any other non-public information in the query. " &
-        "Only well-known public figures, public institutions, published legislation, " &
-        "publicly available case law references, and other clearly public information may appear in queries. " &
-        "If you cannot formulate a useful query without disclosing non-public information, " &
-        "do NOT call this tool — instead respond based on your existing knowledge and state your uncertainty."
+    ''' <summary>Selected tool names for persistence.</summary>
+    Public Shared Property SelectedToolNames As List(Of String) = New List(Of String)()
 
 
-    ''' <summary>Minimum characters for a search hit to be considered relevant.</summary>
-    Private Const ISearch_MinChars As Integer = 500
-
-    ''' <summary>Maximum characters per search result page (applied as a cap even with WebView2).</summary>
-    Private Const ISearch_MaxChars As Integer = 4000
 
     ''' <summary>
     ''' Suffix appended to internal tool descriptions when shown to the user.
     ''' </summary>
-    Private Const InternalToolSuffix As String = " (built-in)"
+    Private Const InternalToolSuffix As String = ""
 
     ''' <summary>
     ''' Maximum tool loop iterations used by prompt-building helpers.
     ''' </summary>
-    Public MaxToolIterations As Integer = 10
+    Public MaxToolIterations As Integer = Agents.ToolingConstants.DefaultMaxToolIterations
 
     ''' <summary>
     ''' Holds the active ToolExecutionContext during an ExecuteToolingLoop run.
@@ -150,780 +103,7 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private _activeToolingContext As ToolExecutionContext = Nothing
 
-#Region "WebView2 Web Content Retrieval"
 
-    ''' <summary>
-    ''' Retrieves website content using WebView2 (Edge) to include JavaScript-rendered content.
-    ''' A dedicated STA thread is created to host WebView2 and run a minimal message loop.
-    ''' </summary>
-    ''' <param name="baseUrl">Absolute HTTP/HTTPS URL to retrieve.</param>
-    ''' <param name="maxChars">Maximum characters to return. Values less than or equal to 0 return full content.</param>
-    ''' <returns>A task producing the extracted plain text content (possibly truncated) or an empty string.</returns>
-
-    Private Function RetrieveWebsiteContent_WebView2(baseUrl As String, Optional maxChars As Integer = 0) As Task(Of String)
-        Dim tcs As New TaskCompletionSource(Of String)()
-
-        ' Create a new STA thread for WebView2 (it requires its own message loop)
-        Dim thread As New System.Threading.Thread(
-            Sub()
-                Dim result As String = ""
-                Dim form As Form = Nothing
-                Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
-                Dim userDataFolder As String = Nothing
-
-                Try
-                    Debug.WriteLine($"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())})")
-
-                    ' Create a temporary user data folder
-                    Dim uniqueID As String = Guid.NewGuid().ToString()
-                    userDataFolder = Path.Combine(Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
-                    Directory.CreateDirectory(userDataFolder)
-
-                    ' Create the form - larger size to trigger more content loading
-                    form = New Form() With {
-                        .Width = 1920,
-                        .Height = 4000,
-                        .ShowInTaskbar = False,
-                        .FormBorderStyle = FormBorderStyle.None,
-                        .StartPosition = FormStartPosition.Manual,
-                        .Location = New System.Drawing.Point(-5000, -5000),
-                        .Opacity = 0
-                    }
-
-                    webView = New Microsoft.Web.WebView2.WinForms.WebView2() With {
-                        .Dock = DockStyle.Fill
-                    }
-
-                    form.Controls.Add(webView)
-
-                    Dim navigationCompleted As Boolean = False
-                    Dim navigationSuccess As Boolean = False
-                    Dim contentExtracted As Boolean = False
-
-                    ' Set up event handlers
-                    AddHandler webView.CoreWebView2InitializationCompleted,
-                            Sub(s, e)
-                                If e.IsSuccess Then
-                                    Debug.WriteLine("[WebView2] CoreWebView2 initialized")
-
-                                    ' 1. Validate Input URL before navigating
-                                    If Not IsSafeWebUrl(baseUrl) Then
-                                        Debug.WriteLine($"[WebView2] Blocked unsafe URL: {baseUrl}")
-                                        navigationCompleted = True
-                                        Return
-                                    End If
-
-                                    ' 2. Lockdown Settings
-                                    With webView.CoreWebView2.Settings
-                                        .AreDefaultScriptDialogsEnabled = False
-                                        .AreDefaultContextMenusEnabled = False
-                                        .AreDevToolsEnabled = False
-                                        .IsStatusBarEnabled = False
-                                        .IsScriptEnabled = True
-                                        .IsBuiltInErrorPageEnabled = False
-                                        .IsWebMessageEnabled = False
-                                    End With
-
-                                    ' 3. Block New Windows / Popups
-                                    AddHandler webView.CoreWebView2.NewWindowRequested,
-                                        Sub(sender, args)
-                                            args.Handled = True
-                                        End Sub
-
-                                    ' 4. Block Permission Requests
-                                    AddHandler webView.CoreWebView2.PermissionRequested,
-                                        Sub(sender, args)
-                                            args.State = CoreWebView2PermissionState.Deny
-                                        End Sub
-
-                                    ' 5. Block Navigation to non-http schemes
-                                    AddHandler webView.CoreWebView2.NavigationStarting,
-                                        Sub(sender, args)
-                                            Dim uriStart As Uri = Nothing
-                                            If Uri.TryCreate(args.Uri, UriKind.Absolute, uriStart) Then
-                                                If uriStart.Scheme <> Uri.UriSchemeHttp AndAlso uriStart.Scheme <> Uri.UriSchemeHttps Then
-                                                    args.Cancel = True
-                                                End If
-                                            End If
-                                        End Sub
-
-                                    Debug.WriteLine("[WebView2] Navigating...")
-                                    webView.CoreWebView2.Navigate(baseUrl)
-                                Else
-                                    Debug.WriteLine($"[WebView2] Initialization failed: {e.InitializationException?.Message}")
-                                    navigationCompleted = True
-                                End If
-                            End Sub
-
-                    AddHandler webView.NavigationCompleted,
-                        Sub(s, e)
-                            navigationSuccess = e.IsSuccess
-                            Debug.WriteLine($"[WebView2] Navigation completed. Success: {e.IsSuccess}, Status: {e.WebErrorStatus}")
-
-                            If e.IsSuccess Then
-                                ' Use a timer to wait for JS rendering - 5 seconds
-                                Dim timer As New System.Windows.Forms.Timer() With {.Interval = 5000}
-                                AddHandler timer.Tick,
-                                    Sub(ts, te)
-                                        timer.Stop()
-                                        timer.Dispose()
-
-                                        Try
-                                            ' Scroll to trigger lazy loading
-                                            Dim scrollScript As String = "
-                                                (async function() {
-                                                    var totalHeight = document.body.scrollHeight;
-                                                    var viewportHeight = window.innerHeight || 1000;
-                                                    var currentPosition = 0;
-
-                                                    while (currentPosition < totalHeight) {
-                                                        window.scrollTo(0, currentPosition);
-                                                        await new Promise(r => setTimeout(r, 200));
-                                                        currentPosition += viewportHeight;
-                                                        totalHeight = document.body.scrollHeight;
-                                                    }
-
-                                                    window.scrollTo(0, 0);
-                                                    await new Promise(r => setTimeout(r, 300));
-                                                    return 'done';
-                                                })();
-                                            "
-                                            webView.CoreWebView2.ExecuteScriptAsync(scrollScript).ContinueWith(
-                                                Sub(scrollTask)
-                                                    ' Wait after scrolling
-                                                    System.Threading.Thread.Sleep(2000)
-
-                                                    form.BeginInvoke(
-                                                        Sub()
-                                                            Try
-
-                                                                ' Extract body text with inline hyperlinks as Markdown [text](url)
-                                                                Dim extractScript As String = "
-                                                (function() {
-                                                    // Remove noise elements
-                                                    var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
-                                                    toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
-
-                                                    // Recursively extract text, inlining <a> hrefs as Markdown links
-                                                    function walk(node) {
-                                                        if (!node) return '';
-                                                        if (node.nodeType === 3) return node.textContent || '';
-                                                        if (node.nodeType !== 1) return '';
-
-                                                        var tag = node.tagName ? node.tagName.toUpperCase() : '';
-
-                                                        // Skip hidden elements
-                                                        var style = window.getComputedStyle(node);
-                                                        if (style && (style.display === 'none' || style.visibility === 'hidden')) return '';
-
-                                                        // Collect child text first
-                                                        var parts = [];
-                                                        for (var i = 0; i < node.childNodes.length; i++) {
-                                                            parts.push(walk(node.childNodes[i]));
-                                                        }
-                                                        var inner = parts.join('');
-
-                                                        // Anchor: emit Markdown link if href is meaningful
-                                                        if (tag === 'A') {
-                                                            var href = (node.getAttribute('href') || '').trim();
-                                                            var text = inner.trim();
-                                                            if (href && text && href !== '#' && !href.startsWith('javascript:')) {
-                                                                // Resolve relative URLs to absolute
-                                                                try { href = new URL(href, document.baseURI).href; } catch(e) {}
-                                                                // Avoid duplicating link text that IS the URL
-                                                                if (text === href || text === decodeURIComponent(href)) return text;
-                                                                return '[' + text + '](' + href + ')';
-                                                            }
-                                                            return text || '';
-                                                        }
-
-                                                        // Block-level elements get newlines
-                                                        if (/^(DIV|P|BR|H[1-6]|LI|TR|BLOCKQUOTE|SECTION|ARTICLE|ASIDE|MAIN|DT|DD|FIGCAPTION|PRE)$/.test(tag)) {
-                                                            if (tag === 'BR') return '\n';
-                                                            return '\n' + inner + '\n';
-                                                        }
-
-                                                        return inner;
-                                                    }
-
-                                                    var text = document.body ? walk(document.body) : '';
-
-                                                    // Clean up whitespace
-                                                    text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
-
-                                                    return text;
-                                                })();
-                                                "
-
-                                                                webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
-                                                                    Sub(t)
-                                                                        form.BeginInvoke(
-                                                                            Sub()
-                                                                                Try
-                                                                                    If t.IsCompleted AndAlso Not t.IsFaulted Then
-                                                                                        result = UnescapeJsonString(t.Result)
-                                                                                        Debug.WriteLine($"[WebView2] Extracted {result.Length} chars (full content)")
-                                                                                    End If
-                                                                                Catch ex As Exception
-                                                                                    Debug.WriteLine($"[WebView2] Extract error: {ex.Message}")
-                                                                                End Try
-                                                                                contentExtracted = True
-                                                                            End Sub)
-                                                                    End Sub)
-                                                            Catch ex As Exception
-                                                                Debug.WriteLine($"[WebView2] Script error: {ex.Message}")
-                                                                contentExtracted = True
-                                                            End Try
-                                                        End Sub)
-                                                End Sub)
-                                        Catch ex As Exception
-                                            Debug.WriteLine($"[WebView2] Timer error: {ex.Message}")
-                                            contentExtracted = True
-                                        End Try
-                                    End Sub
-                                timer.Start()
-                            Else
-                                navigationCompleted = True
-                            End If
-                        End Sub
-
-                    ' Show form and start async initialization
-                    form.Show()
-
-                    ' Initialize WebView2 asynchronously
-                    Dim env = CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
-                    env.ContinueWith(
-                            Sub(t)
-                                form.BeginInvoke(
-                                    Sub()
-                                        If t.IsCompleted AndAlso Not t.IsFaulted Then
-                                            webView.EnsureCoreWebView2Async(t.Result)
-                                            ' Don't do anything else here - wait for CoreWebView2InitializationCompleted
-                                        Else
-                                            Debug.WriteLine($"[WebView2] Environment creation failed")
-                                            navigationCompleted = True
-                                        End If
-                                    End Sub)
-                            End Sub)
-
-                    ' Run message loop with timeout - 90 seconds
-                    Dim startTime As DateTime = DateTime.Now
-                    Dim timeout As TimeSpan = TimeSpan.FromSeconds(90)
-
-                    While Not contentExtracted AndAlso Not navigationCompleted AndAlso (DateTime.Now - startTime) < timeout
-                        System.Windows.Forms.Application.DoEvents()
-                        System.Threading.Thread.Sleep(50)
-                    End While
-
-                    Debug.WriteLine($"[WebView2] Loop ended. Content: {result.Length} chars, elapsed: {(DateTime.Now - startTime).TotalSeconds:F1}s")
-
-                Catch ex As Exception
-                    Debug.WriteLine($"[WebView2] Error: {ex.Message}")
-                Finally
-                    Try
-                        If userDataFolder IsNot Nothing Then Directory.Delete(userDataFolder, True)
-                    Catch
-                    End Try
-                    Try
-                        webView?.Dispose()
-                    Catch
-                    End Try
-                    Try
-                        form?.Close()
-                        form?.Dispose()
-                    Catch
-                    End Try
-                End Try
-
-                ' Apply character limit only if explicitly requested (maxChars > 0)
-                Dim finalResult As String = result.Trim()
-                If maxChars > 0 AndAlso finalResult.Length > maxChars Then
-                    ' Try to cut at a sentence boundary
-                    Dim cutPoint As Integer = maxChars
-                    Dim lastPeriod As Integer = finalResult.LastIndexOf("."c, maxChars - 1)
-                    Dim lastNewline As Integer = finalResult.LastIndexOf(vbLf, maxChars - 1)
-
-                    If lastPeriod > maxChars * 0.8 Then
-                        cutPoint = lastPeriod + 1
-                    ElseIf lastNewline > maxChars * 0.8 Then
-                        cutPoint = lastNewline
-                    End If
-
-                    finalResult = finalResult.Substring(0, cutPoint).Trim()
-                    Debug.WriteLine($"[WebView2] Trimmed to {finalResult.Length} chars (limit was {maxChars})")
-                End If
-
-                tcs.TrySetResult(finalResult)
-            End Sub)
-
-        thread.SetApartmentState(System.Threading.ApartmentState.STA)
-        thread.Start()
-
-        Return tcs.Task
-    End Function
-
-    ''' <summary>
-    ''' Determines whether a URL is allowed to be retrieved by the internal web tool.
-    ''' Only absolute HTTP/HTTPS URLs are permitted; loopback/localhost is denied.
-    ''' </summary>
-    ''' <param name="url">Candidate URL.</param>
-    ''' <returns><c>True</c> if the URL is considered safe; otherwise <c>False</c>.</returns>
-
-    Private Function IsSafeWebUrl(url As String) As Boolean
-        Try
-            Dim uriResult As Uri = Nothing
-            If Not Uri.TryCreate(url, UriKind.Absolute, uriResult) Then Return False
-
-            ' 1. Only allow HTTP and HTTPS
-            If uriResult.Scheme <> Uri.UriSchemeHttp AndAlso uriResult.Scheme <> Uri.UriSchemeHttps Then
-                Return False
-            End If
-
-            ' 2. Basic SSRF check: Block localhost / loopback
-            If uriResult.IsLoopback Then Return False
-            If uriResult.Host.ToLower().Equals("localhost") Then Return False
-
-            Return True
-        Catch ex As Exception
-            Return False
-        End Try
-    End Function
-
-    ''' <summary>
-    ''' Unescapes the JSON-encoded string returned by WebView2 <c>ExecuteScriptAsync</c>.
-    ''' </summary>
-    ''' <param name="jsonString">JSON string value returned by script execution.</param>
-    ''' <returns>Unescaped string content.</returns>
-    Private Function UnescapeJsonString(jsonString As String) As String
-        If String.IsNullOrEmpty(jsonString) Then Return ""
-
-        ' Remove surrounding quotes
-        If jsonString.StartsWith("""") AndAlso jsonString.EndsWith("""") Then
-            jsonString = jsonString.Substring(1, jsonString.Length - 2)
-        End If
-
-        ' Handle null
-        If jsonString = "null" Then Return ""
-
-        ' Unescape common sequences
-        Try
-            jsonString = jsonString.Replace("\n", vbLf)
-            jsonString = jsonString.Replace("\r", vbCr)
-            jsonString = jsonString.Replace("\t", vbTab)
-            jsonString = jsonString.Replace("\\", "\")
-            jsonString = jsonString.Replace("\""", """")
-
-            ' Handle unicode escapes like \u0027
-            Dim unicodePattern As String = "\\u([0-9A-Fa-f]{4})"
-            jsonString = Regex.Replace(jsonString, unicodePattern,
-                Function(m) ChrW(System.Convert.ToInt32(m.Groups(1).Value, 16)).ToString())
-
-        Catch ex As Exception
-            Debug.WriteLine($"[WebView2] Unescape error: {ex.Message}")
-        End Try
-
-        Return jsonString
-    End Function
-
-    ''' <summary>
-    ''' Retrieves website content using an HTTP client (non-WebView2 fallback).
-    ''' </summary>
-    ''' <param name="url">Absolute URL to retrieve.</param>
-    ''' <param name="maxDepth">Unused by this implementation; retained for caller compatibility.</param>
-    ''' <param name="client">HTTP client used for retrieval.</param>
-    ''' <returns>Response body as a string, or an error string on failure.</returns>
-    Private Async Function RetrieveWebsiteContent(url As String, maxDepth As Integer, client As System.Net.Http.HttpClient) As Task(Of String)
-        Try
-            Return Await client.GetStringAsync(url)
-        Catch ex As Exception
-            Return $"Error retrieving {url}: {ex.Message}"
-        End Try
-    End Function
-
-#End Region
-
-    ''' <summary>User-friendly name for the tooling feature.</summary>
-    Public Const ToolFriendlyName As String = "Sources"
-
-    ''' <summary>Auto-close delay for tooling log window.</summary>
-    Public Shared Property ToolingLog_AutoCloseDefaultSeconds As Integer = 30
-
-    ''' <summary>Selected tool names for persistence.</summary>
-    Public Shared Property SelectedToolNames As List(Of String) = New List(Of String)()
-
-
-#Region "Tooling File Logger (Reduced, Single File)"
-
-    ''' <summary>
-    ''' Reduced file-based logger for tooling operations.
-    ''' - Single file per run (overwrites).
-    ''' - Writes: LogWindow steps, warnings, errors, and pre-LLM call snapshots.
-    ''' - Writes full raw LLM/tool responses with two empty lines before and after.
-    ''' </summary>
-    Public Class ToolingFileLogger
-
-        ''' <summary>Absolute filesystem path to the current tooling log file (if enabled).</summary>
-        Private Shared _logPath As String = Nothing
-
-        ''' <summary>Whether file logging is enabled (controlled by <c>INI_APIDebug</c> in <see cref="StartSession"/>).</summary>
-        Private Shared _isEnabled As Boolean = False
-
-        ''' <summary>Whether the session header has already been written in this run.</summary>
-        Private Shared _started As Boolean = False
-
-        ''' <summary>Synchronizes file writes to avoid interleaving.</summary>
-        Private Shared ReadOnly _lock As New Object()
-
-        ''' <summary>Stable log filename used for the tooling session log (overwritten each run).</summary>
-        Private Shared ReadOnly StableLogFileName As String = $"{AN5}_Tooling_Log.txt"
-
-        ''' <summary>
-        ''' Starts a tooling log session and writes the log header.
-        ''' Logging is enabled only when <c>INI_APIDebug</c> is <c>True</c>.
-        ''' </summary>
-        Public Shared Sub StartSession()
-            _isEnabled = INI_APIDebug
-            If Not _isEnabled Then Return
-
-            If _started AndAlso Not String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            Dim desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
-            _logPath = Path.Combine(desktopPath, StableLogFileName)
-
-            Try
-                WriteHeader()
-                _started = True
-            Catch ex As Exception
-                _isEnabled = False
-                _started = False
-                _logPath = Nothing
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Writes the session header and overwrites any previous log file with the same name.
-        ''' </summary>
-        Private Shared Sub WriteHeader()
-            Dim header As New StringBuilder()
-            header.AppendLine("=" & New String("="c, 78))
-            header.AppendLine($"{AN} - Tooling Log")
-            header.AppendLine($"Started: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
-            header.AppendLine($"Version: {Version}")
-            header.AppendLine($"File: {StableLogFileName} (overwritten each run)")
-            header.AppendLine("=" & New String("="c, 78))
-            header.AppendLine()
-
-            File.WriteAllText(_logPath, header.ToString())
-        End Sub
-
-        ''' <summary>
-        ''' Logs a step message to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Message text.</param>
-        Public Shared Sub LogStep(message As String)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-            WriteLine("STEP", message)
-        End Sub
-
-        ''' <summary>
-        ''' Logs a warning message and optional details/exception to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Primary message text.</param>
-        ''' <param name="details">Optional detail text written as a separate log line.</param>
-        ''' <param name="ex">Optional exception whose type/message/stack is written.</param>
-        Public Shared Sub LogWarn(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-            WriteLine("WARN", message)
-            If Not String.IsNullOrWhiteSpace(details) Then
-                WriteLine("WARN", $"Details: {details}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("WARN", ex)
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs an error message and optional details/exception to the tooling log (if enabled).
-        ''' </summary>
-        ''' <param name="message">Primary message text.</param>
-        ''' <param name="details">Optional detail text written as a separate log line.</param>
-        ''' <param name="ex">Optional exception whose type/message/stack is written.</param>
-        Public Shared Sub LogError(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            WriteLine("ERR", message)
-            If Not String.IsNullOrWhiteSpace(details) Then
-                WriteLine("ERR", $"Details: {details}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("ERR", ex)
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Writes exception details to the log under the specified category.
-        ''' </summary>
-        ''' <param name="category">Log category identifier (e.g., WARN/ERR/END).</param>
-        ''' <param name="ex">Exception instance to serialize.</param>
-        Private Shared Sub WriteException(category As String, ex As Exception)
-            If ex Is Nothing Then Return
-            WriteLine(category, $"Exception Type: {ex.GetType().FullName}")
-            WriteLine(category, $"Exception Message: {ex.Message}")
-            If Not String.IsNullOrWhiteSpace(ex.StackTrace) Then
-                WriteLine(category, "Stack Trace:")
-                WriteRaw(category, ex.StackTrace)
-            End If
-            If ex.InnerException IsNot Nothing Then
-                WriteLine(category, $"Inner Exception Type: {ex.InnerException.GetType().FullName}")
-                WriteLine(category, $"Inner Exception Message: {ex.InnerException.Message}")
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs every public instance property of <see cref="ModelConfig"/> (unmodified) for diagnostics,
-        ''' skipping a fixed list of sensitive/high-volume properties.
-        ''' </summary>
-        ''' <param name="config">Configuration instance to log.</param>
-        ''' <param name="label">Label written before the config dump.</param>
-        Public Shared Sub LogModelConfigOnce(config As ModelConfig, label As String)
-            If Not _isEnabled OrElse config Is Nothing Then Return
-
-            WriteLine("CONF", $"{label}:")
-
-            Try
-                Dim excludedExact As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase) From {
-                    "APIEncrypted",
-                    "APIKey",
-                    "APIKeyBack",
-                    "APIKeyPrefix",
-                    "DecodedAPI",
-                    "TokenCount",
-                    "MaxOutputToken",
-                    "MergePrompt",
-                    "QueryPrompt",
-                    "TokenExpiry"
-                }
-
-                Dim excludedPrefixes As String() = {
-                    "OAuth2",
-                    "Parameter"
-                }
-
-                Dim props = GetType(ModelConfig).GetProperties(BindingFlags.Instance Or BindingFlags.Public).
-                    Where(Function(p)
-                              If excludedExact.Contains(p.Name) Then Return False
-                              For Each prefix In excludedPrefixes
-                                  If p.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) Then Return False
-                              Next
-                              Return True
-                          End Function).
-                    OrderBy(Function(p) p.Name).
-                    ToList()
-
-                For Each p In props
-                    Dim v As Object = Nothing
-                    Try
-                        v = p.GetValue(config, Nothing)
-                    Catch ex As Exception
-                        WriteLine("CONF", $"  {p.Name}: <error reading>")
-                        WriteLine("CONF", $"    {ex.GetType().Name}: {ex.Message}")
-                        Continue For
-                    End Try
-
-                    Dim textValue As String
-                    If v Is Nothing Then
-                        textValue = ""
-                    ElseIf TypeOf v Is DateTime Then
-                        textValue = DirectCast(v, DateTime).ToString("yyyy-MM-dd HH:mm:ss.fff")
-                    Else
-                        textValue = v.ToString()
-                    End If
-
-                    WriteLine("CONF", $"  {p.Name}: {textValue}")
-                Next
-            Catch ex As Exception
-                LogError("Failed to log ModelConfig.", ex:=ex)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Logs a snapshot of selected tooling-related INI variables prior to calling the main tool-enabled LLM.
-        ''' Tool instructions and tool responses are logged as length stubs only (full content is already
-        ''' recorded via <see cref="LogModelConfigOnce"/> and <see cref="LogRawResponse"/>).
-        ''' </summary>
-        Public Shared Sub LogPreMainLlmCallSnapshot()
-            If Not _isEnabled Then Return
-            WriteLine("LLM", "Pre LLM() snapshot (main tooling LLM):")
-            WriteLine("LLM", $"  INI_Model_2: {SafeStr(INI_Model_2)}")
-            WriteLine("LLM", $"  INI_APICall_2: {SafeStr(INI_APICall_2)}")
-
-            Dim toolInstr = SafeStr(INI_APICall_ToolInstructions_2)
-            WriteLine("LLM", $"  INI_APICall_ToolInstructions_2: ({toolInstr.Length} chars)")
-
-            Dim toolResp = SafeStr(INI_APICall_ToolResponses_2)
-            If toolResp.Length <= 500 Then
-                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: {toolResp}")
-            Else
-                Dim excerpt = toolResp.Substring(0, 500) & "..."
-                WriteLine("LLM", $"  INI_APICall_ToolResponses_2: ({toolResp.Length} chars) {excerpt}")
-            End If
-
-            WriteLine("LLM", $"  INI_Response_2: {SafeStr(INI_Response_2)}")
-        End Sub
-
-        ''' <summary>
-        ''' Logs a snapshot of selected variables prior to calling an external tool/service via <c>LLM</c>.
-        ''' </summary>
-        ''' <param name="ctx">Object expected to expose <c>INI_Model_2</c> and <c>INI_APICall_2</c> members.</param>
-        Public Shared Sub LogPreToolLlmCallSnapshot(ctx As Object)
-            If Not _isEnabled Then Return
-
-            WriteLine("LLM", "Pre LLM() snapshot (tool/service call):")
-            Try
-                WriteLine("LLM", $"  INI_Model_2: {SafeGetMemberString(ctx, "INI_Model_2")}")
-                WriteLine("LLM", $"  INI_APICall_2: {SafeGetMemberString(ctx, "INI_APICall_2")}")
-            Catch ex As Exception
-                LogError("Failed to capture tool LLM snapshot.", ex:=ex)
-            End Try
-        End Sub
-
-        ''' <summary>
-        ''' Logs raw response content (unmodified) with two blank lines before and after.
-        ''' </summary>
-        ''' <param name="source">Source label (e.g. "Main LLM()" or tool name).</param>
-        ''' <param name="rawResponse">Raw response text.</param>
-        Public Shared Sub LogRawResponse(source As String, rawResponse As String)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            WriteLine("RESP", $"Raw response ({source}) begins:")
-            WriteRaw("RESP", vbCrLf & vbCrLf & SafeStr(rawResponse) & vbCrLf & vbCrLf)
-            WriteLine("RESP", $"Raw response ({source}) ends.")
-        End Sub
-
-        ''' <summary>
-        ''' Logs a brief stub of a raw response (length + short excerpt) without the full content.
-        ''' Used for main LLM responses to keep the log file focused on tool calls.
-        ''' </summary>
-        ''' <param name="source">Source label (e.g. "Main LLM()").</param>
-        ''' <param name="rawResponse">Raw response text.</param>
-        ''' <param name="excerptLength">Maximum number of characters to include in the excerpt.</param>
-        Public Shared Sub LogRawResponseStub(source As String, rawResponse As String, Optional excerptLength As Integer = 200)
-            If Not _isEnabled OrElse String.IsNullOrWhiteSpace(_logPath) Then Return
-
-            Dim safe As String = SafeStr(rawResponse)
-            Dim charCount As Integer = safe.Length
-            Dim excerpt As String = If(charCount <= excerptLength,
-                safe,
-                safe.Substring(0, excerptLength) & "...")
-
-            WriteLine("RESP", $"Raw response ({source}): {charCount} chars")
-            If charCount > 0 Then
-                WriteLine("RESP", $"Excerpt: {excerpt}")
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Ends a tooling log session and writes summary/exception details (if provided).
-        ''' </summary>
-        ''' <param name="success">Whether the session completed successfully.</param>
-        ''' <param name="summary">Optional summary string written to the log.</param>
-        ''' <param name="ex">Optional exception written to the log.</param>
-        Public Shared Sub EndSession(Optional success As Boolean = True, Optional summary As String = "", Optional ex As Exception = Nothing)
-            If Not _isEnabled Then Return
-            WriteLine("END", $"Success: {success}")
-            If Not String.IsNullOrWhiteSpace(summary) Then
-                WriteLine("END", $"Summary: {summary}")
-            End If
-            If ex IsNot Nothing Then
-                WriteException("END", ex)
-            End If
-            WriteLine("END", $"Ended: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}")
-
-            _isEnabled = False
-            _started = False
-            _logPath = Nothing
-        End Sub
-
-        ''' <summary>
-        ''' Writes a single timestamped log line.
-        ''' </summary>
-        ''' <param name="category">Category identifier (STEP/WARN/ERR/etc.).</param>
-        ''' <param name="message">Message text.</param>
-        Private Shared Sub WriteLine(category As String, message As String)
-            SyncLock _lock
-                Try
-                    Dim entry = $"[{DateTime.Now:HH:mm:ss.fff}] [{category}] {message}"
-                    File.AppendAllText(_logPath, entry & Environment.NewLine)
-                Catch
-                End Try
-            End SyncLock
-        End Sub
-
-        ''' <summary>
-        ''' Writes raw text to the log file without adding timestamps.
-        ''' </summary>
-        ''' <param name="category">Unused category label; retained to match caller signature.</param>
-        ''' <param name="raw">Raw text to append.</param>
-        Private Shared Sub WriteRaw(category As String, raw As String)
-            SyncLock _lock
-                Try
-                    ' Raw is written as-is; only prefixed by one timestamp line already.
-                    File.AppendAllText(_logPath, raw)
-                Catch
-                End Try
-            End SyncLock
-        End Sub
-
-        ''' <summary>
-        ''' Converts a potentially <c>Nothing</c> string into a non-null string for logging.
-        ''' </summary>
-        Private Shared Function SafeStr(value As String) As String
-            If value Is Nothing Then Return ""
-            Return value
-        End Function
-
-        ''' <summary>
-        ''' Reads a string representation of a named property or field value via reflection.
-        ''' </summary>
-        ''' <param name="obj">Target object.</param>
-        ''' <param name="memberName">Property or field name.</param>
-        ''' <returns>Member value converted to string, or an empty string if missing.</returns>
-        Private Shared Function SafeGetMemberString(obj As Object, memberName As String) As String
-            If obj Is Nothing Then Return ""
-            Dim t = obj.GetType()
-            Dim p = t.GetProperty(memberName)
-            If p IsNot Nothing Then
-                Dim v = p.GetValue(obj, Nothing)
-                Return If(v IsNot Nothing, v.ToString(), "")
-            End If
-            Dim f = t.GetField(memberName)
-            If f IsNot Nothing Then
-                Dim v = f.GetValue(obj)
-                Return If(v IsNot Nothing, v.ToString(), "")
-            End If
-            Return ""
-        End Function
-
-        ''' <summary>
-        ''' Returns whether file logging is currently enabled.
-        ''' </summary>
-        Public Shared ReadOnly Property IsEnabled As Boolean
-            Get
-                Return _isEnabled
-            End Get
-        End Property
-
-        ''' <summary>
-        ''' Returns the currently active log file path (empty/Nothing if not enabled).
-        ''' </summary>
-        Public Shared ReadOnly Property LogFilePath As String
-            Get
-                Return _logPath
-            End Get
-        End Property
-    End Class
-
-#End Region
 
 #Region "Tooling Data Classes"
 
@@ -978,6 +158,13 @@ Partial Public Class ThisAddIn
         ''' <summary>Original tool call JSON as extracted from the LLM response.</summary>
         Public Property OriginalCallJson As String
 
+        Public Property ResultKind As String
+        Public Property ErrorCode As String
+
+        Public Property ModelReplayContent As String
+        Public Property ModelReplaySummary As String
+        Public Property WasCompactedForModelReplay As Boolean
+
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.
         ''' </summary>
@@ -987,93 +174,213 @@ Partial Public Class ThisAddIn
         End Sub
     End Class
 
-    ''' <summary>
-    ''' Holds per-run state for the tooling loop, including selected tools, iteration counters, and logging.
-    ''' </summary>
-    Public Class ToolExecutionContext
-
-        ''' <summary>Tools selected for this session.</summary>
-        Public Property SelectedTools As List(Of ModelConfig)
-
-        ''' <summary>All responses generated during this session (successful and failed).</summary>
-        Public Property AllToolResponses As List(Of ToolResponse)
-
-        ''' <summary>Current iteration counter within <see cref="ExecuteToolingLoop"/>.</summary>
-        Public Property CurrentIteration As Integer
-
-        ''' <summary>Maximum permitted number of iterations.</summary>
-        Public Property MaxIterations As Integer
-
-        ''' <summary>Cancellation flag set by UI event handler.</summary>
-        Public Property IsCancelled As Boolean
-
-        ''' <summary>In-memory log entries appended during session execution.</summary>
-        Public Property LogEntries As List(Of String)
-
-        ''' <summary>Snapshot of the LLM/tooling model config used for tool call detection/extraction formats.</summary>
-        Public Property ToolingModel As ModelConfig
-
-        ''' <summary>Optional UI log window instance used for user-visible progress logging.</summary>
-        Public Property LogWindowForm As LogWindow
-
-        ''' <summary>
-        ''' Initializes a new tool execution context with default collections and limits.
-        ''' </summary>
-        Public Sub New()
-            SelectedTools = New List(Of ModelConfig)()
-            AllToolResponses = New List(Of ToolResponse)()
-            LogEntries = New List(Of String)()
-            CurrentIteration = 0
-            MaxIterations = INI_ToolingMaximumIterations
-            IsCancelled = False
-        End Sub
-
-        ''' <summary>
-        ''' Appends a message to the in-memory log, debugger output, optional UI log window, and the tooling file log.
-        ''' </summary>
-        ''' <param name="message">Log message.</param>
-        ''' <param name="level">Log level passed to the UI log window.</param>
-        Public Sub Log(message As String, Optional level As String = "step")
-            Dim entry = $"[{DateTime.Now:HH:mm:ss}] {message}"
-            LogEntries.Add(entry)
-            Debug.WriteLine($"[Tooling] {entry}")
-
-            ToolingFileLogger.LogStep(message)
-
-            If LogWindowForm IsNot Nothing AndAlso Not LogWindowForm.IsDisposed Then
-                Try
-                    LogWindowForm.AppendLog(message, level)
-                Catch ex As Exception
-                    ToolingFileLogger.LogWarn("Failed to append to LogWindow.", ex:=ex)
-                End Try
-            End If
-        End Sub
-
-        ''' <summary>
-        ''' Logs a warning through the session logger and file logger.
-        ''' </summary>
-        Public Sub LogWarn(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            Log(message, "warn")
-            ToolingFileLogger.LogWarn(message, details, ex)
-        End Sub
-
-        ''' <summary>
-        ''' Logs an error through the session logger and file logger.
-        ''' </summary>
-        Public Sub LogError(message As String, Optional details As String = "", Optional ex As Exception = Nothing)
-            Log(message, "error")
-            ToolingFileLogger.LogError(message, details, ex)
-        End Sub
-
-        ''' <summary>
-        ''' Placeholder method (intentionally empty) retained by the caller surface.
-        ''' </summary>
-        Public Sub WriteDebugLog()
-            ' Intentionally empty (avoid multiple log files).
-        End Sub
-    End Class
 
 #End Region
+
+
+
+    Private Function ResolveOptionalHostTaskSummary(latestUserRequestRaw As String,
+                                                    userText As String,
+                                                    otherPrompt As String,
+                                                    fullPromptOverride As String,
+                                                    insertDocs As String,
+                                                    slideInsert As String,
+                                                    bubblesText As String) As String
+        Dim summary As String =
+            BuildToolSelectionHintText(
+                userText,
+                fullPromptOverride,
+                otherPrompt,
+                insertDocs,
+                slideInsert,
+                bubblesText).Trim()
+
+        If summary = "" Then
+            Return ""
+        End If
+
+        If String.Equals(summary, If(latestUserRequestRaw, "").Trim(), StringComparison.Ordinal) Then
+            Return ""
+        End If
+
+        Return summary
+    End Function
+
+
+
+    Private Function BuildCompletedToolResultSummaryBlock(context As ToolExecutionContext,
+                                                         Optional maxItems As Integer = 3) As String
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then
+            Return ""
+        End If
+
+        Dim summaries As New List(Of String)()
+
+        For Each resp In context.AllToolResponses
+            If resp Is Nothing OrElse Not resp.Success Then Continue For
+
+            Dim summary As String = Regex.Replace(If(BuildToolReplaySummary(resp), ""), "\s+", " ").Trim()
+            If summary = "" Then Continue For
+
+            summaries.Add("- " & summary)
+
+            If summaries.Count >= maxItems Then
+                Exit For
+            End If
+        Next
+
+        If summaries.Count = 0 Then
+            Return ""
+        End If
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine("<COMPLETED_TOOL_RESULTS>")
+        For Each summary In summaries
+            sb.AppendLine(summary)
+        Next
+        sb.AppendLine("</COMPLETED_TOOL_RESULTS>")
+        Return sb.ToString().TrimEnd()
+    End Function
+
+    Private Function BuildDeliverableCompletionContinuationBlock(context As ToolExecutionContext) As String
+        If context Is Nothing Then
+            Return ""
+        End If
+
+        If String.IsNullOrWhiteSpace(context.LatestUserRequestRaw) Then
+            Return ""
+        End If
+
+        Dim completedBlock As String = BuildCompletedToolResultSummaryBlock(context)
+        Dim needsDeliverable As Boolean =
+            context.SequencingState IsNot Nothing AndAlso
+            context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+            Not SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+        If Not needsDeliverable AndAlso String.IsNullOrWhiteSpace(completedBlock) Then
+            Return ""
+        End If
+
+        Dim sb As New StringBuilder()
+        sb.AppendLine("[HOST REQUEST CONTINUITY]")
+        sb.AppendLine("The original latest user request remains authoritative.")
+        sb.AppendLine("<LATEST_USER_REQUEST_RAW>")
+        sb.AppendLine(context.LatestUserRequestRaw)
+        sb.AppendLine("</LATEST_USER_REQUEST_RAW>")
+
+        If Not String.IsNullOrWhiteSpace(completedBlock) Then
+            sb.AppendLine(completedBlock)
+        End If
+
+        If needsDeliverable Then
+            sb.AppendLine("<REMAINING_REQUESTED_DELIVERABLES>")
+            sb.AppendLine("A requested deliverable artifact has not yet been actually produced.")
+            If context.SequencingState.LastToolProducesIntermediateData Then
+                sb.AppendLine("The latest successful tool result is preparatory or intermediate data only.")
+            End If
+            If Not String.IsNullOrWhiteSpace(context.SequencingState.RequestDeliverableSummary) Then
+                sb.AppendLine("Requested deliverable: " & context.SequencingState.RequestDeliverableSummary)
+            End If
+            sb.AppendLine("</REMAINING_REQUESTED_DELIVERABLES>")
+            sb.AppendLine("Do not finalize yet. Use an appropriate creation, write, export, or save tool before finalizing, or explain briefly why the deliverable cannot be created.")
+        Else
+            sb.AppendLine("Continue with any remaining requested deliverables. Do not finalize until the full request is complete, or explain briefly why it cannot be completed.")
+        End If
+
+        sb.AppendLine("[/HOST REQUEST CONTINUITY]")
+        Return sb.ToString().TrimEnd()
+    End Function
+
+    Private Function BuildEmptyResponseAfterProgressRecoveryPrompt(context As ToolExecutionContext) As String
+        Dim sb As New StringBuilder()
+        sb.AppendLine("HOST EMPTY-RESPONSE RECOVERY: The previous model turn was empty after successful partial progress.")
+
+        If context IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.LatestUserRequestRaw) Then
+            sb.AppendLine("<LATEST_USER_REQUEST_RAW>")
+            sb.AppendLine(context.LatestUserRequestRaw)
+            sb.AppendLine("</LATEST_USER_REQUEST_RAW>")
+        End If
+
+        Dim completedBlock As String = BuildCompletedToolResultSummaryBlock(context)
+        If Not String.IsNullOrWhiteSpace(completedBlock) Then
+            sb.AppendLine(completedBlock)
+        End If
+
+        Dim requiresMissingOutputFileRecovery As Boolean =
+            context IsNot Nothing AndAlso
+            context.SequencingState IsNot Nothing AndAlso
+            context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+            context.SequencingState.LastToolProducesIntermediateData AndAlso
+            Not SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+        If requiresMissingOutputFileRecovery Then
+            sb.AppendLine("Intermediate data is available. The requested output file has not been created yet. Call an appropriate create/save/export tool now. Do not finalise unless the file is created or no suitable tool exists.")
+        ElseIf context IsNot Nothing AndAlso
+               context.SequencingState IsNot Nothing AndAlso
+               context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+               Not SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState) Then
+
+            sb.AppendLine("A requested deliverable artifact has not yet been actually produced.")
+            sb.AppendLine("Do not finalize yet. Continue with the next appropriate creation, write, export, or save step, or return a valid blocked answer only if the deliverable cannot be created.")
+        Else
+            sb.AppendLine("Continue with any remaining requested deliverables, or return a valid final answer only if the full request is complete.")
+        End If
+
+        Return sb.ToString().TrimEnd()
+    End Function
+
+    Private Async Function ResolveToolingUserLanguageAsync(userText As String,
+                                                           otherPrompt As String,
+                                                           fullPromptOverride As String,
+                                                           useSecondAPI As Boolean,
+                                                           hideSplash As Boolean,
+                                                           cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+        Dim sourceText As String =
+            ResolveLatestUserRequestRaw(userText, otherPrompt, fullPromptOverride)
+
+        sourceText = If(sourceText, "").Trim()
+        If sourceText = "" Then Return ""
+
+        If sourceText.Length > 4000 Then
+            sourceText = sourceText.Substring(0, 4000)
+        End If
+
+        Dim detectionSystemPrompt As String =
+            "Determine the language in which the assistant must answer the user's latest request. " &
+            "Return ONLY valid JSON in the form {""language"":""...""}. " &
+            "Use a concrete runtime language value suitable for later localization, preferably a BCP-47 tag when clear. " &
+            "Do not add explanations."
+
+        Dim detectionUserPrompt As String =
+            "<USER_ENTRY>" & sourceText & "</USER_ENTRY>"
+
+        Try
+            Dim raw As String = Await LLM(
+                detectionSystemPrompt,
+                detectionUserPrompt,
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                cancellationToken,
+                True,
+                False)
+
+            If String.IsNullOrWhiteSpace(raw) Then Return ""
+
+            Try
+                Dim obj As JObject = JObject.Parse(raw)
+                Return If(obj.Value(Of String)("language"), "").Trim()
+            Catch
+                Return raw.Trim().Trim(""""c)
+            End Try
+        Catch
+            Return ""
+        End Try
+    End Function
+
+
 
 #Region "Execute Tooling"
 
@@ -1129,7 +436,21 @@ Partial Public Class ThisAddIn
         Optional hideLogWindow As Boolean = False,
         Optional DoChart As Boolean = False,
         Optional cancellationToken As System.Threading.CancellationToken = Nothing,
-        Optional binaryOutputDirectory As String = Nothing) As Task(Of String)
+        Optional binaryOutputDirectory As String = Nothing,
+        Optional subAgentMode As Boolean = False,
+        Optional subAgentAllowedToolNames As IReadOnlyList(Of String) = Nothing,
+        Optional subAgentSpecialModelKey As String = Nothing,
+        Optional subAgentAuthoritativeRegistry As SharedLibrary.Agents.ToolRegistry = Nothing,
+        Optional subAgentRegistrySource As String = Nothing,
+        Optional subAgentParentRunId As String = Nothing,
+        Optional subAgentInvocationIndex As Integer = 0,
+        Optional subAgentAgentInvocationCount As Integer = 0,
+        Optional subAgentName As String = Nothing,
+        Optional userLanguage As String = "",
+        Optional workflowId As String = "",
+        Optional memoryGroundingMode As SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode = SharedLibrary.Agents.ToolCallSequencing.MemoryGroundingMode.None,
+        Optional memoryGroundingModeIsExplicit As Boolean = False,
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As Task(Of String)
 
         ' Check for power transition BEFORE starting (matches RunLlmAsync pattern)
         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
@@ -1138,12 +459,301 @@ Partial Public Class ThisAddIn
 
         ToolingFileLogger.StartSession()
 
+        ' Per-turn Chat Agent deliverables reset (prevents prior-turn output files
+        ' from being re-presented). Sub-agents inherit parent state and must not
+        ' reset. AutoPilot is single-threaded per Q4.
+        If Not subAgentMode AndAlso _chatAgentActive Then
+            ResetChatAgentDeliverableTrackingForNewTurn()
+        End If
+
+        Dim parentToolingContext = _activeToolingContext
+        Dim workflowScope As IDisposable = Nothing
+        Dim acceptedFinalStatus As String = ""
+
+        Dim fullAllowedTools As List(Of ModelConfig) =
+            If(selectedTools, New List(Of ModelConfig)()).
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+                Select(Function(g) g.First()).
+                ToList()
+
+        selectedTools = fullAllowedTools
+
+        Try
+            SharedLibrary.Agents.HostToolRegistration.RegisterResolvedInternalTools(
+                SharedLibrary.Agents.ToolingHostKind.Outlook,
+                fullAllowedTools)
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Failed to register selected Outlook tooling tools.", ex:=ex)
+        End Try
+
         Dim context As New ToolExecutionContext() With {
-            .MaxIterations = INI_ToolingMaximumIterations,
-            .SelectedTools = selectedTools
+            .MaxIterations = INI_ToolingMaximumIterations
         }
 
+        context.FinalResponseContract = finalResponseContract
+        context.Log(
+            "Final response contract initialized: " &
+            SharedLibrary.Agents.ToolingFinalResponseContractHelpers.FormatToolingFinalResponseContract(context.FinalResponseContract),
+            "diag")
+
+        context.SequencingState.UserLanguage =
+            If(Not String.IsNullOrWhiteSpace(userLanguage),
+               userLanguage.Trim(),
+               Await ResolveToolingUserLanguageAsync(
+                   userText,
+                   otherPrompt,
+                   fullPromptOverride,
+                   useSecondAPI,
+                   hideSplash,
+                   cancellationToken))
+
+        context.LatestUserRequestRaw =
+            ResolveLatestUserRequestRaw(
+                userText,
+                otherPrompt,
+                fullPromptOverride)
+
+        ' Created-deliverable enforcement is metadata-driven only.
+        ' Do not classify the user's text to decide whether an artifact is required.
+
+        context.HostTaskSummary =
+            ResolveOptionalHostTaskSummary(
+                context.LatestUserRequestRaw,
+                userText,
+                otherPrompt,
+                fullPromptOverride,
+                insertDocs,
+                slideInsert,
+                bubblesText)
+
+        Dim toolSelectionHintText As String = BuildToolSelectionHintText(
+            userText,
+            fullPromptOverride,
+            otherPrompt,
+            insertDocs,
+            slideInsert,
+            bubblesText)
+
+        Try
+            SharedLibrary.Agents.AgentResources.SetPaths(INI_AgentResourcesPath, INI_AgentResourcesPathLocal)
+            SharedLibrary.Agents.AgentResources.Refresh()
+        Catch
+        End Try
+
+        Dim authoritativeRegistrySource As SharedLibrary.Agents.ToolRegistry = Nothing
+
+        If subAgentMode AndAlso subAgentAuthoritativeRegistry IsNot Nothing Then
+            authoritativeRegistrySource = subAgentAuthoritativeRegistry.Snapshot()
+        Else
+            authoritativeRegistrySource = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(fullAllowedTools, "selected")
+
+            ' Only register the skills/agents the user actually selected.
+            ' This fixes AutoPilot making unselected skills/agents available anyway.
+            Try
+                SharedLibrary.Agents.AgentResources.Refresh()
+
+                Dim selectedToolNames As New HashSet(Of String)(
+                    If(fullAllowedTools, New List(Of ModelConfig)()).
+                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                        Select(Function(t) t.ToolName.Trim()),
+                    StringComparer.OrdinalIgnoreCase)
+
+                If selectedToolNames.Count > 0 Then
+                    Dim selectedSkills =
+                        SharedLibrary.Agents.AgentResources.Skills.
+                            Where(Function(sk)
+                                      Return sk IsNot Nothing AndAlso
+                                             Not String.IsNullOrWhiteSpace(sk.Name) AndAlso
+                                             selectedToolNames.Contains("skill_" & sk.Name.Trim())
+                                  End Function)
+
+                    Dim selectedAgents =
+                        SharedLibrary.Agents.AgentResources.Agents.
+                            Where(Function(ag)
+                                      Return ag IsNot Nothing AndAlso
+                                             Not String.IsNullOrWhiteSpace(ag.Name) AndAlso
+                                             selectedToolNames.Contains("agent_" & ag.Name.Trim())
+                                  End Function)
+
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, selectedSkills)
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(authoritativeRegistrySource, selectedAgents)
+                End If
+            Catch
+            End Try
+        End If
+
+        Dim authoritativeRegistrySnapshot As SharedLibrary.Agents.ToolRegistry =
+    If(authoritativeRegistrySource Is Nothing,
+       Nothing,
+       authoritativeRegistrySource.Snapshot())
+
+        context.AuthoritativeToolRegistry = authoritativeRegistrySource
+        context.AuthoritativeToolRegistrySnapshot = authoritativeRegistrySnapshot
+        context.HostKind = "Outlook"
+        context.EnforceAllowedToolScope = subAgentMode
+        context.SequencingState.ActiveToolingSession = True
+        context.SequencingState.HasOpenToolWorkflow = True
+        context.SequencingState.ToolRequiredModeUsed = False
+        context.SequencingState.MemoryGroundingMode = memoryGroundingMode
+        context.SequencingState.UserLanguage =
+            If(Not String.IsNullOrWhiteSpace(userLanguage),
+               userLanguage.Trim(),
+               context.SequencingState.UserLanguage)
+        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
+        context.WorkflowId = ResolveToolingWorkflowId(workflowId, subAgentMode, parentToolingContext)
+
+        If Not subAgentMode Then
+            Dim clearedCount As Integer =
+                SharedLibrary.Agents.SessionMemory.ClearTransientEntriesForHost(
+                    context.HostKind,
+                    context.WorkflowId)
+
+            If clearedCount > 0 Then
+                context.Log(
+                    $"Cleared {clearedCount} transient session-memory entr{If(clearedCount = 1, "y", "ies")} for host '{context.HostKind}'.",
+                    "diag")
+            End If
+        End If
+
+        context.RuntimeState =
+    If(subAgentMode,
+       SharedLibrary.Agents.WorkflowContinuity.AttachWorkflow(context.WorkflowId, context.HostKind),
+       SharedLibrary.Agents.WorkflowContinuity.StartWorkflow(context.WorkflowId, context.HostKind))
+
+        workflowScope = SharedLibrary.Agents.WorkflowContinuity.BeginWorkflowScope(context.WorkflowId, context.HostKind)
+
+        ToolingFileLogger.LogStep(
+            SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                "Tooling workflow initialized.",
+                context.WorkflowId,
+                If(context.RuntimeState?.CurrentPhase, ""),
+                hostName:=context.HostKind) &
+            " [subAgentMode: " & If(subAgentMode, "true", "false") & "]")
+
+        context.Log("Workflow continuity initialized.")
+        context.Log("Memory grounding state initialized: " &
+            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState))
+
+        Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
+
+        If subAgentMode Then
+            initialSubAgentToolNames = BuildToolNameSet(subAgentAllowedToolNames)
+            context.AllowedToolNames = New HashSet(Of String)(initialSubAgentToolNames, StringComparer.OrdinalIgnoreCase)
+            context.AllowedToolRegistry =
+        If(context.AuthoritativeToolRegistrySnapshot Is Nothing,
+           New SharedLibrary.Agents.ToolRegistry(),
+           context.AuthoritativeToolRegistrySnapshot.Narrow(context.AllowedToolNames))
+        Else
+            context.AllowedToolNames = New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+            context.AllowedToolRegistry =
+        If(context.AuthoritativeToolRegistrySnapshot Is Nothing,
+           New SharedLibrary.Agents.ToolRegistry(),
+           context.AuthoritativeToolRegistrySnapshot)
+        End If
+
+        ToolingFileLogger.LogStep(
+            SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                "Tooling host context attached.",
+                context.WorkflowId,
+                If(context.RuntimeState?.CurrentPhase, ""),
+                hostName:=context.HostKind))
+
+        If subAgentMode Then
+            ToolingFileLogger.LogStep(
+                SharedLibrary.Agents.WorkflowContinuity.ComposeWorkflowLogMessage(
+                    "Allowed tool scope initialized.",
+                    context.WorkflowId,
+                    If(context.RuntimeState?.CurrentPhase, ""),
+                    hostName:=context.HostKind,
+                    leadingMarker:="[subagent]") &
+                " [allowedTools: " &
+                If(context.AllowedToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", context.AllowedToolNames.OrderBy(Function(n) n))) &
+                "]")
+        End If
+
+        If subAgentMode Then
+            context.LazyToolLoadingEnabled = False
+
+            Dim scopeInit = SharedLibrary.Agents.SubAgentToolScopeInitializer.Initialize(
+    context.AuthoritativeToolRegistrySnapshot,
+    context.AllowedToolNames)
+
+            context.AllowedToolRegistry = scopeInit.NarrowedRegistry
+            context.SelectedTools = New List(Of ModelConfig)(scopeInit.ResolvedTools)
+
+            Dim requestedNamesText As String =
+                If(scopeInit.RequestedToolNames Is Nothing OrElse scopeInit.RequestedToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", scopeInit.RequestedToolNames))
+
+            Dim resolvedNamesText As String =
+                If(scopeInit.ResolvedToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", scopeInit.ResolvedToolNames))
+
+            Dim missingNamesText As String =
+                If(scopeInit.MissingToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", scopeInit.MissingToolNames))
+
+            Dim finalSelectedNamesText As String =
+                If(scopeInit.FinalCallableToolNames.Count = 0,
+                   "(none)",
+                   String.Join(", ", scopeInit.FinalCallableToolNames))
+
+            Dim repeatedInvocationLabel As String =
+                If(subAgentAgentInvocationCount > 1, "later", "first")
+
+            context.Log($"Sub-agent tool scope initialized from '{If(subAgentRegistrySource, "")}'.")
+
+            ToolingFileLogger.LogStep(
+                "[subagent-host] tool_scope_init: " &
+                $"parent_run_id={If(subAgentParentRunId, "(none)")}; " &
+                $"invocation_index={subAgentInvocationIndex}; " &
+                $"agent='{If(subAgentName, "")}'; " &
+                $"requested_allowed_tools={requestedNamesText}; " &
+                $"registry_source={If(subAgentRegistrySource, "(unspecified)")}; " &
+                $"resolved_tools={resolvedNamesText}; " &
+                $"missing_tools={missingNamesText}; " &
+                $"final_selected_tools={finalSelectedNamesText}; " &
+                $"same_agent_invocation={repeatedInvocationLabel}")
+
+            If scopeInit.HasRequestedTools AndAlso
+               (scopeInit.HasMissingRequestedTools OrElse scopeInit.HasMissingFinalToolNames) Then
+
+                Dim missingRequiredToolNames = scopeInit.MissingFinalToolNames
+
+                Dim payload = SharedLibrary.Agents.SubAgentRuntimeHardening.BuildRequiredToolMissingPayload(
+                    missingRequiredToolNames,
+                    requestedToolNames:=scopeInit.RequestedToolNames,
+                    resolvedToolNames:=scopeInit.ResolvedToolNames)
+
+                context.LogWarn(
+                    "Sub-agent required tools could not be resolved before model call.",
+                    details:=$"host={context.HostKind}; agent={If(subAgentName, "")}; parentRunId={If(subAgentParentRunId, "(none)")}; invocationIndex={subAgentInvocationIndex}; registrySource={If(subAgentRegistrySource, "(unspecified)")}; requested={requestedNamesText}; resolved={resolvedNamesText}; missing={If(missingRequiredToolNames.Count = 0, "(none)", String.Join(", ", missingRequiredToolNames))}; finalSelected={finalSelectedNamesText}")
+
+                ToolingFileLogger.EndSession(False, "Sub-agent required tools missing.")
+                Return payload
+            End If
+        Else
+            context.SelectedTools = BuildInitialToolExposure(fullAllowedTools, context.AllowedToolRegistry, toolSelectionHintText)
+            context.LazyToolLoadingEnabled =
+                context.SelectedTools IsNot Nothing AndAlso
+                context.SelectedTools.Any(
+                    Function(t)
+                        Return t IsNot Nothing AndAlso
+                               Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                               t.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
+                    End Function)
+        End If
+
+        selectedTools = New List(Of ModelConfig)(context.SelectedTools)
+
         context.ToolingModel = GetCurrentConfig(_context)
+
 
         ' Start-of-run config logging (ONCE)
         ToolingFileLogger.LogModelConfigOnce(context.ToolingModel, "Tooling LLM ModelConfig")
@@ -1160,25 +770,48 @@ Partial Public Class ThisAddIn
         End If
 
         If INI_ToolingLogWindow AndAlso Not hideLogWindow Then
-            ' Create and show the log window on the UI thread to avoid threading issues
-            Dim logForm As LogWindow = Nothing
-            Try
-                ' Use Await with SwitchToUi for proper async UI thread marshaling
-                Await SwitchToUi(Sub()
-                                     logForm = New LogWindow()
-                                     logForm.Show()
-                                 End Sub).ConfigureAwait(False)
-            Catch ex As Exception
-                ToolingFileLogger.LogWarn("Failed to create LogWindow.", ex:=ex)
-            End Try
+            ' The LogWindow must be created on the Outlook UI/STA thread.
+            ' ExecuteToolingLoop may run on a thread-pool continuation, so always
+            ' marshal creation/show through the captured UI SynchronizationContext.
+            Dim createdForm As LogWindow = Nothing
+            Dim createError As Exception = Nothing
 
-            context.LogWindowForm = logForm
-            If logForm IsNot Nothing Then
-                AddHandler logForm.CancelRequested, Sub() context.IsCancelled = True
+            Dim createOnUi As Action =
+                Sub()
+                    Try
+                        createdForm = New LogWindow()
+                        createdForm.Show()
+                        AddHandler createdForm.CancelRequested, Sub() context.IsCancelled = True
+                    Catch ex As Exception
+                        createError = ex
+                    End Try
+                End Sub
+
+            If UiSyncContext IsNot Nothing AndAlso
+               System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                UiSyncContext.Send(Sub() createOnUi(), Nothing)
+            Else
+                createOnUi()
             End If
+
+            If createError IsNot Nothing Then
+                ToolingFileLogger.LogWarn("Failed to create LogWindow on UI thread.", ex:=createError)
+            End If
+
+            context.LogWindowForm = createdForm
+
+        ElseIf hideLogWindow AndAlso
+               parentToolingContext IsNot Nothing AndAlso
+               parentToolingContext.LogWindowForm IsNot Nothing AndAlso
+               Not parentToolingContext.LogWindowForm.IsDisposed Then
+
+            context.LogPrefix = "[subagent] "
+            context.ExternalLogSink =
+                Sub(message As String, level As String)
+                    parentToolingContext.LogWindowForm.AppendLog(message, level)
+                End Sub
         End If
 
-        ' Make context available to ApDashboardLog for Chat Agent routing
         _activeToolingContext = context
 
         context.Log("Starting tooling session...")
@@ -1192,6 +825,31 @@ Partial Public Class ThisAddIn
         Dim effectiveTimeout As Integer = CInt(If(useSecondAPI, INI_Timeout_2, INI_Timeout))
 
         Try
+            Await ResolveMemoryGroundingModeAsync(
+                context,
+                userText,
+                otherPrompt,
+                fullPromptOverride,
+                useSecondAPI,
+                hideSplash,
+                cancellationToken,
+                memoryGroundingMode,
+                memoryGroundingModeIsExplicit,
+                subAgentMode)
+
+            If Not subAgentMode Then
+                Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
+                Await TryForceRequiredMemoryGetsAsync(context, cancellationToken)
+
+                If context.AllToolResponses.Count > 0 Then
+                    INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        context.AllToolResponses,
+                        context.ToolingModel,
+                        compactForSubAgent:=False)
+                    context.Log("Initial tool responses prepared for model", "diag")
+                End If
+            End If
+
             ' Build System Prompt (matching direct LLM() call plus Tooling Instructions)
             Dim baseSysPrompt As String = sysCommand
 
@@ -1221,13 +879,74 @@ Partial Public Class ThisAddIn
                 baseSysPrompt &= " " & SP_Add_Chart
             End If
 
-            Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
+            ' Dim enhancedSysPrompt As String = baseSysPrompt & Environment.NewLine & Environment.NewLine & BuildToolInstructionsPrompt(selectedTools)
+            If Not subAgentMode Then
+                ' Agent layer: prepend Inky.md guidance + skill/agent availability summary, append agent-layer addendum (main loop only).
+                Dim selectedSkillToolNames As New List(Of String)()
+                Dim selectedAgentToolNames As New List(Of String)()
+                If selectedTools IsNot Nothing Then
+                    For Each __t In selectedTools
+                        If __t Is Nothing OrElse String.IsNullOrWhiteSpace(__t.ToolName) Then Continue For
+                        If __t.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then selectedSkillToolNames.Add(__t.ToolName)
+                        If __t.ToolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then selectedAgentToolNames.Add(__t.ToolName)
+                    Next
+                End If
+                Dim inkyHeader As String = SharedLibrary.Agents.InkyPromptBuilder.Build(selectedSkillToolNames, selectedAgentToolNames)
+                Dim agentLayerActive As Boolean =
+                    (selectedSkillToolNames.Count > 0) OrElse
+                    (selectedAgentToolNames.Count > 0) OrElse
+                    (selectedTools IsNot Nothing AndAlso selectedTools.Any(Function(t) t IsNot Nothing AndAlso SharedLibrary.Agents.MemoryTools.IsMemoryTool(t.ToolName)))
+                If Not String.IsNullOrWhiteSpace(inkyHeader) Then
+                    baseSysPrompt = inkyHeader & Environment.NewLine & Environment.NewLine & baseSysPrompt
+                End If
+                If agentLayerActive Then
+                    baseSysPrompt &= Environment.NewLine & Environment.NewLine & Default_SP_Add_AgentLayer
+                End If
+            End If
 
-            Dim toolDefinitions = BuildToolInstructionsForModel(selectedTools, context.ToolingModel)
+            ' Language contract — Mandatory rule that the model must produce final
+            ' user-facing prose in the detected user language regardless of the
+            ' language of guard prompts, host messages, or tool output (P1 fix).
+            Dim languageContractFragment As String = ""
+
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                languageContractFragment =
+                    Agents.ToolingOrchestrator.BuildLanguageContractSystemPromptFragment(
+                        If(context.SequencingState IsNot Nothing,
+                           context.SequencingState.UserLanguage,
+                           userLanguage))
+            End If
+
+            Dim enhancedSysPrompt As String =
+                baseSysPrompt & Environment.NewLine & Environment.NewLine &
+                BuildToolInstructionsPromptForSession(
+                    context.SelectedTools,
+                    subAgentMode,
+                    context.FinalResponseContract)
+
+            If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
+                enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                                    languageContractFragment
+            End If
+
+            Dim toolDefinitions = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
             INI_APICall_ToolInstructions_2 = toolDefinitions
             INI_APICall_ToolResponses_2 = ""
 
-            context.Log("Tool definitions prepared for model")
+            context.Log("Tool definitions prepared for model", "diag")
+
+            If Not subAgentMode Then
+                Await TryPrimeRecentMemoryStubsAsync(context, cancellationToken)
+
+                If context.AllToolResponses.Count > 0 Then
+                    INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                        context.AllToolResponses,
+                        context.ToolingModel,
+                        compactForSubAgent:=False)
+                    context.Log("Initial tool responses prepared for model", "diag")
+                End If
+            End If
+
 
             If INI_ToolingDryRun Then
                 Dim preview = $"The following tools will be made available to the model:{Environment.NewLine}{Environment.NewLine}"
@@ -1246,9 +965,16 @@ Partial Public Class ThisAddIn
             Dim currentResponse As String = ""
             Dim iteration As Integer = 0
             Dim fullUserPrompt As String = ""
+            Dim abortDueToToolError As Boolean = False
+            Dim abortToolErrorMessage As String = ""
+            Dim abortToolName As String = ""
+            Dim abortToolParamSummary As String = ""
+            Dim abortToolRawCallJson As String = ""
+            Dim abortFactsPrompt As String = ""
+
+            Dim abortDueToRepeatedToolLoop As Boolean = False
 
             Dim noSelectedText As Boolean = String.IsNullOrWhiteSpace(userText)
-
             While iteration < context.MaxIterations AndAlso Not context.IsCancelled
 
                 ' Check for cancellation token at each iteration
@@ -1292,7 +1018,82 @@ Partial Public Class ThisAddIn
                     End If
                 End If
 
-                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+                fullUserPrompt =
+                    BuildPromptWithAuthoritativeLatestUserRequest(
+                        context,
+                        fullUserPrompt)
+
+                LogLatestUserRequestDiagnostic(context, "main")
+
+                enhancedSysPrompt =
+                    baseSysPrompt & Environment.NewLine & Environment.NewLine &
+                    BuildToolInstructionsPromptForSession(
+                        context.SelectedTools,
+                        subAgentMode,
+                        context.FinalResponseContract)
+
+                If Not String.IsNullOrWhiteSpace(languageContractFragment) Then
+                    enhancedSysPrompt = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                                        languageContractFragment
+                End If
+
+                INI_APICall_ToolInstructions_2 = BuildToolInstructionsForModel(context.SelectedTools, context.ToolingModel)
+
+                Dim effectiveSysPrompt As String = enhancedSysPrompt
+                Dim effectiveUserPrompt As String = fullUserPrompt
+
+                If Not subAgentMode Then
+                    Dim runtimeContextBlock As String = BuildRuntimeContextPromptBlock(context)
+                    If Not String.IsNullOrWhiteSpace(runtimeContextBlock) Then
+                        effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & runtimeContextBlock
+                    End If
+
+                    If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                        Dim postToolContinuationBlock As String =
+                            BuildPostToolContinuationBlock(context)
+
+                        If Not String.IsNullOrWhiteSpace(postToolContinuationBlock) Then
+                            effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & postToolContinuationBlock
+                            LogLatestUserRequestDiagnostic(context, "continuation")
+                        End If
+                    End If
+                End If
+
+
+                If Not String.IsNullOrWhiteSpace(context.PendingContinuationGuardPrompt) Then
+                    effectiveSysPrompt &= Environment.NewLine & Environment.NewLine & context.PendingContinuationGuardPrompt
+
+                    Dim rejected As String = If(context.PendingRejectedAssistantTurn, "")
+                    Dim guardTitle As String = If(context.PendingGuardTitle, "HOST CONTINUATION GUARD")
+                    Dim rejectedExplanation As String = If(
+    context.PendingRejectedTurnExplanation,
+    "Your previous turn was rejected.")
+
+                    Dim guardBlock As New System.Text.StringBuilder()
+                    guardBlock.AppendLine()
+                    guardBlock.AppendLine("[" & guardTitle & "]")
+                    guardBlock.AppendLine(context.PendingContinuationGuardPrompt)
+                    guardBlock.AppendLine()
+                    If Not String.IsNullOrWhiteSpace(rejected) Then
+                        guardBlock.AppendLine(rejectedExplanation)
+                        guardBlock.AppendLine("<<<REJECTED_TURN")
+                        guardBlock.AppendLine(rejected)
+                        guardBlock.AppendLine("REJECTED_TURN>>>")
+                        guardBlock.AppendLine()
+                    End If
+                    guardBlock.AppendLine("[/" & guardTitle & "]")
+
+                    effectiveUserPrompt = fullUserPrompt & Environment.NewLine & guardBlock.ToString()
+
+                    LogLatestUserRequestDiagnostic(context, "repair")
+                    context.LogWarn("Applying host-side continuation guard.", visibleToUser:=False)
+                    context.PendingContinuationGuardPrompt = ""
+                    context.PendingRejectedAssistantTurn = ""
+                    context.PendingGuardTitle = ""
+                    context.PendingRejectedTurnExplanation = ""
+                End If
+
+                LogFinalResponseContractDiagnostics(context, effectiveSysPrompt)
 
                 ' Create linked cancellation with timeout (matches RunLlmAsync pattern)
                 Using timeoutCts As New System.Threading.CancellationTokenSource()
@@ -1304,8 +1105,8 @@ Partial Public Class ThisAddIn
 
                         Try
                             currentResponse = Await LLM(
-                                enhancedSysPrompt,
-                                fullUserPrompt,
+                                effectiveSysPrompt,
+                                effectiveUserPrompt,
                                 "", "", 0,
                                 useSecondAPI,
                                 hideSplash,
@@ -1335,7 +1136,162 @@ Partial Public Class ThisAddIn
                 ToolingFileLogger.LogRawResponseStub("Main LLM()", currentResponse)
 
                 If String.IsNullOrWhiteSpace(currentResponse) Then
+                    Dim lastSuccess = GetLastSuccessfulToolResponse(context)
+
+                    If Not subAgentMode AndAlso
+                       lastSuccess IsNot Nothing AndAlso
+                       SharedLibrary.Agents.ToolCallSequencing.IsSuccessfulDeliverableResult(
+                           If(lastSuccess.Response, "")) Then
+
+                        context.EmptyMainModelResponse = False
+                        currentResponse = Await BuildLocalizedCreatedDeliverableSuccessMessageAsync(
+                            context,
+                            lastSuccess,
+                            useSecondAPI,
+                            hideSplash,
+                            cancellationToken)
+
+                        If context.SequencingState IsNot Nothing Then
+                            context.SequencingState.FinalResponseOrigin = "host_generated"
+                            context.SequencingState.HasOpenToolWorkflow = False
+                        End If
+
+                        context.Log(
+                            "Empty main-model response after successful deliverable creation; returning localized host-generated success message.",
+                            "success")
+
+                        Exit While
+                    End If
+
+                    If Not subAgentMode AndAlso lastSuccess IsNot Nothing Then
+                        Dim requiresMissingOutputFileRecovery As Boolean =
+                            context.SequencingState IsNot Nothing AndAlso
+                            context.SequencingState.RequestRequiresCreatedDeliverable AndAlso
+                            context.SequencingState.LastToolProducesIntermediateData AndAlso
+                            Not SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+                        If requiresMissingOutputFileRecovery AndAlso context.PrematureTextRetryCount = 0 Then
+                            context.PrematureTextRetryCount = 1
+                            context.PendingContinuationGuardPrompt =
+                                BuildEmptyResponseAfterProgressRecoveryPrompt(context)
+                            context.PendingGuardTitle = "HOST EMPTY-RESPONSE RECOVERY"
+                            context.PendingRejectedTurnExplanation =
+                                "Your previous turn was empty after intermediate data was produced, but the requested output file is still missing."
+                            context.PendingRejectedAssistantTurn = ""
+
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                                context.AllToolResponses,
+                                context.ToolingModel,
+                                compactForSubAgent:=False)
+
+                            LogLatestUserRequestDiagnostic(context, "continuation")
+
+                            context.LogWarn(
+                                "Empty main-model response after intermediate progress; retrying once with strong missing-output-file recovery prompt.",
+                                details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                            Continue While
+                        End If
+
+                        If requiresMissingOutputFileRecovery Then
+                            context.EmptyMainModelResponse = True
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode
+                            currentResponse = Await LocalizeHostMessageIfNeededAsync(
+                                "Something went wrong. I could not reliably create the requested output file. Please try again or narrow the request.",
+                                ResolveBlockedFallbackUserLanguage(context),
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                "Empty main-model response persisted after strong missing-output-file recovery prompt; returning simple host-generated message.",
+                                details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                            Exit While
+                        End If
+
+                        If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                            context.PrematureTextRetryCount += 1
+                            context.PendingContinuationGuardPrompt =
+                                BuildEmptyResponseAfterProgressRecoveryPrompt(context)
+                            context.PendingGuardTitle = "HOST EMPTY-RESPONSE RECOVERY"
+                            context.PendingRejectedTurnExplanation =
+                                "Your previous turn was empty after successful partial progress."
+                            context.PendingRejectedAssistantTurn = ""
+
+                            INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                                context.AllToolResponses,
+                                context.ToolingModel,
+                                compactForSubAgent:=False)
+
+                            LogLatestUserRequestDiagnostic(context, "continuation")
+
+                            context.LogWarn(
+                                $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}).",
+                                details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                            Continue While
+                        End If
+                    End If
+
+                    If Not subAgentMode AndAlso
+                       lastSuccess IsNot Nothing AndAlso
+                       context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+
+                        context.PrematureTextRetryCount += 1
+                        context.PendingContinuationGuardPrompt =
+                            BuildEmptyResponseAfterProgressRecoveryPrompt(context)
+                        context.PendingGuardTitle = "HOST EMPTY-RESPONSE RECOVERY"
+                        context.PendingRejectedTurnExplanation =
+                            "Your previous turn was empty after successful partial progress."
+                        context.PendingRejectedAssistantTurn = ""
+
+                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=False)
+
+                        LogLatestUserRequestDiagnostic(context, "continuation")
+
+                        context.LogWarn(
+                            $"Empty main-model response after successful partial progress; retrying with preserved current request ({context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}).",
+                            details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                        Continue While
+                    End If
+
+                    If subAgentMode AndAlso
+       lastSuccess IsNot Nothing AndAlso
+       context.SubAgentEmptyResponseRetryCount < 1 Then
+
+                        context.SubAgentEmptyResponseRetryCount += 1
+                        context.PendingContinuationGuardPrompt = BuildSubAgentEmptyResponseRecoveryPrompt(context)
+                        context.PendingGuardTitle = "SUB-AGENT EMPTY-RESPONSE RECOVERY"
+                        context.PendingRejectedTurnExplanation =
+            "Your previous turn was empty after a successful tool call."
+                        context.PendingRejectedAssistantTurn = ""
+                        INI_APICall_ToolResponses_2 = BuildToolResponsesForModel(
+            context.AllToolResponses,
+            context.ToolingModel,
+            compactForSubAgent:=True)
+
+                        context.LogWarn(
+            $"Empty sub-agent model response after successful tool result; retrying with compact context ({context.SubAgentEmptyResponseRetryCount}/1).",
+            details:=$"host={context.HostKind}; lastTool={If(lastSuccess.ToolName, "")}")
+
+                        Continue While
+                    End If
+
+                    context.EmptyMainModelResponse = True
                     context.LogWarn("Empty response from LLM", details:="LLM() returned null/empty/whitespace.")
+                    ToolingFileLogger.LogWarn("Empty main-model response.",
+              details:=$"host={context.HostKind}; iteration={iteration}; subAgentMode={subAgentMode}")
                     Exit While
                 End If
 
@@ -1357,26 +1313,101 @@ Partial Public Class ThisAddIn
                         Exit While
                     End If
 
+                    context.Log($"Tool-call batch execution mode: sequential_ordered_no_deferral; total={toolCalls.Count}", "diag")
+                    ToolingFileLogger.LogStep($"Executing tool-call batch sequentially in listed order. host={context.HostKind}; count={toolCalls.Count}")
+
+                    Dim stopCurrentBatchAfterTool As Boolean = False
+                    Dim restartForRequiredMemoryGrounding As Boolean = False
+
                     For Each tc In toolCalls
                         If context.IsCancelled OrElse cancellationToken.IsCancellationRequested Then Exit For
 
-                        ' Check power transition before each tool execution
+                        If Not subAgentMode AndAlso
+                               context.SequencingState IsNot Nothing AndAlso
+                               context.SequencingState.RequiresParentRecovery Then
+
+                            Dim failedToolName As String = context.SequencingState.LastToolName
+                            context.SequencingState.NoteRecoveryByLaterToolCall(tc.ToolName)
+
+                            context.Log($"Recovered from prior skipped tool failure by issuing '{tc.ToolName}'.", "success")
+                            ToolingFileLogger.LogStep(
+                                    $"Skipped agent failure recovered by later parent tool call. host={context.HostKind}; failedTool={failedToolName}; recoveryTool={tc.ToolName}")
+                        End If
+
                         If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
                             context.LogWarn("Power transition detected during tool execution")
                             Exit For
                         End If
 
+                        If Not subAgentMode AndAlso
+                           SharedLibrary.Agents.ToolCallSequencing.RequiresRequiredMemoryGroundingBeforeNonMemoryTool(
+                               context.SequencingState,
+                               tc.ToolName) Then
+
+                            If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                context.PrematureTextRetryCount += 1
+                                context.PendingContinuationGuardPrompt =
+                                    SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState)
+                                context.PendingGuardTitle = "HOST REQUIRED MEMORY GROUNDING"
+                                context.PendingRejectedTurnExplanation =
+                                    "Your previous turn attempted a non-memory tool before required Memory grounding was completed."
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+
+                                context.LogWarn(
+                                    "Blocked non-memory tool before required Memory grounding.",
+                                    details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+
+                                restartForRequiredMemoryGrounding = True
+                                Exit For
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                "The tooling run required Memory access before continuing, but Memory was not accessed successfully.", useSecondAPI, hideSplash, cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                "Blocked tooling loop after repeated attempts to bypass required Memory grounding.",
+                                details:=$"host={context.HostKind}; tool={tc.ToolName}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+                            Exit For
+                        End If
+
                         context.Log($"Executing tool: {tc.ToolName} (ID: {tc.CallId})")
 
-                        Dim toolConfig = selectedTools.FirstOrDefault(
-                            Function(t) t.ToolName.Equals(tc.ToolName, StringComparison.OrdinalIgnoreCase))
+                        If subAgentMode AndAlso Not IsToolAllowedForCurrentContext(tc.ToolName, context) Then
+                            Dim blockedResponse = BuildToolNotAllowedResponse(tc, context)
+                            context.AllToolResponses.Add(blockedResponse)
+                            Continue For
+                        End If
+
+                        Dim toolConfig = context.SelectedTools.FirstOrDefault(
+                                Function(t)
+                                    Return t IsNot Nothing AndAlso
+                                           Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                           t.ToolName.Equals(tc.ToolName, StringComparison.OrdinalIgnoreCase)
+                                End Function)
+
+                        If toolConfig Is Nothing Then
+                            toolConfig = EnsureVisibleToolLoaded(tc.ToolName, context)
+                        End If
 
                         If toolConfig Is Nothing Then
                             If tc.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                                 toolConfig = GetInternalWebTool()
                                 ToolingFileLogger.LogStep("Using internal web tool.")
+
+                            ElseIf tc.ToolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) Then
+                                toolConfig = GetInternalDownloadWebFilesTool()
+                                ToolingFileLogger.LogStep("Using internal web download tool.")
+
                             ElseIf tc.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
-                                ' Determine privacy flag: AutoPilot config takes precedence, then INI setting
                                 Dim enforcePrivacy As Boolean
                                 If _apConfig IsNot Nothing Then
                                     enforcePrivacy = _apConfig.EnablePrivacyProtection
@@ -1385,10 +1416,18 @@ Partial Public Class ThisAddIn
                                 End If
                                 toolConfig = GetInternalSearchTool(enforcePrivacy:=enforcePrivacy)
                                 ToolingFileLogger.LogStep("Using internal search tool.")
-                            Else
+                            ElseIf IsInternalKnowledgeToolName(tc.ToolName) Then
+                                toolConfig = GetInternalKnowledgeTool(tc.ToolName)
+                                If toolConfig IsNot Nothing Then
+                                    ToolingFileLogger.LogStep("Using store-specific internal knowledge tool.")
+                                End If
+                            End If
+
+                            If toolConfig Is Nothing Then
                                 context.LogError(
                                     $"Unknown tool: {tc.ToolName}",
                                     details:=$"CallId={tc.CallId}; Raw={tc.RawJson}")
+
                                 Dim errorResp As New ToolResponse() With {
                                     .CallId = tc.CallId,
                                     .ToolName = tc.ToolName,
@@ -1396,46 +1435,595 @@ Partial Public Class ThisAddIn
                                     .ErrorMessage = $"Unknown tool: {tc.ToolName}",
                                     .OriginalCallJson = tc.RawJson
                                 }
+
                                 context.AllToolResponses.Add(errorResp)
-                                Continue For
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.NoteToolFailure(tc.ToolName, "unknown_tool", errorResp.ErrorMessage)
+                                End If
+
+                                stopCurrentBatchAfterTool = True
+                                Exit For
                             End If
                         End If
 
+                        Dim toolCallSignature = BuildToolCallSignature(tc)
+                        Dim previousFailureCount As Integer = 0
+
+                        If context.FailedToolCallCounts.TryGetValue(toolCallSignature, previousFailureCount) AndAlso
+                           previousFailureCount >= context.DuplicateFailureAbortThreshold Then
+
+                            Dim duplicateMsg =
+                                        $"Aborting because the same failing tool call was repeated {previousFailureCount} time(s): {tc.ToolName}. " &
+                                        "The model should revise its plan instead of retrying the identical call."
+
+                            context.LogError(duplicateMsg, details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
+                            abortDueToToolError = True
+                            abortToolName = tc.ToolName
+                            abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                            abortToolRawCallJson = tc.RawJson
+                            abortToolErrorMessage = duplicateMsg
+                            Exit For
+                        End If
+
                         Dim toolResponse = Await ExecuteToolCall(tc, toolConfig, context, cancellationToken)
+                        Dim skippedStructuredAgentFailure As Boolean =
+                            IsSkippedStructuredAgentFailure(tc, toolResponse, toolConfig, subAgentMode)
+
+                        If Not toolResponse.Success AndAlso String.IsNullOrWhiteSpace(toolResponse.ErrorMessage) Then
+                            If Not String.IsNullOrWhiteSpace(toolResponse.Response) Then
+                                toolResponse.ErrorMessage = BuildResultExcerpt(toolResponse.Response, 160)
+                            Else
+                                toolResponse.ErrorMessage = "Tool failed without returning an error message."
+                            End If
+                        End If
+
                         toolResponse.OriginalCallJson = tc.RawJson
                         context.AllToolResponses.Add(toolResponse)
+                        SharedLibrary.Agents.ToolCallSequencing.NoteToolExecutionMetadata(
+                            context.SequencingState,
+                            tc.ToolName,
+                            tc.Arguments,
+                            toolResponse.Success)
+
+                        If toolResponse.Success Then
+                            SharedLibrary.Agents.ToolCallSequencing.NoteToolResultForRepair(
+                                context.SequencingState,
+                                tc.ToolName,
+                                toolResponse.Response,
+                                toolResponse.ResultKind)
+                        End If
+
+                        If Not toolResponse.Success Then
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.NoteToolFailure(tc.ToolName,
+                                                If(toolResponse.ErrorCode, ""),
+                                                If(toolResponse.ErrorMessage, "Tool failed."),
+                                                skippedByPolicy:=skippedStructuredAgentFailure,
+                                                returnedToParent:=skippedStructuredAgentFailure)
+                            End If
+                        Else
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.NoteSuccessfulProgress()
+                            End If
+                        End If
+
+                        UpdateWorkflowContinuityAfterToolExecution(context, tc, toolResponse)
+
+                        SharedLibrary.Agents.ToolCallSequencing.NoteMemoryGroundingToolResult(
+                            context.SequencingState,
+                            tc.ToolName,
+                            toolResponse.Response,
+                            toolResponse.Success)
+
+                        If Not subAgentMode AndAlso
+                           tc.ToolName.Equals(SharedLibrary.Agents.MemoryTools.ToolList, StringComparison.OrdinalIgnoreCase) Then
+                            Await TryForceRequiredMemoryGetsAsync(context, cancellationToken)
+                        End If
+
+                        context.Log("Memory grounding state updated: " &
+                            SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState), "diag")
+
+                        If RegisterToolFailureLoopState(tc, toolResponse, context) Then
+                            context.LogWarn(
+                                                    $"Tool '{tc.ToolName}' failed {context.ConsecutiveFailedToolCount} consecutive times. Forcing a recovery round to reassess the tool choice.")
+
+                            ToolingFileLogger.LogWarn(
+                                                    "Forcing recovery round after repeated consecutive tool failures.",
+                                                    details:=$"ToolName='{tc.ToolName}'; Count={context.ConsecutiveFailedToolCount}")
+
+                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                            context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                            context.PendingRejectedTurnExplanation =
+                                "Your previous tool step failed repeatedly. Reassess the tool choice before continuing."
+                            context.PendingRejectedAssistantTurn = ""
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
+
+                        Dim executedSignature As String = BuildExecutedToolSignature(tc, toolResponse)
+
+                        If String.Equals(context.LastToolExecutionSignature, executedSignature, StringComparison.Ordinal) Then
+                            context.LastToolExecutionRepeatCount += 1
+                        Else
+                            context.LastToolExecutionSignature = executedSignature
+                            context.LastToolExecutionRepeatCount = 1
+                        End If
+
+                        If context.LastToolExecutionRepeatCount >= context.DuplicateToolExecutionAbortThreshold Then
+                            context.LogWarn($"Detected repeated identical tool execution for '{tc.ToolName}'. Forcing a recovery round to reassess the tool choice.")
+                            ToolingFileLogger.LogWarn(
+                                    "Forcing recovery round after repeated identical tool execution.",
+                                    details:=$"ToolName='{tc.ToolName}'; RepeatCount={context.LastToolExecutionRepeatCount}; Signature='{executedSignature}'")
+                            context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                            context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                            context.PendingRejectedTurnExplanation =
+                                "The same tool step repeated without progress. Reassess the tool choice before continuing."
+                            context.PendingRejectedAssistantTurn = ""
+                            context.PrematureTextRetryCount = 0
+                            stopCurrentBatchAfterTool = True
+                            Exit For
+                        End If
 
                         If Not toolResponse.Success Then
                             context.LogError(
-                                $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
-                                details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
+        $"Tool error ({tc.ToolName}): {toolResponse.ErrorMessage}",
+        details:=$"CallId={tc.CallId}; RawCall={tc.RawJson}")
+
+                            If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
+                                context.FailedToolCallCounts(toolCallSignature) += 1
+                            Else
+                                context.FailedToolCallCounts(toolCallSignature) = 1
+                            End If
 
                             Select Case toolConfig.ToolErrorHandling?.ToLowerInvariant()
                                 Case "abort"
                                     context.LogError("Aborting due to tool error (ToolErrorHandling=abort)")
-                                    ShowCustomMessageBox($"Tool execution failed: {toolResponse.ErrorMessage}")
-                                    ToolingFileLogger.EndSession(False, $"Tool error: {toolResponse.ErrorMessage}")
-                                    Return ""
+
+                                    If ShouldShowToolingModalDialogs() Then
+                                        ShowCustomMessageBox($"Tool execution failed: {toolResponse.ErrorMessage}")
+                                    End If
+
+                                    abortDueToToolError = True
+                                    abortToolName = tc.ToolName
+                                    abortToolParamSummary = BuildCondensedParamSummary(tc.Arguments)
+                                    abortToolRawCallJson = tc.RawJson
+                                    abortToolErrorMessage = If(toolResponse.ErrorMessage, "Unknown tool error.")
+                                    Exit For
+
                                 Case "retry"
                                     context.LogWarn("Will retry on next iteration (ToolErrorHandling=retry)")
+                                    context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                    context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                                    context.PendingRejectedTurnExplanation =
+                                        "Your previous tool step failed. Reassess the tool choice before continuing."
+                                    context.PendingRejectedAssistantTurn = ""
+                                    context.PrematureTextRetryCount = 0
+
                                 Case Else
                                     context.LogWarn("Skipping tool error (ToolErrorHandling=skip)")
+
+                                    If Not skippedStructuredAgentFailure Then
+                                        context.PendingContinuationGuardPrompt = BuildToolFailureReassessmentGuardPrompt(tc.ToolName)
+                                        context.PendingGuardTitle = "HOST TOOL FAILURE RECOVERY"
+                                        context.PendingRejectedTurnExplanation =
+                                            "Your previous tool step failed. Reassess the tool choice before continuing."
+                                        context.PendingRejectedAssistantTurn = ""
+                                        context.PrematureTextRetryCount = 0
+                                    End If
+
+                                    If skippedStructuredAgentFailure Then
+                                        context.PendingContinuationGuardPrompt = BuildSkippedToolFailureRecoveryGuardPrompt()
+                                        context.PendingGuardTitle = "HOST TOOL FAILURE GUARD"
+                                        context.PendingRejectedTurnExplanation =
+                                            "Your previous turn was rejected because the prior skipped tool failure is still unresolved."
+                                        context.PendingRejectedAssistantTurn = ""
+                                        context.PrematureTextRetryCount = 0
+
+                                        context.LogWarn(
+                                            "Structured agent failure returned to parent as tool response and skipped by policy.",
+                                            details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}")
+
+                                        ToolingFileLogger.LogWarn(
+                                            "Agent failure returned to parent as structured error and skipped by policy.",
+                                            details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}; returnedToParent=true; skipped=true")
+                                    End If
                             End Select
+
+                            stopCurrentBatchAfterTool = True
                         Else
+                            If context.FailedToolCallCounts.ContainsKey(toolCallSignature) Then
+                                context.FailedToolCallCounts.Remove(toolCallSignature)
+                            End If
+
+                            context.LastInvalidAssistantTurnSignature = ""
+                            context.LastInvalidTurnReason = ""
+                            context.LastInvalidTurnRepeatCount = 0
+                            context.ForceNoToolFinalizationRequested = False
+                            context.ForceNoToolFinalizationReason = ""
+
+                            context.PrematureTextRetryCount = 0
                             context.Log($"Tool completed successfully ({toolResponse.Response?.Length} chars)", "success")
+                        End If
+
+                        If stopCurrentBatchAfterTool Then
+                            context.LogWarn("Stopping current tool-call batch after failure.",
+                    details:=$"host={context.HostKind}; tool={tc.ToolName}; errorCode={If(toolResponse.ErrorCode, "")}")
+                            Exit For
                         End If
                     Next
 
-                    Dim toolResponses = BuildToolResponsesForModel(context.AllToolResponses, context.ToolingModel)
+                    If restartForRequiredMemoryGrounding Then
+                        Dim preparedToolResponses As String = BuildToolResponsesForModel(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+                        INI_APICall_ToolResponses_2 = preparedToolResponses
+                        context.Log("Tool responses prepared for next iteration", "diag")
+                        Continue While
+                    End If
+
+                    If context.FinalizationBlocked Then
+                        Exit While
+                    End If
+
+                    If abortDueToRepeatedToolLoop Then
+                        Exit While
+                    End If
+
+                    Dim toolResponses = BuildToolResponsesForModel(
+    context.AllToolResponses,
+    context.ToolingModel,
+    compactForSubAgent:=subAgentMode)
                     INI_APICall_ToolResponses_2 = toolResponses
-                    context.Log("Tool responses prepared for next iteration")
+                    context.Log("Tool responses prepared for next iteration", "diag")
+                    If abortDueToToolError Then
+                        context.LogWarn("Stopping tooling loop after tool error abort")
+                        Exit While
+                    End If
 
                 Else
-                    context.Log("Text response received (no tool calls)")
-                    Exit While
+                    If subAgentMode Then
+                        currentResponse = StripTaskStatus(currentResponse)
+                        context.Log("Sub-agent final text response accepted (no tool calls)")
+                        Exit While
+                    End If
+
+                    If context.FinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.RawCallerText Then
+                        context.PrematureTextRetryCount = 0
+
+                        If context.SequencingState IsNot Nothing Then
+                            context.SequencingState.HasOpenToolWorkflow = False
+                            context.SequencingState.FinalResponseOrigin = "model_provided"
+                        End If
+
+                        context.Log($"Final raw-text response accepted for caller-defined non-user-facing contract ({currentResponse.Length} chars).")
+                        Exit While
+                    End If
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
+                    End If
+
+                    Dim turnValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
+                        currentResponse,
+                        hasToolCalls:=False,
+                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
+                        runState:=context.SequencingState)
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.LastDetectedTurnType = turnValidation.TurnKind.ToString()
+                        context.SequencingState.LastInvalidTurnReason = If(turnValidation.InvalidReason, "")
+                        context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess =
+                            SharedLibrary.Agents.ToolCallSequencing.IsMemoryGroundingRejectionReason(
+                                turnValidation.InvalidReason)
+                    End If
+
+                    context.Log(
+                        $"activeToolingSession={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ActiveToolingSession, "true", "false")}; detectedModelTurnType={turnValidation.TurnKind}; taskStatusParseResult={turnValidation.TaskStatusSummary}; toolRequiredModeUsed={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.ToolRequiredModeUsed, "true", "false")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}", "diag")
+
+                    Select Case turnValidation.TurnKind
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                            If Not SharedLibrary.Agents.ToolCallSequencing.IsRequiredMemoryGroundingSatisfied(
+                                context.SequencingState,
+                                turnValidation.TurnKind) Then
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = True
+                                End If
+
+                                If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PrematureTextRetryCount += 1
+                                    context.PendingContinuationGuardPrompt = SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState)
+                                    context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                    context.PendingGuardTitle = "HOST REQUIRED MEMORY GROUNDING REPAIR"
+                                    context.PendingRejectedTurnExplanation =
+                                        "Your previous turn was rejected because the current run explicitly required Memory access before finalization."
+
+                                    context.LogWarn(
+                                        $"Final complete turn rejected for missing required memory access. {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}")
+
+                                    Continue While
+                                End If
+
+                                context.FinalizationBlocked = True
+                                context.FinalizationBlockedReason = SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode
+                                currentResponse = Await BuildBlockedToolingResultAsync(
+                                    context,
+                                    SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode,
+                                    "The tooling run required Memory access before finalization, but Memory was not accessed successfully.", useSecondAPI, hideSplash, cancellationToken)
+
+                                If context.SequencingState IsNot Nothing Then
+                                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                                    context.SequencingState.HasOpenToolWorkflow = False
+                                End If
+
+                                context.LogWarn(
+                                    $"Active-tooling final complete turn blocked for missing required memory access. {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}")
+
+                                Exit While
+                            End If
+
+                            context.PrematureTextRetryCount = 0
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalCompleteRejectedForMissingMemoryAccess = False
+                                context.SequencingState.HasOpenToolWorkflow = False
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                            End If
+
+                            ' === Final-turn gate (P3a + P3b) — applies to 'complete' branch.
+                            ' Even 'complete' must not announce future work (contract rule 3).
+                            Dim _ftGateUntried_C As IReadOnlyList(Of String) = CollectUntriedDeliverableFallbackToolNames(context)
+                            Dim _ftGateNeedsDeliverable_C As Boolean =
+                                            context.SequencingState IsNot Nothing AndAlso
+                                            context.SequencingState.RequestRequiresCreatedDeliverable
+                            Dim _ftGateHasDeliverable_C As Boolean =
+                                            context.SequencingState IsNot Nothing AndAlso
+                                            SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+                            Dim _ftGateEval_C As Agents.FinalTurnEvaluation =
+                                            Agents.ToolingOrchestrator.EvaluateFinalTurn(
+                                                currentResponse,
+                                                _ftGateNeedsDeliverable_C,
+                                                _ftGateHasDeliverable_C,
+                                                _ftGateUntried_C)
+
+                            If _ftGateEval_C.Decision <> Agents.FinalTurnDecision.Accept Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = _ftGateEval_C.GuardPrompt
+                                    context.PendingGuardTitle = _ftGateEval_C.GuardTitle
+                                    context.PendingRejectedTurnExplanation = _ftGateEval_C.Reason
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'complete' branch: " & _ftGateEval_C.Reason, "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn(
+                                                "Final-turn repair budget exhausted at 'complete' branch; accepting candidate.",
+                                                details:="reason=" & _ftGateEval_C.Reason)
+                            End If
+
+                            currentResponse = StripTaskStatus(currentResponse)
+                            acceptedFinalStatus = "complete"
+                            context.Log("Final complete response accepted.")
+                            Exit While
+
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                            context.PrematureTextRetryCount = 0
+
+                            If context.SequencingState IsNot Nothing Then
+                                If context.SequencingState.HasUnresolvedToolFailure Then
+                                    context.SequencingState.NoteBlockedFinalHandled()
+                                End If
+
+                                context.SequencingState.HasOpenToolWorkflow = False
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                            End If
+
+                            ' === Final-turn gate (P3a + P3b) — applies to 'blocked' branch.
+                            ' 'blocked' must not pair with prose announcing a fallback (rule 8), and must
+                            ' only be declared after authorized fallback tools have been attempted (rule 9).
+                            Dim _ftGateUntried_B As IReadOnlyList(Of String) = CollectUntriedDeliverableFallbackToolNames(context)
+                            Dim _ftGateNeedsDeliverable_B As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    context.SequencingState.RequestRequiresCreatedDeliverable
+                            Dim _ftGateHasDeliverable_B As Boolean =
+                                    context.SequencingState IsNot Nothing AndAlso
+                                    SharedLibrary.Agents.ToolCallSequencing.HasProducedUserDeliverable(context.SequencingState)
+
+                            Dim _ftGateEval_B As Agents.FinalTurnEvaluation =
+                                    Agents.ToolingOrchestrator.EvaluateFinalTurn(
+                                        currentResponse,
+                                        _ftGateNeedsDeliverable_B,
+                                        _ftGateHasDeliverable_B,
+                                        _ftGateUntried_B)
+
+                            If _ftGateEval_B.Decision <> Agents.FinalTurnDecision.Accept Then
+                                If System.Convert.ToInt32(context.PrematureTextRetryCount) < ToolExecutionContext.MaxContinuationRetries Then
+                                    context.PendingContinuationGuardPrompt = _ftGateEval_B.GuardPrompt
+                                    context.PendingGuardTitle = _ftGateEval_B.GuardTitle
+                                    context.PendingRejectedTurnExplanation = _ftGateEval_B.Reason
+                                    context.PendingRejectedAssistantTurn = currentResponse
+                                    context.PrematureTextRetryCount = System.Convert.ToInt32(context.PrematureTextRetryCount) + 1
+                                    context.Log("Final-turn rejected at 'blocked' branch: " & _ftGateEval_B.Reason, "warn")
+                                    Continue While
+                                End If
+                                context.LogWarn(
+                                        "Final-turn repair budget exhausted at 'blocked' branch; accepting candidate.",
+                                        details:="reason=" & _ftGateEval_B.Reason)
+                            End If
+
+                            currentResponse = StripTaskStatus(currentResponse)
+                            acceptedFinalStatus = "blocked"
+                            context.Log("Final blocked response accepted.")
+                            Exit While
+
+                        Case Else
+                            Dim memoryGroundingRepairRequired As Boolean =
+                                SharedLibrary.Agents.ToolCallSequencing.IsMemoryGroundingRejectionReason(
+                                    turnValidation.InvalidReason)
+
+                            Dim invalidTurnSignature As String =
+                                BuildInvalidTurnSignature(
+                                    currentResponse,
+                                    turnValidation.InvalidReason)
+
+                            If String.Equals(
+                                context.LastInvalidAssistantTurnSignature,
+                                invalidTurnSignature,
+                                StringComparison.Ordinal) Then
+
+                                context.LastInvalidTurnRepeatCount += 1
+                            Else
+                                context.LastInvalidAssistantTurnSignature = invalidTurnSignature
+                                context.LastInvalidTurnReason = If(turnValidation.InvalidReason, "")
+                                context.LastInvalidTurnRepeatCount = 1
+                            End If
+
+                            Dim repeatedInvalidTurnAfterSuccessfulTool As Boolean =
+                                Not memoryGroundingRepairRequired AndAlso
+                                HasSuccessfulToolResponses(context) AndAlso
+                                context.LastInvalidTurnRepeatCount >= 2
+
+                            If repeatedInvalidTurnAfterSuccessfulTool Then
+                                context.ForceNoToolFinalizationRequested = True
+                                context.ForceNoToolFinalizationReason = If(turnValidation.InvalidReason, "invalid_turn")
+
+                                context.LogWarn(
+                                    $"Repeated identical invalid active-tooling turn detected; escalating to forced no-tool finalization. invalidTurnReason={context.ForceNoToolFinalizationReason}; repeatCount={context.LastInvalidTurnRepeatCount}; signature={invalidTurnSignature}; host={context.HostKind}")
+
+                                Exit While
+                            End If
+
+                            If context.PrematureTextRetryCount < ToolExecutionContext.MaxContinuationRetries Then
+                                context.PrematureTextRetryCount += 1
+                                context.PendingContinuationGuardPrompt =
+                                    If(
+                                        memoryGroundingRepairRequired,
+                                        SharedLibrary.Agents.ToolCallSequencing.BuildRequiredMemoryGroundingRepairPrompt(context.SequencingState),
+                                        SharedLibrary.Agents.ToolCallSequencing.BuildActiveToolingRepairPrompt(
+                                            context.SequencingState,
+                                            turnValidation.InvalidReason))
+                                context.PendingRejectedAssistantTurn = If(currentResponse, "")
+                                context.PendingGuardTitle =
+                                    If(
+                                        memoryGroundingRepairRequired,
+                                        "HOST REQUIRED MEMORY GROUNDING REPAIR",
+                                        "HOST ACTIVE TOOLING CONTRACT REPAIR")
+                                context.PendingRejectedTurnExplanation =
+                                    If(
+                                        memoryGroundingRepairRequired,
+                                        "Your previous turn was rejected because the current run required a further Memory-grounding step before finalization.",
+                                        "Your previous turn was rejected because it violated the active-tooling response contract.")
+
+                                context.LogWarn(
+                                    $"Invalid active-tooling turn rejected; invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; repairAttempt={context.PrematureTextRetryCount}/{ToolExecutionContext.MaxContinuationRetries}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; lastSuccessfulTool={If(context.SequencingState?.LastSuccessfulToolCall, "")}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+
+                                Continue While
+                            End If
+
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = If(turnValidation.InvalidReason, "invalid_turn")
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                If(
+                                    memoryGroundingRepairRequired,
+                                    If(turnValidation.InvalidReason, SharedLibrary.Agents.ToolCallSequencing.MissingRequiredMemoryAccessCode),
+                                    SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode),
+                                If(
+                                    memoryGroundingRepairRequired,
+                                    "The tooling run required Memory access before finalization, but the required Memory-grounding step was not completed successfully.",
+                                    "The tooling run ended because the model did not return a valid next tool call or a valid final status."), useSecondAPI, hideSplash, cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                $"Active-tooling repair exhausted; returning host-generated blocked message. invalidTurnReason={If(turnValidation.InvalidReason, "invalid_turn")}; {SharedLibrary.Agents.ToolCallSequencing.BuildMemoryGroundingStateSummary(context.SequencingState)}; unresolvedToolFailure={If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}; host={context.HostKind}")
+
+                            Exit While
+                    End Select
                 End If
 
             End While
+
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) AndAlso
+               context.ForceNoToolFinalizationRequested AndAlso
+               Not context.IsCancelled AndAlso
+               Not cancellationToken.IsCancellationRequested AndAlso
+               Not context.FinalizationBlocked Then
+
+                Dim forcedFinalResponse As String =
+                    Await RunForcedNoToolFinalizationAfterRepeatedInvalidTurnAsync(
+                        context,
+                        enhancedSysPrompt,
+                        fullUserPrompt,
+                        otherPrompt,
+                        fileObject,
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken,
+                        effectiveTimeout,
+                        binaryOutputDirectory)
+
+                If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
+                    currentResponse = forcedFinalResponse
+
+                    Dim forcedValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
+                        currentResponse,
+                        hasToolCalls:=False,
+                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
+                        runState:=context.SequencingState)
+
+                    Select Case forcedValidation.TurnKind
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalCompleteTurn
+                            acceptedFinalStatus = "complete"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.Log("Forced no-tool final response accepted as complete.")
+
+                        Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
+                            acceptedFinalStatus = "blocked"
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "model_provided"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.Log("Forced no-tool final response accepted as blocked.")
+
+                        Case Else
+                            context.FinalizationBlocked = True
+                            context.FinalizationBlockedReason = If(forcedValidation.InvalidReason, "invalid_forced_final")
+
+                            currentResponse = Await BuildBlockedToolingResultAsync(
+                                context,
+                                SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                                "The tooling run ended because the forced finalization response was still not valid.",
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+
+                            If context.SequencingState IsNot Nothing Then
+                                context.SequencingState.FinalResponseOrigin = "host_generated"
+                                context.SequencingState.HasOpenToolWorkflow = False
+                            End If
+
+                            context.LogWarn(
+                                $"Forced no-tool finalization returned an invalid turn; invalidTurnReason={If(forcedValidation.InvalidReason, "invalid_turn")}; host={context.HostKind}")
+                    End Select
+                Else
+                    context.EmptyMainModelResponse = True
+                End If
+            End If
 
             ' If we hit max iterations and the last response was a tool call, force a final text response.
             ' The tool results are already in INI_APICall_ToolResponses_2 from the last iteration.
@@ -1450,9 +2038,12 @@ Partial Public Class ThisAddIn
                 INI_APICall_ToolInstructions_2 = ""
 
                 ' Append instruction to force synthesis
-                Dim finalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
-                    "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. " &
-                    "Based on all the information gathered from the tools so far, provide your final answer now."
+                Dim finalSysPrompt As String =
+                    enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    If(
+                        SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract),
+                        "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, provide your final answer now.",
+                        "IMPORTANT: You have reached the maximum number of tool iterations. Do NOT call any more tools. Based on all the information gathered from the tools so far, return only the final raw text payload in the exact caller-defined format.")
 
                 ToolingFileLogger.LogStep("Forcing final LLM call without tools")
                 ToolingFileLogger.LogPreMainLlmCallSnapshot()
@@ -1481,13 +2072,128 @@ Partial Public Class ThisAddIn
                                 context.Log($"Final response received ({currentResponse.Length} chars)")
                                 ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final", currentResponse)
                             Else
+                                context.EmptyMainModelResponse = True
                                 context.LogWarn("Empty response from forced final LLM call")
+                                ToolingFileLogger.LogWarn("Empty forced-final main-model response.",
+                              details:=$"host={context.HostKind}; iteration={iteration}")
                             End If
 
                         Catch ex As OperationCanceledException
                             context.LogWarn("Forced final call was cancelled")
                         Catch ex As Exception
                             context.LogError($"Error during forced final call: {ex.Message}", ex:=ex)
+                        End Try
+                    End Using
+                End Using
+            End If
+
+            If abortDueToToolError AndAlso
+                   Not context.IsCancelled AndAlso
+                   Not cancellationToken.IsCancellationRequested Then
+
+                context.Log("Forcing final response after tool error abort...")
+
+                ' Disable further tool calls, but keep accumulated tool responses available.
+                INI_APICall_ToolInstructions_2 = ""
+
+                Dim successfulToolFacts As New System.Text.StringBuilder()
+                Dim failedToolFacts As New System.Text.StringBuilder()
+
+                For Each tr In context.AllToolResponses
+                    If tr Is Nothing Then Continue For
+
+                    If tr.Success Then
+                        successfulToolFacts.AppendLine($"- Tool: {tr.ToolName}")
+                        If Not String.IsNullOrWhiteSpace(tr.Response) Then
+                            successfulToolFacts.AppendLine($"  Result: {BuildResultExcerpt(tr.Response, 160)}")
+                        End If
+                    Else
+                        failedToolFacts.AppendLine($"- Tool: {tr.ToolName}")
+                        If Not String.IsNullOrWhiteSpace(tr.ErrorMessage) Then
+                            failedToolFacts.AppendLine($"  Error: {tr.ErrorMessage}")
+                        End If
+                    End If
+                Next
+
+                abortFactsPrompt =
+                        "<TOOL_ABORT_FACTS>" & Environment.NewLine &
+                        "Use ONLY the facts in this block when explaining the failure." & Environment.NewLine &
+                        "Do NOT replace the stated failure with another cause." & Environment.NewLine &
+                        $"Failed tool: {abortToolName}" & Environment.NewLine &
+                        $"Failed tool parameters: {abortToolParamSummary}" & Environment.NewLine &
+                        $"Failed tool raw call JSON: {abortToolRawCallJson}" & Environment.NewLine &
+                        $"Exact failure message: {abortToolErrorMessage}" & Environment.NewLine &
+                        Environment.NewLine &
+                        "<COMPLETED_TOOL_STEPS>" & Environment.NewLine &
+                        If(successfulToolFacts.Length > 0, successfulToolFacts.ToString().TrimEnd(), "(none)") & Environment.NewLine &
+                        "</COMPLETED_TOOL_STEPS>" & Environment.NewLine &
+                        Environment.NewLine &
+                        "<FAILED_TOOL_STEPS>" & Environment.NewLine &
+                        If(failedToolFacts.Length > 0, failedToolFacts.ToString().TrimEnd(), "(none)") & Environment.NewLine &
+                        "</FAILED_TOOL_STEPS>" & Environment.NewLine &
+                        "</TOOL_ABORT_FACTS>"
+
+                Dim abortFinalSysPrompt As String = enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+                    "IMPORTANT: A tool-assisted run has stopped because a tool call failed. Do NOT call any more tools. " &
+                    "Provide a concise, user-friendly status update. " &
+                    "You MUST rely only on the explicitly supplied failure facts and completed-step facts. " &
+                    "Do NOT infer a different cause. Do NOT rewrite the failure into another tool problem. " &
+                    "Treat the exact failure message as authoritative. " &
+                    "If the failed tool parameters indicate action='delete' or action='rmdir', describe it as a delete/remove attempt, not as a move. " &
+                    "If the exact failure says permission was disabled, state that plainly and do not replace it with a path-validation explanation. " &
+                    "Explain clearly: (1) what was completed successfully, (2) what failed, (3) why it failed, and (4) what therefore remains incomplete. " &
+                    "Do not mention internal logs, JSON, raw tool protocols, or hidden implementation details."
+
+                Dim abortFinalUserPrompt As String = fullUserPrompt & Environment.NewLine & Environment.NewLine &
+                            abortFactsPrompt
+
+                ToolingFileLogger.LogStep("Forcing final LLM call without tools after tool error abort")
+                ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+                Using timeoutCts As New System.Threading.CancellationTokenSource()
+                    Dim totalTimeout = effectiveTimeout + 60
+                    timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+
+                    Using combinedCts As System.Threading.CancellationTokenSource =
+            System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+
+                        Try
+                            Dim finalAbortResponse As String = Await LLM(
+                    abortFinalSysPrompt,
+                    abortFinalUserPrompt,
+                    "", "", 0,
+                    useSecondAPI,
+                    hideSplash,
+                    otherPrompt,
+                    fileObject,
+                    combinedCts.Token,
+                    True, True, binaryOutputDirectory:=binaryOutputDirectory)
+
+                            If Not String.IsNullOrWhiteSpace(finalAbortResponse) Then
+                                currentResponse = finalAbortResponse
+                                context.Log($"Final abort summary received ({currentResponse.Length} chars)")
+                                ToolingFileLogger.LogRawResponseStub("Main LLM() - Tool Error Final", currentResponse)
+                            Else
+                                context.LogWarn("Empty response from final abort-summary LLM call")
+                                currentResponse =
+                        If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                           "The tool-assisted run stopped before completion.",
+                           $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
+                            End If
+
+                        Catch ex As OperationCanceledException
+                            context.LogWarn("Final abort-summary call was cancelled")
+                            currentResponse =
+                    If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                       "The tool-assisted run stopped before completion.",
+                       $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
+
+                        Catch ex As Exception
+                            context.LogError($"Error during final abort-summary call: {ex.Message}", ex:=ex)
+                            currentResponse =
+                    If(String.IsNullOrWhiteSpace(abortToolErrorMessage),
+                       "The tool-assisted run stopped before completion.",
+                       $"The tool-assisted run stopped before completion. Failed tool: {abortToolName}. Reason: {abortToolErrorMessage}")
                         End Try
                     End Using
                 End Using
@@ -1501,11 +2207,48 @@ Partial Public Class ThisAddIn
 
             If iteration >= context.MaxIterations Then
                 context.LogWarn($"Maximum iterations ({context.MaxIterations}) reached")
-                ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
+                If ShouldShowToolingModalDialogs() Then
+                    ShowCustomMessageBox($"Maximum tool iterations ({context.MaxIterations}) reached. The response may be incomplete.")
+                End If
                 ToolingFileLogger.LogWarn("Maximum iterations reached.", details:=$"MaxIterations={context.MaxIterations}")
             End If
 
+            If context.EmptyMainModelResponse AndAlso String.IsNullOrWhiteSpace(currentResponse) Then
+                context.FinalizationBlocked = True
+                context.FinalizationBlockedReason = SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode
+                currentResponse = Await BuildBlockedToolingResultAsync(
+                    context,
+                    SharedLibrary.Agents.SubAgentRuntimeHardening.ModelEmptyResponseCode,
+                    "The tooling run ended because the model returned no valid content.", useSecondAPI, hideSplash, cancellationToken)
+
+                If context.SequencingState IsNot Nothing Then
+                    context.SequencingState.FinalResponseOrigin = "host_generated"
+                    context.SequencingState.HasOpenToolWorkflow = False
+                End If
+
+                context.LogWarn("Empty main-model response converted to a user-safe blocked message.",
+                    details:=$"host={context.HostKind}")
+            End If
+
+            If Not context.FinalizationBlocked AndAlso
+   context.SequencingState IsNot Nothing AndAlso
+   context.SequencingState.HasUnresolvedToolFailure AndAlso
+   Not context.SequencingState.RequiresParentRecovery Then
+
+                context.FinalizationBlocked = True
+                context.FinalizationBlockedReason = "unresolved_tool_failure"
+                currentResponse = Await BuildBlockedToolingResultAsync(
+        context,
+        SharedLibrary.Agents.ToolCallSequencing.UnresolvedToolFailureCode,
+        "The tooling run ended with an unresolved tool failure.", useSecondAPI, hideSplash, cancellationToken)
+                context.LogWarn("Finalization blocked because unresolved tool failure remained.",
+                    details:=$"host={context.HostKind}; tool={context.SequencingState.LastToolName}; errorCode={context.SequencingState.LastErrorCode}")
+            End If
+
             context.Log("=== Session Summary ===")
+            context.Log($"Last successful tool: {If(context.SequencingState?.LastSuccessfulToolCall, "(none)")}")
+            context.Log($"Unresolved tool failure: {If(context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure, "true", "false")}")
+            context.Log($"Final response origin: {If(context.SequencingState IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin), context.SequencingState.FinalResponseOrigin, "model_provided")}")
             context.Log($"Total iterations: {iteration}")
             context.Log($"Total tool calls: {context.AllToolResponses.Count}")
             Dim successCount As Integer = context.AllToolResponses.Where(Function(r) r.Success).Count()
@@ -1513,7 +2256,111 @@ Partial Public Class ThisAddIn
             context.Log($"Successful: {successCount}", If(failedCount = 0, "success", "step"))
             context.Log($"Failed: {failedCount}", If(failedCount = 0, "step", "warn"))
 
-            ToolingFileLogger.EndSession(True, $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}")
+            If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(context.FinalResponseContract) Then
+                currentResponse =
+                    SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                        StripTaskStatus(currentResponse))
+
+                If Not context.FinalizationBlocked AndAlso
+                   Not String.IsNullOrWhiteSpace(acceptedFinalStatus) AndAlso
+                   Not SharedLibrary.Agents.ToolCallSequencing.HasSubstantiveUserFacingText(currentResponse) Then
+
+                    Dim previousAcceptedFinalStatus As String = acceptedFinalStatus
+
+                    context.FinalizationBlocked = True
+                    context.FinalizationBlockedReason = "non_user_facing_final_text"
+
+                    currentResponse = Await BuildBlockedToolingResultAsync(
+                        context,
+                        SharedLibrary.Agents.ToolCallSequencing.InvalidTextOnlyFinalizationCode,
+                        "The tooling run ended because the accepted final response did not contain valid user-facing text.",
+                        useSecondAPI,
+                        hideSplash,
+                        cancellationToken)
+
+                    If context.SequencingState IsNot Nothing Then
+                        context.SequencingState.FinalResponseOrigin = "host_generated"
+                        context.SequencingState.HasOpenToolWorkflow = False
+                    End If
+
+                    acceptedFinalStatus = "blocked"
+
+                    context.LogWarn(
+                        "Accepted final response contained no substantive user-facing text after stripping the TASK_STATUS footer; converted to blocked message.",
+                        details:=$"host={context.HostKind}; previousFinalStatus={previousAcceptedFinalStatus}")
+                End If
+
+                ' Post-egress localization of final prose when it does not match the
+                ' detected user language. Sub-agents never localize.
+                If Not subAgentMode Then
+                    Dim _userLanguage As String =
+                        If(context.SequencingState IsNot Nothing, context.SequencingState.UserLanguage, "")
+
+                    If Agents.ToolingOrchestrator.ShouldPostLocalizeFinal(
+                        currentResponse,
+                        _userLanguage,
+                        acceptedFinalStatus) Then
+
+                        Try
+                            currentResponse = Await LocalizeHostMessageIfNeededAsync(
+                                currentResponse,
+                                _userLanguage,
+                                useSecondAPI,
+                                hideSplash,
+                                cancellationToken)
+                        Catch ex As Exception
+                            context.LogWarn(
+                                "Final-response localization failed; returning original prose.",
+                                details:=ex.Message)
+                        End Try
+                    End If
+                End If
+
+                currentResponse = AppendM365SourcesFooter(currentResponse, context.AllToolResponses)
+            Else
+                context.Log("Returning raw caller-defined final response without user-facing post-processing.", "diag")
+            End If
+
+            If Not subAgentMode Then
+                Dim isBlockedFinal As Boolean =
+                    context.FinalizationBlocked OrElse
+                    abortDueToToolError OrElse
+                    context.EmptyMainModelResponse OrElse
+                    String.Equals(acceptedFinalStatus, "blocked", StringComparison.OrdinalIgnoreCase)
+
+                Dim finalCheckpointWritten As Boolean =
+                    SharedLibrary.Agents.WorkflowContinuity.NoteFinalStatus(
+                        context.WorkflowId,
+                        context.HostKind,
+                        isBlockedFinal)
+
+                context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
+                context.Log($"Workflow final status recorded: {If(isBlockedFinal, "blocked", "complete")}; checkpointWritten={If(finalCheckpointWritten, "true", "false")}", "diag")
+            End If
+
+            Dim finalResponseLength As Integer = If(currentResponse, "").Length
+            Dim finalResponseOrigin As String =
+    If(context.SequencingState IsNot Nothing AndAlso
+       Not String.IsNullOrWhiteSpace(context.SequencingState.FinalResponseOrigin),
+       context.SequencingState.FinalResponseOrigin,
+       "model_provided")
+
+            context.Log(
+    $"Returning final response to host: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}",
+    "diag")
+
+            ToolingFileLogger.LogStep(
+    $"Host final response prepared: len={finalResponseLength}; origin={finalResponseOrigin}; blocked={If(context.FinalizationBlocked, "true", "false")}; empty={If(context.EmptyMainModelResponse, "true", "false")}; abortedDueToToolError={If(abortDueToToolError, "true", "false")}")
+
+            Dim sessionSucceeded As Boolean = (Not abortDueToToolError) AndAlso (Not context.EmptyMainModelResponse) AndAlso (Not context.FinalizationBlocked)
+            Dim sessionSummary As String =
+    $"Iterations: {iteration}, Tool calls: {context.AllToolResponses.Count}, Success: {successCount}, Failed: {failedCount}"
+
+            If abortDueToToolError AndAlso Not String.IsNullOrWhiteSpace(abortToolErrorMessage) Then
+                sessionSummary &= $", Aborted due to tool error: {abortToolErrorMessage}"
+            End If
+
+            ToolingFileLogger.EndSession(sessionSucceeded, sessionSummary)
             Return currentResponse
 
         Catch ex As OperationCanceledException
@@ -1523,16 +2370,41 @@ Partial Public Class ThisAddIn
 
         Catch ex As Exception
             context.LogError($"Error in tooling loop: {ex.Message}", ex:=ex)
-            ShowCustomMessageBox($"Error during tool execution: {ex.Message}")
+            If ShouldShowToolingModalDialogs() Then
+                ShowCustomMessageBox($"Error during tool execution: {ex.Message}")
+            End If
+
             ToolingFileLogger.EndSession(False, $"Exception: {ex.Message}", ex:=ex)
-            Return ""
+            Return $"Error during tool execution: {ex.Message}"
         Finally
+
+            If workflowScope IsNot Nothing Then
+                workflowScope.Dispose()
+                workflowScope = Nothing
+            End If
+
+            _activeToolingContext = parentToolingContext
             INI_APICall_ToolInstructions_2 = ""
             INI_APICall_ToolResponses_2 = ""
 
             If context.LogWindowForm IsNot Nothing AndAlso Not context.LogWindowForm.IsDisposed Then
                 Try
-                    context.LogWindowForm.MarkComplete()
+                    If UiSyncContext IsNot Nothing AndAlso
+                       System.Threading.Thread.CurrentThread.ManagedThreadId <> UiThreadId Then
+                        UiSyncContext.Post(
+                            Sub()
+                                Try
+                                    If context.LogWindowForm IsNot Nothing AndAlso
+                                       Not context.LogWindowForm.IsDisposed Then
+                                        context.LogWindowForm.MarkComplete()
+                                    End If
+                                Catch ex As Exception
+                                    ToolingFileLogger.LogWarn("Failed to mark LogWindow complete (UI post).", ex:=ex)
+                                End Try
+                            End Sub, Nothing)
+                    Else
+                        context.LogWindowForm.MarkComplete()
+                    End If
                 Catch ex As Exception
                     ToolingFileLogger.LogWarn("Failed to mark LogWindow complete.", ex:=ex)
                 End Try
@@ -1543,13 +2415,688 @@ Partial Public Class ThisAddIn
                 End If
             End If
 
-            ' Clear the context reference so ApDashboardLog stops routing
-            _activeToolingContext = Nothing
+            Try
+                _lastCompletedToolResponses = New List(Of ToolResponse)()
+                If context IsNot Nothing AndAlso context.AllToolResponses IsNot Nothing Then
+                    Debug.WriteLine("[AISearch] Persisting completed tool responses: " & context.AllToolResponses.Count.ToString())
+
+                    For Each r In context.AllToolResponses
+                        _lastCompletedToolResponses.Add(New ToolResponse() With {
+                    .CallId = r.CallId,
+                    .ToolName = r.ToolName,
+                    .Response = r.Response,
+                    .Success = r.Success,
+                    .ErrorMessage = r.ErrorMessage,
+                    .Timestamp = r.Timestamp,
+                    .OriginalCallJson = r.OriginalCallJson
+                })
+                    Next
+                Else
+                    Debug.WriteLine("[AISearch] Persisting completed tool responses: context or response list is Nothing")
+                End If
+            Catch ex As Exception
+                Debug.WriteLine("[AISearch] Persisting completed tool responses failed: " & ex.Message)
+            End Try
+
+            ' Keep the restored parent context alive for repeated sub-agent calls.
         End Try
     End Function
+
+
+    Private Function ResolveToolingWorkflowId(requestedWorkflowId As String,
+                                              subAgentMode As Boolean,
+                                              parentContext As ToolExecutionContext) As String
+        If Not String.IsNullOrWhiteSpace(requestedWorkflowId) Then
+            Return requestedWorkflowId.Trim()
+        End If
+
+        If subAgentMode AndAlso parentContext IsNot Nothing AndAlso
+           Not String.IsNullOrWhiteSpace(parentContext.WorkflowId) Then
+            Return parentContext.WorkflowId
+        End If
+
+        If Not String.IsNullOrWhiteSpace(SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId) Then
+            Return SharedLibrary.Agents.WorkflowContinuity.CurrentWorkflowId
+        End If
+
+        Return SharedLibrary.Agents.WorkflowContinuity.CreateWorkflowId()
+    End Function
+
+    Private Function BuildRuntimeContextPromptBlock(context As ToolExecutionContext) As String
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(context.WorkflowId) Then
+            Return ""
+        End If
+
+        Return SharedLibrary.Agents.WorkflowContinuity.BuildPromptContextBlock(
+            context.WorkflowId,
+            includeRecentWorkflowMemoryStubs:=context.SequencingState IsNot Nothing AndAlso
+                                              context.SequencingState.ShouldExposeRecentMemoryStubs)
+    End Function
+
+    Private Function ExtractWorkflowSkillName(toolCall As ToolCall,
+                                              toolResponse As ToolResponse) As String
+        If toolCall Is Nothing OrElse toolResponse Is Nothing OrElse Not toolResponse.Success Then
+            Return ""
+        End If
+
+        If Not String.IsNullOrWhiteSpace(toolCall.ToolName) AndAlso
+           toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+            Return toolCall.ToolName.Substring("skill_".Length)
+        End If
+
+        If Not String.Equals(toolCall.ToolName, SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return ""
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(If(toolResponse.Response, ""))
+            Return If(obj.Value(Of String)("name"), "").Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Sub UpdateWorkflowContinuityAfterToolExecution(context As ToolExecutionContext,
+                                                           toolCall As ToolCall,
+                                                           toolResponse As ToolResponse)
+        If context Is Nothing OrElse toolCall Is Nothing OrElse String.IsNullOrWhiteSpace(context.WorkflowId) Then
+            Return
+        End If
+
+        Dim rawResponse As String = If(toolResponse?.Response, "")
+        Dim resultRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractStructuredResultReference(rawResponse)
+        Dim outputRef As String = SharedLibrary.Agents.WorkflowContinuity.ExtractOutputReference(rawResponse)
+        Dim sourceRefs As List(Of String) = SharedLibrary.Agents.WorkflowContinuity.ExtractSourceReferences(rawResponse)
+
+        Dim checkpointWritten As Boolean =
+            SharedLibrary.Agents.WorkflowContinuity.NoteToolCallResult(
+                context.WorkflowId,
+                context.HostKind,
+                toolCall.ToolName,
+                toolResponse IsNot Nothing AndAlso toolResponse.Success,
+                resultRef,
+                outputRef,
+                sourceRefs,
+                Math.Max(context.PrematureTextRetryCount, context.SubAgentEmptyResponseRetryCount))
+
+        Dim skillName As String = ExtractWorkflowSkillName(toolCall, toolResponse)
+        Dim skillCheckpointWritten As Boolean = False
+
+        If Not String.IsNullOrWhiteSpace(skillName) Then
+            skillCheckpointWritten =
+                SharedLibrary.Agents.WorkflowContinuity.NoteSkillLoaded(
+                    context.WorkflowId,
+                    context.HostKind,
+                    skillName)
+        End If
+
+        context.RuntimeState = SharedLibrary.Agents.WorkflowContinuity.GetState(context.WorkflowId)
+
+        context.Log(
+            $"Runtime state updated: tool={toolCall.ToolName}; success={If(toolResponse IsNot Nothing AndAlso toolResponse.Success, "true", "false")}; checkpointWritten={If(checkpointWritten OrElse skillCheckpointWritten, "true", "false")}; memoryRefWritten={If(Not String.IsNullOrWhiteSpace(resultRef), "true", "false")}; sourceRefWritten={If(sourceRefs IsNot Nothing AndAlso sourceRefs.Count > 0, "true", "false")}", "diag")
+    End Sub
+
+    Private Function IsToolAllowedForCurrentContext(toolName As String, context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then Return False
+        If Not context.EnforceAllowedToolScope Then Return True
+        If context.AllowedToolNames Is Nothing Then Return False
+        Return context.AllowedToolNames.Contains(toolName.Trim())
+    End Function
+
+    Private Function BuildToolNotAllowedResponse(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
+        Dim message As String = $"Tool '{toolCall.ToolName}' is not allowed for this sub-agent."
+
+        Dim payload As String = JsonConvert.SerializeObject(New With {
+        Key .summary = "Tool call was rejected by the sub-agent runtime.",
+        Key .result = CType(Nothing, Object),
+        Key .resultKind = "error",
+        Key .error = New With {
+            Key .code = "tool_not_allowed",
+            Key .phase = "tool_dispatch",
+            Key .message = message
+        }
+    })
+
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName,
+        .Response = payload,
+        .Success = False,
+        .ErrorMessage = message,
+        .ResultKind = "error",
+        .ErrorCode = "tool_not_allowed",
+        .OriginalCallJson = toolCall.RawJson
+    }
+
+        If context IsNot Nothing Then
+            context.LogWarn("Blocked tool outside sub-agent scope.",
+                        details:=$"host={context.HostKind}; tool={toolCall.ToolName}")
+        End If
+
+        Return response
+    End Function
+
+    Private Sub ApplyStructuredAgentResult(response As ToolResponse, context As ToolExecutionContext)
+        If response Is Nothing Then Return
+
+        Dim errorCode As String = ""
+        Dim resultKind As String = ""
+
+        If SharedLibrary.Agents.SubAgentRuntimeHardening.TryGetEnvelopeErrorInfo(response.Response, errorCode, resultKind) Then
+            response.ResultKind = If(String.IsNullOrWhiteSpace(resultKind), "error", resultKind)
+            response.ErrorCode = errorCode
+            response.Success = False
+
+            If String.IsNullOrWhiteSpace(response.ErrorMessage) Then
+                response.ErrorMessage = If(String.IsNullOrWhiteSpace(errorCode),
+                                       "Agent-layer tool returned an error payload.",
+                                       $"Agent-layer tool returned error '{errorCode}'.")
+            End If
+
+            If context IsNot Nothing Then
+                context.LogWarn("Agent-layer tool returned structured failure.",
+                            details:=$"tool={response.ToolName}; resultKind={response.ResultKind}; errorCode={If(response.ErrorCode, "")}")
+            End If
+            Return
+        End If
+
+        If Not String.IsNullOrWhiteSpace(resultKind) Then
+            response.ResultKind = resultKind
+        End If
+    End Sub
+
+
+
+    ''' <summary>
+    ''' Returns the set of deliverable-capable tool names that are still loaded in
+    ''' <paramref name="ctx"/> and have NOT yet been invoked (successfully or otherwise)
+    ''' in the current run. Used by the deliverable-fallback gate to decide whether
+    ''' 'blocked' is premature.
+    ''' </summary>
+    Private Function CollectUntriedDeliverableFallbackToolNames(ctx As ToolExecutionContext) As IReadOnlyList(Of String)
+        Dim result As New List(Of String)()
+        If ctx Is Nothing Then Return result.AsReadOnly()
+
+        Dim deliverableCandidates As New HashSet(Of String)(
+            SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
+                SharedLibrary.Agents.ToolingHostKind.Outlook),
+            StringComparer.OrdinalIgnoreCase)
+
+        Dim available As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If ctx.SelectedTools IsNot Nothing Then
+            For Each tool As ModelConfig In ctx.SelectedTools
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                available.Add(tool.ToolName.Trim())
+            Next
+        End If
+
+        If ctx.AuthoritativeToolRegistrySnapshot IsNot Nothing Then
+            For Each manifest In ctx.AuthoritativeToolRegistrySnapshot.ListManifests()
+                If manifest Is Nothing OrElse String.IsNullOrWhiteSpace(manifest.Name) Then Continue For
+                available.Add(manifest.Name.Trim())
+            Next
+        End If
+
+        Dim used As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If ctx.AllToolResponses IsNot Nothing Then
+            For Each r As ToolResponse In ctx.AllToolResponses
+                If r Is Nothing OrElse String.IsNullOrWhiteSpace(r.ToolName) Then Continue For
+                used.Add(r.ToolName.Trim())
+            Next
+        End If
+
+        For Each candidate In deliverableCandidates.OrderBy(Function(n) n, StringComparer.OrdinalIgnoreCase)
+            If available.Contains(candidate) AndAlso Not used.Contains(candidate) Then
+                result.Add(candidate)
+            End If
+        Next
+
+        Return result.AsReadOnly()
+    End Function
+
+    Private Function ResolveBlockedFallbackUserLanguage(context As ToolExecutionContext) As String
+        Return If(context?.SequencingState?.UserLanguage, "").Trim()
+    End Function
+
+
+    Private Async Function LocalizeHostMessageIfNeededAsync(message As String,
+                                                            userLanguage As String,
+                                                            useSecondAPI As Boolean,
+                                                            hideSplash As Boolean,
+                                                            cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+        Dim baseMessage As String =
+            SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(
+                If(message, "").Trim())
+
+        Dim targetLanguage As String = If(userLanguage, "").Trim()
+
+        If baseMessage = "" OrElse targetLanguage = "" Then
+            Return baseMessage
+        End If
+
+        If String.Equals(targetLanguage, "en", StringComparison.OrdinalIgnoreCase) OrElse
+           targetLanguage.StartsWith("en-", StringComparison.OrdinalIgnoreCase) Then
+            Return baseMessage
+        End If
+
+        Dim systemPrompt As String =
+            "Translate the provided short end-user office-assistant message into the requested language. " &
+            "Do not add explanations, quotes, code fences, markdown, technical detail, or any TASK_STATUS block. " &
+            "Return only the final localized message."
+
+        Dim userPrompt As String =
+            "<TARGET_LANGUAGE>" & targetLanguage & "</TARGET_LANGUAGE>" & vbCrLf &
+            "<MESSAGE>" & baseMessage & "</MESSAGE>"
+
+        Try
+            Dim localized As String = Await LLM(
+                systemPrompt,
+                userPrompt,
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                cancellationToken,
+                True,
+                False)
+
+            If String.IsNullOrWhiteSpace(localized) Then
+                Return baseMessage
+            End If
+
+            Return SharedLibrary.Agents.ToolCallSequencing.StripTaskStatusBlocksFromUserFacingText(localized.Trim())
+        Catch
+            Return baseMessage
+        End Try
+    End Function
+
+
+    Private Async Function BuildLocalizedCreatedDeliverableSuccessMessageAsync(context As ToolExecutionContext,
+                                                                               toolResponse As ToolResponse,
+                                                                               useSecondAPI As Boolean,
+                                                                               hideSplash As Boolean,
+                                                                               cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+        Dim references As List(Of String) =
+            SharedLibrary.Agents.ToolCallSequencing.ExtractCreatedDeliverableReferences(
+                If(If(toolResponse Is Nothing, Nothing, toolResponse.Response), ""))
+
+        Dim displayNames As New List(Of String)()
+
+        For Each reference As String In references
+            Dim candidate As String = If(reference, "").Trim()
+            If candidate = "" Then Continue For
+
+            Try
+                Dim fileName As String = Path.GetFileName(candidate)
+                If fileName <> "" Then
+                    candidate = fileName
+                End If
+            Catch
+            End Try
+
+            Dim alreadyAdded As Boolean = False
+
+            For Each existing As String In displayNames
+                If String.Equals(existing, candidate, StringComparison.OrdinalIgnoreCase) Then
+                    alreadyAdded = True
+                    Exit For
+                End If
+            Next
+
+            If Not alreadyAdded Then
+                displayNames.Add(candidate)
+            End If
+        Next
+
+        Dim baseMessage As String
+
+        If displayNames.Count = 1 Then
+            baseMessage = "Done. Created: " & displayNames(0) & "."
+        ElseIf displayNames.Count > 1 Then
+            baseMessage = "Done. Created: " & String.Join(", ", displayNames) & "."
+        Else
+            baseMessage = "Done. The requested output was created."
+        End If
+
+        Return Await LocalizeHostMessageIfNeededAsync(
+            baseMessage,
+            ResolveBlockedFallbackUserLanguage(context),
+            useSecondAPI,
+            hideSplash,
+            cancellationToken)
+    End Function
+
+
+
+    Private Async Function BuildTaskSpecificPartialBlockedMessageAsync(context As ToolExecutionContext,
+                                                                       errorCode As String,
+                                                                       message As String,
+                                                                       useSecondAPI As Boolean,
+                                                                       hideSplash As Boolean,
+                                                                       cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then
+            Return ""
+        End If
+
+        Dim completedFacts As New List(Of String)()
+        Dim unresolvedFacts As New List(Of String)()
+
+        For Each item In context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success)
+            Dim excerpt As String = If(item.Response, "").Trim()
+            excerpt = excerpt.Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+
+            If excerpt.Length > 240 Then
+                excerpt = excerpt.Substring(0, 240) & "..."
+            End If
+
+            If excerpt <> "" Then
+                completedFacts.Add(excerpt)
+            End If
+
+            If completedFacts.Count >= 3 Then
+                Exit For
+            End If
+        Next
+
+        For Each item In context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success)
+            Dim failureText As String = If(item.ErrorMessage, "").Trim()
+            failureText = failureText.Replace(vbCr, " ").Replace(vbLf, " ").Trim()
+
+            If failureText.Length > 180 Then
+                failureText = failureText.Substring(0, 180) & "..."
+            End If
+
+            If failureText <> "" Then
+                unresolvedFacts.Add(failureText)
+            End If
+
+            If unresolvedFacts.Count >= 2 Then
+                Exit For
+            End If
+        Next
+
+        If completedFacts.Count = 0 Then
+            Return ""
+        End If
+
+        Dim targetLanguage As String = ResolveBlockedFallbackUserLanguage(context)
+        If targetLanguage = "" Then
+            targetLanguage = "en"
+        End If
+
+        Dim systemPrompt As String =
+            "Write a short end-user office-assistant status message in the requested language. " &
+            "Briefly say what was already completed or prepared, and then what could not be completed or may still be incomplete. " &
+            "Keep it short, non-technical, task-specific, and easy to understand. " &
+            "Do not mention tools, validators, workflows, JSON, retries, memory grounding, checkpoints, or internal state. " &
+            "Do not use bullet points. Do not add a TASK_STATUS footer. Do not invent details."
+
+        Dim userPrompt As String =
+            "<TARGET_LANGUAGE>" & targetLanguage & "</TARGET_LANGUAGE>" & vbCrLf &
+            "<COMPLETED_FACTS>" & vbCrLf &
+            String.Join(vbCrLf, completedFacts) & vbCrLf &
+            "</COMPLETED_FACTS>" & vbCrLf &
+            "<UNRESOLVED_FACTS>" & vbCrLf &
+            String.Join(vbCrLf, unresolvedFacts) & vbCrLf &
+            "</UNRESOLVED_FACTS>" & vbCrLf &
+            "<HOST_BLOCK_REASON>" & If(message, "") & "</HOST_BLOCK_REASON>"
+
+        Try
+            Dim responseText As String = Await LLM(
+                systemPrompt,
+                userPrompt,
+                "", "", 0,
+                useSecondAPI,
+                hideSplash,
+                "",
+                "",
+                cancellationToken,
+                True,
+                False)
+
+            Return If(responseText, "").Trim()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+    Private Async Function BuildBlockedToolingResultAsync(context As ToolExecutionContext,
+                                                          errorCode As String,
+                                                          message As String,
+                                                          useSecondAPI As Boolean,
+                                                          hideSplash As Boolean,
+                                                          cancellationToken As System.Threading.CancellationToken) As Task(Of String)
+        Dim lastToolName As String = ""
+        Dim lastErrorCode As String = ""
+        Dim lastErrorMessage As String = ""
+
+        If context IsNot Nothing AndAlso context.SequencingState IsNot Nothing Then
+            lastToolName = If(context.SequencingState.LastToolName, "")
+            lastErrorCode = If(context.SequencingState.LastErrorCode, "")
+            lastErrorMessage = If(context.SequencingState.LastErrorMessage, "")
+        End If
+
+        Dim structuredPayload As String = SharedLibrary.Agents.ToolCallSequencing.BuildBlockedResultPayload(
+            errorCode,
+            "finalization",
+            message,
+            lastToolName,
+            lastErrorCode,
+            lastErrorMessage)
+
+        ToolingFileLogger.LogWarn(
+            "Structured blocked payload recorded for logs only; user-safe prose will be returned instead.",
+            details:=$"host={If(context?.HostKind, "")}; payload={structuredPayload}")
+
+        Dim successCount As Integer = 0
+        Dim failedCount As Integer = 0
+
+        If context IsNot Nothing AndAlso context.AllToolResponses IsNot Nothing Then
+            successCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso r.Success).Count()
+            failedCount = context.AllToolResponses.Where(Function(r) r IsNot Nothing AndAlso Not r.Success).Count()
+        End If
+
+        Dim partialMessage As String =
+            Await BuildTaskSpecificPartialBlockedMessageAsync(
+                context,
+                errorCode,
+                message,
+                useSecondAPI,
+                hideSplash,
+                cancellationToken)
+
+        If Not String.IsNullOrWhiteSpace(partialMessage) Then
+            Return partialMessage.Trim() & " " &
+                SharedLibrary.Agents.ToolCallSequencing.BuildTaskStatusFooter(
+                    "blocked",
+                    If(errorCode, "host_generated_blocked"))
+        End If
+
+        Dim baseMessage As String =
+            SharedLibrary.Agents.ToolCallSequencing.BuildUserSafeBlockedFinalMessage(
+                context.SequencingState,
+                errorCode,
+                message,
+                successCount,
+                failedCount,
+                userLanguage:=ResolveBlockedFallbackUserLanguage(context),
+                appendTaskStatusFooter:=True)
+
+        Return Await LocalizeHostMessageIfNeededAsync(
+            baseMessage,
+            ResolveBlockedFallbackUserLanguage(context),
+            useSecondAPI,
+            hideSplash,
+            cancellationToken)
+    End Function
+
+    Private Function BuildToolFailureReassessmentGuardPrompt(failedToolName As String) As String
+        Dim normalizedToolName As String = If(failedToolName, "").Trim()
+        Dim failedToolText As String =
+            If(normalizedToolName = "",
+               "The previous tool step failed. ",
+               "The previous tool step using '" & normalizedToolName & "' failed. ")
+
+        Return "HOST TOOL FAILURE RECOVERY: " &
+               failedToolText &
+               "In THIS turn, first reassess whether that was the right tool for the remaining work. " &
+               "If another available tool is more appropriate, use that tool instead. " &
+               "If the same tool is still appropriate, retry only with narrower or corrected arguments. " &
+               "If enough information is already available, provide the best possible final answer and say clearly if it may be incomplete. " &
+               "Return a blocked message only if no reliable answer and no useful recovery step is possible."
+    End Function
+
+    Private Sub LogToolBatchPlan(context As ToolExecutionContext,
+                             plan As SharedLibrary.Agents.ToolCallSequencing.ToolBatchPlan)
+        If context Is Nothing OrElse plan Is Nothing Then Return
+
+        context.Log($"Tool-call batch analysis: total={plan.TotalCallCount}; safeBatch={plan.IsFullyBatchSafe}; executed={plan.ExecutedCount}; deferred={plan.DeferredCount}", "diag")
+        For Each planned In plan.Calls
+            context.Log($"Tool-call classification: index={planned.Index + 1}; tool={planned.ToolName}; class={planned.Classification.ToString().ToLowerInvariant()}; barrier={planned.IsBarrier}; action={If(planned.WillExecute, "execute", "defer")}", "diag")
+        Next
+    End Sub
+
+    Private Function EnsureVisibleToolLoaded(toolName As String, context As ToolExecutionContext) As ModelConfig
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return Nothing
+        End If
+
+        If context.SelectedTools Is Nothing Then
+            context.SelectedTools = New List(Of ModelConfig)()
+        End If
+
+        Dim existing = context.SelectedTools.FirstOrDefault(
+        Function(t)
+            Return t IsNot Nothing AndAlso
+                   Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                   t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+        End Function)
+
+        If existing IsNot Nothing Then
+            Return existing
+        End If
+
+        If Not IsToolAllowedForCurrentContext(toolName, context) Then
+            Return Nothing
+        End If
+
+        Dim loaded = context.AllowedToolRegistry.Get(toolName)
+        If loaded Is Nothing Then
+            Return Nothing
+        End If
+
+        context.SelectedTools.Add(loaded)
+        Return loaded
+    End Function
+
+
+    Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As String, context As ToolExecutionContext)
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(skillResponse) Then
+            Return
+        End If
+
+        Try
+            Dim obj As JObject = JObject.Parse(skillResponse)
+            Dim allowedToolsToken As JToken = obj("allowed_tools")
+
+            If allowedToolsToken Is Nothing OrElse allowedToolsToken.Type <> JTokenType.Array Then
+                Return
+            End If
+
+            For Each item As JToken In DirectCast(allowedToolsToken, JArray)
+                Dim toolName As String = item.ToString().Trim()
+                If toolName = "" Then Continue For
+                EnsureVisibleToolLoaded(toolName, context)
+            Next
+        Catch
+        End Try
+    End Sub
+
+
+    Private Function ExecuteToolLoaderCall(toolCall As ToolCall, context As ToolExecutionContext) As ToolResponse
+        Dim response As New ToolResponse() With {
+        .CallId = toolCall.CallId,
+        .ToolName = toolCall.ToolName
+    }
+
+        If context Is Nothing OrElse context.AllowedToolRegistry Is Nothing Then
+            response.Success = False
+            response.ErrorMessage = "Tool loader is not initialized."
+            Return response
+        End If
+
+        If context.SelectedTools Is Nothing Then
+            context.SelectedTools = New List(Of ModelConfig)()
+        End If
+
+        Dim requestedNames = SharedLibrary.Agents.ToolLoaderTool.ExtractRequestedToolNames(toolCall.Arguments)
+
+        If requestedNames.Count = 0 Then
+            response.Success = False
+            response.ErrorMessage = "No tool names were provided to tool_loader."
+            Return response
+        End If
+
+        Dim loadedNames As New List(Of String)()
+        Dim alreadyLoadedNames As New List(Of String)()
+        Dim unavailableNames As New List(Of String)()
+
+        For Each requestedName In requestedNames
+            If String.IsNullOrWhiteSpace(requestedName) Then Continue For
+
+            If Not IsToolAllowedForCurrentContext(requestedName, context) Then
+                unavailableNames.Add(requestedName)
+                Continue For
+            End If
+
+            If requestedName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                alreadyLoadedNames.Add(requestedName)
+                Continue For
+            End If
+
+            Dim existing = context.SelectedTools.FirstOrDefault(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(requestedName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+            If existing IsNot Nothing Then
+                alreadyLoadedNames.Add(existing.ToolName)
+                Continue For
+            End If
+
+            Dim loaded = EnsureVisibleToolLoaded(requestedName, context)
+            If loaded IsNot Nothing Then
+                loadedNames.Add(loaded.ToolName)
+            Else
+                unavailableNames.Add(requestedName)
+            End If
+        Next
+
+        Dim payload As New JObject(
+        New JProperty("loaded", New JArray(loadedNames.ToArray())),
+        New JProperty("already_loaded", New JArray(alreadyLoadedNames.ToArray())),
+        New JProperty("not_available", New JArray(unavailableNames.ToArray()))
+    )
+
+        response.Success = True
+        response.Response = payload.ToString(Formatting.None)
+        Return response
+    End Function
+
 #End Region
 
-#Region "Tooling Helper Functions"
+
+
+
+    Private Function ShouldShowToolingModalDialogs() As Boolean
+        Return Not _chatAgentActive AndAlso Not _apActive
+    End Function
+
 
 
     ''' <summary>
@@ -1570,11 +3117,25 @@ Partial Public Class ThisAddIn
             Dim jDef As JObject = JObject.Parse(canonicalDefinition)
             Dim name As String = If(jDef("name")?.ToString(), "")
             Dim description As String = If(jDef("description")?.ToString(), "")
-            Dim parameters As String = If(jDef("parameters")?.ToString(), "{}")
 
+            ' Use Formatting.None to produce compact JSON for the parameters object.
+            ' JObject.ToString() defaults to Formatting.Indented, which injects literal
+            ' newlines and whitespace that bloat the payload and can break model API
+            ' templates that expect single-line JSON values.
+            Dim parametersToken As JToken = jDef("parameters")
+            Dim parameters As String = If(parametersToken IsNot Nothing,
+                parametersToken.ToString(Formatting.None), "{}")
+
+            ' JSON-escape name and description before injecting into the template.
+            ' JValue.ToString() returns the RAW unescaped string (e.g., embedded " or \
+            ' are not escaped). When the template places these inside JSON string
+            ' literals like "name":"{name}", unescaped characters produce invalid JSON.
+            ' This is especially critical when combining multiple tools — a single
+            ' malformed definition breaks the entire tools array and the API rejects
+            ' the request, causing LLM() to return an empty string.
             Dim result As String = template
-            result = result.Replace("{name}", name)
-            result = result.Replace("{description}", description)
+            result = result.Replace("{name}", EscapeJsonString(name))
+            result = result.Replace("{description}", EscapeJsonString(description))
             result = result.Replace("{parameters}", parameters)
 
             Return result
@@ -1633,342 +3194,196 @@ Partial Public Class ThisAddIn
         Return result
     End Function
 
-    ''' <summary>
-    ''' Builds the model-specific tool response payload to inject into the next iteration of the tooling loop.
-    ''' </summary>
-    ''' <param name="responses">Tool execution outcomes to serialize.</param>
-    ''' <param name="toolingModel">Tooling model that defines response templates and container structure.</param>
-    ''' <returns>Serialized tool response payload.</returns>
-    Public Function BuildToolResponsesForModel(responses As List(Of ToolResponse), toolingModel As ModelConfig) As String
-        If toolingModel Is Nothing Then
-            ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel is Nothing.")
-            Return ""
-        End If
 
-        If String.IsNullOrWhiteSpace(toolingModel.APICall_ToolResponses) Then
-            ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel.APICall_ToolResponses is empty.")
-            Return ""
-        End If
-
-        Dim responsePartTemplate As String = toolingModel.APICall_ToolResponses_Template
-        If String.IsNullOrWhiteSpace(responsePartTemplate) Then
-            ToolingFileLogger.LogWarn("BuildToolResponsesForModel: toolingModel.APICall_ToolResponses_Template is empty.")
-            Return ""
-        End If
-
-        Dim callPartTemplate As String = If(toolingModel.APICall_ToolCallPart_Template, "")
-        Dim useCallParts As Boolean = Not String.IsNullOrWhiteSpace(callPartTemplate)
-
-        Dim callParts As New StringBuilder()
-        Dim responseParts As New StringBuilder()
-        Dim firstCall As Boolean = True
-        Dim firstResp As Boolean = True
-
-        For Each resp In responses
-            If useCallParts Then
-                ' Extract the original arguments from the parsed tool call JSON
-                Dim argsJson As String = "{}"
-                Try
-                    Dim jCall = JObject.Parse(resp.OriginalCallJson)
-                    Dim argsToken = jCall("arguments")
-                    If argsToken IsNot Nothing Then
-                        If argsToken.Type = JTokenType.String Then
-                            argsJson = argsToken.ToString()
-                        Else
-                            argsJson = argsToken.ToString(Formatting.None)
-                        End If
-                    End If
-                Catch
-                    argsJson = "{}"
-                End Try
-
-                ' Determine if arguments should be escaped (template has quoted placeholder)
-                Dim escapedArgsJson As String
-                If callPartTemplate.Contains("""{arguments}""") Then
-                    escapedArgsJson = EscapeJsonString(argsJson)
-                Else
-                    escapedArgsJson = argsJson
-                End If
-
-                ' Build the call part, also support {call} placeholder for raw call JSON
-                Dim callPart As String = callPartTemplate _
-                    .Replace("{call_id}", If(resp.CallId, "")) _
-                    .Replace("{name}", If(resp.ToolName, "")) _
-                    .Replace("{arguments}", escapedArgsJson) _
-                    .Replace("{call}", resp.OriginalCallJson)
-
-                If Not firstCall Then callParts.Append(",")
-                callParts.Append(callPart)
-                firstCall = False
-            End If
-
-            ' Build response content
-            Dim responseContent As String = If(resp.Success, If(resp.Response, ""), $"Error: {resp.ErrorMessage}")
-
-            ' Check if response should be escaped (template has quoted placeholder) or raw
-            Dim finalResponseContent As String
-            If responsePartTemplate.Contains("""{response}""") Then
-                ' Template expects escaped string
-                finalResponseContent = EscapeJsonString(responseContent)
-            ElseIf responsePartTemplate.Contains("{response}") AndAlso
-                   Not responsePartTemplate.Contains("""{response}") Then
-                ' Template expects raw content - wrap in object if it's not valid JSON
-                If IsValidJson(responseContent) Then
-                    finalResponseContent = responseContent
-                Else
-                    ' Wrap plain text in a result object with escaped content
-                    finalResponseContent = "{""result"": """ & EscapeJsonString(responseContent) & """}"
-                End If
-            Else
-                finalResponseContent = EscapeJsonString(responseContent)
-            End If
-
-            Dim respPart As String = responsePartTemplate _
-                .Replace("{call_id}", If(resp.CallId, "")) _
-                .Replace("{name}", If(resp.ToolName, "")) _
-                .Replace("{response}", finalResponseContent)
-
-            If Not firstResp Then responseParts.Append(",")
-            responseParts.Append(respPart)
-            firstResp = False
-        Next
-
-        Dim functionCallsOutput As String = callParts.ToString()
-        Dim responsesOutput As String = responseParts.ToString()
-
-        ' Replace placeholders - NO comma manipulation by code
-        ' Templates are responsible for their own structure
-        Dim result As String = toolingModel.APICall_ToolResponses
-
-        ' Simple replacement - if content exists, replace; if empty, remove placeholder
-        result = result.Replace("{functioncalls}", functionCallsOutput)
-        result = result.Replace("{responses}", responsesOutput)
-
-        ' Clean up any empty structural remnants (empty arrays, double commas, etc.)
-        ' This handles cases where one placeholder was empty
-        result = Regex.Replace(result, "\[\s*\]", "[]")           ' Normalize empty arrays
-        result = Regex.Replace(result, ",\s*,", ",")              ' Remove double commas
-        result = Regex.Replace(result, "\[\s*,", "[")             ' Remove leading comma in array
-        result = Regex.Replace(result, ",\s*\]", "]")             ' Remove trailing comma in array
-
-        Return result
+    Private Function BuildSkippedToolFailureRecoveryGuardPrompt() As String
+        Return "HOST TOOL FAILURE GUARD: The previous tool call failed and that structured error is already available in the tool-response history. " &
+           "In THIS turn you must take exactly one actionable recovery step: " &
+           "(a) write or update failure state for the current item using an available write/state tool; OR " &
+           "(b) retry the failed agent/tool with smaller or chunked input; OR " &
+           "(c) continue with the next item using the appropriate tool; OR " &
+           "(d) produce a valid final blocked response only if all required work is complete or no further tool action is possible. " &
+           "Do NOT apologize. Do NOT output ordinary progress prose. Do NOT merely restate the failure."
     End Function
 
-    ''' <summary>
-    ''' Determines whether a string represents a JSON object or array.
-    ''' </summary>
-    ''' <param name="str">Candidate JSON string.</param>
-    ''' <returns>True if valid JSON object/array; otherwise False.</returns>
-    Private Function IsValidJson(str As String) As Boolean
-        If String.IsNullOrWhiteSpace(str) Then Return False
-        str = str.Trim()
-        If (str.StartsWith("{") AndAlso str.EndsWith("}")) OrElse
-           (str.StartsWith("[") AndAlso str.EndsWith("]")) Then
-            Try
-                JToken.Parse(str)
-                Return True
-            Catch
-                Return False
-            End Try
+
+
+    Private Function BuildSubAgentEmptyResponseRecoveryPrompt(context As ToolExecutionContext) As String
+        Dim lastSuccess = GetLastSuccessfulToolResponse(context)
+        Dim summary As String = BuildToolReplaySummary(lastSuccess)
+
+        Dim sb As New System.Text.StringBuilder()
+        sb.Append("SUB-AGENT EMPTY-RESPONSE RECOVERY: The previous model turn was empty after a successful tool call. ")
+        sb.Append("Do not repeat a large raw tool response. ")
+        sb.Append("In THIS turn you must either return the required final JSON object, or call one smaller follow-up tool. ")
+        sb.Append("If more source text is needed, request a smaller window using max_chars and start_char/offset.")
+
+        If Not String.IsNullOrWhiteSpace(summary) Then
+            sb.AppendLine()
+            sb.Append("Last successful tool result: ")
+            sb.Append(summary)
         End If
-        Return False
-    End Function
 
-    ''' <summary>
-    ''' Escapes a string for safe embedding into a JSON string literal.
-    ''' </summary>
-    ''' <param name="str">Input string.</param>
-    ''' <returns>Escaped string content (without surrounding quotes).</returns>
-    Private Function EscapeJsonString(str As String) As String
-        If String.IsNullOrEmpty(str) Then Return ""
-
-        Dim sb As New StringBuilder()
-        For Each c As Char In str
-            Select Case c
-                Case """"c : sb.Append("\""")
-                Case "\"c : sb.Append("\\")
-                Case "/"c : sb.Append("\/")
-                Case ChrW(8) : sb.Append("\b")   ' Backspace
-                Case ChrW(12) : sb.Append("\f")  ' Form feed
-                Case vbLf(0) : sb.Append("\n")
-                Case vbCr(0) : sb.Append("\r")
-                Case vbTab(0) : sb.Append("\t")
-                Case Else
-                    If AscW(c) < 32 Then
-                        ' Other control characters
-                        sb.Append("\u" & AscW(c).ToString("X4"))
-                    Else
-                        sb.Append(c)
-                    End If
-            End Select
-        Next
         Return sb.ToString()
     End Function
 
-    ''' <summary>
-    ''' Determines whether a response contains tool calls by applying a detection regex pattern.
-    ''' If <paramref name="detectionPattern"/> is empty, the pattern is derived from <c>INI_Response_2</c>.
-    ''' </summary>
-    ''' <param name="response">LLM response text.</param>
-    ''' <param name="detectionPattern">Regex pattern used for detection.</param>
-    ''' <returns>True if tool calls are detected; otherwise False.</returns>
-    Public Function ContainsToolCalls(response As String, detectionPattern As String) As Boolean
-        If String.IsNullOrWhiteSpace(response) Then Return False
 
-        Dim pattern As String = detectionPattern
-        If String.IsNullOrWhiteSpace(pattern) Then
-            pattern = ExtractToolCallPatternFromResponse(INI_Response_2)
-        End If
 
-        If String.IsNullOrWhiteSpace(pattern) Then Return False
 
-        Try
-            Return Regex.IsMatch(response, pattern, RegexOptions.Singleline Or RegexOptions.CultureInvariant)
-        Catch ex As Exception
-            ToolingFileLogger.LogError("Regex match error.", details:=$"pattern='{pattern}'", ex:=ex)
+
+
+    Private Function IsPreparatoryToolName(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then
             Return False
-        End Try
+        End If
+
+        Select Case toolName.Trim().ToLowerInvariant()
+            Case "tool_loader",
+                 "agent_workspace_get",
+                 "agent_workspace_list",
+                 "agent_workspace_find_files",
+                 "agent_workspace_recent_files",
+                 "agent_workspace_file_details",
+                 "agent_workspace_inventory_report",
+                 "workspace_get",
+                 "workspace_inventory"
+                Return True
+            Case Else
+                Return False
+        End Select
     End Function
 
-    ''' <summary>
-    ''' Extracts a regex pattern embedded in a response key using the <c>ToolCallMatching*</c> markers.
-    ''' </summary>
-    ''' <param name="responseKey">Response configuration key string (e.g., <c>INI_Response_2</c>).</param>
-    ''' <returns>Extracted regex pattern, or an empty string if not available/invalid.</returns>
-    Private Function ExtractToolCallPatternFromResponse(responseKey As String) As String
-        If String.IsNullOrEmpty(responseKey) Then
-            Return String.Empty
-        End If
-
-        Dim startMarker As String = ToolCallMatchingStart
-        Dim startIdx As Integer = responseKey.IndexOf(startMarker, StringComparison.OrdinalIgnoreCase)
-        If startIdx < 0 Then Return String.Empty
-
-        Dim endIdx As Integer = responseKey.IndexOf(ToolCallMatchingEnd, startIdx, StringComparison.OrdinalIgnoreCase)
-        Dim triggerLen As Integer = If(endIdx >= 0,
-               (endIdx - startIdx + ToolCallMatchingEnd.Length),
-               (responseKey.Length - startIdx))
-
-        Dim triggerText As String = responseKey.Substring(startIdx, triggerLen)
-
-        Dim lt As Integer = triggerText.IndexOf("<"c)
-        Dim gt As Integer = triggerText.LastIndexOf(">"c)
-
-        Dim detectedPattern As String = String.Empty
-
-        If lt >= 0 AndAlso gt > lt Then
-            detectedPattern = triggerText.Substring(lt + 1, gt - lt - 1).Trim()
-        Else
-            Dim colonIdx As Integer = triggerText.IndexOf(ToolCallMatchingMiddle, StringComparison.OrdinalIgnoreCase)
-            If colonIdx >= 0 Then
-                Dim raw As String = triggerText.Substring(colonIdx + ToolCallMatchingMiddle.Length)
-                Dim paren As Integer = raw.LastIndexOf(ToolCallMatchingEnd, StringComparison.OrdinalIgnoreCase)
-                If paren >= 0 Then raw = raw.Substring(0, paren)
-                detectedPattern = raw.Trim()
-            End If
-        End If
-
-        If Not String.IsNullOrWhiteSpace(detectedPattern) Then
-            Try
-                Dim rx As New Regex(detectedPattern)
-            Catch ex As ArgumentException
-                ToolingFileLogger.LogError("Invalid regex pattern.", details:=$"pattern='{detectedPattern}'", ex:=ex)
-                Return String.Empty
-            End Try
-        End If
-
-        Return detectedPattern
-    End Function
-
-    ''' <summary>
-    ''' Extracts tool calls from a JSON response according to a JSON "extraction map".
-    ''' </summary>
-    ''' <param name="response">Response text expected to parse as JSON.</param>
-    ''' <param name="extractionMap">JSON map specifying paths for tool call array/id/name/arguments.</param>
-    ''' <returns>List of extracted tool calls (may be empty).</returns>
-    Public Function ExtractToolCalls(response As String, extractionMap As String) As List(Of ToolCall)
-        Dim calls As New List(Of ToolCall)()
-
-        If String.IsNullOrWhiteSpace(response) OrElse String.IsNullOrWhiteSpace(extractionMap) Then
-            ToolingFileLogger.LogWarn(
-                "ExtractToolCalls: Missing response or extractionMap.",
-                details:=$"responseEmpty={String.IsNullOrWhiteSpace(response)}; extractionMapEmpty={String.IsNullOrWhiteSpace(extractionMap)}")
-            Return calls
+    Private Function HasAnyNonPreparatoryToolsAvailable(context As ToolExecutionContext) As Boolean
+        If context Is Nothing Then
+            Return False
         End If
 
         Try
-            Dim jResponse As JToken = JToken.Parse(response)
-            Dim jMap As JObject = JObject.Parse(extractionMap)
+            If context.AllowedToolRegistry IsNot Nothing Then
+                Dim manifests = context.AllowedToolRegistry.ListManifests()
 
-            Dim arrayPath = If(jMap("array_path")?.ToString(), "")
-            Dim callIdPath = If(jMap("call_id_path")?.ToString(), "id")
-            Dim namePath = If(jMap("name_path")?.ToString(), "name")
-            Dim argsPath = If(jMap("arguments_path")?.ToString(), "arguments")
-
-            Dim toolCallTokens As IEnumerable(Of JToken)
-
-            If Not String.IsNullOrWhiteSpace(arrayPath) Then
-                toolCallTokens = jResponse.SelectTokens(arrayPath).ToList()
-            Else
-                toolCallTokens = {jResponse}
+                If manifests IsNot Nothing AndAlso
+                   manifests.Any(Function(m)
+                                     Return m IsNot Nothing AndAlso
+                                            Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                                            Not IsPreparatoryToolName(m.Name)
+                                 End Function) Then
+                    Return True
+                End If
             End If
-
-            For Each tcToken In toolCallTokens
-                Try
-                    Dim tc As New ToolCall() With {
-                        .CallId = If(tcToken.SelectToken(callIdPath)?.ToString(), Guid.NewGuid().ToString("N")),
-                        .ToolName = If(tcToken.SelectToken(namePath)?.ToString(), ""),
-                        .RawJson = tcToken.ToString()
-                    }
-
-                    Dim argsToken = tcToken.SelectToken(argsPath)
-                    If argsToken IsNot Nothing Then
-                        If argsToken.Type = JTokenType.String Then
-                            Try
-                                tc.Arguments = JsonConvert.DeserializeObject(Of Dictionary(Of String, Object))(argsToken.ToString())
-                            Catch ex As Exception
-                                tc.Arguments = New Dictionary(Of String, Object) From {{"raw", argsToken.ToString()}}
-                                ToolingFileLogger.LogWarn(
-                                    "Arguments JSON string could not be deserialized; stored in 'raw'.",
-                                    details:=$"ToolName='{tc.ToolName}'; CallId={tc.CallId}",
-                                    ex:=ex)
-                            End Try
-                        Else
-                            tc.Arguments = argsToken.ToObject(Of Dictionary(Of String, Object))()
-                        End If
-                    End If
-
-                    If Not String.IsNullOrWhiteSpace(tc.ToolName) Then
-                        calls.Add(tc)
-                    Else
-                        ToolingFileLogger.LogWarn("ExtractToolCalls: Skipped tool call with empty ToolName.", details:=$"Raw={tc.RawJson}")
-                    End If
-                Catch ex As Exception
-                    ToolingFileLogger.LogError("Error parsing individual tool call.", ex:=ex)
-                    Debug.WriteLine($"Error parsing individual tool call: {ex.Message}")
-                End Try
-            Next
-
-        Catch ex As Exception
-            ToolingFileLogger.LogError("ExtractToolCalls error.", details:=$"extractionMap='{extractionMap}'", ex:=ex)
-            Debug.WriteLine($"ExtractToolCalls error: {ex.Message}")
+        Catch
         End Try
 
-        Return calls
+        If context.SelectedTools Is Nothing Then
+            Return False
+        End If
+
+        Return context.SelectedTools.Any(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       Not IsPreparatoryToolName(t.ToolName)
+            End Function)
     End Function
+
+
+    Private Enum TaskStatusKind
+        Missing
+        Complete
+        ContinueWork
+        Blocked
+    End Enum
+
+    Private Function ParseTaskStatus(text As String) As TaskStatusKind
+        ' Strict JSON parser is centralized in SharedLibrary.Agents.TaskStatusFooterParser.
+        ' We map the shared TaskStatusKind to the local enum to keep all existing call
+        ' sites and Select Case statements in this file working unchanged.
+        Dim parsed As Agents.TaskStatusFooter =
+            Agents.TaskStatusFooterParser.Parse(text)
+
+        Select Case parsed.Kind
+            Case Agents.TaskStatusKind.Complete
+                Return TaskStatusKind.Complete
+            Case Agents.TaskStatusKind.ContinueWork
+                Return TaskStatusKind.ContinueWork
+            Case Agents.TaskStatusKind.Blocked
+                Return TaskStatusKind.Blocked
+            Case Else
+                ' Treat Invalid (malformed JSON, duplicated footer, unknown status value)
+                ' the same as Missing so existing call sites uniformly retry/repair.
+                Return TaskStatusKind.Missing
+        End Select
+    End Function
+
+    Private Function StripTaskStatus(text As String) As String
+        Return Agents.TaskStatusFooterParser.Strip(text)
+    End Function
+
+
+
+    Private Function ShouldRetryAfterPrematureTextResponse(context As ToolExecutionContext, lastResponse As String) As Boolean
+        If context Is Nothing Then Return False
+        If context.PrematureTextRetryCount >= ToolExecutionContext.MaxContinuationRetries Then Return False
+
+        Select Case ParseTaskStatus(lastResponse)
+            Case TaskStatusKind.Complete, TaskStatusKind.Blocked
+                Return False
+            Case Else
+                ' Missing footer OR status="continue" → force another iteration.
+                Return True
+        End Select
+    End Function
+
+    Private Function BuildPrematureTextContinuationGuardPrompt() As String
+        Return "HOST CONTINUATION GUARD: Your previous turn was a text-only response that did NOT end with a valid <TASK_STATUS> footer declaring 'complete' or 'blocked'. " &
+               "Therefore the task is treated as unfinished. In THIS turn you must do ONE of: " &
+               "(a) invoke the next appropriate tool call now (no footer in tool-call turns), OR " &
+               "(b) deliver the actual final, complete result that fully satisfies the user's request and end it with exactly: " &
+               "<TASK_STATUS>{""status"":""complete"",""reason"":""...""}</TASK_STATUS>  " &
+               "If the task is genuinely impossible despite reasonable tool attempts, end the turn with: " &
+               "<TASK_STATUS>{""status"":""blocked"",""reason"":""...""}</TASK_STATUS>  " &
+               "If the user's request covers multiple items (every PDF, alle Dokumente, tous les fichiers, etc.), you MUST iterate via tool calls until ALL items are processed before declaring 'complete'. " &
+               "If a tool just failed, try a DIFFERENT applicable tool with corrected arguments. For workspace files use workspace_get, workspace_inventory, workspace_read, workspace_read_many, workspace_extract_text, workspace_extract_text_many, workspace_search, and workspace_write."
+    End Function
+
 
     ''' <summary>
     ''' Builds the tool instructions prompt appended to the tooling session's system prompt.
     ''' </summary>
     ''' <param name="selectedTools">Tools to include, sorted by <see cref="ModelConfig.ToolPriority"/>.</param>
     ''' <returns>System prompt fragment describing tooling usage and available tools.</returns>
-    Public Function BuildToolInstructionsPrompt(selectedTools As List(Of ModelConfig)) As String
+    Public Function BuildToolInstructionsPrompt(
+        selectedTools As List(Of ModelConfig),
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As String
+
         Dim sb As New StringBuilder()
 
         MaxToolIterations = INI_ToolingMaximumIterations
-        sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
+
+        If SharedLibrary.Agents.ToolingFinalResponseContractHelpers.RequiresTaskStatusFooter(finalResponseContract) Then
+            sb.AppendLine(InterpolateAtRuntime(SP_Add_Tooling))
+            sb.AppendLine()
+            sb.AppendLine(Agents.ToolingOrchestrator.TaskStatusFooterInstruction)
+        Else
+            sb.AppendLine("ACTIVE-TOOLING CONTRACT: During this active tooling session, every response must be exactly one of: (1) the next required tool call and nothing else; or (2) the final raw text payload requested elsewhere in the prompt and nothing else.")
+            sb.AppendLine("Do NOT append any <TASK_STATUS> footer unless the caller explicitly requested one.")
+            sb.AppendLine("Do NOT convert the final output into user-facing prose unless the caller explicitly requested prose.")
+            sb.AppendLine("When tool work is complete, return only the final raw text payload in the exact caller-defined format.")
+        End If
+
+        sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
+
+        Dim workflowAddendum As String = BuildToolWorkflowInstructionAddendum(selectedTools)
+        If Not String.IsNullOrWhiteSpace(workflowAddendum) Then
+            sb.AppendLine()
+            sb.AppendLine(workflowAddendum)
+        End If
+
         sb.AppendLine()
         sb.AppendLine("Available tools:")
+
+        If selectedTools Is Nothing Then
+            Return sb.ToString()
+        End If
 
         Dim sortedTools = selectedTools.OrderBy(Function(t) t.ToolPriority).ToList()
 
@@ -1982,58 +3397,305 @@ Partial Public Class ThisAddIn
         Return sb.ToString()
     End Function
 
-    ''' <summary>
-    ''' Creates a built-in internal web retrieval tool configuration as a <see cref="ModelConfig"/>.
-    ''' </summary>
-    ''' <returns>Internal tool configuration.</returns>
-    Public Function GetInternalWebTool() As ModelConfig
-        Return New ModelConfig() With {
-            .ToolName = InternalWebToolName,
-            .ToolInstructionsPrompt = InternalWebToolInstructionsPrompt,
-            .ToolDefinition = InternalWebToolDefinition,
-            .ModelDescription = "Web Content Retriever" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 999,
-            .ToolErrorHandling = "skip"
-        }
+    Private Function BuildToolSelectionHintText(userText As String,
+                                                fullPromptOverride As String,
+                                                otherPrompt As String,
+                                                insertDocs As String,
+                                                slideInsert As String,
+                                                bubblesText As String) As String
+        Dim parts As New List(Of String)()
+
+        If Not String.IsNullOrWhiteSpace(fullPromptOverride) Then parts.Add(fullPromptOverride)
+        If Not String.IsNullOrWhiteSpace(userText) Then parts.Add(userText)
+        If Not String.IsNullOrWhiteSpace(otherPrompt) Then parts.Add(otherPrompt)
+        If Not String.IsNullOrWhiteSpace(insertDocs) Then parts.Add(insertDocs)
+        If Not String.IsNullOrWhiteSpace(slideInsert) Then parts.Add(slideInsert)
+        If Not String.IsNullOrWhiteSpace(bubblesText) Then parts.Add(bubblesText)
+
+        Return String.Join(Environment.NewLine, parts)
     End Function
 
-    ''' <summary>
-    ''' Creates a built-in internal internet search tool configuration as a <see cref="ModelConfig"/>.
-    ''' Only meaningful when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured.
-    ''' </summary>
-    ''' <param name="enforcePrivacy">When True, privacy constraints are included in the tool definition and instructions.</param>
-    ''' <returns>Internal search tool configuration.</returns>
-    Public Function GetInternalSearchTool(Optional enforcePrivacy As Boolean = True) As ModelConfig
-        Dim definition As String = InternalSearchToolDefinition
-        Dim instructions As String = InternalSearchToolInstructionsPrompt
+    Private Function BuildInitialToolExposure(allowedTools As List(Of ModelConfig),
+                                              allowedRegistry As SharedLibrary.Agents.ToolRegistry,
+                                              promptText As String) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
 
-        If Not enforcePrivacy Then
-            ' Strip privacy constraints from the tool definition
-            definition =
-                "{""name"":""internet_search""," &
-                """description"":""Searches the internet via the configured search engine, retrieves the top result pages, and returns their readable text content. Use this when you need up-to-date or factual information you are not confident about.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """query"":{""type"":""string"",""description"":""The search query.""}," &
-                """max_results"":{""type"":""integer"",""description"":""Maximum number of search result pages to retrieve (default: 4, server-capped).""}," &
-                """max_depth"":{""type"":""integer"",""description"":""Maximum crawl depth per result page. 0 = top-level only (default: 0, server-capped).""}},""required"":[""query""]}}"
-
-            instructions =
-                "internet_search: Searches the internet and returns readable text from the top result pages. " &
-                "Call this tool when you need current or factual information you are not confident about. " &
-                "Provide query (required string). Optionally provide max_results (integer, default 4) and max_depth (integer, default 0). " &
-                "Return value includes the search query used, the URLs visited, and the page content for each qualifying result."
+        If allowedTools Is Nothing OrElse allowedTools.Count = 0 Then
+            Return result
         End If
 
-        Return New ModelConfig() With {
-            .ToolName = InternalSearchToolName,
-            .ToolInstructionsPrompt = instructions,
-            .ToolDefinition = definition,
-            .ModelDescription = "Internet Search (" & If(Not String.IsNullOrWhiteSpace(INI_ISearch_Name), INI_ISearch_Name, "Search") & ")" & InternalToolSuffix,
-            .Tool = True,
-            .ToolPriority = 998,
-            .ToolErrorHandling = "skip"
-        }
+        Dim deduplicatedTools As List(Of ModelConfig) =
+            allowedTools.
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName, StringComparer.OrdinalIgnoreCase).
+                Select(Function(g) g.First()).
+                ToList()
+
+        If Not SharedLibrary.Agents.ToolLoaderTool.ShouldUseLazyLoading(deduplicatedTools) Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        If allowedRegistry Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loaderManifests As List(Of SharedLibrary.Agents.ToolManifest) =
+            allowedRegistry.ListManifests().
+                Where(Function(m)
+                          Return m IsNot Nothing AndAlso
+                                 Not String.IsNullOrWhiteSpace(m.Name) AndAlso
+                                 Not m.Name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase)
+                      End Function).
+                OrderBy(Function(m) m.Name, StringComparer.OrdinalIgnoreCase).
+                ToList()
+
+        If loaderManifests.Count = 0 Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        Dim loader As ModelConfig =
+            SharedLibrary.Agents.ToolLoaderTool.Build(loaderManifests)
+
+        If loader Is Nothing Then
+            result.AddRange(deduplicatedTools)
+            Return result
+        End If
+
+        result.Add(loader)
+        Return result
+    End Function
+
+
+
+
+
+
+    Private Function BuildSubAgentLoaderManifests(context As ToolExecutionContext) As List(Of SharedLibrary.Agents.ToolManifest)
+        Dim result As New List(Of SharedLibrary.Agents.ToolManifest)()
+
+        If context Is Nothing OrElse context.AllowedToolRegistry Is Nothing Then
+            Return result
+        End If
+
+        Dim selectedNames As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If context.SelectedTools IsNot Nothing Then
+            For Each tool In context.SelectedTools
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                selectedNames.Add(tool.ToolName.Trim())
+            Next
+        End If
+
+        For Each manifest In context.AllowedToolRegistry.ListManifests()
+            If manifest Is Nothing OrElse String.IsNullOrWhiteSpace(manifest.Name) Then Continue For
+
+            Dim toolName As String = manifest.Name.Trim()
+
+            If toolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then Continue For
+            If toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then Continue For
+            If selectedNames.Contains(toolName) Then Continue For
+
+            result.Add(manifest)
+        Next
+
+        Return result
+    End Function
+
+    Private Function BuildToolInstructionsPromptForSession(
+        selectedTools As List(Of ModelConfig),
+        subAgentMode As Boolean,
+        Optional finalResponseContract As SharedLibrary.Agents.ToolingFinalResponseContract = SharedLibrary.Agents.ToolingFinalResponseContract.UserFacingTaskStatus) As String
+
+        If Not subAgentMode Then
+            Return BuildToolInstructionsPrompt(selectedTools, finalResponseContract)
+        End If
+
+        Dim sb As New StringBuilder()
+
+        sb.AppendLine("You are running in a native tool-calling runtime.")
+        sb.AppendLine()
+        sb.AppendLine("SUB-AGENT RULES:")
+        sb.AppendLine("- Use tools only if they are actually needed.")
+        sb.AppendLine("- If a tool is declared for this turn, call it ONLY through the model's native function/tool-calling mechanism.")
+        sb.AppendLine("- Do NOT write tool calls as plain text, JSON text, markdown, Python, JavaScript, SDK examples, print(...), tool(...), tool.run(...), or function wrappers.")
+        sb.AppendLine("- Do NOT call any agent_* tool.")
+        sb.AppendLine("- Never call tool_loader for agent_* tools.")
+        sb.AppendLine("- Use tool_loader only when a needed tool is not yet declared in this turn.")
+        sb.AppendLine("- Do NOT append any <TASK_STATUS> footer.")
+        sb.AppendLine("- When the work is finished, return exactly one JSON object with keys ""summary"" and ""result"".")
+        sb.AppendLine(SharedLibrary.Agents.ToolCallSequencing.DependentBatchingInstruction)
+        sb.AppendLine()
+        sb.AppendLine("Available tools:")
+
+        If selectedTools IsNot Nothing Then
+            Dim sortedTools = selectedTools.OrderBy(Function(t) t.ToolPriority).ToList()
+
+            For Each tool In sortedTools
+                If Not String.IsNullOrWhiteSpace(tool.ToolInstructionsPrompt) Then
+                    sb.AppendLine()
+                    sb.AppendLine($"- {tool.ToolInstructionsPrompt}")
+                End If
+            Next
+        End If
+
+        Return sb.ToString()
+    End Function
+
+
+    Private Sub AddToolByNameIfPresent(target As List(Of ModelConfig),
+                                       source As IEnumerable(Of ModelConfig),
+                                       toolName As String)
+        If target Is Nothing OrElse source Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return
+        End If
+
+        If target.Any(Function(t)
+                          Return t IsNot Nothing AndAlso
+                                 Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                 t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+                      End Function) Then
+            Return
+        End If
+
+        Dim match = source.FirstOrDefault(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+
+        If match IsNot Nothing Then
+            target.Add(match)
+        End If
+    End Sub
+
+    Private Sub AddToolNameIfAvailable(target As List(Of String),
+                                       availableTools As IEnumerable(Of ModelConfig),
+                                       toolName As String)
+        If target Is Nothing OrElse availableTools Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return
+        End If
+
+        If target.Any(Function(name) name.Equals(toolName, StringComparison.OrdinalIgnoreCase)) Then
+            Return
+        End If
+
+        If availableTools.Any(Function(t)
+                                  Return t IsNot Nothing AndAlso
+                                         Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                         t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+                              End Function) Then
+            target.Add(toolName)
+        End If
+    End Sub
+
+    Private Function HasToolName(selectedTools As IEnumerable(Of ModelConfig), toolName As String) As Boolean
+        If selectedTools Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        Return selectedTools.Any(
+            Function(t)
+                Return t IsNot Nothing AndAlso
+                       Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                       t.ToolName.Equals(toolName, StringComparison.OrdinalIgnoreCase)
+            End Function)
+    End Function
+
+
+
+
+
+    Private Sub LogAgentToolCallStatistic(toolName As String)
+        Dim surface As String = ""
+
+        If _apActive Then
+            surface = "Outlook_AutoPilot"
+        ElseIf _chatAgentActive Then
+            surface = "Outlook_LocalChatAgent"
+        Else
+            Return
+        End If
+
+        SharedLogger.LogAgentToolCall(_context, _context.RDV, surface, toolName)
+    End Sub
+
+
+
+    Private Function IsEmptyJsRunResult(rawResponse As String) As Boolean
+        Dim raw As String = If(rawResponse, "").Trim()
+
+        If raw = "" OrElse raw = "{}" OrElse raw = "[]" OrElse raw.Equals("null", StringComparison.OrdinalIgnoreCase) Then
+            Return True
+        End If
+
+        Try
+            Dim token As JToken = JToken.Parse(raw)
+
+            If TypeOf token Is JObject Then
+                Dim obj = DirectCast(token, JObject)
+
+                If Not obj.Properties().Any() Then
+                    Return True
+                End If
+
+                Dim errorToken = obj("error")
+                If errorToken IsNot Nothing AndAlso errorToken.Type <> JTokenType.Null AndAlso errorToken.ToString().Trim() <> "" Then
+                    Return False
+                End If
+
+                Dim okToken = obj("ok")
+                Dim resultToken = obj("result")
+
+                Dim okValue As Boolean = False
+                If okToken IsNot Nothing Then
+                    If okToken.Type = JTokenType.Boolean Then
+                        okValue = okToken.Value(Of Boolean)()
+                    Else
+                        Boolean.TryParse(okToken.ToString(), okValue)
+                    End If
+                End If
+
+                If okValue Then
+                    If resultToken Is Nothing OrElse resultToken.Type = JTokenType.Null Then
+                        Return True
+                    End If
+
+                    If resultToken.Type = JTokenType.String AndAlso resultToken.ToString().Trim() = "" Then
+                        Return True
+                    End If
+                End If
+            End If
+        Catch
+        End Try
+
+        Return False
+    End Function
+
+    Private Function RegisterToolFailureLoopState(toolCall As ToolCall, toolResponse As ToolResponse, context As ToolExecutionContext) As Boolean
+        If toolCall Is Nothing OrElse toolResponse Is Nothing OrElse context Is Nothing Then
+            Return False
+        End If
+
+        If toolResponse.Success Then
+            context.ConsecutiveFailedToolName = ""
+            context.ConsecutiveFailedToolCount = 0
+            Return False
+        End If
+
+        Dim failedName As String = If(toolCall.ToolName, "").Trim()
+
+        If failedName.Equals(context.ConsecutiveFailedToolName, StringComparison.OrdinalIgnoreCase) Then
+            context.ConsecutiveFailedToolCount += 1
+        Else
+            context.ConsecutiveFailedToolName = failedName
+            context.ConsecutiveFailedToolCount = 1
+        End If
+
+        Return context.ConsecutiveFailedToolCount >= context.ConsecutiveToolFailureAbortThreshold
     End Function
 
     ''' <summary>
@@ -2041,6 +3703,201 @@ Partial Public Class ThisAddIn
     ''' Internal tools: <c>retrieve_web_content</c> and <c>internet_search</c> (when search is enabled).
     ''' </summary>
     Public Async Function ExecuteToolCall(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
+
+        LogAgentToolCallStatistic(toolCall.ToolName)
+
+        ' ── workspace_extract_text: unified file reader for Local Chat agent (no staging) ──
+        If _chatAgentActive AndAlso Not _apActive AndAlso
+           toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractText, StringComparison.OrdinalIgnoreCase) Then
+
+            Dim resp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
+            Dim relPath As String = If(toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("path"),
+                                       System.Convert.ToString(toolCall.Arguments("path")), "")
+            Dim maxChars As Integer = 100000
+            Try
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars") Then
+                    Integer.TryParse(toolCall.Arguments("max_chars").ToString(), maxChars)
+                End If
+            Catch
+            End Try
+            maxChars = Math.Min(Math.Max(maxChars, 1000), 500000)
+
+            If Not IsChatAgentWorkspaceConnected() OrElse Not _chatAgentWorkspace.AllowRead Then
+                resp.Success = False
+                resp.ErrorMessage = "No readable workspace is connected."
+                Return resp
+            End If
+
+            Dim fullPath As String = ResolveWorkspacePath(relPath)
+            If String.IsNullOrWhiteSpace(fullPath) OrElse Not IO.File.Exists(fullPath) Then
+                resp.Success = False
+                resp.ErrorMessage = "Workspace file not found: " & If(relPath, "")
+                Return resp
+            End If
+
+            Dim extracted As String = ""
+            Try
+                extracted = Await ChatAgentExtractFileText(fullPath).ConfigureAwait(False)
+            Catch ex As Exception
+                resp.Success = False
+                resp.ErrorMessage = "Extraction failed: " & ex.Message
+                Return resp
+            End Try
+
+            If String.IsNullOrWhiteSpace(extracted) Then
+                resp.Success = True
+                resp.Response = "(No readable text extracted from '" & relPath & "'.)"
+            Else
+                If extracted.Length > maxChars Then
+                    extracted = extracted.Substring(0, maxChars) & Environment.NewLine & "[Truncated at " & maxChars & " characters.]"
+                End If
+                resp.Success = True
+                resp.Response = extracted
+            End If
+            Return resp
+        End If
+
+        ' ── workspace_read_many: shared UTF-8 text reader for multiple files (Local Chat Agent only) ──
+        If _chatAgentActive AndAlso Not _apActive AndAlso
+           toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolReadMany, StringComparison.OrdinalIgnoreCase) Then
+
+            Dim rmResp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
+            If Not IsChatAgentWorkspaceConnected() OrElse Not _chatAgentWorkspace.AllowRead Then
+                rmResp.Success = False
+                rmResp.ErrorMessage = "No readable workspace is connected."
+                Return rmResp
+            End If
+
+            rmResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+            rmResp.Success = True
+            Return rmResp
+        End If
+
+        ' ── workspace_extract_text_many: extract text from multiple files (Local Chat Agent only) ──
+        If _chatAgentActive AndAlso Not _apActive AndAlso
+           toolCall.ToolName.Equals(SharedLibrary.Agents.WorkspaceTools.ToolExtractTextMany, StringComparison.OrdinalIgnoreCase) Then
+
+            Dim etmResp As New ToolResponse() With {.CallId = toolCall.CallId, .ToolName = toolCall.ToolName}
+
+            Dim etmMaxFiles As Integer = 20
+            Dim etmMaxCharsPerFile As Integer = 100000
+            Try
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_files") Then
+                    Integer.TryParse(toolCall.Arguments("max_files").ToString(), etmMaxFiles)
+                End If
+                If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("max_chars_per_file") Then
+                    Integer.TryParse(toolCall.Arguments("max_chars_per_file").ToString(), etmMaxCharsPerFile)
+                End If
+            Catch
+            End Try
+            etmMaxFiles = Math.Min(Math.Max(etmMaxFiles, 1), 100)
+            etmMaxCharsPerFile = Math.Min(Math.Max(etmMaxCharsPerFile, 1000), 500000)
+
+            If Not IsChatAgentWorkspaceConnected() OrElse Not _chatAgentWorkspace.AllowRead Then
+                etmResp.Success = False
+                etmResp.ErrorMessage = "No readable workspace is connected."
+                Return etmResp
+            End If
+
+            Dim etmPaths As New List(Of String)()
+            If toolCall.Arguments IsNot Nothing AndAlso toolCall.Arguments.ContainsKey("paths") Then
+                Dim etmV = toolCall.Arguments("paths")
+                If TypeOf etmV Is JArray Then
+                    For Each tk In DirectCast(etmV, JArray)
+                        Dim s = tk.ToString()
+                        If Not String.IsNullOrWhiteSpace(s) Then etmPaths.Add(s)
+                    Next
+                ElseIf TypeOf etmV Is IEnumerable(Of Object) Then
+                    For Each o In DirectCast(etmV, IEnumerable(Of Object))
+                        Dim s = System.Convert.ToString(o)
+                        If Not String.IsNullOrWhiteSpace(s) Then etmPaths.Add(s)
+                    Next
+                End If
+            End If
+
+            Dim etmRequestedCount As Integer = etmPaths.Count
+            Dim etmSelected As List(Of String) = etmPaths.Take(etmMaxFiles).ToList()
+            Dim etmItems As New List(Of Object)()
+
+            For Each etmRelPath In etmSelected
+                Dim etmFullPath As String = ResolveWorkspacePath(etmRelPath)
+                If String.IsNullOrWhiteSpace(etmFullPath) OrElse Not IO.File.Exists(etmFullPath) Then
+                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "not_found", Key .message = "File not found."})
+                    Continue For
+                End If
+
+                Try
+                    Dim etmExtracted As String = Await ChatAgentExtractFileText(etmFullPath).ConfigureAwait(False)
+                    Dim etmTruncated As Boolean = False
+                    If Not String.IsNullOrWhiteSpace(etmExtracted) AndAlso etmExtracted.Length > etmMaxCharsPerFile Then
+                        etmExtracted = etmExtracted.Substring(0, etmMaxCharsPerFile) & vbCrLf & $"[Truncated at {etmMaxCharsPerFile} characters.]"
+                        etmTruncated = True
+                    End If
+                    etmItems.Add(New With {
+                        Key .path = etmFullPath,
+                        Key .truncated = etmTruncated,
+                        Key .text = If(etmExtracted, "")
+                    })
+                Catch ex As Exception
+                    etmItems.Add(New With {Key .path = etmRelPath, Key .error = "extraction_failed", Key .message = ex.Message})
+                End Try
+            Next
+
+            etmResp.Success = True
+            etmResp.Response = JsonConvert.SerializeObject(New With {
+                Key .requested_count = etmRequestedCount,
+                Key .processed_count = etmSelected.Count,
+                Key .items = etmItems
+            })
+            Return etmResp
+        End If
+
+        If _chatAgentActive AndAlso Not _apActive AndAlso
+           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolCall.ToolName) Then
+
+            Dim wsResp As New ToolResponse() With {
+                .CallId = toolCall.CallId,
+                .ToolName = toolCall.ToolName
+            }
+
+            Dim hasReadableWorkspace As Boolean = IsChatAgentWorkspaceConnected()
+            Dim hasTransientSessionWorkspace As Boolean =
+                _chatAgentActive AndAlso Not _apActive AndAlso HasChatAgentSessionWorkspace()
+
+            If Not hasReadableWorkspace AndAlso Not hasTransientSessionWorkspace Then
+                wsResp.Success = False
+                wsResp.ErrorMessage = "No readable workspace is connected."
+                Return wsResp
+            End If
+
+            If hasTransientSessionWorkspace Then
+                SyncWorkspaceToPathPolicy(includeSessionTempFallback:=True)
+            End If
+
+            wsResp.Response = SharedLibrary.Agents.WorkspaceTools.Execute(toolCall.ToolName, toolCall.Arguments)
+            wsResp.Success = True
+
+            Try
+                Dim wsToken As JToken = JToken.Parse(wsResp.Response)
+                If wsToken.Type = JTokenType.Object Then
+                    Dim wsObj = DirectCast(wsToken, JObject)
+                    Dim errToken = wsObj("error")
+                    If errToken IsNot Nothing AndAlso errToken.Type <> JTokenType.Null AndAlso errToken.ToString().Trim() <> "" Then
+                        wsResp.Success = False
+                        wsResp.ErrorMessage = If(wsObj("message")?.ToString(), errToken.ToString())
+                    End If
+                End If
+            Catch
+            End Try
+
+            Return wsResp
+        End If
+
+        ' ── Local Chat Agent workspace tools; never available to AutoPilot ──
+        If _chatAgentActive AndAlso Not _apActive AndAlso IsChatAgentWorkspaceTool(toolCall.ToolName) Then
+            Dim workspaceResult = Await ExecuteChatAgentWorkspaceTool(toolCall, context, cancellationToken)
+            Return workspaceResult
+        End If
 
         ' ── AutoPilot / Chat Agent internal tool routing ──
         If (_apActive OrElse _chatAgentActive) AndAlso IsAutoPilotInternalTool(toolCall.ToolName) Then
@@ -2072,25 +3929,120 @@ Partial Public Class ThisAddIn
 
         ' Build condensed parameter summary for log window
         Dim paramSummary As String = BuildCondensedParamSummary(toolCall.Arguments)
-        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}")
+        Dim visibleToolLabel As String = Regex.Replace(If(toolCall.ToolName, ""), "_+", " ").Trim()
+
+        If visibleToolLabel = "" Then
+            visibleToolLabel = "processing step"
+        End If
+
+        context.Log("Running " & visibleToolLabel & "...")
+        context.Log($"Executing tool: {toolCall.ToolName}{paramSummary}", "diag")
 
 
         Try
             ' Check cancellation before execution
             cancellationToken.ThrowIfCancellationRequested()
 
+
+            If toolCall.ToolName.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = ExecuteToolLoaderCall(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+            ' Agent layer (memory_*, skill_use, agent_*) — single-line dispatcher.
+            If SharedLibrary.Agents.AgentToolRouter.IsAgentLayerTool(toolCall.ToolName) Then
+                Dim __agentJson = Await SharedLibrary.Agents.AgentToolRouter.TryHandleAsync(
+        toolCall.ToolName, toolCall.Arguments, CType(Me, SharedLibrary.Agents.ISubAgentHost), cancellationToken).ConfigureAwait(False)
+
+                response.Response = If(__agentJson, "")
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+                ApplyStructuredAgentResult(response, context)
+
+                If Not response.Success AndAlso String.IsNullOrWhiteSpace(response.ErrorMessage) Then
+                    response.ErrorMessage = "Agent-layer tool returned no usable result."
+                ElseIf response.Success AndAlso SharedLibrary.Agents.JsRunTool.IsJsTool(toolCall.ToolName) AndAlso IsEmptyJsRunResult(response.Response) Then
+                    response.Success = False
+                    response.ResultKind = "error"
+                    response.ErrorCode = "agent_empty_result"
+                    response.ErrorMessage = "js_run returned no usable result. Ensure the script explicitly returns the computed value."
+                    response.Response = "{""summary"":""Sub-agent returned no usable result."",""result"":null,""resultKind"":""error"",""error"":{""code"":""agent_empty_result"",""phase"":""final_output_parse"",""message"":""Sub-agent returned no usable final result.""}}"
+                End If
+
+                ToolingFileLogger.LogSubAgentReturn($"Agent-layer tool ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            ElseIf toolCall.ToolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) Then
+                Dim skillArgs As New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase)
+
+                skillArgs("name") = toolCall.ToolName.Substring("skill_".Length)
+
+                If toolCall.Arguments IsNot Nothing Then
+                    For Each kvp In toolCall.Arguments
+                        If Not skillArgs.ContainsKey(kvp.Key) Then
+                            skillArgs(kvp.Key) = kvp.Value
+                        End If
+                    Next
+
+                    If Not skillArgs.ContainsKey("input") AndAlso toolCall.Arguments.ContainsKey("instruction") Then
+                        skillArgs("input") = toolCall.Arguments("instruction")
+                    End If
+                End If
+
+                response.Response = SharedLibrary.Agents.SkillInvokeTool.Execute(skillArgs)
+                response.Success = Not String.IsNullOrWhiteSpace(response.Response)
+
+                ApplyStructuredAgentResult(response, context)
+
+                If response.Success Then
+                    LoadSkillAllowedToolsFromResponse(response.Response, context)
+                ElseIf String.IsNullOrWhiteSpace(response.ErrorMessage) Then
+                    response.ErrorMessage = "Skill invocation returned no usable result."
+                End If
+
+                ToolingFileLogger.LogSubAgentReturn($"Agent-layer skill ({toolCall.ToolName})", response.Response)
+                GoTo __AfterDispatch
+            End If
+
+
             If toolCall.ToolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalWebTool(toolCall, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
+            ElseIf toolCall.ToolName.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) Then
+                response = Await ExecuteInternalDownloadWebFilesTool(toolCall, context, cancellationToken)
+                ToolingFileLogger.LogRawResponseStub(
+                $"Internal tool ({toolCall.ToolName})",
+                response.Response)
 
             ElseIf toolCall.ToolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) Then
                 response = Await ExecuteInternalSearchTool(toolCall, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
 
+            ElseIf IsInternalKnowledgeToolName(toolCall.ToolName) Then
+                response = Await ExecuteInternalKnowledgeTool(toolCall, context)
+                ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+
+            ElseIf SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolCall.ToolName) Then
+                ' M365 tools are allowed in interactive/local scenarios, but never in AutoPilot.
+                ' They may trigger an interactive MSAL sign-in on the user's machine.
+                If Not _apActive Then
+                    response = Await ExecuteInternalM365Tool(toolCall, context)
+                    ToolingFileLogger.LogRawResponseStub($"Internal tool ({toolCall.ToolName})", response.Response)
+                Else
+                    response.Success = False
+                    response.ErrorMessage = "M365 tools cannot run inside AutoPilot because they may require interactive user sign-in."
+                    ToolingFileLogger.LogWarn(
+                        "M365 tool blocked in AutoPilot.",
+                        details:=$"tool={toolCall.ToolName}; _apActive={_apActive}; _chatAgentActive={_chatAgentActive}")
+                End If
+
             Else
                 response = Await ExecuteExternalTool(toolCall, toolConfig, context, cancellationToken)
                 ToolingFileLogger.LogRawResponseStub($"Tool LLM() ({toolCall.ToolName})", response.Response)
             End If
+
+__AfterDispatch:
 
             ' Log completion with excerpt
             If response.Success Then
@@ -2156,685 +4108,8 @@ Partial Public Class ThisAddIn
     End Function
 
 
-    ''' <summary>
-    ''' Builds a brief excerpt of the tool result for display in the log window.
-    ''' </summary>
-    ''' <param name="result">Full tool response text.</param>
-    ''' <param name="maxExcerptLength">Maximum length for the excerpt portion.</param>
-    ''' <returns>Formatted string like "12,345 chars: 'The quick brown fox...'".</returns>
-    Private Function BuildResultExcerpt(result As String, Optional maxExcerptLength As Integer = 80) As String
-        If String.IsNullOrEmpty(result) Then
-            Return "0 chars (empty)"
-        End If
 
-        Dim charCount As Integer = result.Length
-        Dim formattedCount As String = charCount.ToString("N0")
 
-        ' Clean up the result for excerpt (remove excessive whitespace/newlines)
-        Dim cleaned As String = Regex.Replace(result, "\s+", " ").Trim()
-
-        If cleaned.Length <= maxExcerptLength Then
-            Return $"{formattedCount} chars: '{cleaned}'"
-        End If
-
-        ' Truncate and add ellipsis
-        Dim excerpt As String = cleaned.Substring(0, maxExcerptLength - 3) & "..."
-        Return $"{formattedCount} chars: '{excerpt}'"
-    End Function
-
-    ''' <summary>
-    ''' Builds a condensed parameter summary for display in the log window.
-    ''' </summary>
-    ''' <param name="arguments">Tool call arguments dictionary.</param>
-    ''' <param name="maxLength">Maximum length for each parameter value display.</param>
-    ''' <returns>Formatted parameter string like " (query: 'search term', count: 10)".</returns>
-    Private Function BuildCondensedParamSummary(arguments As Dictionary(Of String, Object), Optional maxLength As Integer = 50) As String
-        If arguments Is Nothing OrElse arguments.Count = 0 Then
-            Return ""
-        End If
-
-        Dim parts As New List(Of String)()
-
-        For Each kvp In arguments
-            Dim valueStr As String = ""
-            If kvp.Value IsNot Nothing Then
-                If TypeOf kvp.Value Is JArray Then
-                    Dim arr = DirectCast(kvp.Value, JArray)
-                    valueStr = $"[{arr.Count} items]"
-                ElseIf TypeOf kvp.Value Is IEnumerable(Of Object) AndAlso Not TypeOf kvp.Value Is String Then
-                    valueStr = $"[{DirectCast(kvp.Value, IEnumerable(Of Object)).Count()} items]"
-                Else
-                    valueStr = kvp.Value.ToString()
-                    ' Use shorter limit for long text parameters like "instruction"
-                    Dim effectiveMax = If(valueStr.Length > 200, Math.Min(maxLength, 80), maxLength)
-                    If valueStr.Length > effectiveMax Then
-                        valueStr = valueStr.Substring(0, effectiveMax - 3) & "..."
-                    End If
-                End If
-            End If
-
-            parts.Add($"{kvp.Key}: '{valueStr}'")
-        Next
-
-        Return $" ({String.Join(", ", parts)})"
-    End Function
-
-
-    ''' <summary>
-    ''' Executes the internal web retrieval tool by fetching content for one or more URLs and returning tagged content blocks.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call payload containing <c>url</c> or <c>urls</c> arguments.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <param name="cancellationToken">Optional cancellation token to abort execution.</param>
-    ''' <returns>Tool response containing retrieved content or an error.</returns>
-    Private Async Function ExecuteInternalWebTool(toolCall As ToolCall, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            ' Check cancellation before starting
-            cancellationToken.ThrowIfCancellationRequested()
-
-            Dim urls As New List(Of String)()
-
-            If toolCall.Arguments.ContainsKey("urls") Then
-                Dim urlsArg = toolCall.Arguments("urls")
-                If TypeOf urlsArg Is JArray Then
-                    For Each item In DirectCast(urlsArg, JArray)
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is IEnumerable(Of Object) Then
-                    For Each item In DirectCast(urlsArg, IEnumerable(Of Object))
-                        urls.Add(item.ToString())
-                    Next
-                ElseIf TypeOf urlsArg Is String Then
-                    urls.Add(urlsArg.ToString())
-                End If
-            ElseIf toolCall.Arguments.ContainsKey("url") Then
-                urls.Add(toolCall.Arguments("url").ToString())
-            End If
-
-            If urls.Count = 0 Then
-                response.Success = False
-                response.ErrorMessage = "No URLs provided"
-                ToolingFileLogger.LogWarn("Internal web tool: No URLs provided.", details:=$"CallId={toolCall.CallId}; Args={JsonConvert.SerializeObject(toolCall.Arguments)}")
-                Return response
-            End If
-
-            ' ── SharePoint / OneDrive / Teams detection ──
-            ' These authenticated cloud storage URLs require login and will not return useful content.
-            Dim sharepointPatterns As String() = {"sharepoint.com", "onedrive.com", "1drv.ms", "teams.microsoft.com", ":f:/", "/:f:/"}
-            Dim blockedUrls As New List(Of String)()
-            For Each url In urls
-                Dim lowerUrl = url.ToLowerInvariant()
-                For Each pattern In sharepointPatterns
-                    If lowerUrl.Contains(pattern) Then
-                        blockedUrls.Add(url)
-                        Exit For
-                    End If
-                Next
-            Next
-
-            If blockedUrls.Count > 0 Then
-                Dim blockedList = String.Join(", ", blockedUrls)
-                response.Success = False
-                response.ErrorMessage =
-                    $"Cannot retrieve content from the following URL(s) because they point to SharePoint, OneDrive, or Microsoft Teams — " &
-                    $"these are authenticated cloud storage resources that require login and cannot be accessed remotely: {blockedList}. " &
-                    "Please ask the user to download the file(s) and attach them directly to the e-mail."
-                context.Log($"Blocked SharePoint/OneDrive URL(s): {blockedList}", "warn")
-                ToolingFileLogger.LogWarn("Internal web tool: SharePoint/OneDrive URL blocked.", details:=$"urls={blockedList}")
-                Return response
-            End If
-
-            context.Log($"Retrieving content from {urls.Count} URL(s)...")
-
-            Dim results As New StringBuilder()
-
-            If UseWebView2 Then
-                For i = 0 To urls.Count - 1
-                    ' Check cancellation before each URL fetch
-                    cancellationToken.ThrowIfCancellationRequested()
-
-                    Dim url = urls(i)
-                    Try
-                        context.Log($"  Fetching: {url}")
-                        ' RetrieveWebsiteContent_WebView2 handles its own threading (runs on STA thread internally)
-                        Dim content = Await RetrieveWebsiteContent_WebView2(url, 0)
-
-
-                        If Not String.IsNullOrWhiteSpace(content) Then
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                            results.AppendLine($"<CONTENT_{i + 1}>")
-                            results.AppendLine(content)
-                            results.AppendLine($"</CONTENT_{i + 1}>")
-                            results.AppendLine()
-                        Else
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                            results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                            results.AppendLine()
-                            ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={url}")
-                        End If
-                    Catch ex As OperationCanceledException
-                        Throw ' Re-throw cancellation
-                    Catch ex As Exception
-                        results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                        results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
-                        results.AppendLine()
-                        ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
-                    End Try
-                Next
-            Else
-                Using httpClient As New System.Net.Http.HttpClient()
-                    httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    httpClient.Timeout = TimeSpan.FromSeconds(30)
-
-                    For i = 0 To urls.Count - 1
-                        ' Check cancellation before each URL fetch
-                        cancellationToken.ThrowIfCancellationRequested()
-
-                        Dim url = urls(i)
-                        Try
-                            context.Log($"  Fetching: {url}")
-                            Dim content = Await RetrieveWebsiteContent(url, INI_ISearch_MaxDepth, httpClient)
-
-                            If Not String.IsNullOrWhiteSpace(content) Then
-                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                                results.AppendLine($"<CONTENT_{i + 1}>")
-                                results.AppendLine(content)
-                                results.AppendLine($"</CONTENT_{i + 1}>")
-                                results.AppendLine()
-                            Else
-                                results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                                results.AppendLine($"<CONTENT_{i + 1}>No content retrieved</CONTENT_{i + 1}>")
-                                results.AppendLine()
-                                ToolingFileLogger.LogWarn("Internal web tool: No content retrieved.", details:=$"url={url}")
-                            End If
-                        Catch ex As OperationCanceledException
-                            Throw ' Re-throw cancellation
-                        Catch ex As Exception
-                            results.AppendLine($"<URL_{i + 1}>{url}</URL_{i + 1}>")
-                            results.AppendLine($"<ERROR_{i + 1}>{ex.Message}</ERROR_{i + 1}>")
-                            results.AppendLine()
-                            ToolingFileLogger.LogError("Internal web tool fetch error.", details:=$"url={url}", ex:=ex)
-                        End Try
-                    Next
-                End Using
-            End If
-
-            response.Response = results.ToString()
-            response.Success = True
-
-        Catch ex As OperationCanceledException
-            response.Success = False
-            response.ErrorMessage = "Operation was cancelled"
-            ToolingFileLogger.LogWarn("Internal web tool cancelled.")
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            ToolingFileLogger.LogError("Internal web tool error.", ex:=ex)
-        End Try
-
-        Return response
-    End Function
-
-    ''' <summary>
-    ''' Executes the internal internet search tool by querying the configured search engine,
-    ''' extracting result URLs via response masks, fetching qualifying page content, and returning
-    ''' tagged result blocks including the search query and all visited URLs for transparency.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call payload containing <c>query</c> and optional <c>max_results</c>/<c>max_depth</c>.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <param name="cancellationToken">Optional cancellation token to abort execution.</param>
-    ''' <returns>Tool response containing search results or an error.</returns>
-    Private Async Function ExecuteInternalSearchTool(toolCall As ToolCall, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            cancellationToken.ThrowIfCancellationRequested()
-
-            ' ── Validate search configuration ────────────────────────────
-            If Not INI_ISearch OrElse String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
-                response.Success = False
-                response.ErrorMessage = "Internet search is not configured or not enabled."
-                ToolingFileLogger.LogWarn("Internal search tool: search not enabled/configured.",
-                    details:=$"INI_ISearch={INI_ISearch}; INI_ISearch_URL='{INI_ISearch_URL}'")
-                Return response
-            End If
-
-            ' ── Extract and validate parameters ──────────────────────────
-            Dim query As String = ""
-            If toolCall.Arguments.ContainsKey("query") Then
-                query = If(toolCall.Arguments("query")?.ToString(), "").Trim()
-            End If
-
-            If String.IsNullOrWhiteSpace(query) Then
-                response.Success = False
-                response.ErrorMessage = "No search query provided."
-                ToolingFileLogger.LogWarn("Internal search tool: empty query.",
-                    details:=$"CallId={toolCall.CallId}; Args={JsonConvert.SerializeObject(toolCall.Arguments)}")
-                Return response
-            End If
-
-            ' ── PII / confidential data safety net ───────────────────────
-            ' Block queries that contain obvious personal data patterns.
-            ' Only enforced when privacy protection is enabled.
-            Dim enforcePrivacyForPII As Boolean = True  ' default for non-AutoPilot callers
-            If _apConfig IsNot Nothing Then
-                enforcePrivacyForPII = _apConfig.EnablePrivacyProtection
-            ElseIf _context IsNot Nothing Then
-                enforcePrivacyForPII = _context.INI_EnablePrivacyForSearch
-            End If
-
-            If enforcePrivacyForPII Then
-                Dim piiPatterns As String() = {
-                "\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
-                "\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b",
-                "\b\+?\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{2,4}[-.\s]?\d{2,4}[-.\s]?\d{0,4}\b",
-                "\b\d{3}-\d{2}-\d{4}\b",
-                "\b\d{2}[\./]\d{2}[\./]\d{2,4}\b(?=.*\d{2}[\./]\d{2}[\./]\d{2,4})",
-                "\b[A-Z]{2}\d{2}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{4}\s?\d{0,2}\b",
-                "\b(?:4\d{3}|5[1-5]\d{2}|6011|3[47]\d{2})[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
-                "\bAHV[\s-]?\d{3}[\.\s]?\d{4}[\.\s]?\d{4}[\.\s]?\d{2}\b"
-            }
-                For Each piiPattern In piiPatterns
-                    If Regex.IsMatch(query, piiPattern, RegexOptions.IgnoreCase) Then
-                        response.Success = False
-                        response.ErrorMessage = "Search query blocked: appears to contain personal or confidential data."
-                        ToolingFileLogger.LogWarn("Internal search tool: query blocked by PII filter.",
-                        details:=$"CallId={toolCall.CallId}; Pattern='{piiPattern}'")
-                        context.Log("  ⚠ Search query blocked — contains data that appears personal or confidential.", "warn")
-                        Return response
-                    End If
-                Next
-            End If
-
-            ' Clamp max_results to server limit (INI_ISearch_Tries)
-            Dim maxResults As Integer = INI_ISearch_Results
-            If toolCall.Arguments.ContainsKey("max_results") Then
-                Dim requested As Integer
-                If Integer.TryParse(toolCall.Arguments("max_results")?.ToString(), requested) AndAlso requested > 0 Then
-                    maxResults = Math.Min(requested, INI_ISearch_Tries)
-                End If
-            End If
-
-            ' Clamp max_depth to server limit (INI_ISearch_MaxDepth)
-            Dim maxDepth As Integer = 0
-            If toolCall.Arguments.ContainsKey("max_depth") Then
-                Dim requested As Integer
-                If Integer.TryParse(toolCall.Arguments("max_depth")?.ToString(), requested) AndAlso requested >= 0 Then
-                    maxDepth = Math.Min(requested, INI_ISearch_MaxDepth)
-                End If
-            End If
-
-            context.Log($"Internet search: query='{query}', max_results={maxResults}, max_depth={maxDepth}")
-            ToolingFileLogger.LogStep($"Search query: '{query}'; max_results={maxResults}; max_depth={maxDepth}; engine={INI_ISearch_Name}")
-
-            ' ── Perform the HTTP search request ──────────────────────────
-            Dim searchUrl As String = INI_ISearch_URL & Uri.EscapeDataString(query)
-            context.Log($"  Search URL: {searchUrl}")
-
-            cancellationToken.ThrowIfCancellationRequested()
-
-            Dim searchResponse As String = ""
-            Using httpClient As New System.Net.Http.HttpClient()
-                httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
-                httpClient.Timeout = TimeSpan.FromSeconds(30)
-
-                searchResponse = Await httpClient.GetStringAsync(searchUrl)
-            End Using
-
-            If String.IsNullOrWhiteSpace(searchResponse) Then
-                response.Success = False
-                response.ErrorMessage = "Search engine returned an empty response."
-                ToolingFileLogger.LogWarn("Internal search tool: empty search response.",
-                    details:=$"searchUrl={searchUrl}")
-                Return response
-            End If
-
-            ' ── Extract unique URLs using response masks ─────────────────
-            Dim urlPattern As String = Regex.Escape(INI_ISearch_ResponseMask1) & "(.*?)" & Regex.Escape(INI_ISearch_ResponseMask2)
-            Dim matches As MatchCollection = Regex.Matches(searchResponse, urlPattern)
-
-            Dim extractedUrls As New List(Of String)()
-            For Each m As Match In matches
-                Dim rawUrl As String = m.Groups(1).Value
-                Dim decodedUrl As String = System.Net.WebUtility.UrlDecode(rawUrl.Replace(INI_ISearch_ResponseMask1, ""))
-
-                If Not extractedUrls.Contains(decodedUrl) AndAlso IsSafeWebUrl(decodedUrl) Then
-                    extractedUrls.Add(decodedUrl)
-                End If
-
-                If extractedUrls.Count >= INI_ISearch_Tries Then Exit For
-            Next
-
-            context.Log($"  Extracted {extractedUrls.Count} unique URL(s) from search results")
-            ToolingFileLogger.LogStep($"Extracted URLs: {extractedUrls.Count}")
-
-            If extractedUrls.Count = 0 Then
-                response.Success = False
-                response.ErrorMessage = "No result URLs could be extracted from the search engine response."
-                ToolingFileLogger.LogWarn("Internal search tool: no URLs extracted.",
-                    details:=$"searchUrl={searchUrl}; ResponseMask1='{INI_ISearch_ResponseMask1}'; ResponseMask2='{INI_ISearch_ResponseMask2}'")
-                Return response
-            End If
-
-            ' ── Fetch content from each result URL ───────────────────────
-            Dim results As New Text.StringBuilder()
-            Dim visitedUrls As New List(Of String)()
-            Dim resultIndex As Integer = 0
-
-            ' Header: report the search query and engine
-            results.AppendLine($"<SEARCH_QUERY>{query}</SEARCH_QUERY>")
-            results.AppendLine($"<SEARCH_ENGINE>{If(INI_ISearch_Name, "Search")}</SEARCH_ENGINE>")
-            results.AppendLine()
-
-            For Each url In extractedUrls
-                If resultIndex >= maxResults Then Exit For
-                cancellationToken.ThrowIfCancellationRequested()
-
-                Try
-                    context.Log($"  Fetching result: {url}")
-                    visitedUrls.Add(url)
-
-                    Dim content As String = ""
-
-                    If UseWebView2 Then
-                        content = Await RetrieveWebsiteContent_WebView2(url, ISearch_MaxChars)
-                    Else
-                        Using httpClient As New System.Net.Http.HttpClient()
-                            httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                            httpClient.Timeout = TimeSpan.FromSeconds(30)
-                            content = Await RetrieveWebsiteContent(url, maxDepth, httpClient)
-                        End Using
-                    End If
-
-                    ' Apply character cap (ISearch_MaxChars) for WebView2 results that exceed it
-                    If Not String.IsNullOrWhiteSpace(content) AndAlso ISearch_MaxChars > 0 AndAlso content.Length > ISearch_MaxChars Then
-                        content = content.Substring(0, ISearch_MaxChars)
-                    End If
-
-                    ' Discard noise (pages shorter than ISearch_MinChars)
-                    If Not String.IsNullOrWhiteSpace(content) AndAlso content.Length >= ISearch_MinChars Then
-                        resultIndex += 1
-                        results.AppendLine($"<SEARCHRESULT_{resultIndex}_URL>{url}</SEARCHRESULT_{resultIndex}_URL>")
-                        results.AppendLine($"<SEARCHRESULT_{resultIndex}>")
-                        results.AppendLine(content)
-                        results.AppendLine($"</SEARCHRESULT_{resultIndex}>")
-                        results.AppendLine()
-                        context.Log($"  Result #{resultIndex}: {content.Length} chars from {url}")
-                    Else
-                        Dim charCount = If(content Is Nothing, 0, content.Length)
-                        context.Log($"  Skipped (too short: {charCount} chars, min {ISearch_MinChars}): {url}")
-                        ToolingFileLogger.LogStep($"Search result skipped (too short: {charCount} < {ISearch_MinChars}): {url}")
-                    End If
-
-                Catch ex As OperationCanceledException
-                    Throw ' Re-throw cancellation
-                Catch ex As Exception
-                    context.Log($"  Error fetching {url}: {ex.Message}")
-                    ToolingFileLogger.LogError("Internal search tool fetch error.", details:=$"url={url}", ex:=ex)
-                End Try
-            Next
-
-            ' Footer: report all visited URLs for transparency
-            results.AppendLine("<URLS_VISITED>")
-            For Each vUrl In visitedUrls
-                results.AppendLine($"  {vUrl}")
-            Next
-            results.AppendLine("</URLS_VISITED>")
-
-            context.Log($"Search complete: {resultIndex} qualifying result(s) from {visitedUrls.Count} URL(s) visited")
-
-            response.Response = results.ToString()
-            response.Success = True
-
-        Catch ex As OperationCanceledException
-            response.Success = False
-            response.ErrorMessage = "Operation was cancelled"
-            ToolingFileLogger.LogWarn("Internal search tool cancelled.")
-
-        Catch ex As System.Net.Http.HttpRequestException
-            response.Success = False
-            response.ErrorMessage = $"Search HTTP error: {ex.Message}"
-            ToolingFileLogger.LogError("Internal search tool HTTP error.", ex:=ex)
-
-        Catch ex As TaskCanceledException
-            response.Success = False
-            response.ErrorMessage = $"Search request timed out: {ex.Message}"
-            ToolingFileLogger.LogError("Internal search tool timeout.", ex:=ex)
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            ToolingFileLogger.LogError("Internal search tool error.", ex:=ex)
-        End Try
-
-        Return response
-    End Function
-
-    ''' <summary>
-    ''' Executes an external tool by applying its <see cref="ModelConfig"/> to <c>_context</c>, preparing
-    ''' the tool API call payload, and invoking <c>LLM</c> in JSON response mode.
-    ''' For SSE/MCP endpoints (prefixed with "sse:"), bypasses LLM() and calls the MCP server directly.
-    ''' </summary>
-    ''' <param name="toolCall">Tool call extracted from the LLM response.</param>
-    ''' <param name="toolConfig">Tool configuration to apply for this call.</param>
-    ''' <param name="context">Tool execution context for logging and diagnostics.</param>
-    ''' <param name="cancellationToken">Optional cancellation token to abort execution.</param>
-    ''' <returns>Tool response containing the tool service result or an error.</returns>
-    Private Async Function ExecuteExternalTool(toolCall As ToolCall, toolConfig As ModelConfig, context As ToolExecutionContext, Optional cancellationToken As System.Threading.CancellationToken = Nothing) As Task(Of ToolResponse)
-        Dim response As New ToolResponse() With {
-            .CallId = toolCall.CallId,
-            .ToolName = toolCall.ToolName
-        }
-
-        Try
-            ' Check cancellation before starting
-            cancellationToken.ThrowIfCancellationRequested()
-
-            Dim apiCallTemplate = toolConfig.ToolAPICall
-            If String.IsNullOrWhiteSpace(apiCallTemplate) Then
-                apiCallTemplate = toolConfig.APICall
-            End If
-
-            If String.IsNullOrWhiteSpace(apiCallTemplate) Then
-                response.Success = False
-                response.ErrorMessage = "Tool has no APICall template defined"
-                ToolingFileLogger.LogError("Tool has no APICall template defined.", details:=$"ToolName='{toolCall.ToolName}'")
-                Return response
-            End If
-
-            Dim apiCall = apiCallTemplate
-
-            For Each kvp In toolCall.Arguments
-                Dim placeholder = "{" & kvp.Key & "}"
-                Dim value As String
-                If kvp.Value Is Nothing Then
-                    value = ""
-                ElseIf TypeOf kvp.Value Is Boolean Then
-                    ' JSON requires lowercase true/false
-                    value = If(CBool(kvp.Value), "true", "false")
-                ElseIf TypeOf kvp.Value Is JToken Then
-                    Dim jt = DirectCast(kvp.Value, JToken)
-                    If jt.Type = JTokenType.String Then
-                        ' Escape the string value for safe JSON embedding in the template
-                        value = JsonConvert.ToString(jt.Value(Of String)())
-                        ' JsonConvert.ToString wraps in quotes → strip the outer quotes
-                        value = value.Substring(1, value.Length - 2)
-                    Else
-                        ' Preserve JSON token as-is (handles nested objects/arrays)
-                        value = jt.ToString(Formatting.None)
-                    End If
-                ElseIf TypeOf kvp.Value Is Double OrElse TypeOf kvp.Value Is Single OrElse TypeOf kvp.Value Is Decimal Then
-                    ' Ensure invariant culture (dot decimal separator)
-                    value = System.Convert.ToDouble(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
-                ElseIf TypeOf kvp.Value Is Long OrElse TypeOf kvp.Value Is Integer OrElse TypeOf kvp.Value Is Short Then
-                    value = System.Convert.ToInt64(kvp.Value).ToString(Globalization.CultureInfo.InvariantCulture)
-                Else
-                    ' Escape the string for safe JSON embedding (handles ", \, newlines, etc.)
-                    Dim raw = kvp.Value.ToString()
-                    Dim escaped = JsonConvert.ToString(raw)
-                    ' JsonConvert.ToString wraps in quotes → strip the outer quotes
-                    value = escaped.Substring(1, escaped.Length - 2)
-                End If
-                apiCall = apiCall.Replace(placeholder, value)
-            Next
-
-            Dim unreplacedPattern As New Regex("\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
-
-            Dim unreplacedMatches = unreplacedPattern.Matches(apiCall)
-            If unreplacedMatches.Count > 0 Then
-
-                ToolingFileLogger.LogWarn(
-                    "Unreplaced placeholders found in tool APICall (defaults will be applied if available).",
-                    details:=$"ToolName='{toolCall.ToolName}'; Count={unreplacedMatches.Count}; APICall='{apiCall}'")
-
-                Dim toolDefaults As Dictionary(Of String, String) = Nothing
-                If Not String.IsNullOrWhiteSpace(toolConfig.ToolParameterDefaults) Then
-                    Try
-                        toolDefaults = JsonConvert.DeserializeObject(Of Dictionary(Of String, String))(toolConfig.ToolParameterDefaults)
-                    Catch ex As Exception
-                        ToolingFileLogger.LogWarn(
-                            "ToolParameterDefaults parse failed.",
-                            details:=$"ToolName='{toolCall.ToolName}'; ToolParameterDefaults='{toolConfig.ToolParameterDefaults}'",
-                            ex:=ex)
-                    End Try
-                End If
-
-                For Each m As Match In unreplacedMatches
-                    Dim placeholderName = m.Groups(1).Value
-                    Dim defaultValue As String = ""
-                    If toolDefaults IsNot Nothing AndAlso toolDefaults.ContainsKey(placeholderName) Then
-                        defaultValue = toolDefaults(placeholderName)
-                    End If
-                    apiCall = apiCall.Replace(m.Value, defaultValue)
-                Next
-
-                ' Re-check: if anything remains unreplaced after applying defaults, that's a real error.
-                Dim remainingMatches = unreplacedPattern.Matches(apiCall)
-                If remainingMatches.Count > 0 Then
-                    Dim remainingNames = remainingMatches.
-                        Cast(Of Match)().
-                        Select(Function(m) m.Groups(1).Value).
-                        Distinct(StringComparer.OrdinalIgnoreCase).
-                        ToList()
-
-                    response.Success = False
-                    response.ErrorMessage = $"Unreplaced placeholders remain after applying defaults: {String.Join(", ", remainingNames)}"
-
-                    ToolingFileLogger.LogError(
-                        "Unreplaced placeholders remain in tool APICall after applying defaults.",
-                        details:=$"ToolName='{toolCall.ToolName}'; RemainingCount={remainingMatches.Count}; Remaining='{String.Join(", ", remainingNames)}'; APICall='{apiCall}'")
-
-                    Return response
-                End If
-            End If
-
-            ' ── SSE transport: full round-trip bypassing LLM() ───────────
-            If Not String.IsNullOrWhiteSpace(toolConfig.Endpoint) AndAlso
-               toolConfig.Endpoint.StartsWith(SharedMethods.MCP_SSE_PREFIX, StringComparison.OrdinalIgnoreCase) Then
-
-                Dim sseBase = toolConfig.Endpoint.Substring(SharedMethods.MCP_SSE_PREFIX.Length)
-                Dim resolvedHeaderB = If(toolConfig.HeaderB, "").Replace("{apikey}", If(toolConfig.DecodedAPI, ""))
-
-                context.Log($"SSE transport: executing tool {toolCall.ToolName} via {sseBase}")
-                ToolingFileLogger.LogStep($"SSE round-trip for {toolCall.ToolName} at {sseBase}")
-                ToolingFileLogger.LogStep($"SSE request body: {apiCall}")
-
-                Try
-                    Dim rawResult = Await SharedMethods.ExecuteMCPSSEToolCall(
-                        sseBase, apiCall,
-                        If(toolConfig.HeaderA, ""), resolvedHeaderB,
-                        CInt(Math.Min(If(toolConfig.Timeout > 0, toolConfig.Timeout, 60000L), Integer.MaxValue)))
-
-                    ToolingFileLogger.LogRawResponseStub($"SSE tool result ({toolCall.ToolName})", rawResult)
-
-                    If Not String.IsNullOrWhiteSpace(rawResult) Then
-                        response.Response = rawResult
-                        response.Success = True
-                    Else
-                        response.Success = False
-                        response.ErrorMessage = "Empty response from SSE tool service"
-                        ToolingFileLogger.LogError("Empty SSE response.", details:=$"ToolName='{toolCall.ToolName}'")
-                    End If
-
-                Catch ex As Exception
-                    response.Success = False
-                    response.ErrorMessage = $"SSE tool call failed: {ex.Message}"
-                    ToolingFileLogger.LogError("SSE tool call failed.",
-                        details:=$"ToolName='{toolCall.ToolName}'; SseBase='{sseBase}'", ex:=ex)
-                End Try
-
-                Return response
-            End If
-
-            ' ── Standard transport: route through LLM() ──────────────────
-            Dim backupConfig = GetCurrentConfig(_context)
-
-            Try
-                ' Check cancellation before applying config
-                cancellationToken.ThrowIfCancellationRequested()
-
-                Dim errorFlag As Boolean = False
-                ApplyModelConfig(_context, toolConfig, errorFlag)
-                If errorFlag Then
-                    response.Success = False
-                    response.ErrorMessage = "Failed to apply tool configuration"
-                    ToolingFileLogger.LogError("Failed to apply tool configuration.", details:=$"ToolName='{toolCall.ToolName}'")
-                    Return response
-                End If
-
-                _context.INI_APICall_2 = apiCall
-
-                Dim originalResponse = _context.INI_Response_2
-                _context.INI_Response_2 = "JSON"
-
-                context.Log($"Calling external service for tool: {toolCall.ToolName}")
-
-                ToolingFileLogger.LogPreToolLlmCallSnapshot(_context)
-
-                ' Pass cancellation token to LLM call
-                Dim result = Await LLM("", "", "", "", 0, True, True, "", "", cancellationToken, EnsureUI:=False)
-
-                ToolingFileLogger.LogRawResponseStub($"Tool LLM() result ({toolCall.ToolName})", result)
-
-                _context.INI_Response_2 = originalResponse
-
-                If Not String.IsNullOrWhiteSpace(result) Then
-                    response.Response = result
-                    response.Success = True
-                Else
-                    response.Success = False
-                    response.ErrorMessage = "Empty response from tool service"
-                    ToolingFileLogger.LogError("Empty response from tool service.", details:=$"ToolName='{toolCall.ToolName}'; APICall='{apiCall}'")
-                End If
-
-            Finally
-                RestoreDefaults(_context, backupConfig)
-            End Try
-
-        Catch ex As OperationCanceledException
-            response.Success = False
-            response.ErrorMessage = "Operation was cancelled"
-            ToolingFileLogger.LogWarn($"Tool {toolCall.ToolName} cancelled during external execution.")
-
-        Catch ex As Exception
-            response.Success = False
-            response.ErrorMessage = ex.Message
-            ToolingFileLogger.LogError("Tool execution error.", details:=$"ToolName='{toolCall.ToolName}'", ex:=ex)
-        End Try
-
-        Return response
-    End Function
 
     ''' <summary>
     ''' Loads tooling service configurations from an INI file and returns tool-capable <see cref="ModelConfig"/> entries.
@@ -2844,6 +4119,11 @@ Partial Public Class ThisAddIn
     ''' <returns>List of available tool configurations.</returns>
     Public Function LoadToolingServices(iniPath As String, Optional toolsOnly As Boolean = True) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+
+        ' Register host-internal tool names in the executor registry (idempotent).
+        ' External (INI) tools are registered below, after they have been confirmed
+        ' to carry an APICall template. Anything not registered cannot be advertised.
+        Agents.HostToolRegistration.RegisterOutlookInternals()
 
         If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
             Return tools
@@ -2857,13 +4137,25 @@ Partial Public Class ThisAddIn
 
                 If toolsOnly Then
                     If String.IsNullOrWhiteSpace(mc.ToolInstructionsPrompt) AndAlso
-                       String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
+                    String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
                         Continue For
                     End If
                 End If
 
                 mc.Tool = True
                 tools.Add(mc)
+
+                ' Register transport-backed (external) tools that have an APICall
+                ' template. A tool with no transport is intentionally NOT registered
+                ' here; that prevents it from being advertised and forces the
+                ' deliverable-fallback gate to look elsewhere.
+                Dim apiTemplate As String =
+                 If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
+                If Not String.IsNullOrWhiteSpace(apiTemplate) AndAlso
+                Not String.IsNullOrWhiteSpace(mc.ToolName) Then
+                    Agents.ToolExecutorRegistry.RegisterExternal(
+                     Agents.ToolingHostKind.Outlook, mc.ToolName)
+                End If
             Next
 
         Catch ex As Exception
@@ -2885,9 +4177,8 @@ Partial Public Class ThisAddIn
             Return New List(Of ModelConfig)()
         End If
 
-        ' Note: Do NOT add ToolingSuffix here. ToolingSuffix is for models that CAN USE tools/sources,
-        ' not for the tools/sources themselves. The tools in this list ARE the sources.
-        ' InternalToolSuffix is already applied to the internal web tool in GetInternalWebTool().
+        ' Note: do NOT add built-in/internal suffixes here.
+        ' MultiModelSelectorForm renders those labels centrally via HostToolRegistration.
 
         Dim selector As New MultiModelSelectorForm(
         availableTools,
@@ -2895,7 +4186,20 @@ Partial Public Class ThisAddIn
         $"{AN} - Select {FriendlyName}",
         resetChecked:=False,
         preselectMany:=If(SelectedToolNames, New List(Of String)()),
-        "Select the sources you want to make available to the model:")
+        $"Select the {Globals.ThisAddIn.ToolFriendlyName.ToLower} you want to make available to the model:")
+
+        selector.AddExtraButton("Skills && Agents…",
+            Sub(s, e)
+                Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                    f.ShowDialog(selector)
+                End Using
+            End Sub)
+        selector.AddExtraButton("Memory…",
+            Sub(s, e)
+                Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
+                    f.ShowDialog(selector)
+                End Using
+            End Sub)
 
         If selector.ShowDialog() = DialogResult.OK Then
             Dim selected = selector.SelectedModels
@@ -2914,11 +4218,13 @@ Partial Public Class ThisAddIn
 
     ''' <summary>
     ''' Returns all available tools by loading external tools from <c>INI_SpecialServicePath</c>,
-    ''' adding the internal web tool, and conditionally adding the internal search tool
-    ''' (only when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured).
+    ''' adding the internal web tool, conditionally adding the internal search tool
+    ''' (only when <c>INI_ISearch</c> is enabled and <c>INI_ISearch_URL</c> is configured),
+    ''' and conditionally adding the internal knowledge store search tool
+    ''' (only when a knowledge store path is configured and at least one store is indexed).
     ''' </summary>
     ''' <returns>List of available tools.</returns>
-    Public Function GetAvailableTools() As List(Of ModelConfig)
+    Public Function GetAvailableTools(Optional includeInteractiveM365Tools As Boolean = False) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
         If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
@@ -2927,11 +4233,47 @@ Partial Public Class ThisAddIn
         End If
 
         tools.Add(GetInternalWebTool())
+        tools.Add(GetInternalDownloadWebFilesTool())
 
-        ' Add internet search tool only when search grounding is enabled and configured
+        Dim webGroundingTool =
+        SharedLibrary.Agents.WebGroundingTool.Build(
+            _context,
+            enforcePrivacy:=INI_EnablePrivacyForSearch,
+            toolPriority:=997,
+            displaySuffix:=InternalToolSuffix)
+
+        If webGroundingTool IsNot Nothing Then
+            tools.Add(webGroundingTool)
+        End If
+
         If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
             tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
         End If
+
+        tools.AddRange(GetInternalKnowledgeTools())
+
+        ' M365 tools are interactive-only. Show them for Local Chat Agent source
+        ' selection and execution, but never for AutoPilot.
+        If (includeInteractiveM365Tools OrElse _chatAgentActive) AndAlso Not _apActive Then
+            tools.AddRange(SharedLibrary.SharedLibrary.M365ToolService.GetTools(_context, InternalToolSuffix))
+        End If
+
+        ' Agent layer: session memory, skill loader, and discovered skills/agents (lazy registry-backed).
+        Try
+            SharedLibrary.Agents.AgentResources.Refresh()
+            tools.AddRange(SharedLibrary.Agents.MemoryTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.TextTools.BuildAll())
+            tools.AddRange(SharedLibrary.Agents.WordTools.BuildAll())
+            tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+            tools.Add(SharedLibrary.Agents.SkillInvokeTool.Build())
+
+            Dim __agentReg As New SharedLibrary.Agents.ToolRegistry()
+            SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(__agentReg, SharedLibrary.Agents.AgentResources.Skills)
+            SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(__agentReg, SharedLibrary.Agents.AgentResources.Agents)
+            tools.AddRange(__agentReg.MaterializeAll())
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("Agent layer registration failed.", ex:=ex)
+        End Try
 
         Return tools
     End Function
@@ -2956,8 +4298,10 @@ Partial Public Class ThisAddIn
     ''' </summary>
     ''' <param name="forceDialog">If True, always shows the selection dialog.</param>
     ''' <returns>Selected tool configurations, or Nothing when the dialog is canceled or no tools are available.</returns>
-    Public Function SelectToolsForSession(Optional forceDialog As Boolean = False, Optional FriendlyName As String = ToolFriendlyName) As List(Of ModelConfig)
-        Dim availableTools = GetAvailableTools()
+    Public Function SelectToolsForSession(Optional forceDialog As Boolean = False,
+                                      Optional FriendlyName As String = ToolFriendlyName,
+                                      Optional includeInteractiveM365Tools As Boolean = False) As List(Of ModelConfig)
+        Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
 
         If availableTools.Count = 0 Then
             ShowCustomMessageBox($"No {FriendlyName.ToLower} are available. Configure 'Tooling' in the Special Services configuration file.")
@@ -2970,8 +4314,8 @@ Partial Public Class ThisAddIn
             Dim selectedNameSet As New HashSet(Of String)(SelectedToolNames, StringComparer.OrdinalIgnoreCase)
 
             Dim selected = availableTools.
-            Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
-            ToList()
+        Where(Function(t) Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso selectedNameSet.Contains(t.ToolName)).
+        ToList()
 
             If selected.Count > 0 Then
                 Return selected
@@ -2980,10 +4324,402 @@ Partial Public Class ThisAddIn
 
         Dim hasPersistedSelection As Boolean = (SelectedToolNames IsNot Nothing AndAlso SelectedToolNames.Count > 0)
 
-        ' Only preselect all on first use (no persisted selection yet).
         Return ShowToolSelectionDialog(availableTools, preselectAll:=Not hasPersistedSelection, FriendlyName)
     End Function
 
-#End Region
+
+    Private Class InteractiveToolSelectionState
+        Public Property SelectedMainToolNames As New List(Of String)()
+        Public Property SelectedAdvancedToolNames As New List(Of String)()
+    End Class
+
+    Private Shared Function DeduplicateToolsByName(tools As IEnumerable(Of ModelConfig)) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        If tools Is Nothing Then
+            Return result
+        End If
+
+        For Each tool In tools
+            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+            If seen.Add(tool.ToolName.Trim()) Then
+                result.Add(tool)
+            End If
+        Next
+
+        Return result
+    End Function
+
+
+    Private Function IsLocalChatAdvancedToolName(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        ' web_grounding must remain user-visible in the main selector even though
+        ' it is also an AutoPilot internal tool.
+        If SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(toolName) Then
+            Return False
+        End If
+
+        If IsChatAgentWorkspaceTool(toolName) Then
+            Return True
+        End If
+
+        If toolName.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        If toolName.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           toolName.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           IsInternalKnowledgeToolName(toolName) OrElse
+           SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(toolName) Then
+            Return False
+        End If
+
+        If SharedLibrary.Agents.MemoryTools.IsMemoryTool(toolName) OrElse
+           SharedLibrary.Agents.TextTools.IsTextTool(toolName) OrElse
+           SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(toolName) OrElse
+           SharedLibrary.Agents.WordTools.IsWordTool(toolName) OrElse
+           SharedLibrary.Agents.WordDocTools.IsWordDocTool(toolName) OrElse
+           SharedLibrary.Agents.JsRunTool.IsJsTool(toolName) OrElse
+           toolName.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+           IsAutoPilotInternalTool(toolName) Then
+            Return True
+        End If
+
+        Return False
+    End Function
+
+
+    Private Function IsLocalChatMainSelectableTool(tool As ModelConfig) As Boolean
+        If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Return False
+        Return Not IsLocalChatAdvancedToolName(tool.ToolName)
+    End Function
+
+    Public Function GetLocalChatMainSelectableTools(Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
+        Dim availableTools = GetAvailableTools(includeInteractiveM365Tools)
+        Return DeduplicateToolsByName(
+            availableTools.Where(Function(t) IsLocalChatMainSelectableTool(t)))
+    End Function
+
+
+    Public Function GetAvailableToolsForAutoPilotSelection() As List(Of ModelConfig)
+        Dim tools As New List(Of ModelConfig)()
+
+        If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
+            tools.AddRange(LoadToolingServices(INI_SpecialServicePath, True))
+        End If
+
+        tools.Add(GetInternalWebTool())
+        tools.Add(GetInternalDownloadWebFilesTool())
+
+        If INI_ISearch AndAlso Not String.IsNullOrWhiteSpace(INI_ISearch_URL) Then
+            tools.Add(GetInternalSearchTool(enforcePrivacy:=INI_EnablePrivacyForSearch))
+        End If
+
+        tools.AddRange(GetInternalKnowledgeTools())
+
+        ' AutoPilot should also let the user explicitly select discovered skills and agents.
+        Try
+            SharedLibrary.Agents.AgentResources.Refresh()
+
+            Dim agentRegistry As New SharedLibrary.Agents.ToolRegistry()
+            SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(agentRegistry, SharedLibrary.Agents.AgentResources.Skills)
+            SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(agentRegistry, SharedLibrary.Agents.AgentResources.Agents)
+
+            tools.AddRange(agentRegistry.MaterializeAll())
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn("AutoPilot skill/agent discovery failed.", ex:=ex)
+        End Try
+
+        Return DeduplicateToolsByName(tools)
+    End Function
+
+    Private Function NormalizeAutoPilotSelectableExternalTools(tools As IEnumerable(Of ModelConfig)) As List(Of ModelConfig)
+        Dim result As New List(Of ModelConfig)()
+
+        Dim allowedByName As Dictionary(Of String, ModelConfig) =
+            GetAvailableToolsForAutoPilotSelection().
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                GroupBy(Function(t) t.ToolName.Trim(), StringComparer.OrdinalIgnoreCase).
+                ToDictionary(Function(g) g.Key, Function(g) g.First(), StringComparer.OrdinalIgnoreCase)
+
+        If tools Is Nothing Then
+            Return result
+        End If
+
+        For Each tool In tools
+            If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+
+            Dim normalized As ModelConfig = Nothing
+            If allowedByName.TryGetValue(tool.ToolName.Trim(), normalized) Then
+                result.Add(normalized)
+            End If
+        Next
+
+        Return DeduplicateToolsByName(result)
+    End Function
+
+    Private Function NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames As IEnumerable(Of String),
+                                                         Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+        Dim result As New List(Of String)(
+            If(selectedAdvancedToolNames, Enumerable.Empty(Of String)()).
+                Where(Function(n) Not String.IsNullOrWhiteSpace(n)).
+                Select(Function(n) n.Trim()).
+                Distinct(StringComparer.OrdinalIgnoreCase))
+
+        result = result.
+            Where(Function(name) Not IsChatAgentWorkspaceTool(name)).
+            ToList()
+
+        If IsChatAgentWorkspaceConnected() Then
+            result.AddRange(
+                GetChatAgentWorkspaceTools().
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    Select(Function(t) t.ToolName))
+        End If
+
+        Return result.
+            Distinct(StringComparer.OrdinalIgnoreCase).
+            ToList()
+    End Function
+
+    Public Function GetLocalChatAdvancedSelectableTools(Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
+        Dim tools As New List(Of ModelConfig)()
+
+        tools.AddRange(
+            GetAvailableTools(includeInteractiveM365Tools).
+                Where(Function(t) t IsNot Nothing AndAlso
+                                  Not String.IsNullOrWhiteSpace(t.ToolName) AndAlso
+                                  IsLocalChatAdvancedToolName(t.ToolName)))
+
+        If IsChatAgentWorkspaceConnected() Then
+            tools.AddRange(GetChatAgentWorkspaceTools())
+        End If
+
+        Try
+            For Each tool In GetAutoPilotInternalTools()
+                If tool Is Nothing OrElse String.IsNullOrWhiteSpace(tool.ToolName) Then Continue For
+                If tool.ToolName.Equals(AP_Tool_SummarizeThread, StringComparison.OrdinalIgnoreCase) Then Continue For
+                tools.Add(tool)
+            Next
+        Catch
+        End Try
+
+        Return DeduplicateToolsByName(tools)
+    End Function
+
+    Public Function GetLocalChatEffectiveTools(selectedMainToolNames As IEnumerable(Of String),
+                                               selectedAdvancedToolNames As IEnumerable(Of String),
+                                               advancedToolsEnabled As Boolean,
+                                               Optional includeInteractiveM365Tools As Boolean = True) As List(Of ModelConfig)
+
+        Dim result As New List(Of ModelConfig)()
+        Dim mainSet = BuildToolNameSet(selectedMainToolNames)
+        Dim advancedSet = BuildToolNameSet(
+            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools))
+
+        For Each tool In GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
+            If mainSet.Contains(tool.ToolName) Then
+                result.Add(tool)
+            End If
+        Next
+
+        If advancedToolsEnabled Then
+            For Each tool In GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools)
+                If advancedSet.Contains(tool.ToolName) Then
+                    result.Add(tool)
+                End If
+            Next
+        End If
+
+        Return DeduplicateToolsByName(result)
+    End Function
+
+    Private Function ShowLocalChatAdvancedToolSelectionDialog(selectedAdvancedToolNames As IEnumerable(Of String),
+                                                              Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+
+        Dim availableTools = GetLocalChatAdvancedSelectableTools(includeInteractiveM365Tools)
+        Dim preselected = NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools)
+
+        Using selector As New MultiModelSelectorForm(
+            availableTools,
+            "",
+            $"{AN} - Select Advanced Tools",
+            resetChecked:=False,
+            preselectMany:=preselected,
+            instruction:="Select the advanced tools that may be callable in Local Chat. " &
+                         "Connected workspace tools are shown here and auto-selected by default; otherwise they remain off.")
+
+            If selector.ShowDialog() = DialogResult.OK Then
+                Return NormalizeLocalChatAdvancedToolNames(
+                    selector.SelectedModels.
+                        Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                        Select(Function(t) t.ToolName).
+                        Distinct(StringComparer.OrdinalIgnoreCase).
+                        ToList(),
+                    includeInteractiveM365Tools)
+            End If
+        End Using
+
+        Return Nothing
+    End Function
+
+
+    Public Function ShowLocalChatToolSelectionDialog(selectedMainToolNames As IEnumerable(Of String),
+                                                     selectedAdvancedToolNames As IEnumerable(Of String),
+                                                     ByRef updatedAdvancedToolNames As List(Of String),
+                                                     Optional includeInteractiveM365Tools As Boolean = True) As List(Of String)
+
+        Dim availableTools = GetLocalChatMainSelectableTools(includeInteractiveM365Tools)
+        Dim workingAdvanced As New List(Of String)(
+            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools))
+
+        Using selector As New MultiModelSelectorForm(
+            availableTools,
+            "",
+            $"{AN} - Select {ToolFriendlyName}",
+            resetChecked:=False,
+            preselectMany:=If(selectedMainToolNames, New List(Of String)()),
+            instruction:="Select the agents, sources, skills, and connector-oriented tools you want to make available to the model. " &
+                         "Advanced tools are managed separately through the 'Advanced tools…' button.")
+
+            selector.AddExtraButton("Advanced tools…",
+                Sub(s, e)
+                    Dim advanced = ShowLocalChatAdvancedToolSelectionDialog(
+                        workingAdvanced,
+                        includeInteractiveM365Tools)
+
+                    If advanced IsNot Nothing Then
+                        workingAdvanced = advanced
+                    End If
+                End Sub)
+
+            selector.AddExtraButton("Skills && Agents…",
+                Sub(s, e)
+                    Using f As New SharedLibrary.Agents.AgentResourcesViewerForm()
+                        f.ShowDialog(selector)
+                    End Using
+                End Sub)
+
+            selector.AddExtraButton("Memory…",
+                Sub(s, e)
+                    Using f As New SharedLibrary.Agents.SessionMemoryViewerForm()
+                        f.ShowDialog(selector)
+                    End Using
+                End Sub)
+
+            If selector.ShowDialog() = DialogResult.OK Then
+                updatedAdvancedToolNames = workingAdvanced.
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+
+                Return selector.SelectedModels.
+                    Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                    Select(Function(t) t.ToolName).
+                    Distinct(StringComparer.OrdinalIgnoreCase).
+                    ToList()
+            End If
+        End Using
+
+        Return Nothing
+    End Function
+
+    Private Function HasSuccessfulToolResponses(context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse context.AllToolResponses Is Nothing Then
+            Return False
+        End If
+
+        For Each tr In context.AllToolResponses
+            If tr IsNot Nothing AndAlso tr.Success Then
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    Private Function BuildInvalidTurnSignature(responseText As String, invalidReason As String) As String
+        Dim raw As String = If(responseText, "")
+        Dim reason As String = If(invalidReason, "").Trim().ToLowerInvariant()
+        Dim hashText As String
+
+        Using sha = System.Security.Cryptography.SHA256.Create()
+            Dim bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(raw))
+            hashText = BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant()
+        End Using
+
+        Return reason & "|" & hashText
+    End Function
+
+    Private Async Function RunForcedNoToolFinalizationAfterRepeatedInvalidTurnAsync(
+        context As ToolExecutionContext,
+        enhancedSysPrompt As String,
+        fullUserPrompt As String,
+        otherPrompt As String,
+        fileObject As Object,
+        useSecondAPI As Boolean,
+        hideSplash As Boolean,
+        cancellationToken As System.Threading.CancellationToken,
+        effectiveTimeout As Integer,
+        binaryOutputDirectory As String) As Task(Of String)
+
+        INI_APICall_ToolInstructions_2 = ""
+
+        Dim forcedSysPrompt As String =
+            enhancedSysPrompt & Environment.NewLine & Environment.NewLine &
+            "IMPORTANT: A successful tool step already completed, but the model then repeated an invalid non-final response. " &
+            "Do NOT call any more tools in this turn. " &
+            "Do NOT repeat the previous invalid response format. " &
+            "Do NOT output internal protocol content, intermediate control text, raw structured data, or non-final status text. " &
+            "Based only on the tool results already gathered, produce a concise user-facing answer now and append exactly one valid TASK_STATUS footer with status 'complete' or 'blocked'."
+
+        context.LogWarn(
+            "Escalating to forced no-tool finalization after repeated identical invalid turn.",
+            details:=$"invalidTurnReason={If(context.ForceNoToolFinalizationReason, "")}; host={context.HostKind}")
+
+        ToolingFileLogger.LogStep("Forcing final LLM call without tools after repeated invalid turn")
+        ToolingFileLogger.LogPreMainLlmCallSnapshot()
+
+        Using timeoutCts As New System.Threading.CancellationTokenSource()
+            Dim totalTimeout = effectiveTimeout + 60
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(totalTimeout))
+
+            Using combinedCts As System.Threading.CancellationTokenSource =
+                System.Threading.CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token)
+
+                Try
+                    Dim forcedFinalResponse As String = Await LLM(
+                        forcedSysPrompt,
+                        fullUserPrompt,
+                        "", "", 0,
+                        useSecondAPI,
+                        hideSplash,
+                        otherPrompt,
+                        fileObject,
+                        combinedCts.Token,
+                        True, True, binaryOutputDirectory:=binaryOutputDirectory)
+
+                    If Not String.IsNullOrWhiteSpace(forcedFinalResponse) Then
+                        ToolingFileLogger.LogRawResponseStub("Main LLM() - Forced Final After Invalid Turn", forcedFinalResponse)
+                    Else
+                        ToolingFileLogger.LogWarn(
+                            "Empty forced-final response after repeated invalid turn.",
+                            details:=$"host={context.HostKind}")
+                    End If
+
+                    Return If(forcedFinalResponse, "")
+                Catch ex As OperationCanceledException
+                    context.LogWarn("Forced no-tool finalization call was cancelled")
+                    Return ""
+                Catch ex As Exception
+                    context.LogError($"Error during forced no-tool finalization: {ex.Message}", ex:=ex)
+                    Return ""
+                End Try
+            End Using
+        End Using
+    End Function
+
 
 End Class

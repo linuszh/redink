@@ -24,6 +24,7 @@ Option Explicit On
 Option Strict Off
 
 Imports System.Diagnostics
+Imports DocumentFormat.OpenXml.Wordprocessing
 Imports Microsoft.Office.Interop.Word
 Imports SharedLibrary.SharedLibrary
 
@@ -165,12 +166,30 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Orders placeholders by offset and then by length.
     ''' </summary>
-    Private Shared ReadOnly PlaceholderComparer As Comparison(Of PlaceholderInfo) =
+    Private Shared ReadOnly oldPlaceholderComparer As Comparison(Of PlaceholderInfo) =
     Function(a, b)
         If a.Offset <> b.Offset Then
             Return a.Offset.CompareTo(b.Offset)
         End If
         Return a.Length.CompareTo(b.Length)
+    End Function
+
+    '======================================================
+
+    ''' <summary>
+    ''' Orders placeholders by offset, then puts zero-length markers (e.g. {{PFOR:n}})
+    ''' first at the same offset, then sorts non-zero spans by length descending so
+    ''' that outer ranges (e.g. fields) are emitted before any inner placeholders
+    ''' (e.g. footnote references) that fall inside them.
+    ''' </summary>
+    Private Shared ReadOnly PlaceholderComparer As Comparison(Of PlaceholderInfo) =
+    Function(a, b)
+        If a.Offset <> b.Offset Then Return a.Offset.CompareTo(b.Offset)
+        ' Zero-length first
+        If a.Length = 0 AndAlso b.Length <> 0 Then Return -1
+        If a.Length <> 0 AndAlso b.Length = 0 Then Return 1
+        ' Among non-zero spans at the same offset: longer (outer) first
+        Return b.Length.CompareTo(a.Length)
     End Function
 
     ''' <summary>
@@ -182,6 +201,728 @@ Partial Public Class ThisAddIn
     ''' <param name="DoMarkdown">True to emit Markdown markers for styles.</param>
     ''' <returns>Serialized text containing placeholder tokens.</returns>
     Public Function GetTextWithSpecialElementsInline(
+        ByVal workingrange As Word.Range,
+        PreserveParagraphFormatInline As Boolean, DoMarkdown As Boolean) As String
+
+        Dim app As Word.Application = CType(workingrange.Application, Word.Application)
+        Dim oldSU As Boolean = app.ScreenUpdating
+        Dim oldSpell As Boolean = app.Options.CheckSpellingAsYouType
+        Dim oldGrammar As Boolean = app.Options.CheckGrammarAsYouType
+        Dim oldPagination As Boolean = app.Options.Pagination
+        app.Options.CheckSpellingAsYouType = False
+        app.Options.CheckGrammarAsYouType = False
+        app.Options.Pagination = False           ' (#7) avoid background repagination during edits
+        app.ScreenUpdating = False
+
+        ' ---- Progress + Cancel helpers ----
+        Dim current As Integer = 0
+        Dim total As Integer = 5 ' baseline: setup + bookmark + sort + build + finalize
+
+        If DoMarkdown Then total += 12
+
+        ' (#2) Use range-scoped collections – they are already filtered to the range
+        Dim tmpRng As Word.Range = workingrange.Duplicate
+        Dim fnCount As Integer = tmpRng.Footnotes.Count
+        Dim enCount As Integer = tmpRng.Endnotes.Count
+        Dim fieldsCount As Integer = tmpRng.Fields.Count
+        Dim parasInRange As Integer = If(PreserveParagraphFormatInline AndAlso tmpRng.Paragraphs IsNot Nothing, tmpRng.Paragraphs.Count, 0)
+
+        total += fnCount + enCount + fieldsCount + parasInRange
+
+        Using scope As New ProgressScope("Extracting text …", "Initializing …", System.Math.Max(1, total), useDpiForm:=False)
+            Dim Cancelled As Func(Of Boolean) =
+                Function() As Boolean
+                    Return scope.CancelRequested OrElse ProgressBarModule.CancelOperation
+                End Function
+
+            ' Local helper for early-exit assembly (cancel path).
+            Dim BuildPartial As Func(Of Word.Range, List(Of PlaceholderInfo), String) =
+                Function(r As Word.Range, phs As List(Of PlaceholderInfo)) As String
+                    Dim ft As String = r.Text
+                    Dim sorted As New List(Of PlaceholderInfo)(phs)
+                    sorted.Sort(PlaceholderComparer)
+                    Dim sb As New System.Text.StringBuilder(ft.Length + sorted.Count * 16)
+                    Dim lp As Integer = 0
+                    For Each ph In sorted
+                        ' Skip placeholders nested inside an already-emitted outer span.
+                        ' Zero-length markers are allowed to sit exactly at lp.
+                        If ph.Length > 0 AndAlso ph.Offset < lp Then Continue For
+                        If ph.Length = 0 AndAlso ph.Offset < lp Then Continue For
+                        If ph.Offset > lp Then sb.Append(ft.Substring(lp, ph.Offset - lp))
+                        sb.Append(ph.Token)
+                        Dim newLp As Integer = ph.Offset + ph.Length
+                        If newLp > lp Then lp = newLp
+                    Next
+                    If lp < ft.Length Then sb.Append(ft.Substring(lp))
+                    Return sb.ToString()
+                End Function
+
+            Try
+                '──────────── 0)  Preparation (range clone, settings) ───────────────
+                Dim rng As Word.Range = workingrange.Duplicate
+                Dim expandedEnd As Boolean = False
+                If rng.End < rng.Document.Content.End - 1 Then
+                    rng.End = rng.End + 1
+                    expandedEnd = True
+                End If
+
+                ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Prepping selection …")
+                If Cancelled() Then Return rng.Text
+
+                Debug.WriteLine($"4-1 Range Start = {rng.Start} Selection Start = {Application.Selection.Start}")
+                Debug.WriteLine($"Range End = {rng.End} Selection End = {Application.Selection.End}")
+
+                Dim origSel As Word.Range = app.Selection.Range.Duplicate
+
+                If DoMarkdown Then
+                    ' 1) Bold + Italic  (paragraph)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Bold = True
+                                f.Font.Italic = True
+                                f.Font.Underline = Word.WdUnderline.wdUnderlineNone
+                                f.Text = "([!^13]@)^13"
+                                f.MatchWildcards = True
+                            End Sub,
+                            "***\1***^13",
+                            Sub(rep)
+                                rep.Bold = False
+                                rep.Italic = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: bold+italic (para) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 2) Bold + Italic  (inline)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Bold = True
+                                f.Font.Italic = True
+                                f.Font.Underline = Word.WdUnderline.wdUnderlineNone
+                                f.Text = ""
+                                f.MatchWildcards = False
+                            End Sub,
+                            "***^&***",
+                            Sub(rep)
+                                rep.Bold = False
+                                rep.Italic = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: bold+italic (inline) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 3) Bold only  (paragraph)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Bold = True
+                                f.Text = "([!^13]@)^13"
+                                f.MatchWildcards = True
+                            End Sub,
+                            "**\1**^13",
+                            Sub(rep)
+                                rep.Bold = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: bold (para) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 4) Bold only  (inline)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Bold = True
+                                f.Text = ""
+                                f.MatchWildcards = False
+                            End Sub,
+                            "**^&**",
+                            Sub(rep)
+                                rep.Bold = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: bold (inline) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 5) Italic only  (paragraph)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Italic = True
+                                f.Text = "([!^13]@)^13"
+                                f.MatchWildcards = True
+                            End Sub,
+                            "*\1*^13",
+                            Sub(rep)
+                                rep.Italic = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: italic (para) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 6) Italic only  (inline)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Italic = True
+                                f.Text = ""
+                                f.MatchWildcards = False
+                            End Sub,
+                            "*^&*",
+                            Sub(rep)
+                                rep.Italic = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: italic (inline) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 8) Underline (inline)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.Underline = Word.WdUnderline.wdUnderlineSingle
+                                f.Text = ""
+                                f.MatchWildcards = False
+                            End Sub,
+                            "<u>^&</u>",
+                            Sub(rep)
+                                rep.Underline = Word.WdUnderline.wdUnderlineNone
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: underline (inline) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ' 9) Strikethrough (paragraph)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.StrikeThrough = True
+                                f.Text = "([!^13]@)^13"
+                                f.MatchWildcards = True
+                            End Sub,
+                            "~~\1~~^13",
+                            Sub(rep)
+                                rep.StrikeThrough = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: strike (para) …")
+                    If Cancelled() Then Return rng.Text
+
+                    '10) Strikethrough (inline)
+                    ReplaceWithinRange(rng,
+                            Sub(f)
+                                f.Font.StrikeThrough = True
+                                f.Text = ""
+                                f.MatchWildcards = False
+                            End Sub,
+                            "~~^&~~",
+                            Sub(rep)
+                                rep.StrikeThrough = False
+                            End Sub)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: strike (inline) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ReplaceWithinRange_Highlight(Application.Selection.Range, keepParagraphBreakOutside:=True, includeColorInTag:=True)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (para-like) …")
+                    If Cancelled() Then Return rng.Text
+
+                    ReplaceWithinRange_Highlight(Application.Selection.Range, includeColorInTag:=True)
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Markdown: highlight (inline) …")
+                    If Cancelled() Then Return rng.Text
+                End If
+
+                If expandedEnd Then
+                    rng.End = rng.End - 1
+                End If
+                rng.Select()
+
+                '──────────── Prepare placeholders ────────────────────────────
+                ' (#8) Skip the bookmark round-trip; set TextRetrievalMode directly on rng.
+                With rng.TextRetrievalMode
+                    .IncludeHiddenText = True
+                    .IncludeFieldCodes = True
+                End With
+
+                ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Preparing placeholders …")
+                If Cancelled() Then Return rng.Text
+
+                Dim placeholders As New List(Of PlaceholderInfo)
+
+                '──────────── Read text once; everything below uses STRING indices ─────────
+                ' Critical: positions returned by Word (fld.Code.Start, fn.Reference.Start)
+                ' are absolute document positions and frequently disagree with indices into
+                ' rng.Text after the Markdown phase has inserted characters.  We therefore
+                ' scan rng.Text itself for field markers (Chr(19)/Chr(20)/Chr(21)) and note
+                ' references (Chr(2)) and pair them with Word objects in document order.
+                Dim fullText As String = rng.Text
+
+                ' Snapshot notes in document order (their Chr(2) refs appear in fullText
+                ' in the same order as Reference.Start ascending).
+                Dim noteQueue As New Queue(Of Tuple(Of String, String))()
+                Dim mergedNotes As New List(Of Tuple(Of Integer, String, String))()
+                For Each fn As Word.Footnote In rng.Footnotes
+                    mergedNotes.Add(Tuple.Create(CInt(fn.Reference.Start), "WFNT", fn.Range.Text))
+                Next
+                For Each en As Word.Endnote In rng.Endnotes
+                    mergedNotes.Add(Tuple.Create(CInt(en.Reference.Start), "WENT", en.Range.Text))
+                Next
+                mergedNotes.Sort(Function(a, b) a.Item1.CompareTo(b.Item1))
+                For Each m In mergedNotes
+                    noteQueue.Enqueue(Tuple.Create(m.Item2, m.Item3))
+                Next
+
+                ' Snapshot top-level fields in document order. We use Word.Field.Code/Result
+                ' for content (code text, type, display text) and the string scan for
+                ' positions only — avoids any reliance on TextRetrievalMode behaving
+                ' uniformly across field types and Word versions.
+                Dim allFields As New List(Of Word.Field)()
+                For Each fld As Word.Field In rng.Fields
+                    allFields.Add(fld)
+                Next
+                Dim topLevelFields As New List(Of Word.Field)()
+                For Each fld As Word.Field In allFields
+                    Dim isNested As Boolean = False
+                    For Each other As Word.Field In allFields
+                        If other Is fld Then Continue For
+                        If fld.Code.Start > other.Code.Start AndAlso fld.Result.End < other.Result.End Then
+                            isNested = True
+                            Exit For
+                        End If
+                    Next
+                    If Not isNested Then topLevelFields.Add(fld)
+                Next
+                topLevelFields.Sort(Function(a, b) a.Code.Start.CompareTo(b.Code.Start))
+                Dim topFieldIdx As Integer = 0
+
+                ' Scan rng.Text for field begin/end and note references.
+                Dim fieldStack As New Stack(Of Integer)
+                Dim processedFields As Integer = 0
+                Dim processedNotes As Integer = 0
+
+                For i As Integer = 0 To fullText.Length - 1
+                    If (i And &HFFF) = 0 AndAlso Cancelled() Then Exit For
+                    Dim code As Integer = AscW(fullText(i))
+                    Select Case code
+
+                        Case 19 ' field begin
+                            fieldStack.Push(i)
+
+                        Case 21 ' field end
+                            If fieldStack.Count = 0 Then Continue For
+                            Dim startIdx As Integer = fieldStack.Pop()
+                            If fieldStack.Count <> 0 Then Continue For ' nested – outer represents it
+
+                            ' Pair this top-level closure with the next top-level Word.Field
+                            ' in document order. Both are deterministically ordered, so an
+                            ' ordinal pairing is robust to position drift.
+                            Dim fld As Word.Field = Nothing
+                            If topFieldIdx < topLevelFields.Count Then
+                                fld = topLevelFields(topFieldIdx)
+                                topFieldIdx += 1
+                            End If
+
+                            Dim codeText As String = String.Empty
+                            If fld IsNot Nothing Then
+                                Try
+                                    Dim raw As String = fld.Code.Text
+                                    If raw IsNot Nothing Then codeText = raw.Trim()
+                                Catch
+                                    codeText = String.Empty
+                                End Try
+                            End If
+
+                            Dim token As String
+                            If fld IsNot Nothing AndAlso fld.Type = Word.WdFieldType.wdFieldHyperlink Then
+                                Dim disp As String = StripSurroundingUTags(fld.Result.Text)
+                                Dim dispB64 As String = System.Convert.ToBase64String(
+                                    System.Text.Encoding.UTF8.GetBytes(If(disp, String.Empty)))
+                                token = $"{{{{WFLD:{codeText}|||{dispB64}}}}}"
+                            Else
+                                token = $"{{{{WFLD:{codeText}}}}}"
+                            End If
+
+                            placeholders.Add(New PlaceholderInfo With {
+                                .Offset = startIdx,
+                                .Length = i - startIdx + 1,
+                                .Token = token
+                            })
+
+                            processedFields += 1
+                            ProgressScope.Report(System.Threading.Interlocked.Increment(current),
+                                                 label:=$"Fields … {processedFields}/{fieldsCount}")
+
+                        Case 2 ' footnote/endnote reference
+                            If noteQueue.Count = 0 Then Continue For
+                            Dim n = noteQueue.Dequeue()
+                            placeholders.Add(New PlaceholderInfo With {
+                                .Offset = i,
+                                .Length = 1,
+                                .Token = $"{{{{{n.Item1}:{n.Item2}}}}}"
+                            })
+                            processedNotes += 1
+                            If n.Item1 = "WFNT" Then
+                                ProgressScope.Report(System.Threading.Interlocked.Increment(current),
+                                                     label:=$"Footnotes/Endnotes … {processedNotes}/{fnCount + enCount}")
+                            Else
+                                ProgressScope.Report(System.Threading.Interlocked.Increment(current),
+                                                     label:=$"Footnotes/Endnotes … {processedNotes}/{fnCount + enCount}")
+                            End If
+                    End Select
+                Next
+
+                If Cancelled() Then Return BuildPartial(rng, placeholders)
+
+                '──────────── Paragraph placeholders (cached COM accessors) (#4)
+                If PreserveParagraphFormatInline AndAlso rng.Paragraphs.Count > 0 Then
+                    Dim paraCountLocal As Integer = rng.Paragraphs.Count
+                    ReDim paragraphFormat(paraCountLocal - 1)
+                    Array.Clear(paragraphFormat, 0, paragraphFormat.Length)
+
+                    Dim processed As Integer = 0    ' ← ADD THIS LINE
+
+                    For i As Integer = 1 To paraCountLocal
+                        Dim p As Word.Paragraph = rng.Paragraphs(i)
+                        Dim pr As Word.Range = p.Range
+                        Dim fnt As Word.Font = pr.Font
+                        Dim lf As Word.ListFormat = pr.ListFormat
+                        Dim listType As Word.WdListType = lf.ListType
+                        Dim hasList As Boolean = (listType <> Word.WdListType.wdListNoNumbering)
+                        Dim listTpl As Word.ListTemplate = If(hasList, lf.ListTemplate, Nothing)
+                        Dim listLvl As Integer = If(hasList, lf.ListLevelNumber, 0)
+                        Dim listVal As Integer = If(hasList, lf.ListValue, 0)
+
+                        Dim fmt As New ParagraphFormatStructure With {
+                            .Style = p.Style,
+                            .FontName = fnt.Name,
+                            .FontSize = fnt.Size,
+                            .FontBold = fnt.Bold,
+                            .FontItalic = fnt.Italic,
+                            .FontUnderline = fnt.Underline,
+                            .FontColor = fnt.Color,
+                            .ListType = listType,
+                            .ListTemplate = listTpl,
+                            .ListLevel = listLvl,
+                            .ListNumber = listVal,
+                            .HasListFormat = hasList,
+                            .Alignment = p.Alignment,
+                            .LineSpacing = p.LineSpacing,
+                            .SpaceBefore = p.SpaceBefore,
+                            .SpaceAfter = p.SpaceAfter
+                        }
+
+                        paragraphFormat(i - 1) = fmt
+
+                        placeholders.Add(New PlaceholderInfo With {
+                            .Offset = pr.Start - rng.Start,
+                            .Length = 0,
+                            .Token = $"{{{{PFOR:{i - 1}}}}}"
+                        })
+
+                        processed += 1
+                        ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:=$"Paragraph formats … {processed}/{paraCountLocal}")
+                        If Cancelled() Then Exit For
+                    Next
+
+                    If Cancelled() Then Return BuildPartial(rng, placeholders)
+                End If
+
+                '──────────── Sort placeholders (Offset ↑, Length ↑) ──────────
+                placeholders.Sort(PlaceholderComparer)
+                ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Sorting placeholders …")
+                If Cancelled() Then Return BuildPartial(rng, placeholders)
+
+                Dim newMax As Integer = System.Math.Max(total, current + System.Math.Max(1, placeholders.Count) + 1)
+                ProgressScope.Report(current, max:=newMax, label:="Building result …")
+
+                ' ───── Insert placeholders ────────────────────────────────                
+                Dim sbInline As New System.Text.StringBuilder(fullText.Length + placeholders.Count * 16)
+                Dim lastPos As Integer = 0
+                Dim idx As Integer = 0
+
+                For Each ph As PlaceholderInfo In placeholders
+                    idx += 1
+                    ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:=$"Building … {idx}/{placeholders.Count}")
+
+                    ' (#9) Skip placeholders nested inside a previously emitted outer span.
+                    ' This covers cases like a footnote reference sitting inside a field
+                    ' (e.g. inside a HYPERLINK or REF field result), which would otherwise
+                    ' corrupt the output by duplicating text and dropping lastPos backwards.
+                    If ph.Offset < lastPos Then
+                        If Cancelled() Then
+                            If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
+                            Return sbInline.ToString()
+                        End If
+                        Continue For
+                    End If
+
+                    If ph.Offset > lastPos Then
+                        sbInline.Append(fullText.Substring(lastPos, ph.Offset - lastPos))
+                    End If
+                    sbInline.Append(ph.Token)
+
+                    Dim newLastPos As Integer = ph.Offset + ph.Length
+                    If newLastPos > lastPos Then lastPos = newLastPos
+
+                    If Cancelled() Then
+                        If lastPos < fullText.Length Then sbInline.Append(fullText.Substring(lastPos))
+                        Return sbInline.ToString()
+                    End If
+                Next
+
+                If lastPos < fullText.Length Then
+                    sbInline.Append(fullText.Substring(lastPos))
+                End If
+
+                ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Done")
+                Return sbInline.ToString()
+
+            Catch ex As System.Exception
+                Debug.WriteLine("Error in GetTextWithSpecialElementsInline: " & ex.Message)
+                Return workingrange.Text
+            Finally
+                app.Options.CheckSpellingAsYouType = oldSpell
+                app.Options.CheckGrammarAsYouType = oldGrammar
+                app.Options.Pagination = oldPagination
+                app.ScreenUpdating = oldSU
+            End Try
+        End Using
+    End Function
+
+    ''' <summary>
+    ''' Generic helper that finds formatted fragments inside a range and wraps them with the provided markers.
+    ''' </summary>
+    Private Sub ReplaceWithinRange(
+    ByVal rng As Microsoft.Office.Interop.Word.Range,
+    ByVal configureFind As System.Action(Of Microsoft.Office.Interop.Word.Find),
+    ByVal replacementText As System.String,
+    ByVal tweakReplacement As System.Action(Of Microsoft.Office.Interop.Word.Font))
+
+        If rng Is Nothing Then Return
+
+        Dim doc As Microsoft.Office.Interop.Word.Document = rng.Document
+
+        Dim originalStart As System.Int32 = rng.Start
+        Dim allowedEnd As System.Int32 = rng.End
+        Dim currentPosition As System.Int32 = originalStart
+
+        Dim NormalizePart As System.Func(Of System.String, System.String) =
+        Function(s As System.String) As System.String
+            If System.String.IsNullOrEmpty(s) Then Return System.String.Empty
+            Return s.Replace("^13", vbCr)
+        End Function
+
+        Dim isWildcard As System.Boolean = replacementText.Contains("\1")
+        Dim isInline As System.Boolean = replacementText.Contains("^&")
+        If Not isWildcard AndAlso Not isInline Then
+            isInline = True
+            replacementText = replacementText & "^&"
+        End If
+
+        Dim prevPosition As System.Int32 = -1
+        Dim iterations As System.Int32 = 0
+        Dim maxIterations As System.Int32 = System.Math.Max(100000, System.Math.Max(1, allowedEnd - originalStart) * 8)
+
+        Do While currentPosition < allowedEnd
+            ' (#5) Throttle DoEvents – pumping the message loop on every Find iteration
+            ' is itself a major contributor to the perceived hang.
+            If (iterations And &H7F) = 0 Then
+                If ProgressBarModule.CancelOperation Then Exit Do
+                System.Windows.Forms.Application.DoEvents()
+            End If
+
+            Dim searchRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=currentPosition, [End]:=allowedEnd)
+            Dim f As Microsoft.Office.Interop.Word.Find = searchRange.Find
+
+            f.ClearFormatting()
+            f.Replacement.ClearFormatting()
+            configureFind(f)
+            f.Forward = True
+            f.Wrap = Microsoft.Office.Interop.Word.WdFindWrap.wdFindStop
+            f.Format = True
+
+            If Not f.Execute(Replace:=Microsoft.Office.Interop.Word.WdReplace.wdReplaceNone) Then
+                Exit Do
+            End If
+
+            Dim foundStart As System.Int32 = searchRange.Start
+            Dim foundEnd As System.Int32 = searchRange.End
+            Dim foundText As System.String = If(searchRange.Text, System.String.Empty)
+
+            If foundEnd <= foundStart Then
+                currentPosition = System.Math.Min(System.Math.Max(foundStart, currentPosition) + 1, allowedEnd)
+                GoTo ContinueLoop
+            End If
+
+            Dim endsWithCellMark As System.Boolean = foundText.EndsWith(vbCr & ChrW(7), System.StringComparison.Ordinal)
+            Dim isCellMarkOnly As System.Boolean = (foundText = ChrW(7))
+            Dim isCrOrCellBoundary As System.Boolean = (foundText = vbCr) OrElse (foundText = vbCr & ChrW(7)) OrElse isCellMarkOnly
+
+            If isWildcard Then
+                Dim rep As System.String = replacementText
+                Dim parts = rep.Replace("^13", System.String.Empty).Split(New System.String() {"\1"}, 2, System.StringSplitOptions.None)
+                Dim prefix As System.String = NormalizePart(If(parts.Length > 0, parts(0), System.String.Empty))
+                Dim suffix As System.String = NormalizePart(If(parts.Length > 1, parts(1), System.String.Empty))
+                Dim prefixLen As System.Int32 = prefix.Length
+                Dim suffixLen As System.Int32 = suffix.Length
+
+                ' (#6) Compute trim offsets from the already-fetched foundText
+                ' instead of opening one-character ranges over COM.
+                Dim trailingTrim As Integer = 0
+                If endsWithCellMark Then
+                    trailingTrim = 2
+                ElseIf foundText.EndsWith(vbCr, System.StringComparison.Ordinal) Then
+                    trailingTrim = 1
+                End If
+                Dim coreLen As Integer = foundText.Length - trailingTrim
+                While coreLen > 0
+                    Dim ch As Char = foundText(coreLen - 1)
+                    If ch = " "c OrElse ch = vbTab Then
+                        coreLen -= 1
+                    Else
+                        Exit While
+                    End If
+                End While
+                Dim groupEnd As System.Int32 = foundStart + coreLen
+
+                Dim endsWithParaCr As System.Boolean = (trailingTrim > 0)
+                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
+                If projectedEnd > allowedEnd Then Exit Do
+
+                If tweakReplacement IsNot Nothing AndAlso groupEnd > foundStart Then
+                    Dim contentRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
+                    tweakReplacement(contentRange.Font)
+                End If
+                If tweakReplacement IsNot Nothing AndAlso endsWithParaCr Then
+                    Dim trailingLen As System.Int32 = If(endsWithCellMark, 2, 1)
+                    Dim paraRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=groupEnd, [End]:=groupEnd + trailingLen)
+                    tweakReplacement(paraRange.Font)
+                End If
+
+                If prefixLen > 0 AndAlso groupEnd >= foundStart Then
+                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
+                    groupRange.InsertBefore(prefix)
+                End If
+                If suffixLen > 0 AndAlso groupEnd >= foundStart Then
+                    Dim groupRange As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=groupEnd)
+                    groupRange.InsertAfter(suffix)
+                End If
+
+                If tweakReplacement IsNot Nothing Then
+                    If prefixLen > 0 Then
+                        Dim leadingTok As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=foundStart, [End]:=foundStart + prefixLen)
+                        tweakReplacement(leadingTok.Font)
+                    End If
+                    If suffixLen > 0 Then
+                        Dim trailingStart As System.Int32 = groupEnd + prefixLen
+                        Dim trailingTok As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=trailingStart, [End]:=trailingStart + suffixLen)
+                        tweakReplacement(trailingTok.Font)
+                    End If
+                End If
+
+                currentPosition = foundEnd + prefixLen + suffixLen
+
+            Else
+                If isCrOrCellBoundary Then
+                    If tweakReplacement IsNot Nothing Then tweakReplacement(searchRange.Font)
+                    currentPosition = foundEnd
+                    allowedEnd = rng.End
+                    GoTo ContinueLoop
+                End If
+
+                Dim parts = replacementText.Split(New System.String() {"^&"}, 2, System.StringSplitOptions.None)
+                Dim prefix As System.String = NormalizePart(If(parts.Length > 0, parts(0), System.String.Empty))
+                Dim suffix As System.String = NormalizePart(If(parts.Length > 1, parts(1), System.String.Empty))
+                Dim prefixLen As System.Int32 = prefix.Length
+                Dim suffixLen As System.Int32 = suffix.Length
+
+                ' (#6) Compute leading/trailing trim from foundText.
+                Dim ft As System.String = foundText
+                Dim trailingTrim As Integer = 0
+                If ft.EndsWith(vbCr & ChrW(7), System.StringComparison.Ordinal) Then
+                    trailingTrim = 2
+                ElseIf ft.EndsWith(vbCr, System.StringComparison.Ordinal) Then
+                    trailingTrim = 1
+                End If
+                Dim hi As Integer = ft.Length - trailingTrim
+                While hi > 0
+                    Dim ch As Char = ft(hi - 1)
+                    If ch = " "c OrElse ch = vbTab Then hi -= 1 Else Exit While
+                End While
+                Dim lo As Integer = 0
+                While lo < hi
+                    Dim ch As Char = ft(lo)
+                    If ch = " "c OrElse ch = vbTab Then lo += 1 Else Exit While
+                End While
+
+                Dim contentStart As System.Int32 = foundStart + lo
+                Dim contentEnd As System.Int32 = foundStart + hi
+
+                If contentEnd <= contentStart Then
+                    If tweakReplacement IsNot Nothing Then tweakReplacement(searchRange.Font)
+                    currentPosition = foundEnd
+                    allowedEnd = rng.End
+                    GoTo ContinueLoop
+                End If
+
+                Dim projectedEnd As System.Int32 = foundEnd + prefixLen + suffixLen
+                If projectedEnd > allowedEnd Then Exit Do
+
+                If tweakReplacement IsNot Nothing Then
+                    Dim contentRangeUF As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentEnd)
+                    tweakReplacement(contentRangeUF.Font)
+                End If
+
+                If prefixLen > 0 Then
+                    Dim openTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart, [End]:=contentStart)
+                    openTokPos.InsertBefore(prefix)
+                    contentStart += prefixLen
+                    contentEnd += prefixLen
+                End If
+
+                If suffixLen > 0 Then
+                    Dim closeTokPos As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentEnd, [End]:=contentEnd)
+                    closeTokPos.InsertAfter(suffix)
+                End If
+
+                If tweakReplacement IsNot Nothing Then
+                    If prefixLen > 0 Then
+                        Dim leadingTok As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentStart - prefixLen, [End]:=contentStart)
+                        tweakReplacement(leadingTok.Font)
+                    End If
+                    If suffixLen > 0 Then
+                        Dim trailingTok As Microsoft.Office.Interop.Word.Range = doc.Range(Start:=contentEnd, [End]:=contentEnd + suffixLen)
+                        tweakReplacement(trailingTok.Font)
+                    End If
+                End If
+
+                currentPosition = foundEnd + prefixLen + suffixLen
+            End If
+
+            allowedEnd = rng.End
+
+ContinueLoop:
+            If currentPosition <= prevPosition Then
+                currentPosition = System.Math.Min(currentPosition + 1, allowedEnd)
+            End If
+            prevPosition = currentPosition
+
+            iterations += 1
+            If iterations >= maxIterations Then Exit Do
+        Loop
+
+        rng.SetRange(Start:=originalStart, [End]:=allowedEnd)
+    End Sub
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    '===================================================
+
+    ''' <summary>
+    ''' Extracts text from a Word range, replaces special elements with inline placeholders,
+    ''' and optionally converts formatting to Markdown-compatible markers.
+    ''' </summary>
+    ''' <param name="workingrange">Range whose content is extracted.</param>
+    ''' <param name="PreserveParagraphFormatInline">True to capture per-paragraph formatting.</param>
+    ''' <param name="DoMarkdown">True to emit Markdown markers for styles.</param>
+    ''' <returns>Serialized text containing placeholder tokens.</returns>
+    Public Function oldGetTextWithSpecialElementsInline(
         ByVal workingrange As Word.Range,
         PreserveParagraphFormatInline As Boolean, DoMarkdown As Boolean) As String
 
@@ -651,6 +1392,7 @@ Partial Public Class ThisAddIn
                 Debug.WriteLine($"4-6 Range Start = {rng.Start} Selection Start = {Application.Selection.Start}")
                 Debug.WriteLine($"Range End = {rng.End} Selection End = {Application.Selection.End}")
 
+
                 placeholders.Sort(PlaceholderComparer)
                 ProgressScope.Report(System.Threading.Interlocked.Increment(current), label:="Sorting placeholders …")
                 If Cancelled() Then
@@ -755,7 +1497,7 @@ Partial Public Class ThisAddIn
     ''' <param name="configureFind">Action configuring Word.Find before execution.</param>
     ''' <param name="replacementText">String containing \1 or ^& tokens.</param>
     ''' <param name="tweakReplacement">Action clearing formatting on inserted tokens.</param>
-    Private Sub ReplaceWithinRange(
+    Private Sub oldReplaceWithinRange(
     ByVal rng As Microsoft.Office.Interop.Word.Range,
     ByVal configureFind As System.Action(Of Microsoft.Office.Interop.Word.Find),
     ByVal replacementText As System.String,
@@ -1316,34 +2058,44 @@ ContinueLoop:
     ''' <param name="doc">Owning document.</param>
     ''' <param name="placeholderPrefix">Token prefix (e.g., WFNT:).</param>
     ''' <param name="addNoteAction">Callback that handles reinsertion.</param>
-    Private Sub ProcessInTextPlaceholders(ByRef workingrange As Word.Range, doc As Word.Document, placeholderPrefix As String, addNoteAction As Action(Of Word.Document, Word.Range, String))
-        Dim PreserveRange As Range = workingrange
+    Private Sub ProcessInTextPlaceholders(
+    ByRef workingrange As Word.Range,
+    doc As Word.Document,
+    placeholderPrefix As String,
+    addNoteAction As Action(Of Word.Document, Word.Range, String, InlineCharFormatSnapshot))
+
         With workingrange.Find
+            .ClearFormatting()
+            .Replacement.ClearFormatting()
             .Text = "\{\{" & placeholderPrefix & "*\}\}"
             .MatchWildcards = True
+            .Format = False
+            .Forward = True
+            .Wrap = Word.WdFindWrap.wdFindStop
+
             Do While .Execute()
                 Dim startPos As Integer = workingrange.Start
-                Dim endPos As Integer = workingrange.End
 
-                ' Extract note or field text by trimming prefix and suffix
+                Dim placeholderRange As Word.Range = workingrange.Duplicate
+                Dim placeholderFormat As InlineCharFormatSnapshot =
+                CaptureInlineCharFormatSnapshot(placeholderRange)
+
                 Dim placeholderText As String = workingrange.Text
-                Dim noteText As String = placeholderText.Substring(placeholderPrefix.Length + 2, placeholderText.Length - (placeholderPrefix.Length + 4))
+                Dim noteText As String =
+                placeholderText.Substring(
+                    placeholderPrefix.Length + 2,
+                    placeholderText.Length - (placeholderPrefix.Length + 4))
 
-                ' Remove placeholder
                 workingrange.Text = ""
 
-                ' Add footnote, endnote, or field
                 Dim insertionRange As Word.Range = doc.Range(startPos, startPos)
-                addNoteAction.Invoke(doc, insertionRange, noteText)
+                addNoteAction.Invoke(doc, insertionRange, noteText, placeholderFormat)
 
-                ' Adjust range position for the next match
-                ' workingrange.Start = endPos + 1
                 workingrange.Collapse(Word.WdCollapseDirection.wdCollapseEnd)
                 If placeholderPrefix = "PFOR:" Then
                     workingrange.MoveStart(Unit:=Word.WdUnits.wdParagraph, Count:=1)
                     If workingrange.Start < doc.Content.End Then
                         Dim nextChar As String = doc.Range(workingrange.Start, workingrange.Start + 1).Text
-                        ' In Word the paragraph mark is typically Chr(13) (which is vbCr)
                         If nextChar = vbCr Then
                             workingrange.MoveStart(Unit:=Word.WdUnits.wdCharacter, Count:=1)
                         End If
@@ -1361,23 +2113,36 @@ ContinueLoop:
     ''' <summary>
     ''' Adds a footnote at the specified location.
     ''' </summary>
-    Private Sub AddFootnote(doc As Word.Document, insertionRange As Word.Range, noteText As String)
+    Private Sub AddFootnote(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    noteText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         doc.Footnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
     ''' <summary>
     ''' Adds an endnote at the specified location.
     ''' </summary>
-    Private Sub AddEndnote(doc As Word.Document, insertionRange As Word.Range, noteText As String)
+    Private Sub AddEndnote(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    noteText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         doc.Endnotes.Add(Range:=insertionRange, Text:=noteText)
     End Sub
 
     ''' <summary>
     ''' Inserts a Word field and restores its code plus optional display text.
     ''' </summary>
-    Private Sub AddField(doc As Word.Document, insertionRange As Word.Range, fieldText As String)
-        ' fieldText may be either just the code
-        ' or "code|||base64(displayText)" for hyperlink fields
+    Private Sub AddField(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    fieldText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         Dim fieldCode As String = fieldText
         Dim displayText As String = Nothing
 
@@ -1387,50 +2152,65 @@ ContinueLoop:
             Try
                 displayText = System.Text.Encoding.UTF8.GetString(System.Convert.FromBase64String(parts(1)))
             Catch
-                ' Fallback if it wasn't base64-encoded (keeps behavior robust)
                 displayText = parts(1)
             End Try
         End If
 
-        ' Insert the field and apply the code
-        Dim fieldRange As Word.Range = insertionRange.Duplicate
-        Dim field As Word.Field = doc.Fields.Add(fieldRange)
-        field.Code.Text = fieldCode
-        field.Update()
+        Try
+            Dim fieldRange As Word.Range = insertionRange.Duplicate
+            Dim field As Word.Field = doc.Fields.Add(fieldRange)
+            field.Code.Text = fieldCode
+            field.Update()
 
-        ' If we captured a display text (e.g., from a hyperlink), restore it and lock the field
-        If Not String.IsNullOrEmpty(displayText) Then
-            field.Result.Text = displayText
-            ' Keep the display text stable; remove this if you want updates to overwrite it later
-            field.Locked = True
-        End If
+            If Not String.IsNullOrEmpty(displayText) Then
+                field.Result.Text = displayText
+
+                Dim visibleRange As Word.Range = field.Result.Duplicate
+                Dim visibleEnd As Integer = Math.Min(visibleRange.Start + displayText.Length, visibleRange.End)
+                visibleRange.SetRange(visibleRange.Start, visibleEnd)
+
+                With visibleRange.Font
+                    If Not String.IsNullOrWhiteSpace(sourceFormat.FontName) Then .Name = sourceFormat.FontName
+                    If sourceFormat.FontSize.HasValue AndAlso sourceFormat.FontSize.Value > 0 Then .Size = sourceFormat.FontSize.Value
+                    If sourceFormat.Bold.HasValue Then .Bold = sourceFormat.Bold.Value
+                    If sourceFormat.Italic.HasValue Then .Italic = sourceFormat.Italic.Value
+                    If sourceFormat.Underline.HasValue Then .Underline = sourceFormat.Underline.Value
+                    If sourceFormat.Color.HasValue Then .Color = sourceFormat.Color.Value
+                End With
+
+                field.Locked = True
+            End If
+
+        Catch ex As System.Exception
+            Debug.WriteLine("AddField failed: " & ex.ToString())
+        End Try
     End Sub
+
 
     ''' <summary>
     ''' Applies a captured paragraph format (style, font, list, spacing) to the paragraph
     ''' containing the specified insertion range.
     ''' </summary>
-    Private Sub AddFormat(doc As Word.Document, insertionRange As Word.Range, formatIndexText As String)
+    Private Sub AddFormat(
+    doc As Word.Document,
+    insertionRange As Word.Range,
+    formatIndexText As String,
+    sourceFormat As InlineCharFormatSnapshot)
+
         Try
-            ' Parse the format index from the input text
             Dim formatIndex As Integer = Integer.Parse(formatIndexText.Trim())
 
-            ' Ensure the format index is within bounds
             If formatIndex >= 0 AndAlso formatIndex < paragraphFormat.Length Then
-                ' Retrieve the specific paragraph format
                 Dim format = paragraphFormat(formatIndex)
 
-                ' Expand the range to the entire paragraph
                 Dim targetRange As Word.Range = insertionRange.Paragraphs(1).Range
                 If targetRange.End > targetRange.Start Then
-                    targetRange.End = targetRange.End - 1  ' Exclude the paragraph mark
+                    targetRange.End = targetRange.End - 1
                 End If
 
                 With targetRange
-                    ' Apply the stored style
                     If format.Style IsNot Nothing Then .Style = format.Style
 
-                    ' Apply the stored font formatting
                     With .Font
                         If format.FontName IsNot Nothing Then .Name = format.FontName
                         If format.FontSize > 0 Then .Size = format.FontSize
@@ -1440,36 +2220,26 @@ ContinueLoop:
                         .Color = format.FontColor
                     End With
 
-                    ' Apply list formatting if applicable
                     If format.HasListFormat AndAlso format.ListTemplate IsNot Nothing Then
                         Try
                             .ListFormat.ApplyListTemplateWithLevel(
                             ListTemplate:=format.ListTemplate,
                             ContinuePreviousList:=If(format.ListNumber > 0, True, False),
                             ApplyTo:=Word.WdListApplyTo.wdListApplyToWholeList,
-                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior
-                        )
+                            DefaultListBehavior:=Word.WdDefaultListBehavior.wdWord10ListBehavior)
                             .ListFormat.ListLevelNumber = format.ListLevel
                         Catch ex As System.Exception
-                            'MsgBox("Error applying list format: " & ex.Message, MsgBoxStyle.Exclamation)
                         End Try
                     End If
 
-                    ' Apply paragraph alignment
                     .ParagraphFormat.Alignment = format.Alignment
-
-                    ' Apply line spacing
                     .ParagraphFormat.LineSpacing = format.LineSpacing
-
-                    ' Apply spacing before and after
                     .ParagraphFormat.SpaceBefore = format.SpaceBefore
                     .ParagraphFormat.SpaceAfter = format.SpaceAfter
                 End With
-            Else
-                ' MsgBox("Invalid format index: " & formatIndex, MsgBoxStyle.Exclamation)
             End If
         Catch ex As System.Exception
-            ' MsgBox("Error applying format: " & ex.Message, MsgBoxStyle.Critical)
         End Try
     End Sub
+
 End Class

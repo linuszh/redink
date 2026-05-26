@@ -67,6 +67,12 @@ Public Module WordSearchHelper
     ' Public Methods
     ' =========================================================================
 
+    <System.Diagnostics.Conditional("DEBUG")>
+    Private Sub LogHelperDiag(message As String)
+        If String.IsNullOrWhiteSpace(message) Then Return
+        System.Diagnostics.Debug.WriteLine($"{DateTime.Now:HH:mm:ss.fff} [FindLongTextAnchoredFast] {message}")
+    End Sub
+
     ''' <summary>
     ''' Searches for a long text fragment in the specified Word selection using
     ''' multiple fallback strategies. Updates the selection to the found text.
@@ -79,6 +85,17 @@ Public Module WordSearchHelper
     ''' <param name="timeoutSeconds">Maximum search duration in seconds (default 10).</param>
     ''' <param name="searchOriginal">When True, searches in Original view (hides inserted revisions)</param>
     ''' <returns>True if text was found and selection updated; False otherwise.</returns>
+    ''' <remarks>
+    ''' Search scope contract:
+    '''   - If <paramref name="sel"/> has Start &lt; End, the helper searches inside that range.
+    '''   - If <paramref name="sel"/> is collapsed (Start = End), the helper searches
+    '''     from that caret position forward to the end of the main story.
+    '''
+    ''' Callers that want to scan the whole document MUST set the selection to
+    ''' [doc.Content.Start, doc.Content.End] immediately before every call,
+    ''' because intervening Word UI activity (DoEvents, Comments.Add, balloon
+    ''' refresh, etc.) may collapse the live Selection between calls.
+    ''' </remarks>
     Public Function FindLongTextAnchoredFast(
         ByRef sel As Microsoft.Office.Interop.Word.Selection,
         ByVal findText As System.String,
@@ -134,16 +151,25 @@ Public Module WordSearchHelper
             Dim mainStory As Microsoft.Office.Interop.Word.Range =
                 doc.StoryRanges(Microsoft.Office.Interop.Word.WdStoryType.wdMainTextStory).Duplicate
 
-            ' Determine search area: entire document if no selection, otherwise selected range
+            LogHelperDiag($"ENTRY sel=[{sel.Range.Start},{sel.Range.End}] mainStory=[{mainStory.Start},{mainStory.End}] needleLen={findText.Length}")
+
+            ' Determine search area.
+            ' A collapsed selection must search from the caret position forward,
+            ' not from the beginning of the document.
             Dim area As Microsoft.Office.Interop.Word.Range
+            Dim sStart As System.Int32 = System.Math.Max(sel.Range.Start, mainStory.Start)
+            Dim sEnd As System.Int32
+
             If sel.Range.Start = sel.Range.End Then
-                area = mainStory.Duplicate
+                sEnd = mainStory.End
             Else
-                Dim sStart As System.Int32 = System.Math.Max(sel.Range.Start, mainStory.Start)
-                Dim sEnd As System.Int32 = System.Math.Min(sel.Range.End, mainStory.End)
-                If sEnd < sStart Then sEnd = sStart
-                area = doc.Range(Start:=sStart, End:=sEnd)
+                sEnd = System.Math.Min(sel.Range.End, mainStory.End)
             End If
+
+            If sEnd < sStart Then sEnd = sStart
+            area = doc.Range(Start:=sStart, End:=sEnd)
+
+            LogHelperDiag($"AREA computed area=[{area.Start},{area.End}]")
 
             ' STRATEGY 0: Plain literal search (no wildcards, no IgnoreSpace)
             If findText.Length <= 255 Then
@@ -160,8 +186,15 @@ Public Module WordSearchHelper
                 Dim hitPlain As System.Boolean
                 Try : hitPlain = rngPlain.Find.Execute() : Catch : hitPlain = False : End Try
                 If hitPlain Then
-                    sel.SetRange(rngPlain.Start, rngPlain.End)
-                    Return True
+                    If rngPlain.Start < area.Start OrElse rngPlain.End > area.End Then
+                        LogHelperDiag($"STRATEGY 0 REJECTED out-of-range hit area=[{area.Start},{area.End}] hit=[{rngPlain.Start},{rngPlain.End}]")
+                    Else
+                        LogHelperDiag($"STRATEGY 0 HIT area=[{area.Start},{area.End}] hit=[{rngPlain.Start},{rngPlain.End}]")
+                        sel.SetRange(rngPlain.Start, rngPlain.End)
+                        Return True
+                    End If
+                Else
+                    LogHelperDiag($"STRATEGY 0 MISS findTextLen={findText.Length}")
                 End If
             End If
 
@@ -178,8 +211,15 @@ Public Module WordSearchHelper
                     .Format = False : .IgnoreSpace = True
                 End With
                 If rngLit.Find.Execute() Then
-                    sel.SetRange(rngLit.Start, rngLit.End)
-                    Return True
+                    If rngLit.Start < area.Start OrElse rngLit.End > area.End Then
+                        LogHelperDiag($"STRATEGY 1 REJECTED out-of-range hit area=[{area.Start},{area.End}] hit=[{rngLit.Start},{rngLit.End}]")
+                    Else
+                        LogHelperDiag($"STRATEGY 1 HIT area=[{area.Start},{area.End}] hit=[{rngLit.Start},{rngLit.End}]")
+                        sel.SetRange(rngLit.Start, rngLit.End)
+                        Return True
+                    End If
+                Else
+                    LogHelperDiag($"STRATEGY 1 MISS litPatLen={litPat.Length}")
                 End If
             End If
 
@@ -203,8 +243,15 @@ Public Module WordSearchHelper
                     .Format = False : .IgnoreSpace = True
                 End With
                 If rngFull.Find.Execute() Then
-                    sel.SetRange(rngFull.Start, rngFull.End)
-                    Return True
+                    If rngFull.Start < area.Start OrElse rngFull.End > area.End Then
+                        LogHelperDiag($"STRATEGY 2 REJECTED out-of-range hit area=[{area.Start},{area.End}] hit=[{rngFull.Start},{rngFull.End}]")
+                    Else
+                        LogHelperDiag($"STRATEGY 2 HIT area=[{area.Start},{area.End}] hit=[{rngFull.Start},{rngFull.End}]")
+                        sel.SetRange(rngFull.Start, rngFull.End)
+                        Return True
+                    End If
+                Else
+                    LogHelperDiag($"STRATEGY 2 MISS fullWildcardLen={fullWildcardPattern.Length}")
                 End If
             End If
 
@@ -227,6 +274,7 @@ Public Module WordSearchHelper
             Dim occur As System.Int32 = CountOccurrences(findText, System.String.Join(" "c, endWords))
             If startPat = endPat Then occur = System.Math.Max(2, occur)
 
+            LogHelperDiag($"STRATEGY 3 PREP nWords={nWords} startPatLen={startPat.Length} endPatLen={endPat.Length} occur={occur} canonNeedleLen={canonNeedle.Length}")
 
             ' STRATEGY 3: Anchored search using start/end patterns
             Using sRng As New RangeProxy(area.Duplicate)
@@ -241,7 +289,11 @@ Public Module WordSearchHelper
                 End With
 
                 Dim okS As System.Boolean : Try : okS = fS.Execute() : Catch : okS = False : End Try
+                LogHelperDiag($"STRATEGY 3 first start-anchor execute returned {okS}")
+                Dim s3Iter As Integer = 0
                 While okS
+                    s3Iter += 1
+                    LogHelperDiag($"STRATEGY 3 iter={s3Iter} startAnchor=[{sRng.Range.Start},{sRng.Range.End}]")
                     ' Check timeout
                     If (System.DateTime.UtcNow - t0).TotalSeconds > timeoutSeconds Then
                         timedOut = True : Exit While
@@ -289,6 +341,8 @@ Public Module WordSearchHelper
                         _dbgLastSlice = canSlice
                         _dbgLastIdx = idx
 
+                        LogHelperDiag($"STRATEGY 3 iter={s3Iter} canSliceLen={canSlice.Length} canonNeedleLen={canonNeedle.Length} idx={idx}")
+
                         If idx >= 0 Then
                             Dim endIdx As System.Int32 = System.Math.Min(idx + canonNeedle.Length - 1, backCanon.Count - 1)
 
@@ -311,6 +365,7 @@ Public Module WordSearchHelper
                                         " End=" & backCanon(endIdx))
                             End If
 
+                            LogHelperDiag($"STRATEGY 3 HIT area=[{area.Start},{area.End}] hit=[{backCanon(idx)},{backCanon(endIdx) + 1}] posStart={posStart}")
                             sel.SetRange(backCanon(idx), backCanon(endIdx) + 1)
                             Return True
                         End If
@@ -327,7 +382,10 @@ Public Module WordSearchHelper
             Dim winSize As System.Int32 = 12000
             Dim overlap As System.Int32 = 400
             Dim p As System.Int32 = area.Start
+            LogHelperDiag($"STRATEGY 4 START area=[{area.Start},{area.End}] winSize={winSize} overlap={overlap}")
+            Dim s4Window As Integer = 0
             While p < area.End
+                s4Window += 1
                 ' Check timeout
                 If (System.DateTime.UtcNow - t0).TotalSeconds > timeoutSeconds Then
                     timedOut = True : Exit While
@@ -344,6 +402,7 @@ Public Module WordSearchHelper
                 CanonicaliseWithBackMap(sliceTxt, True, back, canSlice, backCanon)
 
                 Dim idx As System.Int32 = canSlice.IndexOf(canonNeedle, System.StringComparison.Ordinal)
+                LogHelperDiag($"STRATEGY 4 window#{s4Window} p={p} len={len} canSliceLen={canSlice.Length} idx={idx}")
 
                 ' Production code with boundary checking
                 If idx >= 0 Then
@@ -370,6 +429,7 @@ Public Module WordSearchHelper
                         End While
 
                         If testRange.Start >= doc.Content.Start AndAlso testRange.End <= doc.Content.End Then
+                            LogHelperDiag($"STRATEGY 4 HIT area=[{area.Start},{area.End}] window p={p} hit=[{testRange.Start},{testRange.End}]")
                             sel.SetRange(testRange.Start, testRange.End)
                             System.Runtime.InteropServices.Marshal.ReleaseComObject(testRange)
                             Return True

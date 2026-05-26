@@ -87,7 +87,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             TranslateWordDocuments()
             Return
         End If
@@ -108,7 +108,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             CorrectWordDocuments()
             Return
         End If
@@ -361,7 +361,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             AnonymizeWordDocuments()
             Return
         End If
@@ -612,7 +612,7 @@ Partial Public Class ThisAddIn
         Dim application As Word.Application = Globals.ThisAddIn.Application
         Dim Selection As Microsoft.Office.Interop.Word.Selection = application.Selection
 
-        If Selection.Type = WdSelectionType.wdSelectionIP Then
+        If ShouldRunWholeDocumentPipeline(Selection) Then
             SwitchPartiesDocuments()
             Return
         End If
@@ -1040,6 +1040,70 @@ Partial Public Class ThisAddIn
         _win2.ShowRaised()
     End Sub
 
+    Public Shared Sub SelectModel(modelNumber As Integer)
+        Try
+            If PrimaryModelManager.SelectModel(_context, modelNumber) Then
+                Try
+                    If Globals.Ribbons.Ribbon1 IsNot Nothing Then
+                        Globals.Ribbons.Ribbon1.UpdateModelsMenu()
+                    End If
+                Catch
+                    ' non-critical
+                End Try
+            Else
+                SharedMethods.ShowCustomMessageBox($"Model {modelNumber} is not configured.")
+            End If
+        Catch ex As Exception
+            SharedMethods.ShowCustomMessageBox($"Error switching model: {ex.Message}")
+        End Try
+    End Sub
+
+
+    Private Shared Function ShouldRunWholeDocumentPipeline(ByVal Selection As Word.Selection) As Boolean
+        If Selection Is Nothing OrElse Selection.Range Is Nothing Then Return False
+        If Selection.Type <> Word.WdSelectionType.wdSelectionIP Then Return False
+
+        Try
+            Select Case Selection.StoryType
+                Case Word.WdStoryType.wdCommentsStory,
+                 Word.WdStoryType.wdFootnotesStory,
+                 Word.WdStoryType.wdEndnotesStory
+                    Return False
+            End Select
+        Catch
+        End Try
+
+        Try
+            Dim doc As Word.Document = Selection.Range.Document
+            If doc Is Nothing Then Return True
+
+            Dim cursorPos As Integer = Selection.Range.Start
+
+            For Each c As Word.Comment In doc.Comments
+                Dim anchor As Word.Range = Nothing
+
+                Try
+                    anchor = c.Scope
+                Catch
+                    Try
+                        anchor = c.Reference
+                    Catch
+                        anchor = Nothing
+                    End Try
+                End Try
+
+                If anchor IsNot Nothing AndAlso
+               cursorPos >= anchor.Start AndAlso
+               cursorPos <= anchor.End Then
+                    Return False
+                End If
+            Next
+        Catch
+        End Try
+
+        Return True
+    End Function
+
     ''' <summary>
     ''' Displays the settings editor window with configuration options and tooltips.
     ''' Updates context menu after settings are changed.
@@ -1072,6 +1136,7 @@ Partial Public Class ThisAddIn
                 {"MarkupDiffCap", "Maximum characters for Diff Markup"},
                 {"MarkupRegexCap", "Maximum characters for Regex Markup"},
                 {"MarkdownBubbles", "Use Markdown in Word bubbles"},
+                {"MarkupAuthor", "Author name for track changes/comments"},
                 {"PreCorrection", "Additional instruction for prompts"},
                 {"PostCorrection", "Prompt to apply after queries"},
                 {"Language1", "Default translation language 1"},
@@ -1084,9 +1149,15 @@ Partial Public Class ThisAddIn
                 {"MyStylePath", "Path to the MyStyle prompt file"},
                 {"DefaultPrefix", "Default prefix to use in 'Freestyle'"},
                 {"Location", "Location information to use, e.g., in 'Freestyle'"},
-                {"ToolingLogWindow", "Tooling: Show log window"},
-                {"ToolingDryRun", $"Tooling: Show {ToolFriendlyName.ToLower} overview before running"},
-                {"ToolingMaximumIterations", $"Tooling: Number of rounds that {ToolFriendlyName.ToLower} may be called"}
+                {"ToolingLogWindow", "Agents: Show log window"},
+                {"ToolingDryRun", $"Agents: Show {ToolFriendlyName.ToLower} overview before running"},
+                {"ToolingMaximumIterations", $"Agents: Number of rounds that {ToolFriendlyName.ToLower} may be called"},
+                {"KnowledgeStorePath", "Knowledge store file (central)"},
+                {"KnowledgeStorePathLocal", "Knowledge store file (local)"},
+                {"KnowledgeStoreUseLLMIndex", "Knowledge store: Use LLM for indexing"},
+                {"KnowledgeStoreOwner", "Knowledge store: Default owner"},
+                {"KnowledgeStoreBackgroundIndexing", "Knowledge store: Background indexing"},
+                {"KnowledgeStoreBackgroundIndexingWindow", "Knowledge store: Background processing window"}
             }
         Dim SettingsTips As New Dictionary(Of String, String) From {
                 {"Temperature", "The higher, the more creative the LLM will be (0.0-2.0)"},
@@ -1112,6 +1183,7 @@ Partial Public Class ThisAddIn
                 {"MarkupDiffCap", "The maximum size of the text that should be processed using the Diff method (to avoid you having to wait too long)"},
                 {"MarkupRegexCap", "The maximum size of the text that should be processed using the Regex method (to avoid you having to wait too long)"},
                 {"MarkdownBubbles", $"If selected, Word bubbles created by {AN} will support Markdown formatting (if provided by the LLM)"},
+                {"MarkupAuthor", "If a text is entered, this will be used as the author for track changes or comments by the LLM"},
                 {"PreCorrection", "Add prompting text that will be added to all basic requests (e.g., for special language tasks)"},
                 {"PostCorrection", "Add a prompt that will be applied to each result before it is further processed (slow!)"},
                 {"Language1", "The language (in English) that will be used for the first quick access button in the ribbon"},
@@ -1126,7 +1198,13 @@ Partial Public Class ThisAddIn
                 {"Location", "Provide location information (e.g., 'We are in Zurich, Switzerland') to be used in 'Freestyle', chatbot and some other prompts that contain {Location} to get more location specific results."},
                 {"ToolingLogWindow", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), a log window will automatically open and show the progress."},
                 {"ToolingDryRun", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), the {ToolFriendlyName.ToLower} made available to the LLM will be shown first, allowing the user to decide whether to proceed."},
-                {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."}
+                {"ToolingMaximumIterations", $"When an LLM is allowed to call {ToolFriendlyName.ToLower} within Red Ink (e.g., Special Services), this number will define how many rounds of such calls may be done by the LLM."},
+                {"KnowledgeStorePath", "The file path for the central knowledge store index (supports env variables); used by the (kb) trigger"},
+                {"KnowledgeStorePathLocal", "The file path for the local knowledge store index (supports env variables); used by the (kb) trigger"},
+                {"KnowledgeStoreUseLLMIndex", "When enabled, the indexer uses the LLM to generate richer summaries and keywords (uses API credits)"},
+                {"KnowledgeStoreOwner", "Default owner identity for locally created stores (empty = current Windows username)"},
+                {"KnowledgeStoreBackgroundIndexing", "When enabled, new or changed documents in active stores are indexed automatically in the background"},
+                {"KnowledgeStoreBackgroundIndexingWindow", "Optional local-time processing window for background indexing. Leave empty to allow any time. Examples: '22:00-06:00' (only at night), 'allow:22:00-06:00;12:00-13:00', 'deny:08:00-18:00'."}
             }
 
         ShowSettingsWindow(Settings, SettingsTips)
@@ -1140,6 +1218,7 @@ Partial Public Class ThisAddIn
         splash.Close()
 
     End Sub
+
 
 
 

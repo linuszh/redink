@@ -59,6 +59,7 @@ Imports NetOffice.PowerPointApi
 Imports SharedLibrary
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedMethods
+Imports Windows.Media
 Imports SLib = SharedLibrary.SharedLibrary.SharedMethods
 
 Partial Public Class ThisAddIn
@@ -217,11 +218,10 @@ Partial Public Class ThisAddIn
     ''' The file content (optionally wrapped in XML document tags), or an empty string
     ''' if the file could not be read or contained no extractable text.
     ''' </returns>
-    Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False) As Task(Of String)
+    Private Async Function LoadSingleFileAsync(filePath As String, isWrapped As Boolean, ctx As FileLoadingContext, Optional isFromDirectory As Boolean = False, Optional askWorksheetSelection As Boolean = False) As Task(Of String)
         Try
             Dim doOCR As Boolean = False
             Dim askUser As Boolean = False
-
             ' Check if OCR is available at all
             Dim ocrAvailable As Boolean = SharedMethods.IsOcrAvailable(_context)
 
@@ -251,12 +251,17 @@ Partial Public Class ThisAddIn
                 askUser = False
             End If
 
-            ' Load file content with determined OCR settings
+            ' Keep normal file loading silent, but allow worksheet picker for explicit single-workbook loads
+            Dim silentLoad As Boolean = Not askWorksheetSelection
+
+            ' Load file content with determined OCR settings            
             Dim fileResult = Await GetFileContentEx(
                 optionalFilePath:=filePath,
-                Silent:=True,
+                Silent:=silentLoad,
                 DoOCR:=doOCR,
-                AskUser:=askUser
+                AskUser:=askUser,
+                AskWorksheetSelection:=askWorksheetSelection,
+                OcrAdditionalInstruction:=Add_OcrMarkdownInstruction
             )
 
             ' Track PDFs that may have incomplete content
@@ -296,9 +301,10 @@ Partial Public Class ThisAddIn
             End If
         Catch ex As Exception
             ctx.FailedFiles.Add(filePath)
-            Return ""
+        Return ""
         End Try
     End Function
+
 
 
 
@@ -649,8 +655,12 @@ Partial Public Class ThisAddIn
                     Dim replacementText As String = ""
 
                     If Not String.IsNullOrWhiteSpace(selectedFile) Then
-                        ' Start progress bar on first actual file load (after all user dialogs)
-                        If Not progressBarStarted Then
+                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
+                        Dim askWorksheetSelection As Boolean =
+                            Path.GetExtension(selectedFile).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        ' Start progress bar only when no worksheet-selection dialog is expected
+                        If Not askWorksheetSelection AndAlso Not progressBarStarted Then
                             progressBarStarted = True
                             ProgressBarModule.CancelOperation = False
                             ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
@@ -658,11 +668,28 @@ Partial Public Class ThisAddIn
                             ProgressBarModule.GlobalProgressLabel = "Loading external files..."
                             ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
                         End If
-                        Dim isWrapped As Boolean = IsWrappedInXml(prompt, extIdx, ExtTrigger)
-                        ProgressBarModule.GlobalProgressLabel = $"Loading file {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(selectedFile)}..."
-                        ProgressBarModule.GlobalProgressMax = totalTriggers
-                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
-                        replacementText = Await LoadSingleFileAsync(selectedFile, isWrapped, ctx, isFromDirectory:=False)
+
+                        If progressBarStarted Then
+                            ProgressBarModule.GlobalProgressLabel = $"Loading file {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(selectedFile)}..."
+                            ProgressBarModule.GlobalProgressMax = totalTriggers
+                        End If
+
+                        replacementText = Await LoadSingleFileAsync(
+                            selectedFile,
+                            isWrapped,
+                            ctx,
+                            isFromDirectory:=False,
+                            askWorksheetSelection:=askWorksheetSelection)
+
+                        ' Start progress bar after selection if it was deferred
+                        If askWorksheetSelection AndAlso Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = processedTriggers
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
                     Else
                         Dim answer As Integer = ShowCustomYesNoBox(
                         "No file selected. Do you want to continue or abort?",
@@ -841,8 +868,11 @@ Partial Public Class ThisAddIn
 
                     ' Determine if it's a file or directory
                     If File.Exists(candidatePath) Then
-                        ' Start progress bar for file loading (no user dialogs ahead)
-                        If Not progressBarStarted Then
+                        Dim askWorksheetSelection As Boolean =
+                            Path.GetExtension(candidatePath).Equals(".xlsx", StringComparison.OrdinalIgnoreCase)
+
+                        ' Start progress bar only when no worksheet-selection dialog is expected
+                        If Not askWorksheetSelection AndAlso Not progressBarStarted Then
                             progressBarStarted = True
                             ProgressBarModule.CancelOperation = False
                             ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
@@ -851,11 +881,28 @@ Partial Public Class ThisAddIn
                             ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
                         End If
 
-                        ProgressBarModule.GlobalProgressLabel = $"Loading {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(candidatePath)}..."
-                        ProgressBarModule.GlobalProgressMax = totalTriggers
+                        If progressBarStarted Then
+                            ProgressBarModule.GlobalProgressLabel = $"Loading {processedTriggers + 1} of {totalTriggers}: {Path.GetFileName(candidatePath)}..."
+                            ProgressBarModule.GlobalProgressMax = totalTriggers
+                        End If
 
-                        ' Individual file - isFromDirectory=False means OCR with AskUser=True
-                        replacementText = Await LoadSingleFileAsync(candidatePath, isWrapped, ctx, isFromDirectory:=False)
+                        replacementText = Await LoadSingleFileAsync(
+                            candidatePath,
+                            isWrapped,
+                            ctx,
+                            isFromDirectory:=False,
+                            askWorksheetSelection:=askWorksheetSelection)
+
+                        ' Start progress bar after selection if it was deferred
+                        If askWorksheetSelection AndAlso Not progressBarStarted Then
+                            progressBarStarted = True
+                            ProgressBarModule.CancelOperation = False
+                            ProgressBarModule.GlobalProgressMax = System.Math.Max(1, totalTriggers)
+                            ProgressBarModule.GlobalProgressValue = processedTriggers
+                            ProgressBarModule.GlobalProgressLabel = "Loading external files..."
+                            ShowProgressBarInSeparateThread(AN & " File Loading (may include OCR)", "Loading external files...")
+                        End If
+
                     ElseIf Directory.Exists(candidatePath) Then
                         ' Directory - defer progress bar to LoadDirectoryFilesAsync (user dialogs first)
                         replacementText = Await LoadDirectoryFilesAsync(candidatePath, isWrapped, ctx, ensureProgressBar:=Not progressBarStarted)
@@ -1124,6 +1171,7 @@ Partial Public Class ThisAddIn
             Dim DoFiles As Boolean = False
             Dim DoAssemble As Boolean = False
             Dim DoShowModel As Boolean = False
+            Dim DoKB As Boolean = False
 
             ' Build instruction strings for user guidance
             Dim MarkupInstruct As String = $"start With '{MarkupPrefixAll}' for markups"
@@ -1141,6 +1189,7 @@ Partial Public Class ThisAddIn
             Dim MyStyleInstruct As String = $"; add '{MyStyleTrigger}' to apply your personal style"
             Dim LibInstruct As String = $"; add '{LibTrigger}' for library search"
             Dim NetInstruct As String = $"; add '{NetTrigger}' for internet search"
+            Dim KBInstruct As String = $"; add '{KnowledgeTriggerHelper.KbTrigger}' to search all stores or use '{KnowledgeTriggerHelper.KbTriggerPrefix}your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}store:StoreName your query)' / '{KnowledgeTriggerHelper.KbTriggerPrefix}tag:TagName your query)' for Knowledge Store retrieval"
             Dim PureInstruct As String = $"; use '{PurePrefix}' for direct prompting"
             Dim FileInstruct As String = $"; use '{FilePrefix}' for modifying file(s)"
             Dim AssembleInstruct As String = $"; use '{AssemblePrefix}' for assembling a document from templates"
@@ -1150,8 +1199,10 @@ Partial Public Class ThisAddIn
             Dim MultiModelInstruct As String = $"; add '{MultiModelTrigger}' for multiple models, and {ShowModel} to include the model name in the output"
             Dim ToolSelectionInstruct As String = $"; add '{ToolSelectionTrigger}' to permit {ToolFriendlyName.ToLower} selection"
             Dim LastPromptInstruct As String = If(String.IsNullOrWhiteSpace(My.Settings.LastPrompt), "", "; Ctrl-P for your last prompt")
+            Dim FormInstruct As String = $"; use '{FormPrefix}' for completing tables/form fields in a Word document"
             Dim FileObject As String = ""
             Dim SlideDeck As String = ""
+            Dim DoForm As Boolean = False
 
             Dim DefaultPrefix As String = INI_DefaultPrefix
             Dim DefaultPrefixText As String = ""
@@ -1162,13 +1213,20 @@ Partial Public Class ThisAddIn
             ' Check if no text is selected (insertion point only)
             If selection.Type = WdSelectionType.wdSelectionIP Then NoText = True
 
-            ' Check if the selected model supports tooling (can call tools)
+            ' Check if the selected model supports tooling (can call tools)f
             Dim modelSupportsTool As Boolean = False
             If UseSecondAPI Then
                 ' Check via SharedMethods - based on APICall_ToolInstructions
                 modelSupportsTool = Not String.IsNullOrWhiteSpace(INI_APICall_ToolInstructions_2) OrElse
                                     SharedMethods.ModelSupportsTooling(LastFreestyleModelConfig)
             End If
+
+            Dim ToolTriggerAvailable As Boolean =
+                Not UseSecondAPI AndAlso
+                SharedMethods.HasToolingCapableSpecialTaskModel(_context, INI_AlternateModelPath, "ToolDefaultModel")
+
+            Dim ToolTriggerInstruct As String =
+                If(ToolTriggerAvailable, $"; add '{ToolTrigger}' to perform an agentic search of your selected {ToolFriendlyName.ToLower}", "")
 
             ' Build additional instruction text based on configuration and selection state
             Dim AddOnInstruct As String = AllInstruct
@@ -1185,6 +1243,10 @@ Partial Public Class ThisAddIn
             If INI_ISearch Then
                 AddOnInstruct += NetInstruct.Replace("; add", ", ")
             End If
+            If Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePath) OrElse
+               Not String.IsNullOrWhiteSpace(INI_KnowledgeStorePathLocal) Then
+                AddOnInstruct += KBInstruct.Replace("; add", ", ")
+            End If
             If Not String.IsNullOrWhiteSpace(INI_MyStylePath) Then
                 AddOnInstruct += MyStyleInstruct.Replace("; add", ", ")
             End If
@@ -1196,14 +1258,21 @@ Partial Public Class ThisAddIn
                 If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) Then
                     AddOnInstruct += MultiModelInstruct.Replace("; add", ", ")
                 End If
-                If Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool Then
-                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
-                End If
 
             Else
                 If Not String.IsNullOrWhiteSpace(INI_APICall_Object) Then
                     AddOnInstruct += ObjectInstruct.Replace("; add", ",")
                     DoFileObject = True
+                End If
+            End If
+
+            If Not String.IsNullOrWhiteSpace(ToolTriggerInstruct) Then
+                AddOnInstruct += ToolTriggerInstruct.Replace("; add", ", ")
+            End If
+
+            If UseSecondAPI OrElse ToolTriggerAvailable Then
+                If (Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) And modelSupportsTool) Or ToolTriggerAvailable Then
+                    AddOnInstruct += ToolSelectionInstruct.Replace("; add", ", ")
                 End If
             End If
 
@@ -1243,7 +1312,7 @@ Partial Public Class ThisAddIn
                             System.Tuple.Create("OK, use window", $"Use this to automatically insert '{ClipboardPrefix}' as a prefix.", ClipboardPrefix),
                             System.Tuple.Create("OK, use pane", $"Use this to automatically insert '{PanePrefix}' as a prefix.", PanePrefix)
                         }
-                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
+                    OtherPrompt = SLib.ShowCustomInputBox($"Please provide the prompt you wish to execute ({ClipboardInstruct}, {ChartInstruct} or {SlidesInstruct}){PromptLibInstruct}{ExtInstruct}{AddOnInstruct}{PureInstruct}{FileInstruct}{AssembleInstruct}{FormInstruct}{LastPromptInstruct}{DefaultPrefixText}:", $"{AN} Freestyle (using " & If(UseSecondAPI, INI_Model_2, INI_Model) & ")", False, "", My.Settings.LastPrompt, OptionalButtons, InsertButtons).Trim()
                 End If
             Else
                 OtherPrompt = LastPrompt
@@ -1320,46 +1389,57 @@ Partial Public Class ThisAddIn
                 AddItem("insertclipboard", "Insert clipboard content at the cursor position.")
                 AddItem("insertclip", "Insert clipboard content at the cursor position.")
 
+                ' KNOWLEDGE STORE
+                AddItem("kbindex", "Index new/changed files across all active knowledge stores.")
+                AddItem("kbreindex", "Force full re-index of all knowledge stores (regenerates all metadata, uses API credits).")
+                AddItem("kbrefreshvectors", "Rebuild embeddings from existing wiki pages only (use after changing the embedding model).")
+                AddItem("kbaddstore", "Add a new Knowledge Store (Name|Path).")
+                AddItem("kbstore", "Show the list of Knowledge Stores and their status.")
+                AddItem("kbschema", "Open the selected Knowledge Store schema in the internal JSON editor.")
+                AddItem("kbhealth", "Run an AI health check/lint on the active Wiki (finds orphans/duplicates).")
+                AddItem("kbrepair", "Run an AI repair operation on the active Wiki (fixes issues found during health check).")
+                AddItem("cliptowiki", "Store the clipboard text in the knowledgebase wiki.")
                 ' TOOLS / SOURCES
-                AddItem("setsources", "Select sources/tools available for tooling-capable models (session scope).")
-                AddItem("loadurl", "Retrieve the text of a particular URL given.")
-                AddItem("translator", "Open a widget that provides you with an on-the-fly translation.")
-                AddItem("drawio", "Open a draw.io for editing chart files, optionally with Internet blocking.")
-                AddItem("drawioconverter", "Convert a draw.io flow chart to a HTML mini-web-app.")
+                AddItem("setagents", "Select sources/tools available For agentic models (session scope).")
+                AddItem("loadurl", "Retrieve the text Of a particular URL given.")
+                AddItem("translator", "Open a widget that provides you With an On-the-fly translation.")
+                AddItem("drawio", "Open a draw.io For editing chart files, optionally With Internet blocking.")
+                AddItem("drawioconverter", "Convert a draw.io flow chart To a HTML mini-web-app.")
+                AddItem("pptxconvert", "Convert a PowerPoint presentation To a different template format.")
 
                 ' PRIVACY / TRANSFORMS
-                AddItem("anonymize", "Anonymize/redact the current selection (no LLM call).")
-                AddItem("convertmarkdown", "Convert Markdown in the selected text to Word formatting.")
+                AddItem("anonymize", "Anonymize/redact the current selection (no LLM Call).")
+                AddItem("convertmarkdown", "Convert Markdown In the selected text To Word formatting.")
 
                 ' AUDIO / SPEECH
                 AddItem("speech", "Start speech transcription (Transcriptor).")
                 AddItem("read", "Create audio (TTS) from the selected text.")
-                AddItem("readlocal", "Read the selected text using local TTS (no cloud call).")
-                AddItem("voices", "Select a single cloud TTS voice.")
+                AddItem("readlocal", "Read the selected text Using local TTS (no cloud Call).")
+                AddItem("voices", "Select a Single cloud TTS voice.")
                 AddItem("voices2", "Select multiple cloud TTS voices.")
                 AddItem("voiceslocal", "Select the local TTS voice.")
                 AddItem("createpodcast", "Create a podcast from the selected text.")
-                AddItem("readpodcast", "Play/read a podcast based on the current selection.")
+                AddItem("readpodcast", "Play/read a podcast based On the current selection.")
 
                 ' DOCUMENT / CLAUSES
                 AddItem("doccheck", "Run the document check.")
-                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document or automatic/AI).")
+                AddItem("learndocstyle", "Learn document style — extract a style template (trainer document Or automatic/AI).")
                 AddItem("applydocstyle", "Apply a style template.")
-                AddItem("findclause", "Search for a clause in the clause library/database.")
-                AddItem("addclause", "Add a clause to the clause library/database.")
-                AddItem("splitpdf", "Split a PDF into separate exhibits based on its content.")
-                AddItem("stamper", "Apply an exhibit stamp to a PDF based on its filename.")
+                AddItem("findclause", "Search For a clause In the clause library/database.")
+                AddItem("addclause", "Add a clause To the clause library/database.")
+                AddItem("splitpdf", "Split a PDF into separate exhibits based On its content.")
+                AddItem("stamper", "Apply an exhibit stamp To a PDF based On its filename.")
 
                 ' WEB AGENT
                 AddItem("webagentcreator", "Create/modify web agent scripts.")
                 AddItem("webagent", "Run the web agent (requires configured script paths).")
 
                 ' ANALYSIS
-                AddItem("findhiddenprompts", "Scan the document for hidden prompts.")
+                AddItem("findhiddenprompts", "Scan the document For hidden prompts.")
 
                 Dim chosen As Integer = SLib.SelectValue(items,
                             1,
-                            "Select a Freestyle short command (Esc to cancel):",
+                            "Select a Freestyle Short command (Esc To cancel):",
                             $"{AN} Freestyle - Help"
                         )
 
@@ -1418,6 +1498,387 @@ Partial Public Class ThisAddIn
                 End If
 
             End If
+
+            ' Knowledge store indexing commands
+            If OtherPrompt.Equals("cliptowiki", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select a Knowledge Store:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Await KnowledgeWikiService.CreatePageFromClipboardAsync(selectedStorePath, My.Computer.Clipboard.GetText(), _context)
+                ShowCustomMessageBox("Clipboard saved to Wiki!")
+                Return
+            End If
+
+            ' Run Knowledge Base health check / linter
+            If OtherPrompt.Equals("kbhealth", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to lint:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Dim report = Await KnowledgeWikiService.LintWikiAsync(selectedStorePath, _context)
+                SP_MergePrompt_Cached = SP_MergePrompt
+
+                Dim response = ShowCustomWindow("Here is the health report of the Knowledge Store you have selected:", report, "You can copy it to the clipboard, if you wish.", "{AN} Knowledge Store")
+
+                Return
+            End If
+
+            If OtherPrompt.Equals("kbschema", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStore As KnowledgeStoreCatalog.KnowledgeStoreDefinition = stores(0)
+
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store schema to open:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+
+                    selectedStore = stores(chosen - 1)
+                End If
+
+                If String.IsNullOrWhiteSpace(selectedStore.ResolvedSourcePath) Then
+                    ShowCustomMessageBox("The selected Knowledge Store does not have a valid source path.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                KnowledgeStoreSchema.LoadOrCreate(selectedStore.ResolvedSourcePath)
+
+                Dim schemaPath = KnowledgeStoreSchema.GetSchemaPath(selectedStore.ResolvedSourcePath)
+                If String.IsNullOrWhiteSpace(schemaPath) Then
+                    ShowCustomMessageBox("Could not resolve the schema path for the selected Knowledge Store.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                SharedMethods.ShowTextFileEditor(
+                    schemaPath,
+                    $"Edit schema for Knowledge Store '{selectedStore.Name}'.",
+                    ForceJson:=True,
+                    _context:=_context)
+
+                Return
+            End If
+
+            ' Run Knowledge Base repair only
+            If OtherPrompt.Equals("kbrepair", StringComparison.OrdinalIgnoreCase) Then
+                Dim stores = KnowledgeStoreCatalog.LoadAll(_context)
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No Knowledge Store is configured. Use 'kbaddstore Name|Path' first.")
+                    Return
+                End If
+
+                Dim selectedStorePath As String = stores(0).ResolvedSourcePath
+                If stores.Count > 1 Then
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    Dim idx As Integer = 1
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(s.Name & " (" & s.ResolvedSourcePath & ")", idx))
+                        idx += 1
+                    Next
+                    Dim chosen As Integer = SLib.SelectValue(items, 1, "Select Knowledge Store to repair:", "Knowledge Store")
+                    If chosen <= 0 Then Return
+                    selectedStorePath = stores(chosen - 1).ResolvedSourcePath
+                End If
+
+                Dim summary = Await KnowledgeWikiService.ApplyWikiHealthFixesAsync(
+                    kbRootPath:=selectedStorePath,
+                    context:=_context,
+                    includeLlmRepairs:=True)
+
+                SP_MergePrompt_Cached = SP_MergePrompt
+
+                Dim response = ShowCustomWindow(
+                    "Here is the summary of the Knowledge Store repair:",
+                    summary,
+                    "You can copy it to the clipboard, if you wish.",
+                    $"{AN} Knowledge Store")
+
+                Return
+            End If
+
+            ' Knowledge store indexing commands
+            If OtherPrompt.Equals("kbindex", StringComparison.OrdinalIgnoreCase) OrElse
+               OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase) Then
+
+                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
+                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim forceReindex As Boolean = OtherPrompt.Equals("kbreindex", StringComparison.OrdinalIgnoreCase)
+                Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No active Knowledge Stores found.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim selectedStoreName As String = ""
+
+                If stores.Count = 1 Then
+                    selectedStoreName = stores(0).StoreId
+                Else
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    items.Add(New SLib.SelectionItem("All active Knowledge Stores", 1))
+
+                    Dim idx As Integer = 2
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem(KnowledgeStoreCatalog.GetDisplayLabel(s), idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(
+                                        items,
+                                        1,
+                                        "Select which Knowledge Store(s) to index:",
+                                        "Knowledge Store")
+
+                    If chosen <= 0 Then Return
+
+                    If chosen > 1 Then
+                        selectedStoreName = stores(chosen - 2).StoreId
+                    End If
+                End If
+
+                If forceReindex Then
+                    Dim targetText As String = If(String.IsNullOrWhiteSpace(selectedStoreName),
+                                                  "all active Knowledge Stores",
+                                                  $"Knowledge Store '{selectedStoreName}'")
+
+                    Dim answer As Integer = ShowCustomYesNoBox(
+                        $"This will force a full re-index of {targetText}, regenerating all metadata and Wiki summaries. This may take a while and use API credits. Continue?",
+                        "Yes, re-index", "No, cancel")
+
+                    If answer <> 1 Then Return
+                End If
+
+                Await RunForegroundKnowledgeStoreIndexAsync(
+                    storeName:=selectedStoreName,
+                    forceReindex:=forceReindex)
+
+                Return
+            End If
+
+            If OtherPrompt.Equals("kbrefreshvectors", StringComparison.OrdinalIgnoreCase) OrElse
+               OtherPrompt.Equals("kbrefreshembeddings", StringComparison.OrdinalIgnoreCase) Then
+
+                If Not KnowledgeStoreCatalog.IsConfigured(_context) Then
+                    ShowCustomMessageBox("No Knowledge Store catalog is configured. Set 'KnowledgeStorePath' or 'KnowledgeStorePathLocal' in your configuration.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim stores = KnowledgeStoreCatalog.GetActiveStores(_context)
+
+                If stores.Count = 0 Then
+                    ShowCustomMessageBox("No active Knowledge Stores found.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim targetStores As New List(Of KnowledgeStoreCatalog.KnowledgeStoreDefinition)()
+
+                If stores.Count = 1 Then
+                    targetStores.Add(stores(0))
+                Else
+                    Dim items As New List(Of SLib.SelectionItem)()
+                    items.Add(New SLib.SelectionItem("All active Knowledge Stores", 1))
+
+                    Dim idx As Integer = 2
+                    For Each s In stores
+                        items.Add(New SLib.SelectionItem($"{s.Name} ({s.ResolvedSourcePath})", idx))
+                        idx += 1
+                    Next
+
+                    Dim chosen As Integer = SLib.SelectValue(
+                        items,
+                        1,
+                        "Select which Knowledge Store(s) to rebuild embeddings for:",
+                        "Knowledge Store")
+
+                    If chosen <= 0 Then Return
+
+                    If chosen = 1 Then
+                        targetStores.AddRange(stores)
+                    Else
+                        targetStores.Add(stores(chosen - 2))
+                    End If
+                End If
+
+                Dim CountEmbeddableWikiPages As Func(Of String, Integer) =
+                    Function(kbStoreRoot As String) As Integer
+                        If String.IsNullOrWhiteSpace(kbStoreRoot) Then Return 0
+
+                        Dim wikiRoot As String = Path.Combine(kbStoreRoot, ".redink", KnowledgeStoreCatalog.WikiFolder)
+                        If Not Directory.Exists(wikiRoot) Then Return 0
+
+                        Dim count As Integer = 0
+
+                        For Each filePath In Directory.GetFiles(wikiRoot, "*.md", SearchOption.AllDirectories)
+                            Dim name As String = Path.GetFileName(filePath)
+
+                            If name.Equals(KnowledgeStoreCatalog.IndexFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            If name.Equals(KnowledgeStoreCatalog.LogFile, StringComparison.OrdinalIgnoreCase) Then Continue For
+                            If name.Equals("health_report.md", StringComparison.OrdinalIgnoreCase) Then Continue For
+
+                            count += 1
+                        Next
+
+                        Return count
+                    End Function
+
+                Dim totalPages As Integer = 0
+                For Each store In targetStores
+                    totalPages += CountEmbeddableWikiPages(store.ResolvedSourcePath)
+                Next
+
+                If totalPages = 0 Then
+                    ShowCustomMessageBox("No wiki pages were found to rebuild embeddings for.", $"{AN} Knowledge Store")
+                    Return
+                End If
+
+                Dim targetText As String = If(targetStores.Count = 1,
+                                              $"Knowledge Store '{targetStores(0).Name}'",
+                                              "all active Knowledge Stores")
+
+                Dim answer As Integer = ShowCustomYesNoBox(
+                    $"This will rebuild the embedding index for {targetText} from the existing wiki pages using the currently configured embedding model. Continue?",
+                    "Yes, rebuild embeddings", "No, cancel")
+
+                If answer <> 1 Then Return
+
+                ProgressBarModule.GlobalProgressValue = 0
+                ProgressBarModule.GlobalProgressMax = totalPages
+                ProgressBarModule.GlobalProgressLabel = "Preparing embedding rebuild..."
+                ProgressBarModule.CancelOperation = False
+                ProgressBarModule.ShowProgressBarInSeparateThread(
+                    $"{AN} Knowledge Store — Embeddings",
+                    "Refreshing embeddings...")
+
+                Dim rebuiltPages As Integer = 0
+                Dim progressOffset As Integer = 0
+
+                Try
+                    For Each store In targetStores
+                        If ProgressBarModule.CancelOperation Then Exit For
+
+                        Dim storePageCount As Integer = CountEmbeddableWikiPages(store.ResolvedSourcePath)
+
+                        rebuiltPages += Await KnowledgeEmbeddingService.RebuildAllWikiEmbeddingsAsync(
+                            kbRootPath:=store.ResolvedSourcePath,
+                            context:=_context,
+                            progressPrefix:=store.Name,
+                            progressOffset:=progressOffset,
+                            progressTotal:=totalPages)
+
+                        progressOffset += storePageCount
+                    Next
+                Finally
+                    Dim wasCancelled As Boolean = ProgressBarModule.CancelOperation
+                    ProgressBarModule.CancelOperation = True
+
+                    If wasCancelled Then
+                        ShowCustomMessageBox(
+                            $"Embedding rebuild was cancelled. Refreshed {rebuiltPages} wiki page embedding set(s).",
+                            $"{AN} Knowledge Store")
+                    Else
+                        ShowCustomMessageBox(
+                            $"Embedding rebuild complete. Refreshed {rebuiltPages} wiki page embedding set(s) across {targetStores.Count} store(s).",
+                            $"{AN} Knowledge Store")
+                    End If
+                End Try
+
+                Return
+            End If
+
+            ' Add a new Knowledge Store via freestyle command
+            If OtherPrompt.StartsWith("kbaddstore", StringComparison.OrdinalIgnoreCase) Then
+                Dim parts = OtherPrompt.Substring("kbaddstore".Length).Trim().Split("|"c)
+                If parts.Length < 2 OrElse String.IsNullOrWhiteSpace(parts(0)) OrElse String.IsNullOrWhiteSpace(parts(1)) Then
+                    ShowCustomMessageBox(
+                        "Usage: kbaddstore Name|Path" & vbCrLf &
+                        "Example: kbaddstore Research|%UserProfile%\Documents\Research",
+                        $"{AN} Knowledge Store")
+                Else
+                    Dim storeName As String = parts(0).Trim()
+                    Dim rawPath As String = parts(1).Trim()
+
+                    ' 1. Resolve environment variables (e.g. %UserProfile%)
+                    Dim resolvedPath As String = SLib.ExpandEnvironmentVariables(rawPath)
+
+                    Try
+                        ' 2. Physically create the root directory if it doesn't exist
+                        If Not System.IO.Directory.Exists(resolvedPath) Then
+                            System.IO.Directory.CreateDirectory(resolvedPath)
+                        End If
+
+                        ' 3. Pre-initialize the Wiki and Raw subfolders so it's ready natively
+                        KnowledgeWikiService.InitializeWikiStructure(resolvedPath)
+
+                        ' 4. Save definition to the logical catalog
+                        Dim def = KnowledgeStoreCatalog.CreateDefinition(storeName, rawPath, _context)
+                        Dim allDefs = KnowledgeStoreCatalog.LoadAll(_context)
+                        allDefs.Add(def)
+                        KnowledgeStoreCatalog.SaveLocalCatalog(allDefs, _context)
+
+                        ShowCustomMessageBox($"Knowledge Store '{def.Name}' successfully created physically at:{vbCrLf}{resolvedPath}", $"{AN} Knowledge Store")
+                    Catch ex As Exception
+                        ShowCustomMessageBox($"Could not create directory at '{resolvedPath}'. Error: {ex.Message}", $"{AN} Knowledge Store")
+                    End Try
+                End If
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "kbstore", StringComparison.OrdinalIgnoreCase) Then
+                Using frm As New KnowledgeStoreForm(_context)
+                    frm.ShowDialog()
+                End Using
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
+                RetemplatePresentation_UI()
+                Return
+            End If
+
 
             ' Decode serial 
             If String.Equals(OtherPrompt.Trim(), "decodeserial", StringComparison.OrdinalIgnoreCase) Then
@@ -1734,7 +2195,7 @@ Partial Public Class ThisAddIn
             End If
 
             If String.Equals(OtherPrompt.Trim(), "tablefill", StringComparison.OrdinalIgnoreCase) Then
-                CompleteWordDocumentTables()
+                directCompleteWordDocumentTables()
                 Return
             End If
 
@@ -1990,6 +2451,69 @@ Partial Public Class ThisAddIn
 
             ' === In-prompt trigger processing ===
 
+            Dim toolTriggerDetected As Boolean = False
+            Dim toolTriggerConfig As ModelConfig = Nothing
+
+            If UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                Dim freestyleToolDefaultModel As ModelConfig = Nothing
+
+                If modelSupportsTool Then
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). The currently selected model already supports agentic processing. Please remove {ToolTrigger} and, if needed, use '{ToolSelectionTrigger}' to choose the available {ToolFriendlyName.ToLower}.")
+                ElseIf SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    freestyleToolDefaultModel) Then
+
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd). Please either choose a model that directly supports agentic processing, or use Freestyle with {ToolTrigger} to invoke the predefined agentic model.")
+                Else
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger is not available in Freestyle (2nd), and no predefined agentic model has been configured. Please choose a model that directly supports agentic processing.")
+                End If
+
+                Return
+            End If
+
+            If Not UseSecondAPI AndAlso OtherPrompt.IndexOf(ToolTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
+                toolTriggerDetected = True
+
+                If Not SharedMethods.TryGetSpecialTaskModelConfig(
+                    _context,
+                    INI_AlternateModelPath,
+                    "ToolDefaultModel",
+                    toolTriggerConfig) Then
+
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger was requested, but no model with 'ToolDefaultModel=True' was found in the alternate model configuration. Please add a ToolDefaultModel entry to your configuration file.")
+                    Return
+                End If
+
+                If Not SharedMethods.ModelSupportsTooling(toolTriggerConfig) Then
+                    ShowCustomMessageBox(
+                        $"The {ToolTrigger} trigger found a ToolDefaultModel, but it does not support {ToolFriendlyName.ToLower}. Please check the model's APICall_ToolInstructions setting.")
+                    Return
+                End If
+
+                OtherPrompt = OtherPrompt.Replace(ToolTrigger, "").Trim()
+
+                If Not originalConfigLoaded Then
+                    originalConfig = GetCurrentConfig(_context)
+                    originalConfigLoaded = True
+                End If
+
+                Dim ErrorFlag As Boolean = False
+                ApplyModelConfig(_context, toolTriggerConfig, ErrorFlag)
+                If ErrorFlag Then
+                    ShowCustomMessageBox("There was an error assigning the tooling model configuration. Aborting.")
+                    Return
+                End If
+
+                UseSecondAPI = True
+                modelSupportsTool = True
+            End If
+
             ' (all) trigger: Select entire document
             If OtherPrompt.IndexOf(AllTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(AllTrigger, "").Trim()
@@ -2002,6 +2526,11 @@ Partial Public Class ThisAddIn
             If OtherPrompt.IndexOf(LibTrigger, StringComparison.OrdinalIgnoreCase) >= 0 Then
                 OtherPrompt = OtherPrompt.Replace(LibTrigger, "").Trim()
                 DoLib = True
+            End If
+
+            ' (kb) or (kb:...) trigger: Query knowledge store and inject context
+            If KnowledgeTriggerHelper.HasKnowledgeTrigger(OtherPrompt) Then
+                DoKB = True
             End If
 
             ' Track point markup trigger: Enable revision tracking in markup
@@ -2099,6 +2628,11 @@ Partial Public Class ThisAddIn
 
             ' === Prefix-based mode selection ===
 
+            Dim ShowPrefixRequiresSelection As Action(Of String) =
+    Sub(prefix As String)
+        ShowCustomMessageBox($"The '{prefix}' prefix is not available when no text is selected.")
+    End Sub
+
             ' Process prompt prefix to determine output mode and remove prefix from prompt
             If OtherPrompt.StartsWith(ClipboardPrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(ClipboardPrefix.Length).Trim()
@@ -2131,31 +2665,63 @@ Partial Public Class ThisAddIn
                 DoChart = 2
                 DoClipboard = True
                 DoChunks = False
-            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(InPlacePrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(InPlacePrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(InPlacePrefix.Length).Trim()
                 DoInplace = True
-            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(AddPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(AddPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(AddPrefix2.Length).Trim()
                 DoInplace = False
-            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) And Not NoText Then
+            ElseIf OtherPrompt.StartsWith(MarkupPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefix.Length).Trim()
                 DoMarkup = True
             ElseIf OtherPrompt.StartsWith(MarkupPrefixRegex, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixRegex)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixRegex.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 4
             ElseIf OtherPrompt.StartsWith(MarkupPrefixWord, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixWord)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixWord.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 1
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiffW, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiffW)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiffW.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 3
             ElseIf OtherPrompt.StartsWith(MarkupPrefixDiff, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(MarkupPrefixDiff)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(MarkupPrefixDiff.Length).Trim()
                 DoMarkup = True
                 MarkupMethod = 2
@@ -2165,11 +2731,19 @@ Partial Public Class ThisAddIn
                 DoClipboard = True
                 DoChunks = False
             ElseIf OtherPrompt.StartsWith(PushbackPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix.Length).Trim()
                 DoPushback = True
                 DoChunks = False
                 DoBubblesExtract = True
             ElseIf OtherPrompt.StartsWith(PushbackPrefix2, StringComparison.OrdinalIgnoreCase) Then
+                If NoText Then
+                    ShowPrefixRequiresSelection(PushbackPrefix2)
+                    Return
+                End If
                 OtherPrompt = OtherPrompt.Substring(PushbackPrefix2.Length).Trim()
                 DoPushback = True
                 DoChunks = False
@@ -2183,6 +2757,13 @@ Partial Public Class ThisAddIn
             ElseIf OtherPrompt.StartsWith(AssemblePrefix, StringComparison.OrdinalIgnoreCase) Then
                 OtherPrompt = OtherPrompt.Substring(AssemblePrefix.Length).Trim()
                 DoAssemble = True
+            ElseIf OtherPrompt.StartsWith(FormPrefix, StringComparison.OrdinalIgnoreCase) Then
+                If Not NoText Then
+                    ShowCustomMessageBox($"The '{FormPrefix}' prefix is available only when no text is selected.")
+                    Return
+                End If
+                OtherPrompt = OtherPrompt.Substring(FormPrefix.Length).Trim()
+                DoForm = True
             End If
 
             ' (net) trigger: Enable internet search
@@ -2221,7 +2802,7 @@ Partial Public Class ThisAddIn
 
             ' (multimodel) trigger: Prompt for multiple model selection
             SelectedAlternateModels = Nothing
-            If UseSecondAPI AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
+            If UseSecondAPI AndAlso Not toolTriggerDetected AndAlso Not String.IsNullOrWhiteSpace(INI_AlternateModelPath) AndAlso OtherPrompt.IndexOf(MultiModelTrigger, StringComparison.OrdinalIgnoreCase) >= 0 AndAlso Not DoFiles Then
                 If Not DoMarkup AndAlso Not DoBubbles AndAlso Not DoPushback AndAlso Not DoSlides AndAlso DoChart = 0 Then
                     If Not ShowMultipleModelSelection(_context, INI_AlternateModelPath) OrElse SelectedAlternateModels Is Nothing OrElse SelectedAlternateModels.Count = 0 Then
                         Return
@@ -2303,6 +2884,23 @@ Partial Public Class ThisAddIn
                     RestoreDefaults(_context, originalConfig)
                     originalConfigLoaded = False
                 End If
+                Return
+            End If
+
+            ' ======== COMPLETEFORMS mode (after all other processing, including file embedding, is done) ========
+
+            If DoForm Then
+                Try
+                    Await CompleteWordDocumentTables(OtherPrompt, UseSecondAPI)
+                Catch ex As System.Exception
+                    ShowCustomMessageBox("Error in Freestyle ('Form:'): " & ex.Message, "Error")
+                End Try
+
+                If UseSecondAPI AndAlso originalConfigLoaded Then
+                    RestoreDefaults(_context, originalConfig)
+                    originalConfigLoaded = False
+                End If
+
                 Return
             End If
 
@@ -2426,7 +3024,7 @@ Partial Public Class ThisAddIn
             ' === User confirmation for processing without text selection ===
 
             ' Prompt user to process full document when bubbles or chunks mode is active but no text selected
-            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso DoFiles Then
+            If NoText AndAlso (DoBubbles Or DoChunks) AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Ask the LLM to comment on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -2438,7 +3036,8 @@ Partial Public Class ThisAddIn
             End If
 
             ' Prompt user to process full document when markup mode is active but no text selected
-            If NoText AndAlso DoMarkup AndAlso Not Dofiles Then
+            ' Not used anymore under normal circumstances (gates introduced above), but kept as a fallback in case of misconfiguration or unexpected states
+            If NoText AndAlso DoMarkup AndAlso Not DoFiles Then
                 Dim FullDocument As Integer = ShowCustomYesNoBox("You have not selected text. Do the markup on the full document?", "Yes", "No, abort")
                 If FullDocument = 1 Then
                     Dim document As Word.Document = application.ActiveDocument
@@ -2498,6 +3097,75 @@ Partial Public Class ThisAddIn
                     If DoPushback Then SysPrompt = SysPrompt & " " & SP_Add_BubblesReply
                     If INI_MarkdownBubbles Then FormatInstruction = SP_Add_Bubbles_Format Else FormatInstruction = ""
                 End If
+
+                ' (kb) / (kb:...) trigger: Knowledge store RAG
+                If DoKB Then
+                    Dim kbRequest = KnowledgeTriggerHelper.TryParseKnowledgeTrigger(OtherPrompt)
+                    If kbRequest IsNot Nothing Then
+                        Dim strippedPrompt = KnowledgeTriggerHelper.StripKnowledgeTrigger(OtherPrompt, kbRequest)
+                        Dim knowledgeTaskPrompt As String = strippedPrompt.Trim()
+
+                        If String.IsNullOrWhiteSpace(strippedPrompt) Then
+                            If Not String.IsNullOrWhiteSpace(kbRequest.SearchQuery) Then
+                                OtherPrompt = kbRequest.SearchQuery.Trim()
+                            ElseIf kbRequest.Tags IsNot Nothing AndAlso kbRequest.Tags.Length > 0 Then
+                                OtherPrompt = "Answer based on the provided Knowledge Store content, focusing on: " &
+                                              String.Join(", ", kbRequest.Tags)
+                            ElseIf Not String.IsNullOrWhiteSpace(kbRequest.StoreName) Then
+                                OtherPrompt = "Answer based on the provided Knowledge Store content from store '" &
+                                              kbRequest.StoreName & "'."
+                            Else
+                                OtherPrompt = "Answer based on the provided Knowledge Store content."
+                            End If
+                        Else
+                            OtherPrompt = strippedPrompt
+                        End If
+
+                        Dim kbResolveOptions As KnowledgeTriggerHelper.KnowledgeResolveOptions = Nothing
+                        If Not String.IsNullOrWhiteSpace(knowledgeTaskPrompt) Then
+                            kbResolveOptions = New KnowledgeTriggerHelper.KnowledgeResolveOptions With {
+                                .TaskPrompt = knowledgeTaskPrompt,
+                                .IncludeRelevantExtracts = True,
+                                .IncludeFullDocumentContent = False
+                            }
+                        End If
+
+                        Dim kbSplash As New SLib.SplashScreen("Querying Knowledge Store...   ")
+                        kbSplash.Show()
+                        System.Windows.Forms.Application.DoEvents()
+
+                        Dim kbResolved As (Content As String, StatusMessage As String)
+                        Try
+                            kbResolved = Await KnowledgeTriggerHelper.ResolveKnowledgeAsync(kbRequest, _context, kbResolveOptions)
+                        Finally
+                            If kbSplash.InvokeRequired Then
+                                kbSplash.Invoke(Sub()
+                                                    kbSplash.Close()
+                                                    kbSplash.Dispose()
+                                                End Sub)
+                            Else
+                                kbSplash.Close()
+                                kbSplash.Dispose()
+                            End If
+                        End Try
+
+                        If Not String.IsNullOrWhiteSpace(kbResolved.Content) Then
+                            SysPrompt = SysPrompt & vbCrLf & vbCrLf &
+                                "The following documents from the user's knowledge store are provided as reference material. " &
+                                "Use them to answer the user's question. " &
+                                "When citing information, prefer clickable markdown citations. " &
+                                "If a KSDOCUMENT element provides a sourcePath attribute, cite it as [Source](sourcePath). " &
+                                "If a wikiPath attribute is available and helpful, you may also cite [Wiki](wikiPath). " &
+                                "Do not invent links and do not fabricate paths. Use only the paths explicitly provided in the KSDOCUMENT metadata." & vbCrLf &
+                                kbResolved.Content
+                        Else
+                            ShowCustomMessageBox(If(String.IsNullOrWhiteSpace(kbResolved.StatusMessage),
+                                                    "No documents found in the Knowledge Store.",
+                                                    kbResolved.StatusMessage), $"{AN} Knowledge Store")
+                            Exit Sub
+                        End If
+                    End If
+                End If
             End If
 
             ' === Chunk processing configuration ===
@@ -2516,18 +3184,17 @@ Partial Public Class ThisAddIn
 
             ' === Execute LLM processing with configured parameters ===
 
-            ' Invoke ProcessSelectedText with all configured options            
+            ' Invoke ProcessSelectedText with all configured options
             Dim result As String = Await ProcessSelectedText(InterpolateAtRuntime(SysPrompt), True, DoKeepFormat, DoKeepParaFormat, DoInplace, DoMarkup, MarkupMethod, DoClipboard, DoBubbles, False, UseSecondAPI, KeepFormatCap, DoTPMarkup, TPMarkupName, False, FileObject, DoPane, ChunkSize, NoFormatAndFieldSaving, DoNewDoc, SlideDeck, InsertDocs <> "", DoMyStyle, DoBubblesExtract, DoPushback, selectedToolsForSession, DoChart, DoShowModel)
-
-            ' Restore original model configuration if alternate model was used
-            If UseSecondAPI And originalConfigLoaded Then
-                RestoreDefaults(_context, originalConfig)
-                originalConfigLoaded = False
-            End If
 
         Catch ex As System.Exception
             ' Handle any unexpected errors during freestyle execution
             ShowCustomMessageBox("Error in Freestyle: " & ex.Message)
+        Finally
+            If UseSecondAPI AndAlso originalConfigLoaded Then
+                RestoreDefaults(_context, originalConfig)
+                originalConfigLoaded = False
+            End If
         End Try
     End Sub
 

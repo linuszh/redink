@@ -1,18 +1,28 @@
 ﻿' Part of "SharedLibrary"
-' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved.
-' For license to use see https://redink.ai.
+' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
 ' =============================================================================
 ' File: SharedMethods.MCP.vb
-' Purpose: Runtime helpers for MCP SSE transport used by tooling and
-'          special-service callers in all add-ins (Word, Outlook, Excel).
+' Purpose: Provides shared runtime helpers for executing MCP tool calls over
+'          SSE transport, including session endpoint discovery, initialize
+'          handshake, request dispatch, and SSE response collection.
 '
 ' Contains:
-'   - MCP_SSE_PREFIX constant (endpoint marker for SSE transport)
-'   - MCP_PROTOCOL_VERSION constant (JSON-RPC initialize handshake version)
-'   - AcquireMCPSSESessionEndpoint: SSE handshake → session POST URL
-'   - ExecuteMCPSSEToolCall: full SSE round-trip (handshake + tool call + response)
-'   - WaitForSSEResponse: reads SSE stream until JSON-RPC response arrives
+'  - Transport constants:
+'      - `MCP_SSE_PREFIX`
+'      - `MCP_PROTOCOL_VERSION`
+'  - Session bootstrap:
+'      - `AcquireMCPSSESessionEndpoint` opens the SSE stream, reads the
+'        advertised POST endpoint, and performs the MCP initialize handshake.
+'  - Tool execution:
+'      - `ExecuteMCPSSEToolCall` performs a complete SSE-based MCP round-trip.
+'  - SSE helpers:
+'      - Reads endpoint and response events from the event stream.
+'      - Resolves relative SSE endpoints and validates transport responses.
+'
+' Notes:
+'  - These helpers bypass `LLM(...)` because SSE transport returns the effective
+'    tool result on the GET stream rather than in the POST response body.
 ' =============================================================================
 
 Option Explicit On
@@ -24,6 +34,7 @@ Imports System.Text
 Imports System.Threading.Tasks
 Imports Newtonsoft.Json
 Imports Newtonsoft.Json.Linq
+Imports SharedLibrary.SharedLibrary.SharedContext
 
 Namespace SharedLibrary
 
@@ -119,6 +130,15 @@ Namespace SharedLibrary
         End Function
 
 
+        Private Shared Sub WriteMCPDebugFile(fileName As String, content As String)
+            Try
+                Dim desktopPath As String = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                Dim debugFilePath As String = Path.Combine(desktopPath, fileName)
+                File.WriteAllText(debugFilePath, If(content, ""))
+            Catch
+            End Try
+        End Sub
+
         ''' <summary>
         ''' Performs a complete MCP tool call over SSE transport:
         '''   1. GET the SSE base URL → read "event: endpoint" → obtain session POST URL
@@ -138,6 +158,7 @@ Namespace SharedLibrary
         ''' <returns>The raw JSON response string from the MCP server.</returns>
         ''' <exception cref="Exception">Thrown when the handshake, request, or response reading fails.</exception>
         Public Shared Async Function ExecuteMCPSSEToolCall(
+                context As ISharedContext,
                 sseBaseUrl As String,
                 requestBody As String,
                 headerA As String,
@@ -145,121 +166,155 @@ Namespace SharedLibrary
                 Optional timeoutMs As Integer = 60000) As Task(Of String)
 
             EnsureTls12()
-
-            Dim handler As New HttpClientHandler()
-            ConfigureMCPHandler(handler)
-
-            Dim client As New HttpClient(handler)
-            client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
-            client.DefaultRequestHeaders.Accept.Clear()
-            client.DefaultRequestHeaders.Accept.Add(
-                New Headers.MediaTypeWithQualityHeaderValue("text/event-stream"))
-
-            If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
-                client.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
-            End If
-
-            Dim sseResponse As HttpResponseMessage = Nothing
-            Dim reader As StreamReader = Nothing
-
+            Await Agents.AgentGate.EnterAsync().ConfigureAwait(False)
             Try
-                ' ── Step 1: GET the SSE stream → obtain session endpoint ──────
-                Dim request As New HttpRequestMessage(HttpMethod.Get, sseBaseUrl)
-                sseResponse = Await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(False)
 
-                If Not sseResponse.IsSuccessStatusCode Then
-                    Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
-                    Throw New Exception(
-                        $"SSE GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
-                        If(preview.Length > 300, preview.Substring(0, 300), preview))
+                EnsureTls12()
+
+                Dim handler As New HttpClientHandler()
+                ConfigureMCPHandler(handler)
+
+                Dim client As New HttpClient(handler)
+                client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+                client.DefaultRequestHeaders.Accept.Clear()
+                client.DefaultRequestHeaders.Accept.Add(
+                    New Headers.MediaTypeWithQualityHeaderValue("text/event-stream"))
+
+                If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                    client.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
                 End If
 
-                Dim stream = Await sseResponse.Content.ReadAsStreamAsync().ConfigureAwait(False)
-                reader = New StreamReader(stream, Encoding.UTF8)
+                Dim sseResponse As HttpResponseMessage = Nothing
+                Dim reader As StreamReader = Nothing
 
-                Dim postEndpoint As String = Await ReadSSEEndpointEvent(reader, timeoutMs).ConfigureAwait(False)
+                Try
+                    ' ── Step 1: GET the SSE stream → obtain session endpoint ──────
+                    Dim request As New HttpRequestMessage(HttpMethod.Get, sseBaseUrl)
+                    sseResponse = Await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(False)
 
-                If String.IsNullOrWhiteSpace(postEndpoint) Then
-                    Throw New Exception($"SSE stream at {sseBaseUrl} did not return an endpoint event.")
-                End If
+                    If Not sseResponse.IsSuccessStatusCode Then
+                        Dim preview = Await sseResponse.Content.ReadAsStringAsync().ConfigureAwait(False)
+                        Throw New Exception(
+                            $"SSE GET {CInt(sseResponse.StatusCode)} ({sseResponse.ReasonPhrase}): " &
+                            If(preview.Length > 300, preview.Substring(0, 300), preview))
+                    End If
 
-                postEndpoint = ResolveSSEEndpoint(sseBaseUrl, postEndpoint)
+                    Dim stream = Await sseResponse.Content.ReadAsStreamAsync().ConfigureAwait(False)
+                    reader = New StreamReader(stream, Encoding.UTF8)
 
-                ' ── Step 2: POST initialize handshake ────────────────────────
-                Using postHandler As New HttpClientHandler()
-                    ConfigureMCPHandler(postHandler)
+                    Dim postEndpoint As String = Await ReadSSEEndpointEvent(reader, timeoutMs).ConfigureAwait(False)
 
-                    Using postClient As New HttpClient(postHandler)
-                        postClient.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
-                        If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
-                            postClient.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
-                        End If
+                    If String.IsNullOrWhiteSpace(postEndpoint) Then
+                        Throw New Exception($"SSE stream at {sseBaseUrl} did not return an endpoint event.")
+                    End If
 
-                        ' initialize
-                        Dim initPayload As New JObject From {
-                            {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
-                            {"params", New JObject From {
-                                {"protocolVersion", MCP_PROTOCOL_VERSION},
-                                {"capabilities", New JObject()},
-                                {"clientInfo", New JObject From {{"name", "RedInk"}, {"version", "1.0"}}}
-                            }}
-                        }
-                        Dim initContent As New StringContent(initPayload.ToString(Formatting.None), Encoding.UTF8, "application/json")
-                        Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
-                        If Not initResp.IsSuccessStatusCode Then
-                            Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                            Throw New Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
-                        End If
+                    postEndpoint = ResolveSSEEndpoint(sseBaseUrl, postEndpoint)
 
-                        ' Wait for initialize response on SSE stream (consume it)
-                        Await WaitForSSEResponse(reader, "1", timeoutMs).ConfigureAwait(False)
+                    If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                        Dim sentDebug As New StringBuilder()
+                        sentDebug.AppendLine($"SENT TO API (SSE GET): {sseBaseUrl}")
+                        sentDebug.AppendLine($"SSE POST ENDPOINT: {postEndpoint}")
+                        sentDebug.AppendLine($"HeaderA: {headerA}")
+                        sentDebug.AppendLine($"HeaderB: {headerB}")
+                        sentDebug.AppendLine("SSE TOOL REQUEST:")
+                        sentDebug.AppendLine(requestBody)
 
-                        ' notifications/initialized
-                        Dim notifPayload As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
-                        Dim notifContent As New StringContent(notifPayload.ToString(Formatting.None), Encoding.UTF8, "application/json")
-                        Try
-                            Await postClient.PostAsync(postEndpoint, notifContent).ConfigureAwait(False)
-                        Catch
-                        End Try
+                        Debug.WriteLine(sentDebug.ToString())
+                        WriteMCPDebugFile("RI_Debug_Sent.json", sentDebug.ToString())
+                    End If
 
-                        ' ── Step 3: POST the actual tool call ────────────────────
-                        Dim toolContent As New StringContent(requestBody, Encoding.UTF8, "application/json")
-                        Dim toolResp = Await postClient.PostAsync(postEndpoint, toolContent).ConfigureAwait(False)
+                    ' ── Step 2: POST initialize handshake ────────────────────────
+                    Using postHandler As New HttpClientHandler()
+                        ConfigureMCPHandler(postHandler)
 
-                        If Not toolResp.IsSuccessStatusCode Then
-                            Dim err = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                            Throw New Exception($"SSE tool POST {CInt(toolResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
-                        End If
+                        Using postClient As New HttpClient(postHandler)
+                            postClient.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+                            If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                                postClient.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
+                            End If
 
-                        ' Check if the POST response itself contains a JSON-RPC result
-                        Dim postBody = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
-                        If Not String.IsNullOrWhiteSpace(postBody) AndAlso postBody.TrimStart().StartsWith("{") Then
+                            ' initialize
+                            Dim initPayload As New JObject From {
+                                {"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"},
+                                {"params", New JObject From {
+                                    {"protocolVersion", MCP_PROTOCOL_VERSION},
+                                    {"capabilities", New JObject()},
+                                    {"clientInfo", New JObject From {{"name", "RedInk"}, {"version", "1.0"}}}
+                                }}
+                            }
+                            Dim initContent As New StringContent(initPayload.ToString(Formatting.None), Encoding.UTF8, "application/json")
+                            Dim initResp = Await postClient.PostAsync(postEndpoint, initContent).ConfigureAwait(False)
+                            If Not initResp.IsSuccessStatusCode Then
+                                Dim err = Await initResp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                                Throw New Exception($"SSE initialize POST {CInt(initResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
+                            End If
+
+                            ' Wait for initialize response on SSE stream (consume it)
+                            Await WaitForSSEResponse(reader, "1", timeoutMs).ConfigureAwait(False)
+
+                            ' notifications/initialized
+                            Dim notifPayload As New JObject From {{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}
+                            Dim notifContent As New StringContent(notifPayload.ToString(Formatting.None), Encoding.UTF8, "application/json")
                             Try
-                                Dim directResult = JObject.Parse(postBody)
-                                If directResult("result") IsNot Nothing OrElse directResult("error") IsNot Nothing Then
-                                    Return directResult.ToString(Formatting.None)
-                                End If
+                                Await postClient.PostAsync(postEndpoint, notifContent).ConfigureAwait(False)
                             Catch
                             End Try
-                        End If
+
+                            ' ── Step 3: POST the actual tool call ────────────────────
+                            Dim toolContent As New StringContent(requestBody, Encoding.UTF8, "application/json")
+                            Dim toolResp = Await postClient.PostAsync(postEndpoint, toolContent).ConfigureAwait(False)
+
+                            If Not toolResp.IsSuccessStatusCode Then
+                                Dim err = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                                Throw New Exception($"SSE tool POST {CInt(toolResp.StatusCode)}: {If(err.Length > 300, err.Substring(0, 300), err)}")
+                            End If
+
+                            ' Check if the POST response itself contains a JSON-RPC result
+                            Dim postBody = Await toolResp.Content.ReadAsStringAsync().ConfigureAwait(False)
+                            If Not String.IsNullOrWhiteSpace(postBody) AndAlso postBody.TrimStart().StartsWith("{") Then
+                                Try
+                                    Dim directResult = JObject.Parse(postBody)
+                                    If directResult("result") IsNot Nothing OrElse directResult("error") IsNot Nothing Then
+                                        Dim directResultText As String = directResult.ToString(Formatting.None)
+
+                                        If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                                            Debug.WriteLine($"RECEIVED FROM API (SSE):{Environment.NewLine}{directResultText}")
+                                            WriteMCPDebugFile("RI_Debug_Received.json", directResultText)
+                                        End If
+
+                                        Return directResultText
+                                    End If
+                                Catch
+                                End Try
+                            End If
+                        End Using
                     End Using
-                End Using
 
-                ' ── Step 4: Read the tool call response from the SSE stream ──
-                Dim expectedId As String = ""
-                Try
-                    Dim reqObj = JObject.Parse(requestBody)
-                    expectedId = If(reqObj("id")?.ToString(), "")
-                Catch
+                    ' ── Step 4: Read the tool call response from the SSE stream ──
+                    Dim expectedId As String = ""
+                    Try
+                        Dim reqObj = JObject.Parse(requestBody)
+                        expectedId = If(reqObj("id")?.ToString(), "")
+                    Catch
+                    End Try
+
+                    Dim responseJson = Await WaitForSSEResponse(reader, expectedId, timeoutMs).ConfigureAwait(False)
+                    Dim responseJsonText As String = responseJson.ToString(Formatting.None)
+
+                    If context IsNot Nothing AndAlso context.INI_APIDebug Then
+                        Debug.WriteLine($"RECEIVED FROM API (SSE):{Environment.NewLine}{responseJsonText}")
+                        WriteMCPDebugFile("RI_Debug_Received.json", responseJsonText)
+                    End If
+
+                    Return responseJsonText
+
+                Finally
+                    Try : reader?.Dispose() : Catch : End Try
+                    Try : sseResponse?.Dispose() : Catch : End Try
+                    Try : client.Dispose() : Catch : End Try
                 End Try
-
-                Dim responseJson = Await WaitForSSEResponse(reader, expectedId, timeoutMs).ConfigureAwait(False)
-                Return responseJson.ToString(Formatting.None)
-
             Finally
-                Try : reader?.Dispose() : Catch : End Try
-                Try : sseResponse?.Dispose() : Catch : End Try
-                Try : client.Dispose() : Catch : End Try
+                Agents.AgentGate.Release()
             End Try
         End Function
 
@@ -427,6 +482,187 @@ Namespace SharedLibrary
                 End Try
             End Using
         End Function
+
+        ''' <summary>
+        ''' Marker prefix for INI Endpoint values that require MCP Streamable HTTP
+        ''' initialization before the actual tools/call request is sent.
+        ''' </summary>
+        Public Const MCP_STREAMABLE_PREFIX As String = "mcp:"
+
+        ''' <summary>
+        ''' Performs a complete MCP tool call over Streamable HTTP transport:
+        '''   1. POST "initialize"
+        '''   2. POST "notifications/initialized"
+        '''   3. POST the actual JSON-RPC tool request
+        '''   4. Return the raw JSON-RPC response string
+        ''' </summary>
+        Public Shared Async Function ExecuteMCPStreamableToolCall(
+                mcpUrl As String,
+                requestBody As String,
+                headerA As String,
+                headerB As String,
+                Optional timeoutMs As Integer = 60000) As Task(Of String)
+
+            EnsureTls12()
+
+            Await Agents.AgentGate.EnterAsync().ConfigureAwait(False)
+            Try
+
+                Using handler As New HttpClientHandler()
+                    ConfigureMCPHandler(handler)
+
+                    Using client As New HttpClient(handler)
+                        client.Timeout = TimeSpan.FromMilliseconds(timeoutMs)
+                        client.DefaultRequestHeaders.Accept.Clear()
+                        client.DefaultRequestHeaders.Accept.Add(
+                            New Headers.MediaTypeWithQualityHeaderValue("application/json"))
+                        client.DefaultRequestHeaders.Accept.Add(
+                            New Headers.MediaTypeWithQualityHeaderValue("text/event-stream"))
+
+                        If Not String.IsNullOrWhiteSpace(headerA) AndAlso Not String.IsNullOrWhiteSpace(headerB) Then
+                            client.DefaultRequestHeaders.TryAddWithoutValidation(headerA, headerB)
+                        End If
+
+                        Dim initPayload As New JObject From {
+                            {"jsonrpc", "2.0"},
+                            {"id", 1},
+                            {"method", "initialize"},
+                            {"params", New JObject From {
+                                {"protocolVersion", MCP_PROTOCOL_VERSION},
+                                {"capabilities", New JObject()},
+                                {"clientInfo", New JObject From {
+                                    {"name", "RedInk"},
+                                    {"version", "1.0"}
+                                }}
+                            }}
+                        }
+
+                        Await PostMCPStreamableRequest(
+                            client,
+                            mcpUrl,
+                            initPayload,
+                            timeoutMs,
+                            expectResponse:=True).ConfigureAwait(False)
+
+                        Dim notifPayload As New JObject From {
+                            {"jsonrpc", "2.0"},
+                            {"method", "notifications/initialized"}
+                        }
+
+                        Try
+                            Await PostMCPStreamableRequest(
+                                client,
+                                mcpUrl,
+                                notifPayload,
+                                timeoutMs,
+                                expectResponse:=False).ConfigureAwait(False)
+                        Catch
+                        End Try
+
+                        Dim toolPayload As JObject = JObject.Parse(requestBody)
+                        Dim toolResult As JObject =
+                            Await PostMCPStreamableRequest(
+                                client,
+                                mcpUrl,
+                                toolPayload,
+                                timeoutMs,
+                                expectResponse:=True).ConfigureAwait(False)
+
+                        Return toolResult.ToString(Formatting.None)
+                    End Using
+                End Using
+            Finally
+                Agents.AgentGate.Release()
+            End Try
+        End Function
+
+        ''' <summary>
+        ''' Sends a single JSON-RPC POST to a Streamable HTTP MCP endpoint and returns the parsed JSON response.
+        ''' </summary>
+        Private Shared Async Function PostMCPStreamableRequest(
+                client As HttpClient,
+                mcpUrl As String,
+                payload As JObject,
+                timeoutMs As Integer,
+                Optional expectResponse As Boolean = True) As Task(Of JObject)
+
+            Dim content As New StringContent(payload.ToString(Formatting.None), Encoding.UTF8, "application/json")
+            Dim response As HttpResponseMessage = Await client.PostAsync(mcpUrl, content).ConfigureAwait(False)
+            Dim responseText As String = Await response.Content.ReadAsStringAsync().ConfigureAwait(False)
+
+            If Not response.IsSuccessStatusCode Then
+                Throw New Exception(
+                    $"MCP Streamable HTTP POST {CInt(response.StatusCode)} ({response.ReasonPhrase}): " &
+                    If(responseText.Length > 300, responseText.Substring(0, 300), responseText))
+            End If
+
+            If Not expectResponse Then
+                Return New JObject()
+            End If
+
+            responseText = ExtractJsonFromMCPResponse(
+                responseText,
+                If(response.Content.Headers.ContentType?.MediaType, ""))
+
+            If String.IsNullOrWhiteSpace(responseText) Then
+                Return New JObject()
+            End If
+
+            Dim result As JObject = JObject.Parse(responseText)
+            CheckJsonRpcError(result)
+            Return result
+        End Function
+
+        ''' <summary>
+        ''' Extracts a JSON-RPC message from a body that may be plain JSON or SSE-framed text.
+        ''' </summary>
+        Private Shared Function ExtractJsonFromMCPResponse(responseText As String, contentType As String) As String
+            If String.IsNullOrWhiteSpace(responseText) Then
+                Return responseText
+            End If
+
+            Dim trimmed As String = responseText.TrimStart()
+            Dim mediaType As String = If(contentType, "")
+
+            Dim looksLikeSse As Boolean =
+                mediaType.IndexOf("text/event-stream", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+                trimmed.StartsWith("data:", StringComparison.OrdinalIgnoreCase) OrElse
+                trimmed.StartsWith("event:", StringComparison.OrdinalIgnoreCase) OrElse
+                trimmed.StartsWith(":", StringComparison.Ordinal)
+
+            If Not looksLikeSse Then
+                Return responseText
+            End If
+
+            Dim lastJson As String = Nothing
+
+            For Each rawLine As String In responseText.Split(
+                New String() {vbCrLf, vbLf, vbCr},
+                StringSplitOptions.None)
+
+                Dim line As String = If(rawLine, "").Trim()
+
+                If line.StartsWith("data:", StringComparison.OrdinalIgnoreCase) Then
+                    Dim data As String = line.Substring(5).Trim()
+
+                    If data.Length > 0 AndAlso
+                       Not data.Equals("[DONE]", StringComparison.OrdinalIgnoreCase) AndAlso
+                       data.TrimStart().StartsWith("{") Then
+
+                        Try
+                            Dim candidate As JObject = JObject.Parse(data)
+                            If candidate("result") IsNot Nothing OrElse candidate("error") IsNot Nothing Then
+                                lastJson = data
+                            End If
+                        Catch
+                        End Try
+                    End If
+                End If
+            Next
+
+            Return If(lastJson, responseText)
+        End Function
+
 
     End Class
 

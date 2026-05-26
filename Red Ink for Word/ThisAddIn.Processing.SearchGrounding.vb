@@ -30,8 +30,10 @@ Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
 Imports HtmlAgilityPack
-Imports SharedLibrary.SharedLibrary.SharedMethods
 Imports Microsoft.Web.WebView2.Core
+Imports Newtonsoft.Json
+Imports Newtonsoft.Json.Linq
+Imports SharedLibrary.SharedLibrary.SharedMethods
 
 ''' <summary>
 ''' Provides search-grounding helpers that connect Word instructions with external internet content.
@@ -427,6 +429,12 @@ Partial Public Class ThisAddIn
     ''' </summary>
     Private Const MaxDocumentDownloadBytes As Long = 50 * 1024 * 1024
 
+    Private Class WebRetrievalResult
+        Public Property TextContent As String = ""
+        Public Property FinalUrl As String = ""
+        Public Property LinksJson As String = "[]"
+    End Class
+
     ''' <summary>
     ''' Retrieves website content using WebView2 (Edge-based, built into Windows).
     ''' Handles JavaScript rendering without external browser downloads.
@@ -435,377 +443,950 @@ Partial Public Class ThisAddIn
     ''' <param name="baseUrl">The URL to fetch.</param>
     ''' <param name="maxChars">Maximum characters to return. 0 or negative = no limit.</param>
     ''' <param name="expandCollapsed">When True, attempts to expand collapsed/hidden content before extraction.</param>
-    Private Function RetrieveWebsiteContent_WebView2(baseUrl As String, Optional maxChars As Integer = 0, Optional expandCollapsed As Boolean = True) As Task(Of String)        
-        
-        Dim tcs As New TaskCompletionSource(Of String)()
+    Private Async Function RetrieveWebsiteContent_WebView2(baseUrl As String,
+                                                           Optional maxChars As Integer = 0,
+                                                           Optional expandCollapsed As Boolean = True) As Task(Of String)
 
-        ' Check if URL points to a document that should be downloaded instead of rendered
+        Dim pageResult = Await RetrieveWebsiteContent_WebView2Detailed(
+            baseUrl,
+            maxChars,
+            expandCollapsed,
+            includeLinks:=False,
+            linkExtensions:=Nothing).ConfigureAwait(False)
+
+        Return If(pageResult?.TextContent, "")
+    End Function
+
+    Private Function RetrieveWebsiteContent_WebView2Detailed(baseUrl As String,
+                                                         Optional maxChars As Integer = 0,
+                                                         Optional expandCollapsed As Boolean = True,
+                                                         Optional includeLinks As Boolean = False,
+                                                         Optional linkExtensions As System.Collections.Generic.List(Of String) = Nothing) As System.Threading.Tasks.Task(Of WebRetrievalResult)
+
+        Dim tcs As New System.Threading.Tasks.TaskCompletionSource(Of WebRetrievalResult)()
+
+        Dim normalizedExtensions As System.Collections.Generic.List(Of String) =
+        If(linkExtensions, New System.Collections.Generic.List(Of String)()).
+        Select(Function(x) If(x, "").Trim().TrimStart("."c).ToLowerInvariant()).
+        Where(Function(x) x <> "").
+        Distinct(System.StringComparer.OrdinalIgnoreCase).
+        ToList()
+
         Dim documentContent As String = Nothing
+
         If TryExtractDocumentContent(baseUrl, documentContent) Then
-            ' Apply character limit if requested
             If maxChars > 0 AndAlso documentContent.Length > maxChars Then
                 documentContent = TrimToSentenceBoundary(documentContent, maxChars)
             End If
-            tcs.SetResult(documentContent)
+
+            tcs.TrySetResult(New WebRetrievalResult() With {
+            .TextContent = documentContent,
+            .FinalUrl = baseUrl,
+            .LinksJson = "[]"
+        })
+
             Return tcs.Task
         End If
 
-        ' Create a new STA thread for WebView2 (it requires its own message loop)
         Dim thread As New System.Threading.Thread(
-            Sub()
-                Dim result As String = ""
-                Dim form As Form = Nothing
-                Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
-                Dim userDataFolder As String = ""
+        Sub()
+            Dim result As New WebRetrievalResult() With {
+                .TextContent = "",
+                .FinalUrl = baseUrl,
+                .LinksJson = "[]"
+            }
 
-                Try
-                    Debug.WriteLine($"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())})")
+            Dim form As System.Windows.Forms.Form = Nothing
+            Dim webView As Microsoft.Web.WebView2.WinForms.WebView2 = Nothing
+            Dim userDataFolder As String = ""
 
-                    ' Create a temporary user data folder
-                    Dim uniqueID As String = Guid.NewGuid().ToString()
-                    userDataFolder = Path.Combine(Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
-                    Directory.CreateDirectory(userDataFolder)
+            Dim navigationFinished As Boolean = False
+            Dim navigationFailed As Boolean = False
+            Dim contentExtracted As Boolean = False
+            Dim extractionStarted As Boolean = False
 
-                    ' Create the form - larger size to trigger more content loading
-                    form = New Form() With {
-                        .Width = 1920,
-                        .Height = 4000,
-                        .ShowInTaskbar = False,
-                        .FormBorderStyle = FormBorderStyle.None,
-                        .StartPosition = FormStartPosition.Manual,
-                        .Location = New System.Drawing.Point(-5000, -5000),
-                        .Opacity = 0
-                    }
+            Dim startTime As System.DateTime = System.DateTime.Now
+            Dim timeout As System.TimeSpan = System.TimeSpan.FromSeconds(90)
 
-                    webView = New Microsoft.Web.WebView2.WinForms.WebView2() With {
-                        .Dock = DockStyle.Fill
-                    }
+            Try
+                System.Diagnostics.Debug.WriteLine(
+                    $"[WebView2] Fetching: {baseUrl} (maxChars: {If(maxChars <= 0, "unlimited", maxChars.ToString())}, includeLinks: {includeLinks}, expandCollapsed: {expandCollapsed})")
 
-                    form.Controls.Add(webView)
-
-                    Dim navigationCompleted As Boolean = False
-                    Dim navigationSuccess As Boolean = False
-                    Dim contentExtracted As Boolean = False
-
-                    ' Set up event handlers
-                    AddHandler webView.CoreWebView2InitializationCompleted,
-                            Sub(s, e)
-                                If e.IsSuccess Then
-                                    Debug.WriteLine("[WebView2] CoreWebView2 initialized")
-
-                                    ' 1. Validate Input URL before navigating
-                                    If Not IsSafeWebUrl(baseUrl) Then
-                                        Debug.WriteLine($"[WebView2] Blocked unsafe URL: {baseUrl}")
-                                        navigationCompleted = True
-                                        Return
-                                    End If
-
-                                    ' 2. Lockdown Settings
-                                    With webView.CoreWebView2.Settings
-                                        .AreDefaultScriptDialogsEnabled = False
-                                        .AreDefaultContextMenusEnabled = False
-                                        .AreDevToolsEnabled = False
-                                        .IsStatusBarEnabled = False
-                                        .IsScriptEnabled = True
-                                        .IsBuiltInErrorPageEnabled = False
-                                        .IsWebMessageEnabled = False
-                                    End With
-
-                                    ' 3. Block New Windows / Popups
-                                    AddHandler webView.CoreWebView2.NewWindowRequested,
-                                        Sub(sender, args)
-                                            args.Handled = True
-                                        End Sub
-
-                                    ' 4. Block Permission Requests
-                                    AddHandler webView.CoreWebView2.PermissionRequested,
-                                        Sub(sender, args)
-                                            args.State = CoreWebView2PermissionState.Deny
-                                        End Sub
-
-                                    ' 5. Block Navigation to non-http schemes
-                                    AddHandler webView.CoreWebView2.NavigationStarting,
-                                        Sub(sender, args)
-                                            Dim uriStart As Uri = Nothing
-                                            If Uri.TryCreate(args.Uri, UriKind.Absolute, uriStart) Then
-                                                If uriStart.Scheme <> Uri.UriSchemeHttp AndAlso uriStart.Scheme <> Uri.UriSchemeHttps Then
-                                                    args.Cancel = True
-                                                End If
-                                            End If
-                                        End Sub
-
-                                    Debug.WriteLine("[WebView2] Navigating...")
-                                    webView.CoreWebView2.Navigate(baseUrl)
-                                Else
-                                    Debug.WriteLine($"[WebView2] Initialization failed: {e.InitializationException?.Message}")
-                                    navigationCompleted = True
-                                End If
-                            End Sub
-
-                    AddHandler webView.NavigationCompleted,
-                        Sub(s, e)
-                            navigationSuccess = e.IsSuccess
-                            Debug.WriteLine($"[WebView2] Navigation completed. Success: {e.IsSuccess}, Status: {e.WebErrorStatus}")
-
-                            If e.IsSuccess Then
-                                ' Use a timer to wait for JS rendering - 5 seconds
-                                Dim timer As New System.Windows.Forms.Timer() With {.Interval = 5000}
-                                AddHandler timer.Tick,
-                                    Sub(ts, te)
-                                        timer.Stop()
-                                        timer.Dispose()
-
-                                        Try
-                                            ' Define the expansion script
-                                            Dim expandAndScrollScript As String =
-                                    "(async function () {
-                                      const start = Date.now();
-                                      const MAX_MS = 20000;
-                                      const MAX_ROUNDS = 5; 
-                                      const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-                                      const clicked = new WeakSet();
-
-                                      // 1. INJECT STYLE TO FORCE VISIBILITY (Fail-safe)
-                                      // This exposes content inside accordions/regions even if JS expansion fails
-                                      const style = document.createElement('style');
-                                      style.innerHTML = `
-                                        cws-accordion-section .content,
-                                        cws-accordion-section [role=""region""], 
-                                        details > *:not(summary),
-                                        [aria-hidden=""true""] { 
-                                            display: block !important; 
-                                            height: auto !important; 
-                                            visibility: visible !important; 
-                                            opacity: 1 !important; 
-                                            max-height: none !important;
-                                        }
-                                      `;
-                                      document.head.appendChild(style);
-
-                                      function timeUp() { return (Date.now() - start) > MAX_MS; }
-
-                                      // Shadow DOM aware selector helper
-                                      function getCandidates(selector) {
-                                         const nodes = [];
-                                         // Grab light DOM first
-                                         document.querySelectorAll(selector).forEach(el => nodes.push(el));
-                                         
-                                         // Recursive traversal for shadow roots
-                                         function traverse(node) {
-                                            if (node.shadowRoot) {
-                                                node.shadowRoot.querySelectorAll(selector).forEach(el => nodes.push(el));
-                                                Array.from(node.shadowRoot.children).forEach(traverse);
-                                            }
-                                            if (node.children) Array.from(node.children).forEach(traverse);
-                                         }
-                                         traverse(document.body);
-                                         return nodes;
-                                      }
-
-                                      function clickCollapsedOnce() {
-                                        let c = 0;
-                                        
-                                        // A. Google Cloud Specific: cws-accordion-section
-                                        // Needs 'expanded' attribute on the SECTION, not the container
-                                        getCandidates('cws-accordion-section').forEach(el => {
-                                            if (el.getAttribute('expanded') !== 'true') {
-                                                el.setAttribute('expanded', 'true'); // Attribute
-                                                try { el.expanded = true; } catch(e){} // Property direct access
-                                                c++;
-                                            }
-                                        });
-
-                                        // B. Standard ARIA
-                                        getCandidates('[aria-expanded=""false""]').forEach(el => {
-                                           if (!clicked.has(el)) { 
-                                            clicked.add(el); el.click(); c++;
-                                          }
-                                        });
-
-                                        // C. Details
-                                        getCandidates('details:not([open])').forEach(el => {
-                                          if (!clicked.has(el)) {
-                                            clicked.add(el); el.open = true; c++;
-                                          }
-                                        });
-
-                                        // D. Generic Buttons with expansion keywords
-                                        const query = 'button, [role=""button""], .accordion-trigger, .expander';
-                                        getCandidates(query).forEach(el => {
-                                          if (clicked.has(el)) return;
-                                          
-                                          const t = (el.innerText || '').trim().toLowerCase();
-                                          if (!t) return;
-                                          
-                                          if (/^(expand|show|read|load|more|all)/.test(t) || t.includes('expand') || t.includes('show more')) {
-                                              clicked.add(el);
-                                              el.click();
-                                              c++;
-                                          }
-                                        });
-
-                                        return c;
-                                      }
-
-                                      // Scroll helper to trigger lazy loading
-                                      async function scrollPage() {
-                                         window.scrollBy(0, window.innerHeight / 2);
-                                         await sleep(200);
-                                      }
-
-                                      let totalClicks = 0;
-                                      for (let round = 0; round < MAX_ROUNDS; round++) {
-                                        if (timeUp()) break;
-                                        await scrollPage(); 
-                                        
-                                        const clicks = clickCollapsedOnce();
-                                        totalClicks += clicks;
-                                        
-                                        if (clicks > 0) await sleep(500); // Wait for animations
-                                      }
-
-                                      window.scrollTo(0, 0);
-                                      return 'done';
-                                    })();"
-
-                                            ' Define the scroll-down script
-                                            Dim scrollScript As String = "
-                                                            (async function() {
-                                                                var totalHeight = document.body.scrollHeight;
-                                                                var viewportHeight = window.innerHeight || 1000;
-                                                                var currentPosition = 0;
-                                                                var maxScroll = 15000; 
-
-                                                                while (currentPosition < totalHeight && currentPosition < maxScroll) {
-                                                                    window.scrollTo(0, currentPosition);
-                                                                    await new Promise(r => setTimeout(r, 200));
-                                                                    currentPosition += viewportHeight;
-                                                                    totalHeight = document.body.scrollHeight;
-                                                                }
-    
-                                                                window.scrollTo(0, 0);
-                                                                await new Promise(r => setTimeout(r, 300));
-                                                                return 'done';
-                                                            })();"
-
-                                            ' Define the extraction script
-                                            Dim extractScript As String = "
-                                                            (function() {
-                                                                var toRemove = document.querySelectorAll('script, style, noscript, nav, footer, header');
-                                                                toRemove.forEach(function(el) { try { el.remove(); } catch(e) {} });
-                                                                var text = document.body ? (document.body.innerText || '') : '';
-                                                                text = text.replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
-                                                                return text;
-                                                            })();"
-
-                                            ' EXECUTION CHAIN
-                                            Dim initialTask As Task(Of String)
-
-                                            If expandCollapsed Then
-                                                ' Chain: Expand -> Scroll
-                                                initialTask = webView.CoreWebView2.ExecuteScriptAsync(expandAndScrollScript).ContinueWith(
-                                                    Function(t)
-                                                        Return webView.CoreWebView2.ExecuteScriptAsync(scrollScript)
-                                                    End Function, TaskScheduler.FromCurrentSynchronizationContext()).Unwrap()
-                                            Else
-                                                ' Chain: Scroll only
-                                                initialTask = webView.CoreWebView2.ExecuteScriptAsync(scrollScript)
-                                            End If
-
-                                            ' Final Chain: ... -> Extract -> Process Result
-                                            initialTask.ContinueWith(
-                                                Sub(t)
-                                                    ' Delay slightly to safely ensure rendering is settled
-                                                    Dim extractionTimer As New System.Windows.Forms.Timer() With {.Interval = 1000}
-                                                    AddHandler extractionTimer.Tick,
-                                                        Sub(extractSender, extractArgs)
-                                                            extractionTimer.Stop()
-                                                            extractionTimer.Dispose()
-
-                                                            webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
-                                                                Sub(extractTask)
-                                                                    form.BeginInvoke(
-                                                                        Sub()
-                                                                            Try
-                                                                                If extractTask.IsCompleted AndAlso Not extractTask.IsFaulted Then
-                                                                                    result = UnescapeJsonString(extractTask.Result)
-                                                                                    Debug.WriteLine($"[WebView2] Extracted {result.Length} chars")
-                                                                                End If
-                                                                            Catch ex As Exception
-                                                                                Debug.WriteLine($"[WebView2] Extract error: {ex.Message}")
-                                                                            End Try
-                                                                            contentExtracted = True
-                                                                        End Sub)
-                                                                End Sub)
-                                                        End Sub
-                                                    extractionTimer.Start()
-                                                End Sub, TaskScheduler.FromCurrentSynchronizationContext())
-
-                                        Catch ex As Exception
-                                            Debug.WriteLine($"[WebView2] Timer error: {ex.Message}")
-                                            contentExtracted = True
-                                        End Try
-                                    End Sub
-                                timer.Start()
-                            Else
-                                navigationCompleted = True
-                            End If
-                        End Sub
-
-                    ' Show form and start async initialization
-                    form.Show()
-
-                    ' Initialize WebView2 asynchronously
-                    Dim env = CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
-                    env.ContinueWith(
-                            Sub(t)
-                                form.BeginInvoke(
-                                    Sub()
-                                        If t.IsCompleted AndAlso Not t.IsFaulted Then
-                                            webView.EnsureCoreWebView2Async(t.Result)
-                                            ' Don't do anything else here - wait for CoreWebView2InitializationCompleted
-                                        Else
-                                            Debug.WriteLine($"[WebView2] Environment creation failed")
-                                            navigationCompleted = True
-                                        End If
-                                    End Sub)
-                            End Sub)
-
-                    ' Run message loop with timeout - 90 seconds
-                    Dim startTime As DateTime = DateTime.Now
-                    Dim timeout As TimeSpan = TimeSpan.FromSeconds(90)
-
-                    While Not contentExtracted AndAlso Not navigationCompleted AndAlso (DateTime.Now - startTime) < timeout
-                        System.Windows.Forms.Application.DoEvents()
-                        System.Threading.Thread.Sleep(50)
-                    End While
-
-                    Debug.WriteLine($"[WebView2] Loop ended. Content: {result.Length} chars, elapsed: {(DateTime.Now - startTime).TotalSeconds:F1}s")
-
-                Catch ex As Exception
-                    Debug.WriteLine($"[WebView2] Error: {ex.Message}")
-                Finally
-                    Try
-                        If Not String.IsNullOrEmpty(userDataFolder) Then Directory.Delete(userDataFolder, True)
-                    Catch
-                    End Try
-                    Try : webView?.Dispose() : Catch : End Try
-                    Try : form?.Close() : form?.Dispose() : Catch : End Try
-                End Try
-
-                ' Apply character limit only if explicitly requested (maxChars > 0)
-                Dim finalResult As String = result.Trim()
-                If maxChars > 0 AndAlso finalResult.Length > maxChars Then
-                    finalResult = TrimToSentenceBoundary(finalResult, maxChars)
+                If Not IsSafeWebUrl(baseUrl) Then
+                    System.Diagnostics.Debug.WriteLine($"[WebView2] Blocked unsafe URL: {baseUrl}")
+                    navigationFailed = True
+                    result.TextContent = $"Blocked unsafe URL: {baseUrl}"
+                    Return
                 End If
 
-                tcs.TrySetResult(finalResult)
-            End Sub)
+                Dim uniqueID As String = System.Guid.NewGuid().ToString()
+                userDataFolder = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInkWebView2_" & uniqueID)
+                System.IO.Directory.CreateDirectory(userDataFolder)
+
+                form = New System.Windows.Forms.Form() With {
+                    .Width = 1920,
+                    .Height = 4000,
+                    .ShowInTaskbar = False,
+                    .FormBorderStyle = System.Windows.Forms.FormBorderStyle.None,
+                    .StartPosition = System.Windows.Forms.FormStartPosition.Manual,
+                    .Location = New System.Drawing.Point(-32000, -32000),
+                    .Opacity = 0
+                }
+
+                webView = New Microsoft.Web.WebView2.WinForms.WebView2() With {
+                    .Dock = System.Windows.Forms.DockStyle.Fill
+                }
+
+                form.Controls.Add(webView)
+
+                AddHandler webView.CoreWebView2InitializationCompleted,
+                    Sub(s, e)
+                        Try
+                            If Not e.IsSuccess Then
+                                Dim initMessage As String =
+                                    If(e.InitializationException IsNot Nothing,
+                                       e.InitializationException.Message,
+                                       "Unknown initialization error")
+
+                                System.Diagnostics.Debug.WriteLine("[WebView2] CoreWebView2 initialization failed: " & initMessage)
+                                result.TextContent = "WebView2 initialization failed: " & initMessage
+                                navigationFailed = True
+                                Return
+                            End If
+
+                            System.Diagnostics.Debug.WriteLine("[WebView2] CoreWebView2 initialized")
+
+                            With webView.CoreWebView2.Settings
+                                .AreDefaultScriptDialogsEnabled = False
+                                .AreDefaultContextMenusEnabled = False
+                                .AreDevToolsEnabled = False
+                                .IsStatusBarEnabled = False
+                                .IsScriptEnabled = True
+                                .IsBuiltInErrorPageEnabled = False
+
+                                ' Wichtig: Muss True sein, weil das Script per chrome.webview.postMessage(...)
+                                ' an VB.NET zurückmeldet.
+                                .IsWebMessageEnabled = True
+                            End With
+
+                            AddHandler webView.CoreWebView2.WebMessageReceived,
+                                Sub(sender, args)
+                                    Try
+                                        Dim rawJson As String = args.WebMessageAsJson
+
+                                        System.Diagnostics.Debug.WriteLine("[WebView2] WebMessage received: " & If(rawJson, "<null>"))
+
+                                        If System.String.IsNullOrWhiteSpace(rawJson) Then
+                                            contentExtracted = True
+                                            Return
+                                        End If
+
+                                        Dim payload As Newtonsoft.Json.Linq.JObject =
+                                            Newtonsoft.Json.Linq.JObject.Parse(rawJson)
+
+                                        Dim sourceToken As Newtonsoft.Json.Linq.JToken = payload("source_url")
+                                        If sourceToken IsNot Nothing Then
+                                            result.FinalUrl = sourceToken.ToString()
+                                        End If
+
+                                        Dim textToken As Newtonsoft.Json.Linq.JToken = payload("text")
+                                        If textToken IsNot Nothing Then
+                                            result.TextContent = textToken.ToString()
+                                        End If
+
+                                        Dim linksToken As Newtonsoft.Json.Linq.JToken = payload("links")
+                                        If linksToken IsNot Nothing AndAlso linksToken.Type = Newtonsoft.Json.Linq.JTokenType.Array Then
+                                            result.LinksJson = linksToken.ToString(Newtonsoft.Json.Formatting.None)
+                                        End If
+
+                                        Dim errorToken As Newtonsoft.Json.Linq.JToken = payload("error")
+                                        If errorToken IsNot Nothing AndAlso System.String.IsNullOrWhiteSpace(result.TextContent) Then
+                                            result.TextContent = "WebView2 extraction error: " & errorToken.ToString()
+                                        End If
+
+                                        System.Diagnostics.Debug.WriteLine(
+                                            $"[WebView2] Extract result: text={If(result.TextContent, "").Length} chars, elapsed={(System.DateTime.Now - startTime).TotalSeconds:F1}s")
+
+                                        contentExtracted = True
+
+                                    Catch ex As System.Exception
+                                        System.Diagnostics.Debug.WriteLine("[WebView2] WebMessage parse error: " & ex.Message)
+                                        result.TextContent = "WebView2 WebMessage parse error: " & ex.Message
+                                        contentExtracted = True
+                                    End Try
+                                End Sub
+
+                            AddHandler webView.CoreWebView2.NewWindowRequested,
+                                Sub(sender, args)
+                                    args.Handled = True
+                                End Sub
+
+                            AddHandler webView.CoreWebView2.PermissionRequested,
+                                Sub(sender, args)
+                                    args.State = Microsoft.Web.WebView2.Core.CoreWebView2PermissionState.Deny
+                                End Sub
+
+                            AddHandler webView.CoreWebView2.NavigationStarting,
+                                Sub(sender, args)
+                                    Try
+                                        Dim uriStart As System.Uri = Nothing
+
+                                        If System.Uri.TryCreate(args.Uri, System.UriKind.Absolute, uriStart) Then
+                                            If uriStart.Scheme <> System.Uri.UriSchemeHttp AndAlso uriStart.Scheme <> System.Uri.UriSchemeHttps Then
+                                                args.Cancel = True
+                                            End If
+                                        End If
+
+                                    Catch ex As System.Exception
+                                        System.Diagnostics.Debug.WriteLine("[WebView2] NavigationStarting error: " & ex.Message)
+                                    End Try
+                                End Sub
+
+                            AddHandler webView.NavigationCompleted,
+                                Sub(sender, args)
+                                    Try
+                                        navigationFinished = True
+
+                                        System.Diagnostics.Debug.WriteLine(
+                                            $"[WebView2] Navigation completed. Success: {args.IsSuccess}, Status: {args.WebErrorStatus}")
+
+                                        If Not args.IsSuccess Then
+                                            result.TextContent = $"Navigation failed: {args.WebErrorStatus}"
+                                            navigationFailed = True
+                                            Return
+                                        End If
+
+                                        If extractionStarted Then
+                                            Return
+                                        End If
+
+                                        extractionStarted = True
+
+                                        Dim extractScript As String =
+                                            BuildRobustWebExtractionScript(
+                                                includeLinks,
+                                                expandCollapsed,
+                                                normalizedExtensions)
+
+                                        ' Wichtig:
+                                        ' ExecuteScriptAsync startet nur noch das Script.
+                                        ' Das eigentliche Resultat kommt über WebMessageReceived.
+                                        webView.CoreWebView2.ExecuteScriptAsync(extractScript).ContinueWith(
+                                            Sub(extractTask As System.Threading.Tasks.Task(Of String))
+                                                Try
+                                                    If extractTask.IsFaulted Then
+                                                        Dim message As String = "Unknown script execution error"
+
+                                                        If extractTask.Exception IsNot Nothing Then
+                                                            message = extractTask.Exception.GetBaseException().Message
+                                                        End If
+
+                                                        System.Diagnostics.Debug.WriteLine("[WebView2] ExecuteScriptAsync failed: " & message)
+                                                        result.TextContent = "WebView2 ExecuteScriptAsync failed: " & message
+                                                        contentExtracted = True
+                                                    Else
+                                                        System.Diagnostics.Debug.WriteLine("[WebView2] Extraction script started.")
+                                                    End If
+
+                                                Catch ex As System.Exception
+                                                    System.Diagnostics.Debug.WriteLine("[WebView2] ExecuteScriptAsync continuation error: " & ex.Message)
+                                                    result.TextContent = "WebView2 ExecuteScriptAsync continuation error: " & ex.Message
+                                                    contentExtracted = True
+                                                End Try
+                                            End Sub)
+
+                                    Catch ex As System.Exception
+                                        System.Diagnostics.Debug.WriteLine("[WebView2] NavigationCompleted error: " & ex.Message)
+                                        result.TextContent = "WebView2 NavigationCompleted error: " & ex.Message
+                                        contentExtracted = True
+                                    End Try
+                                End Sub
+
+                            webView.CoreWebView2.Navigate(baseUrl)
+
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("[WebView2] Initialization handler error: " & ex.Message)
+                            result.TextContent = "WebView2 initialization handler error: " & ex.Message
+                            navigationFailed = True
+                        End Try
+                    End Sub
+
+                form.Show()
+
+                Dim env As System.Threading.Tasks.Task(Of Microsoft.Web.WebView2.Core.CoreWebView2Environment) =
+                    Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(Nothing, userDataFolder)
+
+                env.ContinueWith(
+                    Sub(t As System.Threading.Tasks.Task(Of Microsoft.Web.WebView2.Core.CoreWebView2Environment))
+                        Try
+                            If form Is Nothing OrElse form.IsDisposed Then
+                                Return
+                            End If
+
+                            form.BeginInvoke(
+                                Sub()
+                                    Try
+                                        If t.IsCompleted AndAlso Not t.IsFaulted Then
+                                            webView.EnsureCoreWebView2Async(t.Result)
+                                        Else
+                                            Dim message As String = "Unknown environment creation error"
+
+                                            If t.Exception IsNot Nothing Then
+                                                message = t.Exception.GetBaseException().Message
+                                            End If
+
+                                            System.Diagnostics.Debug.WriteLine("[WebView2] Environment creation failed: " & message)
+                                            result.TextContent = "WebView2 environment creation failed: " & message
+                                            navigationFailed = True
+                                        End If
+
+                                    Catch ex As System.Exception
+                                        System.Diagnostics.Debug.WriteLine("[WebView2] Environment BeginInvoke error: " & ex.Message)
+                                        result.TextContent = "WebView2 environment BeginInvoke error: " & ex.Message
+                                        navigationFailed = True
+                                    End Try
+                                End Sub)
+
+                        Catch ex As System.Exception
+                            System.Diagnostics.Debug.WriteLine("[WebView2] Environment continuation error: " & ex.Message)
+                            result.TextContent = "WebView2 environment continuation error: " & ex.Message
+                            navigationFailed = True
+                        End Try
+                    End Sub)
+
+                While Not contentExtracted AndAlso Not navigationFailed AndAlso (System.DateTime.Now - startTime) < timeout
+                    System.Windows.Forms.Application.DoEvents()
+                    System.Threading.Thread.Sleep(50)
+                End While
+
+                If Not contentExtracted AndAlso Not navigationFailed Then
+                    System.Diagnostics.Debug.WriteLine($"[WebView2] Timed out after {timeout.TotalSeconds:F0} seconds while retrieving {baseUrl}")
+                    result.TextContent = $"Timed out after {timeout.TotalSeconds:F0} seconds while retrieving {baseUrl}."
+                End If
+
+            Catch ex As System.Exception
+                System.Diagnostics.Debug.WriteLine("[WebView2] Error: " & ex.Message)
+                result.TextContent = "WebView2 error: " & ex.Message
+
+            Finally
+                Try
+                    If webView IsNot Nothing Then
+                        webView.Dispose()
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] WebView dispose error: " & ex.Message)
+                End Try
+
+                Try
+                    If form IsNot Nothing Then
+                        form.Close()
+                        form.Dispose()
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] Form dispose error: " & ex.Message)
+                End Try
+
+                Try
+                    If Not System.String.IsNullOrEmpty(userDataFolder) AndAlso System.IO.Directory.Exists(userDataFolder) Then
+                        System.IO.Directory.Delete(userDataFolder, True)
+                    End If
+                Catch ex As System.Exception
+                    System.Diagnostics.Debug.WriteLine("[WebView2] User data folder cleanup error: " & ex.Message)
+                End Try
+            End Try
+
+            Dim finalText As String = If(result.TextContent, "").Trim()
+
+            If maxChars > 0 AndAlso finalText.Length > maxChars Then
+                finalText = TrimToSentenceBoundary(finalText, maxChars)
+            End If
+
+            result.TextContent = finalText
+
+            System.Diagnostics.Debug.WriteLine(
+                $"[WebView2] Loop ended. Content: {If(result.TextContent, "").Length} chars, elapsed: {(System.DateTime.Now - startTime).TotalSeconds:F1}s")
+
+            tcs.TrySetResult(result)
+        End Sub)
 
         thread.SetApartmentState(System.Threading.ApartmentState.STA)
         thread.Start()
 
         Return tcs.Task
+    End Function
+
+    Private Function BuildRobustWebExtractionScript(includeLinks As Boolean,
+                                                expandInteractiveSections As Boolean,
+                                                allowedExtensions As System.Collections.Generic.List(Of String)) As String
+
+        Dim script As String = <![CDATA[
+(async function() {
+    var includeLinks = __INCLUDE_LINKS__;
+    var expandInteractiveSections = __EXPAND_INTERACTIVE__;
+    var allowedExtensions = __ALLOWED_EXTENSIONS__;
+
+    function sendResult(payload) {
+        try {
+            if (window.chrome && chrome.webview && chrome.webview.postMessage) {
+                chrome.webview.postMessage(payload);
+            }
+        } catch (e) {
+        }
+    }
+
+    function delay(ms) {
+        return new Promise(function(resolve) {
+            setTimeout(resolve, ms);
+        });
+    }
+
+    function normalizeText(value) {
+        return (value || '').replace(/\s+/g, ' ').trim();
+    }
+
+        function isAllowedResolvedUrl(url) {
+        if (!url) {
+            return false;
+        }
+
+        try {
+            var parsed = new URL(url, document.baseURI);
+            var protocol = (parsed.protocol || '').toLowerCase();
+            var hostname = (parsed.hostname || '').toLowerCase();
+
+            if (protocol !== 'http:' && protocol !== 'https:') {
+                return false;
+            }
+
+            if (hostname === 'localhost' ||
+                hostname === '::1' ||
+                hostname === '[::1]' ||
+                /^127(?:\.\d{1,3}){3}$/.test(hostname)) {
+                return false;
+            }
+
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function resolveUrl(value) {
+        if (!value) {
+            return '';
+        }
+
+        value = String(value).trim();
+
+        if (!value || value === '#' || value.toLowerCase().indexOf('javascript:') === 0) {
+            return '';
+        }
+
+        try {
+            var resolved = new URL(value, document.baseURI).href;
+            return isAllowedResolvedUrl(resolved) ? resolved : '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function getExtensionFromUrl(url) {
+        try {
+            var parsed = new URL(url, document.baseURI);
+            var pathname = parsed.pathname || '';
+            var lastSegment = pathname.split('/').pop() || '';
+            var dot = lastSegment.lastIndexOf('.');
+
+            if (dot < 0) {
+                return '';
+            }
+
+            return lastSegment.substring(dot + 1).toLowerCase();
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function isVisible(el) {
+        if (!el) {
+            return false;
+        }
+
+        try {
+            if (el.hidden) {
+                return false;
+            }
+
+            var style = window.getComputedStyle(el);
+
+            if (!style) {
+                return true;
+            }
+
+            if (style.display === 'none' || style.visibility === 'hidden') {
+                return false;
+            }
+
+            return true;
+        } catch (e) {
+            return true;
+        }
+    }
+
+    function queryAllDeep(selector) {
+        var results = [];
+        var seen = new Set();
+
+        function visitRoot(root) {
+            if (!root || seen.has(root)) {
+                return;
+            }
+
+            seen.add(root);
+
+            try {
+                if (root.querySelectorAll) {
+                    root.querySelectorAll(selector).forEach(function(el) {
+                        results.push(el);
+                    });
+                }
+            } catch (e) {
+            }
+
+            try {
+                var all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+
+                for (var i = 0; i < all.length; i++) {
+                    var el = all[i];
+
+                    if (el && el.shadowRoot) {
+                        visitRoot(el.shadowRoot);
+                    }
+                }
+            } catch (e) {
+            }
+        }
+
+        visitRoot(document);
+        return results;
+    }
+
+    function getAllElementsDeep() {
+        return queryAllDeep('*');
+    }
+
+    function extractUrlsFromString(value) {
+        var results = [];
+
+        if (!value) {
+            return results;
+        }
+
+        var text = String(value);
+        var absoluteRegex = /https?:\/\/[^\s"'<>]+/gi;
+        var match;
+
+        while ((match = absoluteRegex.exec(text)) !== null) {
+            results.push(match[0]);
+        }
+
+        var relativeRegex = /["']((?:\/|\.{1,2}\/)[^"'<>]+)["']/gi;
+
+        while ((match = relativeRegex.exec(text)) !== null) {
+            results.push(match[1]);
+        }
+
+        return results;
+    }
+
+    function matchesAllowed(url, extension, hintText) {
+        if (!allowedExtensions || allowedExtensions.length === 0) {
+            return true;
+        }
+
+        var ext = (extension || '').toLowerCase();
+
+        if (ext && allowedExtensions.indexOf(ext) >= 0) {
+            return true;
+        }
+
+        var haystack = ((url || '') + ' ' + (hintText || '')).toLowerCase();
+
+        for (var i = 0; i < allowedExtensions.length; i++) {
+            var allowed = allowedExtensions[i];
+
+            if (haystack.indexOf('.' + allowed) >= 0 ||
+                haystack.indexOf('=' + allowed) >= 0 ||
+                haystack.indexOf('/' + allowed) >= 0 ||
+                haystack.indexOf('format ' + allowed) >= 0 ||
+                haystack.indexOf('type ' + allowed) >= 0 ||
+                haystack.indexOf(allowed) >= 0) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function buildHintText(el, extraText) {
+        if (!el) {
+            return normalizeText(extraText || '');
+        }
+
+        var className = '';
+
+        try {
+            className = typeof el.className === 'string' ? el.className : '';
+        } catch (e) {
+            className = '';
+        }
+
+        return normalizeText([
+            extraText || '',
+            el.innerText || '',
+            el.textContent || '',
+            el.getAttribute && el.getAttribute('aria-label'),
+            el.getAttribute && el.getAttribute('title'),
+            el.getAttribute && el.getAttribute('type'),
+            el.getAttribute && el.getAttribute('download'),
+            el.id || '',
+            className
+        ].join(' '));
+    }
+
+    async function waitForBodyText() {
+        var started = Date.now();
+
+        while (Date.now() - started < 8000) {
+            if (document.body && normalizeText(document.body.innerText || document.body.textContent || '').length > 20) {
+                return;
+            }
+
+            await delay(250);
+        }
+    }
+
+    async function autoScroll() {
+        var body = document.body || document.documentElement;
+
+        if (!body) {
+            return;
+        }
+
+        var totalHeight = body.scrollHeight || 0;
+        var viewportHeight = window.innerHeight || 1000;
+        var currentPosition = 0;
+        var maxScroll = 20000;
+
+        while (currentPosition < totalHeight && currentPosition < maxScroll) {
+            window.scrollTo(0, currentPosition);
+            await delay(150);
+
+            currentPosition += viewportHeight;
+            totalHeight = body.scrollHeight || totalHeight;
+        }
+
+        window.scrollTo(0, 0);
+        await delay(250);
+    }
+
+    function clickIfExpandable(el) {
+        if (!el) {
+            return false;
+        }
+
+        if (!isVisible(el) && !expandInteractiveSections) {
+            return false;
+        }
+
+        var tag = (el.tagName || '').toUpperCase();
+        var ariaExpanded = (el.getAttribute && el.getAttribute('aria-expanded') || '').toLowerCase();
+        var dataBsToggle = (el.getAttribute && el.getAttribute('data-bs-toggle') || '').toLowerCase();
+        var dataToggle = (el.getAttribute && el.getAttribute('data-toggle') || '').toLowerCase();
+        var text = normalizeText(el.innerText || el.textContent || '');
+
+        var shouldClick =
+            tag === 'SUMMARY' ||
+            ariaExpanded === 'false' ||
+            dataBsToggle === 'collapse' ||
+            dataBsToggle === 'dropdown' ||
+            dataToggle === 'collapse' ||
+            dataToggle === 'dropdown' ||
+            /\b(expand|show more|read more|open|attachments|documents|downloads|resources)\b/i.test(text) ||
+            (el.classList && (
+                el.classList.contains('accordion-button') ||
+                el.classList.contains('accordion-trigger') ||
+                el.classList.contains('expander')
+            ));
+
+        if (!shouldClick) {
+            return false;
+        }
+
+        try {
+            el.click();
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async function expandSections() {
+        if (!expandInteractiveSections) {
+            return;
+        }
+
+        for (var pass = 0; pass < 5; pass++) {
+            var clicked = 0;
+
+            queryAllDeep('details').forEach(function(detailsEl) {
+                if (!detailsEl.open) {
+                    try {
+                        detailsEl.open = true;
+                        clicked++;
+                    } catch (e) {
+                    }
+                }
+            });
+
+            var selectors = [
+                'summary',
+                '[aria-expanded="false"]',
+                '[data-bs-toggle="collapse"]',
+                '[data-toggle="collapse"]',
+                '[data-bs-toggle="dropdown"]',
+                '[data-toggle="dropdown"]',
+                '.accordion-button',
+                '.accordion-trigger',
+                '.expander',
+                'button[aria-expanded="false"]',
+                '[role="button"][aria-expanded="false"]',
+                '[aria-controls]'
+            ];
+
+            queryAllDeep(selectors.join(',')).forEach(function(el) {
+                if (clickIfExpandable(el)) {
+                    clicked++;
+                }
+            });
+
+            if (clicked === 0) {
+                break;
+            }
+
+            await delay(600);
+            await autoScroll();
+        }
+    }
+
+    function walk(node) {
+        if (!node) {
+            return '';
+        }
+
+        if (node.nodeType === 3) {
+            return node.textContent || '';
+        }
+
+        if (node.nodeType !== 1) {
+            return '';
+        }
+
+        var tag = node.tagName ? node.tagName.toUpperCase() : '';
+
+        if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT') {
+            return '';
+        }
+
+        if (!isVisible(node)) {
+            return '';
+        }
+
+        var parts = [];
+
+        if (node.shadowRoot && node.shadowRoot.childNodes) {
+            for (var s = 0; s < node.shadowRoot.childNodes.length; s++) {
+                parts.push(walk(node.shadowRoot.childNodes[s]));
+            }
+        }
+
+        for (var i = 0; i < node.childNodes.length; i++) {
+            parts.push(walk(node.childNodes[i]));
+        }
+
+        var inner = parts.join('');
+
+        if (tag === 'A') {
+            var href = resolveUrl(node.getAttribute('href') || '');
+            var text = inner.trim();
+
+            if (href && text) {
+                if (text === href || text === decodeURIComponent(href)) {
+                    return text;
+                }
+
+                return '[' + text + '](' + href + ')';
+            }
+
+            return text || '';
+        }
+
+        if (/^(DIV|P|BR|H[1-6]|LI|TR|BLOCKQUOTE|SECTION|ARTICLE|ASIDE|MAIN|DT|DD|FIGCAPTION|PRE|HEADER|FOOTER|NAV)$/.test(tag)) {
+            if (tag === 'BR') {
+                return '\n';
+            }
+
+            return '\n' + inner + '\n';
+        }
+
+        return inner;
+    }
+
+    function collectText() {
+        var root =
+            document.querySelector('main') ||
+            document.querySelector('[role="main"]') ||
+            document.body;
+
+        var text = root ? walk(root) : '';
+
+        if (!normalizeText(text) && document.body) {
+            text = document.body.innerText || document.body.textContent || '';
+        }
+
+        text = text
+            .replace(/\r/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .replace(/[ \t]+/g, ' ')
+            .trim();
+
+        return text;
+    }
+
+    function collectLinks() {
+        if (!includeLinks) {
+            return [];
+        }
+
+        var links = [];
+        var seen = new Set();
+
+        function addCandidate(url, source, attributeName, el, explicitText) {
+            var resolved = resolveUrl(url);
+
+            if (!resolved) {
+                return;
+            }
+
+            var extension = getExtensionFromUrl(resolved);
+            var hintText = buildHintText(el, explicitText);
+
+            if (!matchesAllowed(resolved, extension, hintText)) {
+                return;
+            }
+
+            var key = resolved.toLowerCase();
+
+            if (seen.has(key)) {
+                return;
+            }
+
+            seen.add(key);
+
+            links.push({
+                text: hintText || resolved,
+                url: resolved,
+                extension: extension,
+                download: !!(el && el.hasAttribute && el.hasAttribute('download')) || extension !== '',
+                source: source || '',
+                attribute: attributeName || '',
+                visible: el ? isVisible(el) : true
+            });
+        }
+
+        queryAllDeep('a[href], area[href]').forEach(function(el) {
+            addCandidate(el.getAttribute('href'), 'anchor', 'href', el, '');
+        });
+
+        var attributeNames = [
+            'href',
+            'src',
+            'data',
+            'data-href',
+            'data-url',
+            'data-link',
+            'data-src',
+            'data-download',
+            'data-download-url',
+            'data-file',
+            'data-file-url',
+            'data-doc-url',
+            'data-document-url'
+        ];
+
+        getAllElementsDeep().forEach(function(el) {
+            for (var i = 0; i < attributeNames.length; i++) {
+                var attrName = attributeNames[i];
+                var attrValue = el.getAttribute && el.getAttribute(attrName);
+
+                if (attrValue) {
+                    addCandidate(attrValue, 'attribute', attrName, el, '');
+                }
+            }
+
+            var scriptLikeAttrs = ['onclick', 'onmousedown', 'onmouseup', 'data-onclick'];
+
+            for (var j = 0; j < scriptLikeAttrs.length; j++) {
+                var scriptAttr = scriptLikeAttrs[j];
+                var raw = el.getAttribute && el.getAttribute(scriptAttr);
+
+                if (!raw) {
+                    continue;
+                }
+
+                extractUrlsFromString(raw).forEach(function(foundUrl) {
+                    addCandidate(foundUrl, 'script-attribute', scriptAttr, el, raw);
+                });
+            }
+        });
+
+        extractUrlsFromString(document.body ? document.body.innerText : '').forEach(function(foundUrl) {
+            addCandidate(foundUrl, 'body-text', 'text', null, foundUrl);
+        });
+
+        return links;
+    }
+
+    try {
+        await waitForBodyText();
+        await autoScroll();
+        await expandSections();
+        await autoScroll();
+        await delay(500);
+
+        sendResult({
+            source_url: document.baseURI || location.href,
+            title: document.title || '',
+            text: collectText(),
+            links: collectLinks()
+        });
+    } catch (err) {
+        sendResult({
+            source_url: document.baseURI || location.href,
+            title: document.title || '',
+            text: document.body ? (document.body.innerText || document.body.textContent || '') : '',
+            links: [],
+            error: err && err.message ? err.message : String(err)
+        });
+    }
+})();
+]]>.Value
+
+        script = script.Replace("__INCLUDE_LINKS__", If(includeLinks, "true", "false"))
+        script = script.Replace("__EXPAND_INTERACTIVE__", If(expandInteractiveSections, "true", "false"))
+        script = script.Replace("__ALLOWED_EXTENSIONS__", Newtonsoft.Json.JsonConvert.SerializeObject(If(allowedExtensions, New System.Collections.Generic.List(Of String)())))
+
+        Return script
     End Function
 
     ''' <summary>

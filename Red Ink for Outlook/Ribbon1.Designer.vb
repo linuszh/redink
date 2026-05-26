@@ -487,9 +487,11 @@ Partial Class Ribbon2
         Me.RI_Freestyle = Me.Factory.CreateRibbonButton
         Me.RI_CompareSelected = Me.Factory.CreateRibbonButton
         Me.RI_Clipboard = Me.Factory.CreateRibbonButton
+        Me.RI_M365 = Me.Factory.CreateRibbonButton
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
+        Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
         Me.RI_OpenChat = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
@@ -536,9 +538,11 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_Freestyle)
         Me.Menu1.Items.Add(Me.RI_CompareSelected)
         Me.Menu1.Items.Add(Me.RI_Clipboard)
+        Me.Menu1.Items.Add(Me.RI_M365)
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
+        Me.Menu1.Items.Add(Me.RI_KnowledgeStores)
         Me.Menu1.Items.Add(Me.RI_AutoPilot)
         Me.Menu1.Items.Add(Me.RI_OpenChat)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
@@ -696,6 +700,14 @@ Partial Class Ribbon2
     "audio, image)"
         Me.RI_Clipboard.ShowImage = True
         '
+        'RI_M365
+        '
+        Me.RI_M365.Label = "M365 Mail Search"
+        Me.RI_M365.Name = "RI_M365"
+        Me.RI_M365.OfficeImageId = "NewSearchFolder"
+        Me.RI_M365.ScreenTip = "Searches your M365 content with and without the help of AI"
+        Me.RI_M365.ShowImage = True
+        '
         'RI_MailMover
         '
         Me.RI_MailMover.Label = "Mail Mover"
@@ -719,6 +731,14 @@ Partial Class Ribbon2
         Me.RI_DefineMyStyle.OfficeImageId = "DisplayForm"
         Me.RI_DefineMyStyle.ScreenTip = "Analyze your writing style and create a MyStyle prompt based on it"
         Me.RI_DefineMyStyle.ShowImage = True
+        '
+        'RI_KnowledgeStores
+        '
+        Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
+        Me.RI_KnowledgeStores.Name = "RI_KnowledgeStores"
+        Me.RI_KnowledgeStores.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
+        Me.RI_KnowledgeStores.ShowImage = True
         '
         'RI_AutoPilot
         '
@@ -841,6 +861,19 @@ Partial Class Ribbon2
             Me.RI_MailMover.Visible = True
         End If
 
+        If String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePath) And String.IsNullOrWhiteSpace(ThisAddIn.INI_KnowledgeStorePathLocal) Then
+            Me.RI_KnowledgeStores.Enabled = False
+        Else
+            Me.RI_KnowledgeStores.Enabled = True
+        End If
+
+        If String.IsNullOrWhiteSpace(ThisAddIn.INI_M365TenantID) OrElse String.IsNullOrWhiteSpace(ThisAddIn.INI_M365ClientID) Then
+            Me.RI_KnowledgeStores.Enabled = False
+        Else
+            Me.RI_KnowledgeStores.Enabled = True
+        End If
+
+
         ApplyThemeAwareMenuIcon()
 
     End Function
@@ -856,6 +889,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Summarize As RibbonButton
     Friend WithEvents RI_Freestyle As RibbonButton
     Friend WithEvents RI_Clipboard As RibbonButton
+    Friend WithEvents RI_M365 As RibbonButton
     Friend WithEvents RI_MailMover As RibbonButton
     Friend WithEvents RI_InboxBoard As RibbonButton
     Friend WithEvents RI_Translate As RibbonButton
@@ -874,6 +908,7 @@ Partial Class Ribbon2
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
+    Friend WithEvents RI_KnowledgeStores As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton
     Friend WithEvents RI_OpenChat As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton
@@ -888,3 +923,5 @@ Partial Class ThisRibbonCollection
         End Get
     End Property
 End Class
+
+

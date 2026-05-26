@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 8.4.2026
+' 25.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
@@ -27,7 +27,7 @@
 ' Includes PdfiumViewer in unchanged form; Copyright (c) 2017 Pieter van Ginkel; licensed under the Apache 2.0 license (https://licenses.nuget.org/Apache-2.0) at https://github.com/pvginkel/PdfiumViewer
 ' Includes PDFsharp in unchanged form; Copyright (c) 2025 PDFSharp Team; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://docs.pdfsharp.net/
 ' Includes System.Interactive.Async in unchanged form; Copyright (c) 2025 by .NET Foundation and Contributors; licensed under the MIT license (https://licenses.nuget.org/MIT) at https://github.com/dotnet/reactive
-' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
+' Includes also various Microsoft distributables and libraries copyrighted by Microsoft Corporation and available, among others, under the Microsoft EULA, the Visual Studio Community 2022 License, the Microsoft.Web.WebView2 License (for Microsoft.Web.WebView2, see license on https://www.nuget.org/packages/Microsoft.Web.WebView2/ and below) and the MIT License (including Microsoft.Bcl.*, Microsoft.Extensions.*, Microsoft.Identity.Client, Microsoft.Identity.Client.Extensions.Msal, System.*, System.Security.*, System.CodeDom, DocumentFormat.OpenXml.*, Microsoft.ml.*, CommunityToolkit.HighPerformance licensed under MIT License) (https://licenses.nuget.org/MIT); Copyright (c) 2016- Microsoft Corp.
 '
 ' Licenses of Red Ink and of third-party components and further legal terms/notices are available in the installation folder and via https://redink.ai.
 '
@@ -37,6 +37,7 @@
 Option Explicit On
 Option Strict Off
 
+Imports System.Diagnostics
 Imports System.Globalization
 Imports System.Runtime.InteropServices
 Imports System.Threading
@@ -59,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.080426" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.250526" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
@@ -69,7 +70,8 @@ Partial Public Class ThisAddIn
     Private Const MarkupPrefixDiff As String = "MarkupDiff:"
     Private Const MarkupPrefixDiffW As String = "MarkupDiffW:"
     Private Const MarkupPrefixWord As String = "MarkupWord:"
-    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word]:"
+    Private Const MarkupPrefixAll As String = "Markup[Diff|DiffW|Word|Approve]:"
+    Private Const MarkupPrefixApprove As String = "MarkupApprove:"
     Private Const ClipboardPrefix As String = "Clipboard:"
     Private Const ClipboardPrefix2 As String = "Clip:"
     Private Const InsertPrefix As String = "Insert:"
@@ -83,7 +85,9 @@ Partial Public Class ThisAddIn
     Private Const InPlacePrefix As String = "Replace:"
     Private Const NewDocPrefix As String = "Newdoc:"
     Private Const ObjectTrigger2 As String = "(clip)"
-    Private Const ToolTrigger As String = "(t)"
+    Private Const ToolTrigger As String = "(a)"
+    Private Const KBTrigger As String = "(kb)"
+    Private Const AddmailTrigger As String = "(addmail)"
 
     Private Const ESC_KEY As Integer = &H1B
 
@@ -94,7 +98,6 @@ Partial Public Class ThisAddIn
     Public SourceLanguage As String = ""
     Public OutputLanguage As String = ""
     Public OtherPrompt As String = ""
-    Public CurrentDate As String = "(Current Date: " & DateTime.Now.ToString("dd-MMM-yyyy", CultureInfo.GetCultureInfo("en-US")) & ")"
     Public Username As String = ""
     Public MyStyleInsert As String = ""
     Public ShortenLength, SummaryLength As Long
@@ -111,6 +114,13 @@ Partial Public Class ThisAddIn
     Public ExtraInstructions As String = ""
 
     Public InspectorOpened As Boolean = False
+
+    Public ReadOnly Property CurrentDate As String
+        Get
+            Return "Current date (ISO 8601 yyyy-MM-dd): " &
+               DateTime.Now.ToString("yyyy-MM-dd", Globalization.CultureInfo.InvariantCulture)
+        End Get
+    End Property
 
 
     <DllImport("user32.dll", SetLastError:=True)>
@@ -167,6 +177,16 @@ Partial Public Class ThisAddIn
     Private startupFallbackTimer As System.Windows.Forms.Timer
 
     ''' <summary>
+    ''' Shared UI synchronization context used by the shared tooling loop.
+    ''' </summary>
+    Public Shared UiSyncContext As System.Threading.SynchronizationContext
+
+    ''' <summary>
+    ''' Managed thread id of the Outlook UI thread captured at startup.
+    ''' </summary>
+    Public Shared UiThreadId As Integer
+
+    ''' <summary>
     ''' Handles add-in startup. Initializes UI synchronization, UpdateHandler targets, host window handle, Explorer hooks, fallback timer, and restores last chat id.
     ''' </summary>
     Private Sub ThisAddIn_Startup() Handles Me.Startup
@@ -187,6 +207,10 @@ Partial Public Class ThisAddIn
             _uiContext = New WindowsFormsSynchronizationContext()
             SynchronizationContext.SetSynchronizationContext(_uiContext)
         End If
+
+        UiSyncContext = _uiContext
+        UiThreadId = System.Threading.Thread.CurrentThread.ManagedThreadId
+
         _uiScheduler = TaskScheduler.FromCurrentSynchronizationContext()
 
         ' 3) Give that Control to the UpdateHandler so it can Invoke on it
@@ -229,7 +253,35 @@ Partial Public Class ThisAddIn
         Catch
             activeChatId = 1
         End Try
+
+        '#If DEBUG Then
+        '        RunToolCallSequencingSelfTestsAtStartup()
+        '#End If
+
     End Sub
+
+
+    '#If DEBUG Then
+    '    Private Shared _toolCallSequencingSelfTestsRan As Boolean = False
+
+    'Private Sub RunToolCallSequencingSelfTestsAtStartup()
+    'If _toolCallSequencingSelfTestsRan Then Return
+    '    _toolCallSequencingSelfTestsRan = True
+
+    '    Debug.WriteLine("[Startup] Queueing ToolCallSequencing self-tests...")
+
+    '   System.Threading.Tasks.Task.Run(
+    'Sub()
+    'Try
+    '               Debug.WriteLine("[Startup] Running ToolCallSequencing self-tests...")
+    'Dim status = SharedLibrary.Agents.ToolCallSequencingSelfTests.RunAllAndReturnStatus()
+    '               Debug.WriteLine("[Startup] " & status)
+    'Catch ex As System.Exception
+    '               Debug.WriteLine("[Startup] ToolCallSequencing self-tests failed: " & ex.ToString())
+    'End Try
+    'End Sub)
+    'End Sub
+    '#End If
 
     ''' <summary>
     ''' Handles creation of a new Explorer window. Attaches Activate, marks initialized, runs delayed startup, and cleans handlers.
@@ -327,12 +379,32 @@ Partial Public Class ThisAddIn
 
         Try
             InitializeConfig(True, True)
+
             UpdateHandler.PeriodicCheckForUpdates(INI_UpdateCheckInterval, "Outlook", INI_UpdatePath, _context)
             Dim result = Globals.Ribbons.Ribbon1.UpdateRibbon()
             result = Globals.Ribbons.Ribbon2.UpdateRibbon()
             mainThreadControl.CreateControl()
             StartListenerWatchdog()
             StartupHttpListener()
+
+            ' Initialize Knowledge Store background indexing service
+            InitializeKnowledgeStoreService()
+
+            Try
+                If System.Threading.SynchronizationContext.Current Is Nothing Then
+                    System.Threading.SynchronizationContext.SetSynchronizationContext(
+                        New System.Windows.Forms.WindowsFormsSynchronizationContext())
+                End If
+                ' Touch a Control on the UI thread so the WindowsForms sync-context is fully active.
+                Using anchor As New System.Windows.Forms.Control()
+                    Dim h = anchor.Handle
+                End Using
+                SharedLibrary.Agents.WebView2JsSandbox.Initialize(
+                    System.Threading.SynchronizationContext.Current,
+                    System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RedInk_JsSandbox"))
+            Catch
+                ' js_run will report "sandbox_uninitialized" if this failed.
+            End Try
 
         Catch ex As System.Exception
             ' Handling errors gracefully
@@ -344,12 +416,20 @@ Partial Public Class ThisAddIn
         Catch
         End Try
 
+
     End Sub
 
     ''' <summary>
     ''' Outlook add-in shutdown handler. Sequentially stops HTTP listener, watchdog, and power watch components.
     ''' </summary>
     Private Sub ThisAddIn_Shutdown() Handles Me.Shutdown
+
+        ' Shut down Knowledge Store service
+        Try
+            ShutdownKnowledgeStoreService()
+        Catch
+        End Try
+
         ' 1) deterministically stop the HTTP listener (await synchronously)
         Try
             Dim t As System.Threading.Tasks.Task = ShutdownHttpListener()

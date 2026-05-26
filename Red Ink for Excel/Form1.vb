@@ -41,16 +41,18 @@ Option Strict Off
 
 Imports System.Diagnostics
 Imports System.Drawing
+Imports System.Globalization
+Imports System.IO
+Imports System.Runtime.InteropServices
+Imports System.Text.RegularExpressions
 Imports System.Threading.Tasks
 Imports System.Windows.Forms
+Imports System.Windows.Forms.VisualStyles.VisualStyleElement
+Imports Microsoft.Office.Core
+Imports Microsoft.Office.Interop.Excel
 Imports SharedLibrary.SharedLibrary
 Imports SharedLibrary.SharedLibrary.SharedContext
-Imports System.Text.RegularExpressions
 Imports SharedLibrary.SharedLibrary.SharedMethods
-Imports System.Runtime.InteropServices
-Imports Microsoft.Office.Interop.Excel
-Imports System.Globalization
-Imports Microsoft.Office.Core
 
 ''' <summary>
 ''' Chat form integrating an LLM with Excel context (worksheet / selection) and optional command execution.
@@ -89,7 +91,7 @@ Public Class frmAIChat
     ''' <summary>Button: send prompt to LLM.</summary>
     Private WithEvents btnSend As New System.Windows.Forms.Button() With {.Text = "Send", .AutoSize = True}
     ''' <summary>Button: toggle between two configured models.</summary>
-    Private WithEvents btnSwitchModel As New System.Windows.Forms.Button() With {.Text = "Switch Model", .AutoSize = True}
+    Private WithEvents btnSwitchModel As New System.Windows.Forms.Button() With {.Text = "Secondary Model", .AutoSize = True}
     ''' <summary>Checkbox: include entire worksheet UsedRange.</summary>
     Private WithEvents chkIncludeDocText As New System.Windows.Forms.CheckBox() With {.Text = "Include worksheet", .AutoSize = True, .Checked = My.Settings.IncludeDocument}
     ''' <summary>Checkbox: include only current selection (if not including entire sheet).</summary>
@@ -151,6 +153,29 @@ Public Class frmAIChat
 
     ''' <summary>Current session chat messages (role, content).</summary>
     Private _chatHistory As New List(Of (Role As String, Content As String))
+
+    Private Const PersistedContextFileName As String = "redink-excelchatcontext.txt"
+
+    Private Shared ReadOnly SupportedContextExtensions As String() = {
+        ".txt", ".rtf", ".doc", ".docx", ".pdf", ".pptx", ".ini", ".csv", ".log",
+        ".json", ".xml", ".html", ".htm", ".md", ".vb", ".cs", ".js", ".ts",
+        ".py", ".java", ".cpp", ".c", ".h", ".sql", ".yaml", ".yml"
+    }
+
+    Private Shared _cachedLoadedContextContent As String = Nothing
+    Private Shared _cachedLoadedContextPath As String = Nothing
+
+    Private _loadedContextContent As String = Nothing
+    Private _loadedContextPath As String = Nothing
+    Private _isUpdatingPersistContextCheckbox As Boolean = False
+    Private ReadOnly _toolTip As New System.Windows.Forms.ToolTip()
+
+    Private WithEvents btnLoadContext As New System.Windows.Forms.Button() With {.Text = "Load Context", .AutoSize = True}
+
+    Private WithEvents chkPersistContext As New System.Windows.Forms.CheckBox() With {
+        .Text = "Persist context temporarily",
+        .AutoSize = True
+    }
 
     ''' <summary>
     ''' Initializes the chat form, constructing dynamic layout and binding provided context.
@@ -264,30 +289,38 @@ Public Class frmAIChat
         End Try
 
         AddHandler txtUserInput.KeyDown, AddressOf UserInput_KeyDown
+        AddHandler txtUserInput.KeyPress, AddressOf UserInput_KeyPress
+        AddHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
 
         ' Set up instructions label
-        lblInstructions.Text = $"Enter your question and click 'Send' or press Enter. Add '{ExtWSTrigger}' to pass along other open worksheets in your question. You can allow the chatbot to perform actions on your worksheet (change or comment cells): you can undo the last action, if needed."
+        lblInstructions.Text = $"Enter your question and click 'Send' or press Enter. Add '{ExtWSTrigger}' to pass along other open worksheets in your question. You can allow the chatbot to perform actions on your worksheet (change or comment cells): you can undo the last action, if needed. Use 'Load Context' to attach external background material."
+
+        If _context.INI_PromptLib Then
+            lblInstructions.Text &= " Type '/' at the start of a prompt or after whitespace to insert a prompt from the prompt library."
+        End If
+
         lblInstructions.AutoSize = True
         lblInstructions.Height = 50
         lblInstructions.Anchor = AnchorStyles.Top Or AnchorStyles.Left Or AnchorStyles.Right
         lblInstructions.TextAlign = ContentAlignment.MiddleLeft
 
         ' FlowLayoutPanel for buttons
-        pnlButtons.Padding = New Padding(0, 2, 8, 12)
         pnlButtons.Controls.Add(btnSend)
+        pnlButtons.Controls.Add(btnLoadContext)
         pnlButtons.Controls.Add(btnCopyLastAnswer)
         pnlButtons.Controls.Add(btnCopy)
         pnlButtons.Controls.Add(btnClear)
         If _context.INI_SecondAPI Then pnlButtons.Controls.Add(btnSwitchModel)
         pnlButtons.Controls.Add(btnExit)
 
-        pnlCheckboxes.Padding = New Padding(0, 1, 8, 1)
         pnlCheckboxes.Controls.Add(chkIncludeselection)
         pnlCheckboxes.Controls.Add(chkIncludeDocText)
         pnlCheckboxes.Controls.Add(chkPermitCommands)
         pnlCheckboxes.Controls.Add(chkStayOnTop)
         pnlCheckboxes.Controls.Add(chkInkyMemory)
         pnlCheckboxes.Controls.Add(lnkEditMemory)
+        pnlCheckboxes.Controls.Add(chkPersistContext)
+
 
         AddHandler btnCopy.Click, AddressOf btnCopy_Click
         AddHandler btnClear.Click, AddressOf btnClear_Click
@@ -301,6 +334,20 @@ Public Class frmAIChat
         AddHandler chkStayOnTop.Click, AddressOf chkStayontop_Click
         AddHandler chkInkyMemory.Click, AddressOf chkInkyMemory_Click
         AddHandler lnkEditMemory.LinkClicked, AddressOf lnkEditMemory_LinkClicked
+        AddHandler btnLoadContext.Click, AddressOf btnLoadContext_Click
+        AddHandler chkPersistContext.CheckedChanged, AddressOf chkPersistContext_CheckedChanged
+
+        _isUpdatingPersistContextCheckbox = True
+        Try : chkPersistContext.Checked = My.Settings.ChatPersistContext : Catch : chkPersistContext.Checked = False : End Try
+        _isUpdatingPersistContextCheckbox = False
+        UpdatePersistContextTooltip()
+        UpdateSwitchModelButtonText()
+
+        If Not chkPersistContext.Checked Then
+            DeletePersistedContextFile(False)
+        End If
+
+        Await RestoreLoadedContextAsync()
 
         If String.IsNullOrWhiteSpace(txtChatHistory.Text) Then
             Dim result = Await WelcomeMessage()
@@ -315,6 +362,29 @@ Public Class frmAIChat
 
         If String.IsNullOrEmpty(txtUserInput.Text) Then txtUserInput.Focus()
 
+    End Sub
+
+    ''' <summary>
+    ''' Repositions the form after monitor or resolution changes.
+    ''' </summary>
+    Private Sub OnDisplaySettingsChanged(sender As Object, e As EventArgs)
+        If Me.IsDisposed Then Return
+
+        Try
+            If Me.InvokeRequired Then
+                Me.BeginInvoke(New MethodInvoker(
+                    Sub()
+                        If Not Me.IsDisposed Then SharedMethods.EnsureVisibleOnScreen(Me)
+                    End Sub))
+            Else
+                SharedMethods.EnsureVisibleOnScreen(Me)
+            End If
+        Catch
+        End Try
+    End Sub
+
+    Private Sub UpdateSwitchModelButtonText()
+        btnSwitchModel.Text = If(_useSecondApi, "Primary Model", "Secondary Model")
     End Sub
 
     ''' <summary>
@@ -458,6 +528,13 @@ Public Class frmAIChat
 
             If Not InsertWS.IsNullOrWhiteSpace(InsertWS) Then
                 fullPrompt.AppendLine("The user also provided you access to the following additional worksheet(s): " & InsertWS)
+            End If
+
+            If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+                fullPrompt.AppendLine("The user also loaded the following external context material:")
+                fullPrompt.AppendLine("<LOADED_CONTEXT>")
+                fullPrompt.AppendLine(_loadedContextContent)
+                fullPrompt.AppendLine("</LOADED_CONTEXT>")
             End If
 
             fullPrompt.AppendLine("User: " & userPrompt)
@@ -693,6 +770,7 @@ Public Class frmAIChat
     Private Sub btnSwitchModel_Click(sender As Object, e As EventArgs)
         _useSecondApi = Not _useSecondApi
         Me.Text = $"Chat (using " & If(_useSecondApi, _context.INI_Model_2, _context.INI_Model) & ")"
+        UpdateSwitchModelButtonText()
     End Sub
 
     ''' <summary>
@@ -713,7 +791,14 @@ Public Class frmAIChat
     ''' Handles Escape key to save bounded chat snippet and close form.
     ''' </summary>
     Private Sub frmAIChat_KeyDown(sender As Object, e As KeyEventArgs) Handles Me.KeyDown
+
         If e.KeyCode = Keys.Escape Then
+
+            Try
+                RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+            Catch
+            End Try
+
             Dim conversation As String = txtChatHistory.Text
             If conversation.Length > _context.INI_ChatCap Then
                 conversation = conversation.Substring(conversation.Length - _context.INI_ChatCap)
@@ -728,6 +813,12 @@ Public Class frmAIChat
     ''' Button-driven exit: saves bounded chat snippet then closes.
     ''' </summary>
     Private Sub btnExit_Click(sender As Object, e As EventArgs)
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
             conversation = conversation.Substring(conversation.Length - _context.INI_ChatCap)
@@ -741,6 +832,12 @@ Public Class frmAIChat
     ''' Persists chat snippet, window bounds, and settings on form closing.
     ''' </summary>
     Private Sub frmAIChat_FormClosing(sender As Object, e As FormClosingEventArgs) Handles Me.FormClosing
+
+        Try
+            RemoveHandler Microsoft.Win32.SystemEvents.DisplaySettingsChanged, AddressOf OnDisplaySettingsChanged
+        Catch
+        End Try
+
         ' Save the chat history before the form closes
         Dim conversation As String = txtChatHistory.Text
         If conversation.Length > _context.INI_ChatCap Then
@@ -766,6 +863,26 @@ Public Class frmAIChat
     Private Sub oldUserInput_KeyDown(sender As Object, e As KeyEventArgs)
         If e.Control AndAlso e.KeyCode = Keys.Enter Then
             btnSend.PerformClick()
+            e.Handled = True
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' Handles slash-triggered prompt library insertion for the chat input box.
+    ''' </summary>
+    Private Sub UserInput_KeyPress(sender As Object, e As KeyPressEventArgs)
+        If e.KeyChar <> "/"c Then Return
+        If Not _context.INI_PromptLib Then Return
+
+        Dim slashAction As SharedMethods.PromptLibrarySlashAction =
+            SharedMethods.HandlePromptLibrarySlash(
+                txtUserInput,
+                _context.INI_PromptLibPath,
+                _context.INI_PromptLibPathLocal,
+                _context
+            )
+
+        If slashAction <> SharedMethods.PromptLibrarySlashAction.NotTriggered Then
             e.Handled = True
         End If
     End Sub
@@ -923,6 +1040,426 @@ Public Class frmAIChat
 
         Me.TopMost = topmost
         Me.Focus()
+    End Sub
+
+    ' ---------------------- LOAD CONTEXT AND FILE HANDLING ----------------------  
+
+    Private Sub AppendSystemMessage(message As String)
+        Dim prefix As String = If(String.IsNullOrWhiteSpace(txtChatHistory.Text), "", Environment.NewLine)
+        AppendToChatHistory(prefix & "[System] " & message & Environment.NewLine)
+    End Sub
+
+    Private Function GetPersistedContextFilePath() As String
+        Return Path.Combine(Path.GetTempPath(), PersistedContextFileName)
+    End Function
+
+    Private Function GetContextDragDropFilter() As String
+        If ThisAddIn.INI_AllowLegacyDocFiles Then
+            Return "Supported Context Files|*.txt;*.rtf;*.doc;*.docx;*.pdf;*.pptx;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+        End If
+
+        Return "Supported Context Files|*.txt;*.rtf;*.docx;*.pdf;*.pptx;*.ini;*.csv;*.log;*.json;*.xml;*.html;*.htm;*.md;*.vb;*.cs;*.js;*.ts;*.py;*.java;*.cpp;*.c;*.h;*.sql;*.yaml;*.yml|All Files (*.*)|*.*"
+    End Function
+
+    Private Function PathContainsPdfFiles(selectedPath As String) As Boolean
+        If File.Exists(selectedPath) Then
+            Return String.Equals(Path.GetExtension(selectedPath), ".pdf", StringComparison.OrdinalIgnoreCase)
+        End If
+
+        If Directory.Exists(selectedPath) Then
+            For Each f In Directory.GetFiles(selectedPath, "*.*", SearchOption.TopDirectoryOnly)
+                If String.Equals(Path.GetExtension(f), ".pdf", StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            Next
+        End If
+
+        Return False
+    End Function
+
+    Private Sub UpdatePersistContextTooltip()
+        If chkPersistContext.Checked Then
+            _toolTip.SetToolTip(chkPersistContext, "Currently stored in: " & GetPersistedContextFilePath())
+        Else
+            _toolTip.SetToolTip(chkPersistContext, "")
+        End If
+    End Sub
+
+    Private Sub DeletePersistedContextFile(showMessage As Boolean)
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+            If File.Exists(persistPath) Then
+                File.Delete(persistPath)
+                If showMessage Then
+                    AppendSystemMessage("Persisted context file deleted.")
+                End If
+            End If
+        Catch ex As Exception
+            If showMessage Then
+                AppendSystemMessage($"Failed to delete persisted context: {ex.Message}")
+            End If
+        End Try
+    End Sub
+
+    Private Sub PersistLoadedContextToTempFile()
+        If String.IsNullOrWhiteSpace(_loadedContextContent) Then Return
+        File.WriteAllText(GetPersistedContextFilePath(), _loadedContextContent, Encoding.UTF8)
+    End Sub
+
+    Private Async Function LoadSingleContextFileAsync(filePath As String, enableOCR As Boolean, silent As Boolean) As Task(Of (Content As String, PdfMayBeIncomplete As Boolean))
+        If String.IsNullOrWhiteSpace(filePath) OrElse Not File.Exists(filePath) Then
+            Return ("", False)
+        End If
+
+        Dim result = Await Globals.ThisAddIn.GetFileContentEx(filePath, silent, enableOCR, False)
+        Return (result.Content, result.PdfMayBeIncomplete)
+    End Function
+
+    Private Async Function LoadContextFromPathAsync(selectedPath As String, enableOCR As Boolean, interactive As Boolean) As Task(Of (CombinedContent As String, DisplayPath As String, LoadedCount As Integer, Summary As String))
+        Dim isFile As Boolean = File.Exists(selectedPath)
+        Dim isDirectory As Boolean = Directory.Exists(selectedPath)
+
+        If Not isFile AndAlso Not isDirectory Then
+            Return ("", "", 0, "Selected path does not exist.")
+        End If
+
+        Dim filesToProcess As New List(Of String)
+        Dim failedFiles As New List(Of String)
+        Dim loadedFiles As New List(Of Tuple(Of String, Integer))
+        Dim pdfsWithPossibleImages As New List(Of String)
+        Dim ignoredCount As Integer = 0
+
+        If isFile Then
+            Dim ext = Path.GetExtension(selectedPath).ToLowerInvariant()
+            If Array.IndexOf(SupportedContextExtensions, ext) < 0 Then
+                Return ("", "", 0, $"The selected file type '{ext}' is not supported for loaded context.")
+            End If
+
+            filesToProcess.Add(selectedPath)
+        Else
+            Dim allFiles = Directory.GetFiles(selectedPath, "*.*", SearchOption.TopDirectoryOnly)
+
+            For Each f In allFiles
+                Dim ext = Path.GetExtension(f).ToLowerInvariant()
+                If Array.IndexOf(SupportedContextExtensions, ext) >= 0 Then
+                    filesToProcess.Add(f)
+                Else
+                    ignoredCount += 1
+                End If
+            Next
+
+            If filesToProcess.Count > 50 Then
+                If interactive Then
+                    Dim truncateAnswer = ShowCustomYesNoBox(
+                        $"The directory contains {filesToProcess.Count} supported files, but the maximum is 50." & vbCrLf & vbCrLf &
+                        "Only the first 50 files will be loaded. Continue?",
+                        "Yes, continue",
+                        "No, abort")
+
+                    If truncateAnswer <> 1 Then
+                        Return ("", "", 0, "")
+                    End If
+                End If
+
+                filesToProcess = filesToProcess.GetRange(0, 50)
+            ElseIf interactive AndAlso filesToProcess.Count > 10 Then
+                Dim confirmAnswer = ShowCustomYesNoBox(
+                    $"The directory contains {filesToProcess.Count} files to load. Continue?",
+                    "Yes, continue",
+                    "No, abort")
+
+                If confirmAnswer <> 1 Then
+                    Return ("", "", 0, "")
+                End If
+            End If
+
+            If filesToProcess.Count = 0 Then
+                Return ("", "", 0, $"No supported files found in directory '{selectedPath}'.")
+            End If
+        End If
+
+        Dim resultBuilder As New StringBuilder()
+        Dim useDocumentTags As Boolean = (filesToProcess.Count > 1)
+        Dim documentCounter As Integer = 0
+
+        For Each filePath In filesToProcess
+            Dim result = Await LoadSingleContextFileAsync(filePath, enableOCR, True)
+            Dim content = result.Content
+
+            If result.PdfMayBeIncomplete Then
+                pdfsWithPossibleImages.Add(filePath)
+            End If
+
+            If String.IsNullOrWhiteSpace(content) OrElse content.StartsWith("Error:", StringComparison.OrdinalIgnoreCase) Then
+                failedFiles.Add(filePath)
+                Continue For
+            End If
+
+            documentCounter += 1
+            loadedFiles.Add(Tuple.Create(filePath, content.Length))
+
+            If useDocumentTags Then
+                Dim fileName = Path.GetFileName(filePath)
+                resultBuilder.Append($"<document{documentCounter} name=""{fileName}"">")
+                resultBuilder.Append(content)
+                resultBuilder.Append($"</document{documentCounter}>")
+            Else
+                resultBuilder.Append(content)
+            End If
+        Next
+
+        Dim summary As New StringBuilder()
+
+        If loadedFiles.Count > 0 Then
+            summary.AppendLine($"Successfully loaded ({loadedFiles.Count} file(s)):")
+            Dim totalChars As Integer = 0
+            For Each item In loadedFiles
+                summary.AppendLine($"  • {Path.GetFileName(item.Item1)} ({item.Item2:N0} chars)")
+                totalChars += item.Item2
+            Next
+            summary.AppendLine($"  Total: {totalChars:N0} characters")
+            summary.AppendLine()
+        End If
+
+        If failedFiles.Count > 0 Then
+            summary.AppendLine($"Failed to load ({failedFiles.Count} item(s)):")
+            For Each item In failedFiles
+                summary.AppendLine($"  • {Path.GetFileName(item)}")
+            Next
+            summary.AppendLine()
+        End If
+
+        If pdfsWithPossibleImages.Count > 0 Then
+            summary.AppendLine($"PDFs that may contain images/scans ({pdfsWithPossibleImages.Count} file(s)):")
+            For Each item In pdfsWithPossibleImages
+                summary.AppendLine($"  • {Path.GetFileName(item)}")
+            Next
+            summary.AppendLine("  (Text extraction may be incomplete because OCR was not performed)")
+            summary.AppendLine()
+        End If
+
+        If ignoredCount > 0 Then
+            summary.AppendLine($"Ignored unsupported files: {ignoredCount}")
+            summary.AppendLine()
+        End If
+
+        Return (
+            resultBuilder.ToString(),
+            If(isFile, selectedPath, selectedPath & " (directory)"),
+            loadedFiles.Count,
+            summary.ToString().TrimEnd()
+        )
+    End Function
+
+    Private Async Function RestoreLoadedContextAsync() As Task
+        If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) AndAlso Not String.IsNullOrWhiteSpace(_cachedLoadedContextPath) Then
+            _loadedContextContent = _cachedLoadedContextContent
+            _loadedContextPath = _cachedLoadedContextPath
+            AppendSystemMessage("Context restored from cache.")
+            Return
+        End If
+
+        If chkPersistContext.Checked Then
+            Dim persistPath = GetPersistedContextFilePath()
+            If File.Exists(persistPath) Then
+                Try
+                    _loadedContextContent = File.ReadAllText(persistPath, Encoding.UTF8)
+                    _loadedContextPath = "(Persisted Context)"
+                    _cachedLoadedContextContent = _loadedContextContent
+                    _cachedLoadedContextPath = _loadedContextPath
+                    AppendSystemMessage($"Context restored from persisted storage ({_loadedContextContent.Length:N0} characters).")
+                    Return
+                Catch ex As Exception
+                    AppendSystemMessage($"Failed to restore persisted context: {ex.Message}")
+                End Try
+            End If
+        End If
+
+        Dim savedPath As String = ""
+        Try
+            savedPath = My.Settings.ChatContextPath
+        Catch
+            Return
+        End Try
+
+        If String.IsNullOrWhiteSpace(savedPath) Then Return
+
+        If Not File.Exists(savedPath) AndAlso Not Directory.Exists(savedPath) Then
+            Try
+                My.Settings.ChatContextPath = ""
+                My.Settings.Save()
+            Catch
+            End Try
+            Return
+        End If
+
+        Dim restored = Await LoadContextFromPathAsync(savedPath, False, False)
+        If String.IsNullOrWhiteSpace(restored.CombinedContent) Then Return
+
+        _loadedContextContent = restored.CombinedContent
+        _loadedContextPath = restored.DisplayPath
+        _cachedLoadedContextContent = _loadedContextContent
+        _cachedLoadedContextPath = _loadedContextPath
+
+        If chkPersistContext.Checked Then
+            Try
+                PersistLoadedContextToTempFile()
+            Catch
+            End Try
+        End If
+
+        AppendSystemMessage($"Context restored from saved path: {Path.GetFileName(savedPath)}.")
+    End Function
+
+    Private Async Sub btnLoadContext_Click(sender As Object, e As EventArgs)
+        Await PromptForLoadedContextAsync()
+    End Sub
+
+    Private Async Function PromptForLoadedContextAsync() As Task
+        Try
+            Globals.ThisAddIn.DragDropFormLabel = "... a file or folder you want to use as external context, or click Browse"
+            Globals.ThisAddIn.DragDropFormFilter = GetContextDragDropFilter()
+
+            Dim selectedPath As String = ""
+
+            Using frm As New DragDropForm(DragDropMode.FileOrDirectory)
+                If frm.ShowDialog() = DialogResult.OK Then
+                    selectedPath = frm.SelectedFilePath
+                End If
+            End Using
+
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+
+            If String.IsNullOrWhiteSpace(selectedPath) Then
+                If Not String.IsNullOrWhiteSpace(_loadedContextContent) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "No file or folder was selected. Do you want to delete the currently loaded context?",
+                        "Yes, delete context",
+                        "No, keep it")
+
+                    If answer = 1 Then
+                        _loadedContextContent = Nothing
+                        _loadedContextPath = Nothing
+                        _cachedLoadedContextContent = Nothing
+                        _cachedLoadedContextPath = Nothing
+                        DeletePersistedContextFile(False)
+
+                        Try
+                            My.Settings.ChatContextPath = ""
+                            My.Settings.Save()
+                        Catch
+                        End Try
+
+                        AppendSystemMessage("Loaded context deleted.")
+                    End If
+                End If
+
+                Return
+            End If
+
+            Dim enableOCR As Boolean = False
+            If PathContainsPdfFiles(selectedPath) AndAlso SharedMethods.IsOcrAvailable(_context) Then
+                Dim ocrAnswer = ShowCustomYesNoBox(
+                    "Some files may require OCR to extract text. Enable OCR for PDF processing?" & vbCrLf & vbCrLf &
+                    "OCR may take longer but helps with scanned documents.",
+                    "Yes, enable OCR",
+                    "No, skip OCR")
+
+                enableOCR = (ocrAnswer = 1)
+            End If
+
+            Dim loaded = Await LoadContextFromPathAsync(selectedPath, enableOCR, True)
+
+            If String.IsNullOrWhiteSpace(loaded.Summary) AndAlso String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+                Return
+            End If
+
+            If Not String.IsNullOrWhiteSpace(loaded.Summary) Then
+                Dim proceedAnswer = ShowCustomYesNoBox(
+                    loaded.Summary & vbCrLf & vbCrLf & "Do you want to use this context?",
+                    "Yes, proceed",
+                    "No, retry")
+
+                If proceedAnswer <> 1 Then
+                    Await PromptForLoadedContextAsync()
+                    Return
+                End If
+            End If
+
+            If String.IsNullOrWhiteSpace(loaded.CombinedContent) Then
+                AppendSystemMessage("Failed to load context or all files are empty.")
+                Return
+            End If
+
+            _loadedContextContent = loaded.CombinedContent
+            _loadedContextPath = loaded.DisplayPath
+            _cachedLoadedContextContent = _loadedContextContent
+            _cachedLoadedContextPath = _loadedContextPath
+
+            If chkPersistContext.Checked Then
+                Try
+                    PersistLoadedContextToTempFile()
+                    AppendSystemMessage($"Context loaded and persisted ({_loadedContextContent.Length:N0} characters from {loaded.LoadedCount} file(s)).")
+                Catch ex As Exception
+                    AppendSystemMessage($"Context loaded ({_loadedContextContent.Length:N0} characters) but failed to persist: {ex.Message}")
+                End Try
+            Else
+                AppendSystemMessage($"Context loaded: {loaded.LoadedCount} file(s), {_loadedContextContent.Length:N0} characters total.")
+            End If
+
+            Try
+                My.Settings.ChatContextPath = selectedPath
+                My.Settings.Save()
+            Catch
+            End Try
+
+        Catch ex As Exception
+            AppendSystemMessage($"Error loading context: {ex.Message}")
+        Finally
+            Globals.ThisAddIn.DragDropFormLabel = ""
+            Globals.ThisAddIn.DragDropFormFilter = ""
+        End Try
+    End Function
+
+    Private Sub chkPersistContext_CheckedChanged(sender As Object, e As EventArgs)
+        If _isUpdatingPersistContextCheckbox Then Return
+
+        Try
+            Dim persistPath = GetPersistedContextFilePath()
+
+            If chkPersistContext.Checked Then
+                If Not String.IsNullOrWhiteSpace(_cachedLoadedContextContent) Then
+                    File.WriteAllText(persistPath, _cachedLoadedContextContent, Encoding.UTF8)
+                    AppendSystemMessage($"Context persisted to temporary storage ({_cachedLoadedContextContent.Length:N0} characters).")
+                Else
+                    AppendSystemMessage("No context loaded to persist. Load context first, then check this box.")
+                End If
+            Else
+                If File.Exists(persistPath) Then
+                    Dim answer = ShowCustomYesNoBox(
+                        "Do you want to delete the persisted context file? This cannot be undone if you quit Excel.",
+                        "Yes, delete",
+                        "No, keep it")
+
+                    If answer = 1 Then
+                        DeletePersistedContextFile(True)
+                    Else
+                        _isUpdatingPersistContextCheckbox = True
+                        chkPersistContext.Checked = True
+                        _isUpdatingPersistContextCheckbox = False
+                        Return
+                    End If
+                End If
+            End If
+
+            My.Settings.ChatPersistContext = chkPersistContext.Checked
+            My.Settings.Save()
+            UpdatePersistContextTooltip()
+
+        Catch ex As Exception
+            AppendSystemMessage($"Error handling persist context setting: {ex.Message}")
+        End Try
     End Sub
 
 End Class

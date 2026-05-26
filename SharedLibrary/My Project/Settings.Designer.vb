@@ -795,6 +795,54 @@ Namespace My
                 Me("SelectedModelNumber") = value
             End Set
         End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("False")>  _
+        Public Property EnableKBBackgroundIndexing() As Boolean
+            Get
+                Return CType(Me("EnableKBBackgroundIndexing"),Boolean)
+            End Get
+            Set
+                Me("EnableKBBackgroundIndexing") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property KnowledgeStoreBackgroundIndexingWindow() As String
+            Get
+                Return CType(Me("KnowledgeStoreBackgroundIndexingWindow"),String)
+            End Get
+            Set
+                Me("KnowledgeStoreBackgroundIndexingWindow") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property FormulaInstruction() As String
+            Get
+                Return CType(Me("FormulaInstruction"),String)
+            End Get
+            Set
+                Me("FormulaInstruction") = value
+            End Set
+        End Property
+        
+        <Global.System.Configuration.UserScopedSettingAttribute(),  _
+         Global.System.Diagnostics.DebuggerNonUserCodeAttribute(),  _
+         Global.System.Configuration.DefaultSettingValueAttribute("")>  _
+        Public Property MarkupAuthor() As String
+            Get
+                Return CType(Me("MarkupAuthor"),String)
+            End Get
+            Set
+                Me("MarkupAuthor") = value
+            End Set
+        End Property
     End Class
 End Namespace
 

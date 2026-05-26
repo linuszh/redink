@@ -47,7 +47,13 @@ Namespace SharedLibrary
         ''' Optional shared context. If provided and JSON mode is active, an additional button "Check JSON with AI"
         ''' is shown to run an LLM check and display the result.
         ''' </param>
-        Public Shared Sub ShowTextFileEditor(ByVal filePath As System.String, ByVal headerText As System.String, Optional ForceJson As Boolean = False, Optional _context As ISharedContext = Nothing, Optional ByRef wasSaved As System.Boolean? = Nothing)
+        Public Shared Sub ShowTextFileEditor(ByVal filePath As System.String,
+                                        ByVal headerText As System.String,
+                                        Optional ForceJson As Boolean = False,
+                                        Optional _context As ISharedContext = Nothing,
+                                        Optional ByRef wasSaved As System.Boolean? = Nothing,
+                                        Optional ownerHandle As System.IntPtr = Nothing)
+
             ' --- Guard & Input Validation ---
             Try
                 If filePath Is Nothing OrElse filePath.Trim().Length = 0 Then
@@ -136,8 +142,8 @@ Namespace SharedLibrary
             ' Text editor
             Dim textEditor As New System.Windows.Forms.TextBox()
             textEditor.Multiline = True
-            textEditor.ScrollBars = System.Windows.Forms.ScrollBars.Vertical
-            textEditor.WordWrap = True
+            textEditor.ScrollBars = System.Windows.Forms.ScrollBars.Both
+            textEditor.WordWrap = False
             textEditor.AcceptsReturn = True
             textEditor.AcceptsTab = True
             textEditor.Dock = System.Windows.Forms.DockStyle.Fill
@@ -192,6 +198,28 @@ Namespace SharedLibrary
 
             ' --- Load file content ---
             Dim originalLoadedText As String = System.String.Empty
+            Dim originalLineEnding As String = System.Environment.NewLine
+
+            Dim normalizeForEditor As Func(Of String, String) =
+                Function(value As String) As String
+                    If value Is Nothing Then Return System.String.Empty
+                    Return value.Replace(vbCrLf, vbLf).Replace(vbCr, vbLf).Replace(vbLf, vbCrLf)
+                End Function
+
+            Dim normalizeForSave As Func(Of String, String) =
+                Function(value As String) As String
+                    Dim normalized As String = normalizeForEditor(value)
+
+                    Select Case originalLineEnding
+                        Case vbLf
+                            Return normalized.Replace(vbCrLf, vbLf)
+                        Case vbCr
+                            Return normalized.Replace(vbCrLf, vbCr)
+                        Case Else
+                            Return normalized
+                    End Select
+                End Function
+
             Try
                 If System.IO.File.Exists(filePath) Then
                     Try
@@ -204,10 +232,19 @@ Namespace SharedLibrary
                         End Try
                     End Try
                 End If
+
+                If originalLoadedText.Contains(vbCrLf) Then
+                    originalLineEnding = vbCrLf
+                ElseIf originalLoadedText.Contains(vbLf) Then
+                    originalLineEnding = vbLf
+                ElseIf originalLoadedText.Contains(vbCr) Then
+                    originalLineEnding = vbCr
+                End If
             Catch ex As System.Exception
                 ShowCustomMessageBox("Unexpected error while loading the file:" & System.Environment.NewLine & ex.Message)
             End Try
-            textEditor.Text = originalLoadedText
+
+            textEditor.Text = normalizeForEditor(originalLoadedText)
 
             ' --- Minimal invasive JSON pretty-print support ---
             Dim isJsonFile As Boolean = False
@@ -415,7 +452,7 @@ Namespace SharedLibrary
 
                 Try
                     Dim enc As System.Text.Encoding = New System.Text.UTF8Encoding(True)
-                    System.IO.File.WriteAllText(filePath, textEditor.Text, enc)
+                    System.IO.File.WriteAllText(filePath, normalizeForSave(textEditor.Text), enc)
                 Catch exWrite As System.Exception
                     ShowCustomMessageBox("Failed to save file:" & System.Environment.NewLine & exWrite.Message)
                     Return
@@ -467,19 +504,33 @@ Namespace SharedLibrary
 
             ' Sets the initial cursor/selection when the form is shown.
             AddHandler editorForm.Shown,
-                Sub(sender As System.Object, e As System.EventArgs)
-                    Try
-                        textEditor.SelectionStart = 0
-                        textEditor.SelectionLength = 0
-                    Catch ex As System.Exception
-                    End Try
-                End Sub
+                    Sub(sender As System.Object, e As System.EventArgs)
+                        Try
+                            textEditor.SelectionStart = 0
+                            textEditor.SelectionLength = 0
+                        Catch ex As System.Exception
+                        End Try
+
+                        Try
+                            editorForm.BringToFront()
+                            editorForm.Activate()
+                            NativeMethods.SetForegroundWindow(editorForm.Handle)
+                        Catch
+                        End Try
+                    End Sub
 
             ' Show modal window
             Try
-                Dim active As System.Windows.Forms.IWin32Window = System.Windows.Forms.Form.ActiveForm
-                If active IsNot Nothing Then
-                    editorForm.ShowDialog(active)
+                Dim owner As System.Windows.Forms.IWin32Window = Nothing
+
+                If ownerHandle <> System.IntPtr.Zero Then
+                    owner = New WindowWrapper(ownerHandle)
+                Else
+                    owner = System.Windows.Forms.Form.ActiveForm
+                End If
+
+                If owner IsNot Nothing Then
+                    editorForm.ShowDialog(owner)
                 Else
                     editorForm.ShowDialog()
                 End If

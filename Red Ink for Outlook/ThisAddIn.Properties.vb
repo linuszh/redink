@@ -1022,6 +1022,33 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+    Public Shared Property SP_AIMailSearch1 As String
+        Get
+            Return _context.SP_AIMailSearch1
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch1 = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AIMailSearch2 As String
+        Get
+            Return _context.SP_AIMailSearch2
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch2 = value
+        End Set
+    End Property
+
+    Public Shared Property SP_AIMailSearch3 As String
+        Get
+            Return _context.SP_AIMailSearch3
+        End Get
+        Set(value As String)
+            _context.SP_AIMailSearch3 = value
+        End Set
+    End Property
+
     Public Shared Property SP_FreestyleText As String
         Get
             Return _context.SP_FreestyleText
@@ -2087,6 +2114,26 @@ Partial Public Class ThisAddIn
         End Set
     End Property
 
+
+    Public Shared Property INI_AgentResourcesPath As String
+        Get
+            Return _context.INI_AgentResourcesPath
+        End Get
+        Set(value As String)
+            _context.INI_AgentResourcesPath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_AgentResourcesPathLocal As String
+        Get
+            Return _context.INI_AgentResourcesPathLocal
+        End Get
+        Set(value As String)
+            _context.INI_AgentResourcesPathLocal = value
+        End Set
+    End Property
+
+
     Public Shared Property INI_WebAgentPath As String
         Get
             Return _context.INI_WebAgentPath
@@ -2588,6 +2635,99 @@ Partial Public Class ThisAddIn
             _context.SP_Assemble_Summarize = value
         End Set
     End Property
+
+
+    Public Shared Property INI_KnowledgeStorePath As String
+        Get
+            Return _context.INI_KnowledgeStorePath
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStorePath = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStorePathLocal As String
+        Get
+            Return _context.INI_KnowledgeStorePathLocal
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStorePathLocal = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreOwner As String
+        Get
+            Return _context.INI_KnowledgeStoreOwner
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStoreOwner = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreUseLLMIndex As Boolean
+        Get
+            Return _context.INI_KnowledgeStoreUseLLMIndex
+        End Get
+        Set(value As Boolean)
+            _context.INI_KnowledgeStoreUseLLMIndex = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreBackgroundIndexingWindow As String
+        Get
+            Return _context.INI_KnowledgeStoreBackgroundIndexingWindow
+        End Get
+        Set(value As String)
+            _context.INI_KnowledgeStoreBackgroundIndexingWindow = value
+        End Set
+    End Property
+
+    Public Shared Property INI_KnowledgeStoreBackgroundIndexing As Boolean
+        Get
+            Return _context.INI_KnowledgeStoreBackgroundIndexing
+        End Get
+        Set(value As Boolean)
+            _context.INI_KnowledgeStoreBackgroundIndexing = value
+        End Set
+    End Property
+
+    Public Shared Property INI_FormulaInstruction As String
+        Get
+            Return _context.INI_FormulaInstruction
+        End Get
+        Set(value As String)
+            _context.INI_FormulaInstruction = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365ClientID As String
+        Get
+            Return _context.INI_M365ClientId
+        End Get
+        Set(value As String)
+            _context.INI_M365ClientId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365TenantID As String
+        Get
+            Return _context.INI_M365TenantId
+        End Get
+        Set(value As String)
+            _context.INI_M365TenantId = value
+        End Set
+    End Property
+
+    Public Shared Property INI_M365Scopes As String
+        Get
+            Return _context.INI_M365Scopes
+        End Get
+        Set(value As String)
+            _context.INI_M365Scopes = value
+        End Set
+    End Property
+
+
 
     ''' <summary>
     ''' Returns the supplied <paramref name="OverrideValue"/> when it is not null, empty,

@@ -118,6 +118,14 @@ Partial Public Class ThisAddIn
 
         undoStates.Clear()
 
+        Dim shouldShowCellDiffPreview As Boolean = AskWhetherToShowCellDiffPreview(selectedRange, DoRange)
+        Dim totalPreviewCells As Integer = 0
+        Dim previewCellIndex As Integer = 0
+
+        If shouldShowCellDiffPreview AndAlso selectedRange IsNot Nothing Then
+            totalPreviewCells = System.Convert.ToInt32(selectedRange.Cells.Count)
+        End If
+
         If Not DoRange Then
 
             Dim splash As New SplashScreen("Processing cells... press 'Esc' to abort")
@@ -127,6 +135,8 @@ Partial Public Class ThisAddIn
             'Application.ScreenUpdating = False ' Prevent UI updates during processing
             Try
                 For Each cell As Excel.Range In selectedRange.Cells
+
+                    previewCellIndex += 1
 
                     System.Windows.Forms.Application.DoEvents()
 
@@ -142,7 +152,7 @@ Partial Public Class ThisAddIn
                                 SelectedText = CStr(cell.Formula)
 
                                 If DoShorten Then
-                                    Dim Textlength As Integer = getnumberofwords(SelectedText)
+                                    Dim Textlength As Integer = GetNumberOfWords(SelectedText)
                                     ShortenLength = Textlength * (100 - ShortenPercentValue) / 100
                                     SysCommand = InterpolateAtRuntime(SysCommand)
                                 End If
@@ -157,6 +167,29 @@ Partial Public Class ThisAddIn
                                     LLMResult = Await PostCorrection(LLMResult, UseSecondAPI)
                                 End If
                                 If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                                    If shouldShowCellDiffPreview AndAlso Not String.Equals(SelectedText, LLMResult, StringComparison.Ordinal) Then
+                                        splash.Hide()
+
+                                        Dim previewResult As Integer =
+                                            ShowCellDiffPreview(
+                                                cell,
+                                                SelectedText,
+                                                LLMResult,
+                                                "Formula",
+                                                previewCellIndex,
+                                                totalPreviewCells)
+
+                                        splash.Show()
+                                        splash.Refresh()
+
+                                        If previewResult = 2 Then
+                                            Continue For
+                                        ElseIf previewResult <> 1 Then
+                                            Exit For
+                                        End If
+                                    End If
+
                                     Dim state As New CellState With {
                                                                     .WorksheetName = cell.Worksheet.Name,
                                                                     .CellAddress = cell.Address,
@@ -215,6 +248,29 @@ Partial Public Class ThisAddIn
                                 LLMResult = Trim(LLMResult).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr).TrimEnd(ControlChars.Lf, ControlChars.Cr)
 
                                 If Not String.IsNullOrWhiteSpace(LLMResult) Then
+
+                                    If shouldShowCellDiffPreview AndAlso Not String.Equals(SelectedText, LLMResult, StringComparison.Ordinal) Then
+                                        splash.Hide()
+
+                                        Dim previewResult As Integer =
+                                            ShowCellDiffPreview(
+                                                cell,
+                                                SelectedText,
+                                                LLMResult,
+                                                "Value",
+                                                previewCellIndex,
+                                                totalPreviewCells)
+
+                                        splash.Show()
+                                        splash.Refresh()
+
+                                        If previewResult = 2 Then
+                                            Continue For
+                                        ElseIf previewResult <> 1 Then
+                                            Exit For
+                                        End If
+                                    End If
+
                                     Dim state As New CellState With {
                                                                     .WorksheetName = cell.Worksheet.Name,
                                                                     .CellAddress = cell.Address,
@@ -293,13 +349,20 @@ Partial Public Class ThisAddIn
                             SP_MergePrompt_Cached = ""
                             ShowPaneAsync("The LLM has provided the following result (you can edit it):", LLMResult, $"You can let {AN} insert the square brackets into your worksheet, where possible", AN, False, True, True)
                         Else
-                            Dim FinalText = ShowCustomWindow("The LLM has provided the following result (you can edit it):", LLMResult, $"Shall {AN} insert the square brackets into your worksheet, where possible?", AN, False, False, False, True, Nothing, True)
+                            Dim FinalText = ShowCustomWindow("The LLM has provided the following result (you can edit it):", LLMResult, $"Shall {AN} insert the square brackets into your worksheet, where possible?", AN, False, False, False, True, Nothing, True, ReturnPlainText:=True)
 
                             If FinalText = "Pane" Then
                                 SP_MergePrompt_Cached = ""
                                 ShowPaneAsync("The LLM has provided the following result (you can edit it):", LLMResult, $"You can let {AN} insert the square brackets into your worksheet, where possible", AN, False, True, True)
                             ElseIf Not String.IsNullOrWhiteSpace(FinalText) Then
-                                instructions = ParseLLMResponse(FinalText)
+                                Dim InstructionsFinaltext As String = FinalText
+                                If InstructionsFinaltext.TrimStart().StartsWith("{\rtf", StringComparison.OrdinalIgnoreCase) Then
+                                    Using rtb As New System.Windows.Forms.RichTextBox()
+                                        rtb.Rtf = InstructionsFinaltext
+                                        InstructionsFinaltext = rtb.Text
+                                    End Using
+                                End If
+                                instructions = ParseLLMResponse(InstructionsFinaltext)
                                 ApplyLLMInstructions(instructions, DoBubbles)
                                 PutInClipboard(FinalText)
                                 ShowCustomMessageBox("Implementation of the instructions completed (to the extent possible). They are also in the clipboard.")
@@ -581,10 +644,6 @@ Partial Public Class ThisAddIn
             .Calculation = Excel.XlCalculation.xlCalculationManual
         End With
 
-        Dim normalStyle As Excel.Style = app.ActiveWorkbook.Styles("Normal")
-        Dim defaultFontColor As Long = CLng(normalStyle.Font.Color)
-        Dim defaultInteriorColor As Long = CLng(normalStyle.Interior.Color)
-
         Try
             Dim rawVals As Object = CellRange.Value2
             Dim vals(,) As Object
@@ -611,6 +670,8 @@ Partial Public Class ThisAddIn
                     Dim addr As String = cell.Address(False, False)
 
                     Dim shouldProcess As Boolean = False
+                    Dim hasCustomFontColor As Boolean = False
+                    Dim hasCustomFillColor As Boolean = False
 
                     If raw IsNot Nothing Then
                         shouldProcess = True
@@ -637,15 +698,20 @@ Partial Public Class ThisAddIn
                         End Try
                     End If
 
-                    If Not shouldProcess AndAlso DoColor Then
-                        Dim hasFill As Boolean = False
+                    If DoColor Then
                         Try
-                            hasFill = (CLng(cell.Interior.ColorIndex) <> Excel.XlColorIndex.xlColorIndexNone)
+                            hasCustomFontColor = (CLng(cell.Font.ColorIndex) <> CLng(Excel.XlColorIndex.xlColorIndexAutomatic))
                         Catch
                         End Try
-                        If hasFill Then
-                            shouldProcess = True
-                        End If
+
+                        Try
+                            hasCustomFillColor = (CLng(cell.Interior.ColorIndex) <> CLng(Excel.XlColorIndex.xlColorIndexNone))
+                        Catch
+                        End Try
+                    End If
+
+                    If Not shouldProcess AndAlso DoColor AndAlso (hasCustomFontColor OrElse hasCustomFillColor) Then
+                        shouldProcess = True
                     End If
 
                     If shouldProcess Then
@@ -701,18 +767,55 @@ Partial Public Class ThisAddIn
                                         Dim formulaResolved As Boolean = False
 
                                         If formula1.StartsWith("="c) Then
-                                            ' Handle INDIRECT/INDIREKT formulas first
-                                            Dim upperFormula As String = formula1.ToUpperInvariant()
-                                            If upperFormula.Contains("INDIRECT") OrElse upperFormula.Contains("INDIREKT") Then
+                                            ' Handle INDIRECT validations first, language-independently
+                                            Dim normalizedFormulaEnglish As String = formula1
+
+                                            Try
+                                                Dim detectionOriginalHasFormula As Boolean = CBool(cell.HasFormula)
+                                                Dim detectionOriginalFormulaLocal As String = If(detectionOriginalHasFormula, CStr(cell.FormulaLocal), "")
+                                                Dim detectionOriginalValue As Object = If(Not detectionOriginalHasFormula, cell.Value2, Nothing)
+
+                                                Try
+                                                    cell.NumberFormat = "General"
+                                                    cell.ClearContents()
+                                                    cell.FormulaLocal = formula1
+                                                    normalizedFormulaEnglish = CStr(cell.Formula)
+                                                Catch
+                                                    normalizedFormulaEnglish = formula1
+                                                Finally
+                                                    Try
+                                                        If detectionOriginalHasFormula Then
+                                                            cell.FormulaLocal = detectionOriginalFormulaLocal
+                                                        ElseIf detectionOriginalValue IsNot Nothing Then
+                                                            cell.ClearContents()
+                                                            cell.Value2 = detectionOriginalValue
+                                                        Else
+                                                            cell.ClearContents()
+                                                        End If
+                                                    Catch
+                                                    End Try
+                                                End Try
+                                            Catch
+                                            End Try
+
+                                            If Regex.IsMatch(
+                                                normalizedFormulaEnglish,
+                                                "^\s*=\s*INDIRECT\s*\(.+\)\s*$",
+                                                RegexOptions.IgnoreCase) Then
                                                 Try
                                                     Dim oldCalc As Excel.XlCalculation = app.Calculation
                                                     app.Calculation = Excel.XlCalculation.xlCalculationAutomatic
 
                                                     Try
-                                                        ' Extract the argument inside INDIREKT(...)
-                                                        Dim m As Match = Regex.Match(formula1, "=\s*INDIREKT?\s*\((.+)\)\s*$", RegexOptions.IgnoreCase)
-                                                        If m.Success Then
-                                                            Dim innerFormula As String = "=" & m.Groups(1).Value
+                                                        ' Extract the argument from the original local formula so nested localized functions stay intact
+                                                        Dim openParenIndex As Integer = formula1.IndexOf("("c)
+                                                        Dim closeParenIndex As Integer = formula1.LastIndexOf(")"c)
+
+                                                        If openParenIndex > 0 AndAlso closeParenIndex > openParenIndex Then
+                                                            Dim innerFormula As String =
+                                                                "=" & formula1.Substring(
+                                                                    openParenIndex + 1,
+                                                                    closeParenIndex - openParenIndex - 1)
 
                                                             ' Store original cell state
                                                             Dim originalHasFormula As Boolean = CBool(cell.HasFormula)
@@ -822,8 +925,8 @@ Partial Public Class ThisAddIn
                                                                             Try
                                                                                 cell.ClearContents()
                                                                                 cell.FormulaLocal = validationFormula1
-                                                                                valFormulaEnglish = cell.Formula      ' English (commas)
-                                                                                valFormulaLocal = cell.FormulaLocal   ' Local (semicolons, localized names)
+                                                                                valFormulaEnglish = cell.Formula
+                                                                                valFormulaLocal = cell.FormulaLocal
                                                                             Catch
                                                                                 ' If translation fails, assume capture was correct as-is
                                                                             End Try
@@ -850,16 +953,12 @@ Partial Public Class ThisAddIn
 
                                                                         If validationType = Excel.XlDVType.xlValidateList Then
                                                                             Try
-                                                                                ' Use Placeholder pattern for stability
                                                                                 cell.Validation.Add(
                                                                                     Type:=Excel.XlDVType.xlValidateList,
                                                                                     AlertStyle:=CType(validationAlertStyle, Excel.XlDVAlertStyle),
                                                                                     Operator:=Excel.XlFormatConditionOperator.xlBetween,
                                                                                     Formula1:="placeholder")
 
-                                                                                ' OPTIMIZED: Try LOCAL formula first.
-                                                                                ' Your environment uses Semicolons/German. Validation.Modify works best with Local syntax.
-                                                                                ' DisplayAlerts=False allows it to pass even if the reference is currently #N/A.
                                                                                 Try
                                                                                     cell.Validation.Modify(
                                                                                         Type:=Excel.XlDVType.xlValidateList,
@@ -867,7 +966,6 @@ Partial Public Class ThisAddIn
                                                                                         Operator:=Excel.XlFormatConditionOperator.xlBetween,
                                                                                         Formula1:=valFormulaLocal)
                                                                                 Catch exLocal As Exception
-                                                                                    ' Fallback: Try English only if Local failed
                                                                                     Debug.WriteLine($"Modify Local failed ({exLocal.Message}), retrying English: {valFormulaEnglish}")
                                                                                     cell.Validation.Modify(
                                                                                         Type:=Excel.XlDVType.xlValidateList,
@@ -882,7 +980,6 @@ Partial Public Class ThisAddIn
                                                                                 Debug.WriteLine($"List Validation failed completely: {ex.Message}")
                                                                             End Try
                                                                         Else
-                                                                            ' Non-list validation
                                                                             Try
                                                                                 cell.Validation.Add(
                                                                                     Type:=CType(validationType, Excel.XlDVType),
@@ -964,15 +1061,17 @@ Partial Public Class ThisAddIn
                                             Marshal.ReleaseComObject(refRange)
                                         ElseIf Not formulaResolved Then
                                             ' ORIGINAL: Fallback - split by comma
-                                            If formula1.StartsWith("="c) Then
-                                                options.AddRange(formula1.Substring(1) _
-                                                .Split(","c) _
-                                                .Select(Function(s) s.Trim()))
-                                            Else
-                                                options.AddRange(formula1 _
-                                                .Split(","c) _
-                                                .Select(Function(s) s.Trim()))
-                                            End If
+                                            Dim listSeparator As String = ","
+                                            Try
+                                                listSeparator = CStr(app.International(Excel.XlApplicationInternational.xlListSeparator))
+                                            Catch
+                                            End Try
+
+                                            Dim listText As String = If(formula1.StartsWith("="c), formula1.Substring(1), formula1)
+
+                                            options.AddRange(listText.Split(
+                                                        New String() {listSeparator},
+                                                        StringSplitOptions.None).Select(Function(s) s.Trim()))
                                         End If
 
                                         sb.AppendLine($"- Dropdown options (separated by §) {String.Join("§", options)}")
@@ -984,7 +1083,7 @@ Partial Public Class ThisAddIn
                             End Try
 
                             If DoColor Then
-                                If CLng(cell.Font.Color) <> defaultFontColor Then
+                                If hasCustomFontColor Then
                                     Try
                                         Dim fc As System.Drawing.Color = System.Drawing.ColorTranslator.FromOle(CInt(cell.Font.Color))
                                         sb.AppendLine($"- FontColor #{fc.R:X2}{fc.G:X2}{fc.B:X2} (rgb {fc.R},{fc.G},{fc.B})")
@@ -993,7 +1092,7 @@ Partial Public Class ThisAddIn
                                     End Try
                                 End If
 
-                                If CLng(cell.Interior.Color) <> defaultInteriorColor Then
+                                If hasCustomFillColor Then
                                     Try
                                         Dim bc As System.Drawing.Color = System.Drawing.ColorTranslator.FromOle(CInt(cell.Interior.Color))
                                         sb.AppendLine($"- BackgroundColor #{bc.R:X2}{bc.G:X2}{bc.B:X2} (rgb {bc.R},{bc.G},{bc.B})")
@@ -1034,6 +1133,71 @@ Partial Public Class ThisAddIn
         End Try
 
         Return sb.ToString()
+    End Function
+
+    Private Function ShouldPreviewCellDiff(selectedRange As Excel.Range, doRange As Boolean) As Boolean
+        If doRange OrElse selectedRange Is Nothing Then Return False
+
+        Try
+            Dim selectedCellCount As Integer = System.Convert.ToInt32(selectedRange.Cells.Count)
+            Return selectedCellCount >= 1 AndAlso selectedCellCount <= 10
+        Catch
+            Return False
+        End Try
+    End Function
+
+    Private Function ShowCellDiffPreview(
+        cell As Excel.Range,
+        originalText As String,
+        revisedText As String,
+        cellKind As String,
+        itemIndex As Integer,
+        itemCount As Integer
+    ) As Integer
+
+        Dim diffMarkup As String = BuildInlineDiffMarkup(originalText, revisedText)
+
+        If String.IsNullOrWhiteSpace(diffMarkup) Then
+            Return 1
+        End If
+
+        Dim previewBody As String =
+            $"Worksheet: {cell.Worksheet.Name}" & vbCrLf &
+            $"Cell: {cell.Address(False, False)}" & vbCrLf &
+            $"Item: {itemIndex} of {itemCount}" & vbCrLf &
+            $"Type: {cellKind}" & vbCrLf & vbCrLf &
+            diffMarkup
+
+        Dim rtfContent As String = ConvertMarkupToRTF(previewBody)
+
+        Return ShowRTFCustomMessageBox(
+            rtfContent,
+            header:=$"{AN} - Review Changes",
+            RestoreWindow:=True,
+            okButtonText:="Accept",
+            secondaryButtonText:="Skip cell")
+    End Function
+
+    Private Function AskWhetherToShowCellDiffPreview(selectedRange As Excel.Range, doRange As Boolean) As Boolean
+        If doRange OrElse selectedRange Is Nothing Then Return False
+
+        Dim selectedCellCount As Integer
+
+        Try
+            selectedCellCount = System.Convert.ToInt32(selectedRange.Cells.Count)
+        Catch
+            Return False
+        End Try
+
+        Dim answer As Integer =
+            ShowCustomYesNoBox(
+                $"You selected {selectedCellCount} cell(s). Do you want {AN} to show a deltabefore each changed cell is applied?" & vbCrLf & vbCrLf &
+                "If you choose Yes, a review window will appear for each changed cell, one after another.",
+                "Yes, show delta",
+                "No, apply directly",
+                $"{AN} - Cell Delta Preview")
+
+        Return answer = 1
     End Function
 
 

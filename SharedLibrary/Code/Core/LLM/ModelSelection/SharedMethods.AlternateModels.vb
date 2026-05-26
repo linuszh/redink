@@ -281,6 +281,7 @@ Namespace SharedLibrary
 
                 For Each XLine In File.ReadAllLines(iniFilePath)
                     Dim trimmedLine As String = XLine.Trim()
+
                     ' Skip empty lines and comments (';').
                     If String.IsNullOrEmpty(trimmedLine) OrElse trimmedLine.StartsWith(";") Then
                         Continue For
@@ -288,10 +289,11 @@ Namespace SharedLibrary
 
                     ' Section header (e.g., [Model1]) starts a new model section.
                     If trimmedLine.StartsWith("[") AndAlso trimmedLine.EndsWith("]") Then
-                        If currentDict.Count > 0 Then
+                        If Not String.IsNullOrWhiteSpace(Description) Then
                             ProcessModelSection(currentDict, Description, context, models, includeToolOnly, toolsOnly)
                             currentDict.Clear()
                         End If
+
                         Description = trimmedLine.Substring(1, trimmedLine.Length - 2).Trim()
                         Continue For
                     End If
@@ -301,6 +303,7 @@ Namespace SharedLibrary
                     If tokens.Length = 2 Then
                         Dim key As String = tokens(0).Trim()
                         Dim value As String = tokens(1).Trim()
+
                         If Not currentDict.ContainsKey(key) Then
                             currentDict.Add(key, value)
                         Else
@@ -310,7 +313,7 @@ Namespace SharedLibrary
                 Next
 
                 ' Materialize the final section (if any).
-                If currentDict.Count > 0 Then
+                If Not String.IsNullOrWhiteSpace(Description) Then
                     ProcessModelSection(currentDict, Description, context, models, includeToolOnly, toolsOnly)
                 End If
 
@@ -601,6 +604,38 @@ Namespace SharedLibrary
                 Return False
             End Try
         End Function
+
+        Public Structure ModelConfigScopeSnapshot
+            Public ActiveConfig As ModelConfig
+            Public OriginalConfigSnapshot As ModelConfig
+            Public OriginalConfigLoadedSnapshot As Boolean
+        End Structure
+
+        Public Shared Function CaptureModelConfigScope(ByVal context As ISharedContext) As ModelConfigScopeSnapshot
+            Dim snapshot As New ModelConfigScopeSnapshot()
+
+            If context IsNot Nothing Then
+                snapshot.ActiveConfig = GetCurrentConfig(context)
+            End If
+
+            snapshot.OriginalConfigSnapshot = originalConfig
+            snapshot.OriginalConfigLoadedSnapshot = originalConfigLoaded
+
+            Return snapshot
+        End Function
+
+        Public Shared Sub RestoreModelConfigScope(ByVal context As ISharedContext,
+                                                  ByVal snapshot As ModelConfigScopeSnapshot)
+            Try
+                If context IsNot Nothing AndAlso snapshot.ActiveConfig IsNot Nothing Then
+                    RestoreDefaults(context, snapshot.ActiveConfig)
+                End If
+            Catch
+            End Try
+
+            originalConfig = snapshot.OriginalConfigSnapshot
+            originalConfigLoaded = snapshot.OriginalConfigLoadedSnapshot
+        End Sub
 
     End Class
 End Namespace

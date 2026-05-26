@@ -718,4 +718,62 @@ Public Module SharedLogger
         End Try
     End Function
 
+    ''' <summary>
+    ''' Logs one agent/tool invocation in a format that AnalyzeLogs can aggregate.
+    ''' The full counting key must remain in the first token, followed by "invoked".
+    ''' Example:
+    '''   AgentToolCall_Outlook_AutoPilot_m365_search invoked
+    ''' </summary>
+    Public Sub LogAgentToolCall(context As ISharedContext, RDV As String, surface As String, toolName As String)
+        Try
+            Dim safeSurface As String = NormalizeLogTokenPart(surface)
+            Dim safeToolName As String = NormalizeLogTokenPart(toolName)
+
+            If String.IsNullOrWhiteSpace(safeSurface) Then safeSurface = "UnknownSurface"
+            If String.IsNullOrWhiteSpace(safeToolName) Then safeToolName = "UnknownTool"
+
+            Log(context, RDV, $"AgentToolCall_{safeSurface}_{safeToolName} invoked")
+        Catch
+            ' MUST stay silent
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' Normalizes one token fragment so it is safe for log-key aggregation.
+    ''' Keeps letters, digits, and underscores; collapses separators to underscores.
+    ''' </summary>
+    Private Function NormalizeLogTokenPart(value As String) As String
+        If String.IsNullOrWhiteSpace(value) Then Return ""
+
+        Dim sb As New StringBuilder()
+        Dim lastWasUnderscore As Boolean = False
+
+        For Each ch As Char In value.Trim()
+            If Char.IsLetterOrDigit(ch) Then
+                sb.Append(ch)
+                lastWasUnderscore = False
+
+            ElseIf ch = "_"c Then
+                If Not lastWasUnderscore AndAlso sb.Length > 0 Then
+                    sb.Append("_"c)
+                    lastWasUnderscore = True
+                End If
+
+            ElseIf Char.IsWhiteSpace(ch) OrElse
+                   ch = "-"c OrElse
+                   ch = "."c OrElse
+                   ch = "/"c OrElse
+                   ch = "\"c OrElse
+                   ch = ":"c Then
+
+                If Not lastWasUnderscore AndAlso sb.Length > 0 Then
+                    sb.Append("_"c)
+                    lastWasUnderscore = True
+                End If
+            End If
+        Next
+
+        Return sb.ToString().Trim("_"c)
+    End Function
+
 End Module
