@@ -322,18 +322,30 @@ Partial Public Class ThisAddIn
     ''' Initializes listener generation, cancellation token source, logs, and starts listener loop.
     ''' </summary>
     Private Sub StartupHttpListener()
-        ' Make sure the loop can run again
         isShuttingDown = False
+
+        ResetInkyServerLogIfNeeded()
+        EnsureInkyServerExceptionHooks()
 
         Dim gen As System.Int64 = System.Threading.Interlocked.Increment(listenerGeneration)
         cts = New System.Threading.CancellationTokenSource()
 
-        ' Log generation and UTC timestamp
-        System.Diagnostics.Debug.WriteLine(
+        Dim startMessage As System.String =
             "HttpListener START gen=" &
             gen.ToString(System.Globalization.CultureInfo.InvariantCulture) &
             " at " &
-            System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+            System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture)
+
+        AppendInkyServerLog(startMessage)
+        AppendInkyServerLog(
+            "StartupHttpListener state: powerChanging=" &
+            System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0).ToString(System.Globalization.CultureInfo.InvariantCulture) &
+            "; resumeCooldown=" &
+            IsInResumeCooldown().ToString() &
+            "; isShuttingDown=" &
+            isShuttingDown.ToString())
+
+        System.Diagnostics.Debug.WriteLine(startMessage)
 
         lastListenerProgressUtc = System.DateTime.UtcNow
         listenerTask = StartHttpListener(cts.Token, gen)
@@ -346,6 +358,12 @@ Partial Public Class ThisAddIn
         Optional ByVal stopUiThread As System.Boolean = True
     ) As System.Threading.Tasks.Task
         isShuttingDown = True
+
+        AppendInkyServerLog(
+            "ShutdownHttpListener begin. stopUiThread=" &
+            stopUiThread.ToString() &
+            "; listenerGeneration=" &
+            listenerGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture))
 
         ' Cancel current loop
         Try
@@ -404,6 +422,9 @@ Partial Public Class ThisAddIn
         If stopUiThread Then
             StopLlmUiThread()
         End If
+
+        AppendInkyServerLog("ShutdownHttpListener end.")
+
     End Function
 
     ''' <summary>
@@ -414,91 +435,194 @@ Partial Public Class ThisAddIn
         ByVal gen As System.Int64
     ) As System.Threading.Tasks.Task
 
-        Const prefix As System.String = "http://127.0.0.1:12333/"
+        Dim prefixes As System.String() = {
+            "http://127.0.0.1:12333/",
+            "http://localhost:12333/"
+        }
+
         Dim consecutiveFailures As System.Int32 = 0
         Dim lastMetrics As System.DateTime = System.DateTime.UtcNow
 
+        AppendInkyServerLog(
+            "StartHttpListener enter. gen=" &
+            gen.ToString(System.Globalization.CultureInfo.InvariantCulture))
+
         While (Not isShuttingDown) AndAlso (Not token.IsCancellationRequested)
-            ' Bail out if a newer generation has started
-            If gen <> listenerGeneration Then Return
+            If gen <> listenerGeneration Then
+                AppendInkyServerLog(
+                    "StartHttpListener exit because generation changed. localGen=" &
+                    gen.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; currentGen=" &
+                    listenerGeneration.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                Return
+            End If
 
             Dim needShortDelay As System.Boolean = False
 
             Try
-                ' Listener initialization
                 If httpListener Is Nothing Then
                     httpListener = New System.Net.HttpListener()
                     httpListener.IgnoreWriteExceptions = True
+
                     With httpListener.TimeoutManager
-                        ' Permissive timeouts for potentially slow handlers
                         .IdleConnection = System.TimeSpan.FromMinutes(10)
                         .HeaderWait = System.TimeSpan.FromSeconds(30)
                         .EntityBody = System.TimeSpan.FromMinutes(10)
                         .DrainEntityBody = System.TimeSpan.FromSeconds(30)
                         .MinSendBytesPerSecond = CType(0UL, System.UInt64)
                     End With
-                    If Not httpListener.Prefixes.Contains(prefix) Then
-                        httpListener.Prefixes.Add(prefix)
-                    End If
-                    httpListener.Start()
+
+                    Try
+                        httpListener.Prefixes.Clear()
+                    Catch
+                    End Try
+
+                    For Each prefix As System.String In prefixes
+                        If Not httpListener.Prefixes.Contains(prefix) Then
+                            httpListener.Prefixes.Add(prefix)
+                        End If
+                        AppendInkyServerLog("HttpListener prefix (pre-start): " & prefix)
+                    Next
+
+                    Try
+                        httpListener.Start()
+                        AppendInkyServerLog("HttpListener started.")
+                        For Each prefix As System.String In httpListener.Prefixes
+                            AppendInkyServerLog("HttpListener prefix (post-start): " & prefix)
+                        Next
+                    Catch exStart As System.Exception
+                        AppendInkyServerLog("HttpListener.Start failed.", exStart)
+                        Throw
+                    End Try
+
                     System.Diagnostics.Debug.WriteLine("HttpListener started.")
                 ElseIf Not httpListener.IsListening Then
+                    AppendInkyServerLog("HttpListener exists but is not listening. Recycling instance.")
                     Try : httpListener.Close() : Catch : End Try
                     httpListener = Nothing
                     Continue While
                 End If
 
+                If INI_APIDebug Then
+                    AppendInkyServerLog("Waiting in GetContextAsync().")
+                End If
+
                 Dim ctx As System.Net.HttpListenerContext =
                     Await httpListener.GetContextAsync().ConfigureAwait(False)
 
-                ' Progress heartbeat for watchdog
                 lastListenerProgressUtc = System.DateTime.UtcNow
 
+                Dim requestId As System.String = NewInkyRequestId()
+
+                If INI_APIDebug Then
+                    Try
+                        Dim req As System.Net.HttpListenerRequest = ctx.Request
+                        Dim method As System.String = ""
+                        Dim requestPath As System.String = "/"
+                        Dim rawUrl As System.String = ""
+                        Dim hostHeader As System.String = ""
+                        Dim userHostName As System.String = ""
+                        Dim contentType As System.String = ""
+                        Dim contentLength As System.String = ""
+                        Dim localEndPointText As System.String = ""
+                        Dim remoteEndPointText As System.String = ""
+
+                        If req IsNot Nothing Then
+                            method = If(req.HttpMethod, "")
+                            requestPath = GetSafeRequestPath(req)
+                            rawUrl = If(req.RawUrl, "")
+                            hostHeader = If(req.Headers("Host"), "")
+                            userHostName = If(req.UserHostName, "")
+                            contentType = If(req.ContentType, "")
+                            contentLength = req.ContentLength64.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                            localEndPointText = GetSafeEndpointText(req.LocalEndPoint)
+                            remoteEndPointText = GetSafeEndpointText(req.RemoteEndPoint)
+                        End If
+
+                        AppendInkyServerLog(
+                            "REQ " & requestId &
+                            " accepted: " &
+                            method & " " & requestPath &
+                            " RawUrl=" & rawUrl &
+                            " HostHeader=" & hostHeader &
+                            " UserHostName=" & userHostName &
+                            " ContentType=" & contentType &
+                            " ContentLength=" & contentLength &
+                            " LocalEndPoint=" & localEndPointText &
+                            " RemoteEndPoint=" & remoteEndPointText)
+                    Catch exLog As System.Exception
+                        AppendInkyServerLog("REQ " & requestId & " request logging failed.", exLog)
+                    End Try
+                End If
+
                 Dim ctxLocal As System.Net.HttpListenerContext = ctx
+                Dim requestIdLocal As System.String = requestId
+
                 System.Threading.Tasks.Task.Run(
                     Async Function()
                         Dim resLocal As System.Net.HttpListenerResponse = Nothing
                         Try
-                            Await HandleHttpRequest(ctxLocal).ConfigureAwait(False)
-                        Catch
+                            Await HandleHttpRequest(ctxLocal, requestIdLocal).ConfigureAwait(False)
+                        Catch exHandle As System.Exception
+                            AppendInkyServerLog("REQ " & requestIdLocal & " unhandled request task failure.", exHandle)
+
                             Try
                                 resLocal = ctxLocal.Response
-                                resLocal.StatusCode = 500
-                                resLocal.KeepAlive = False
-                                resLocal.Headers("Connection") = "close"
-                                resLocal.SendChunked = False
-                                Dim bufErr() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Internal server error.")
-                                resLocal.ContentType = "text/plain; charset=utf-8"
-                                resLocal.ContentLength64 = bufErr.LongLength
-                                Using os As System.IO.Stream = resLocal.OutputStream
-                                    os.Write(bufErr, 0, bufErr.Length)
-                                End Using
-                            Catch
-                            Finally
-                                Try
-                                    If resLocal IsNot Nothing Then resLocal.Close()
-                                Catch
-                                End Try
+
+                                Dim bufErr() As System.Byte =
+                                        System.Text.Encoding.UTF8.GetBytes(
+                                            "{""ok"":false,""error"":""Internal server error.""}")
+
+                                SendBufferedHttpResponse(
+                                        resLocal,
+                                        500,
+                                        "application/json; charset=utf-8",
+                                        bufErr,
+                                        requestIdLocal,
+                                        "outer-fallback-500",
+                                        addCors:=True)
+
+                                AppendInkyServerLog(
+                                        "REQ " & requestIdLocal &
+                                        " outer fallback 500 written through SendBufferedHttpResponse.")
+                            Catch exWrite As System.Exception
+                                AppendInkyServerLog(
+                                        "REQ " & requestIdLocal &
+                                        " outer fallback 500 write failed.",
+                                        exWrite)
                             End Try
                         Finally
-                            ' Mark progress at the end of a handled request too
                             lastListenerProgressUtc = System.DateTime.UtcNow
                         End Try
                     End Function)
 
-                ' Metrics block
                 Dim now As System.DateTime = System.DateTime.UtcNow
                 If (now - lastMetrics).TotalSeconds >= 10.0 Then
                     Dim gdi As System.UInt32 = GetGdiCount()
                     Dim usr As System.UInt32 = GetUserCount()
+
+                    If INI_APIDebug Then
+                        AppendInkyServerLog(
+                            "Listener metrics: GDI=" &
+                            gdi.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "; USER=" &
+                            usr.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "; activeRequests=" &
+                            System.Threading.Interlocked.CompareExchange(activeRequests, 0, 0).ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                            "; activeJobs=" &
+                            System.Threading.Interlocked.CompareExchange(activeJobs, 0, 0).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                    End If
+
                     System.Diagnostics.Debug.WriteLine(
                         System.String.Format(
                             System.Globalization.CultureInfo.InvariantCulture,
                             "RES {0:HH:mm:ss}: GDI={1}  USER={2}",
                             now, gdi, usr))
+
                     If gdi >= 8000UI OrElse usr >= 8000UI Then
                         System.Diagnostics.Debug.WriteLine("WARN: High handle count – check for GDI/USER leaks.")
                     End If
+
                     lastMetrics = now
                 End If
 
@@ -507,10 +631,29 @@ Partial Public Class ThisAddIn
             Catch ex As System.ObjectDisposedException
                 consecutiveFailures += 1
                 needShortDelay = True
+                AppendInkyServerLog(
+                    "Listener ObjectDisposedException. consecutiveFailures=" &
+                    consecutiveFailures.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ex)
+
+            Catch ex As System.Net.HttpListenerException
+                consecutiveFailures += 1
+                needShortDelay = True
+                AppendInkyServerLog(
+                    "Listener HttpListenerException. consecutiveFailures=" &
+                    consecutiveFailures.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ex)
+
+                System.Diagnostics.Debug.WriteLine("Listener error: " & ex.Message)
 
             Catch ex As System.Exception
                 consecutiveFailures += 1
-                System.Diagnostics.Debug.WriteLine(System.String.Concat("Listener error: ", ex.Message))
+                AppendInkyServerLog(
+                    "Listener error. consecutiveFailures=" &
+                    consecutiveFailures.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ex)
+
+                System.Diagnostics.Debug.WriteLine("Listener error: " & ex.Message)
             End Try
 
             If needShortDelay AndAlso (Not token.IsCancellationRequested) Then
@@ -522,23 +665,36 @@ Partial Public Class ThisAddIn
 
             If consecutiveFailures >= 10 AndAlso (Not isShuttingDown) AndAlso (Not token.IsCancellationRequested) Then
                 System.Diagnostics.Debug.WriteLine("Restarting HttpListener after 10 failures.")
+                AppendInkyServerLog("Restarting HttpListener after 10 consecutive failures.")
+
                 Try
                     If httpListener IsNot Nothing Then
                         Try : httpListener.Abort() : Catch : End Try
                         Try : httpListener.Close() : Catch : End Try
                     End If
-                Catch
+                Catch exReset As System.Exception
+                    AppendInkyServerLog("Listener reset after repeated failures failed.", exReset)
                 Finally
                     httpListener = Nothing
                 End Try
+
                 consecutiveFailures = 0
+
                 Try
                     Await System.Threading.Tasks.Task.Delay(5000, token).ConfigureAwait(False)
                 Catch
                 End Try
             End If
         End While
+
+        AppendInkyServerLog(
+            "StartHttpListener exit. isShuttingDown=" &
+            isShuttingDown.ToString() &
+            "; tokenCancelled=" &
+            token.IsCancellationRequested.ToString())
     End Function
+
+
 
     ''' <summary>
     ''' Starts hidden power notification window if not already active.
@@ -775,5 +931,174 @@ Partial Public Class ThisAddIn
             End If
         Next
     End Sub
+
+    Private ReadOnly inkyServerLogSync As New Object()
+    Private inkyServerLogInitialized As Integer = 0
+    Private inkyServerExceptionHooksInstalled As Integer = 0
+    Private nextInkyRequestId As Long = 0
+
+    Private Function GetInkyServerLogPath() As System.String
+        Return System.IO.Path.Combine(System.IO.Path.GetTempPath(), "RI_InkyServer_Log.txt")
+    End Function
+
+    Private Function NewInkyRequestId() As System.String
+        Dim id As Long = System.Threading.Interlocked.Increment(nextInkyRequestId)
+        Return id.ToString("000000", System.Globalization.CultureInfo.InvariantCulture)
+    End Function
+
+    Private Function ClipForInkyServerLog(
+        ByVal value As System.String,
+        Optional ByVal maxLength As Integer = 2000
+    ) As System.String
+
+        Dim s As System.String = If(value, System.String.Empty)
+
+        s = s.Replace(vbCr, "\r").Replace(vbLf, "\n")
+
+        If s.Length > maxLength Then
+            s = s.Substring(0, maxLength) & "... [truncated]"
+        End If
+
+        Return s
+    End Function
+
+    Private Sub ResetInkyServerLogIfNeeded()
+        If Not INI_APIDebug Then Return
+
+        If System.Threading.Interlocked.CompareExchange(inkyServerLogInitialized, 1, 0) <> 0 Then
+            Return
+        End If
+
+        SyncLock inkyServerLogSync
+            Dim logPath As System.String = GetInkyServerLogPath()
+
+            Try
+                If System.IO.File.Exists(logPath) Then
+                    System.IO.File.Delete(logPath)
+                End If
+            Catch
+            End Try
+
+            Try
+                Dim header As New System.Text.StringBuilder()
+
+                header.AppendLine("==== RI_InkyServer_Log.txt ====")
+                header.AppendLine("StartedLocal: " & System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture))
+                header.AppendLine("StartedUtc:   " & System.DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture))
+                header.AppendLine("Process:      " & System.Diagnostics.Process.GetCurrentProcess().ProcessName)
+                header.AppendLine("PID:          " & System.Diagnostics.Process.GetCurrentProcess().Id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                header.AppendLine("Machine:      " & System.Environment.MachineName)
+                header.AppendLine("User:         " & System.Environment.UserDomainName & "\" & System.Environment.UserName)
+                header.AppendLine("64BitProcess: " & System.Environment.Is64BitProcess.ToString())
+                header.AppendLine("CLR:          " & System.Environment.Version.ToString())
+                header.AppendLine("OS:           " & System.Environment.OSVersion.ToString())
+                header.AppendLine("Culture:      " & System.Globalization.CultureInfo.CurrentCulture.Name)
+                header.AppendLine("UICulture:    " & System.Globalization.CultureInfo.CurrentUICulture.Name)
+                header.AppendLine()
+
+                System.IO.File.AppendAllText(logPath, header.ToString(), System.Text.Encoding.UTF8)
+            Catch
+            End Try
+        End SyncLock
+    End Sub
+
+    Private Sub AppendInkyServerLog(ByVal message As System.String)
+        If Not INI_APIDebug Then Return
+
+        ResetInkyServerLogIfNeeded()
+
+        SyncLock inkyServerLogSync
+            Try
+                System.IO.File.AppendAllText(
+                    GetInkyServerLogPath(),
+                    System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff", System.Globalization.CultureInfo.InvariantCulture) &
+                    " [T" &
+                    System.Threading.Thread.CurrentThread.ManagedThreadId.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "] " &
+                    If(message, System.String.Empty) &
+                    System.Environment.NewLine,
+                    System.Text.Encoding.UTF8)
+            Catch
+            End Try
+        End SyncLock
+    End Sub
+
+    Private Sub AppendInkyServerLog(ByVal message As System.String, ByVal ex As System.Exception)
+        If ex Is Nothing Then
+            AppendInkyServerLog(message)
+            Return
+        End If
+
+        AppendInkyServerLog(
+            If(message, System.String.Empty) &
+            System.Environment.NewLine &
+            ex.ToString())
+    End Sub
+
+    Private Sub EnsureInkyServerExceptionHooks()
+        If Not INI_APIDebug Then Return
+
+        If System.Threading.Interlocked.CompareExchange(inkyServerExceptionHooksInstalled, 1, 0) <> 0 Then
+            Return
+        End If
+
+        AddHandler AppDomain.CurrentDomain.UnhandledException,
+            Sub(sender As System.Object, e As System.UnhandledExceptionEventArgs)
+                Dim exObj As System.Exception = TryCast(e.ExceptionObject, System.Exception)
+                AppendInkyServerLog(
+                    "AppDomain.CurrentDomain.UnhandledException. IsTerminating=" &
+                    e.IsTerminating.ToString(),
+                    exObj)
+            End Sub
+
+        AddHandler System.Threading.Tasks.TaskScheduler.UnobservedTaskException,
+            Sub(sender As System.Object, e As System.Threading.Tasks.UnobservedTaskExceptionEventArgs)
+                AppendInkyServerLog("TaskScheduler.UnobservedTaskException", e.Exception)
+            End Sub
+    End Sub
+
+    Private Function GetSafeRequestPath(ByVal req As System.Net.HttpListenerRequest) As System.String
+        Try
+            If req Is Nothing Then Return "/"
+
+            Dim path As System.String = Nothing
+
+            Try
+                If req.Url IsNot Nothing Then
+                    path = req.Url.AbsolutePath
+                End If
+            Catch
+                path = Nothing
+            End Try
+
+            If System.String.IsNullOrWhiteSpace(path) Then
+                Try
+                    path = req.RawUrl
+                Catch
+                    path = Nothing
+                End Try
+            End If
+
+            If System.String.IsNullOrWhiteSpace(path) Then
+                path = "/"
+            End If
+
+            Return path
+        Catch
+            Return "/"
+        End Try
+    End Function
+
+    Private Function GetSafeEndpointText(ByVal value As System.Object) As System.String
+        Try
+            If value Is Nothing Then Return ""
+            Return value.ToString()
+        Catch
+            Return ""
+        End Try
+    End Function
+
+
+
 
 End Class
