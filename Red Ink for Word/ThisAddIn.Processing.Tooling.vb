@@ -278,9 +278,39 @@ Partial Public Class ThisAddIn
             authoritativeRegistrySource = subAgentAuthoritativeRegistry.Snapshot()
         Else
             authoritativeRegistrySource = SharedLibrary.Agents.ToolRegistryBuilder.FromModelConfigs(fullAllowedTools, "selected")
+
+            ' Only register the skills/agents the user actually selected.
+            ' This keeps Word aligned with Outlook and prevents unselected skills/agents
+            ' from becoming callable just because they exist on disk.
             Try
-                SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, SharedLibrary.Agents.AgentResources.Skills)
-                SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(authoritativeRegistrySource, SharedLibrary.Agents.AgentResources.Agents)
+                SharedLibrary.Agents.AgentResources.Refresh()
+
+                Dim selectedToolNames As New HashSet(Of String)(
+            If(fullAllowedTools, New List(Of ModelConfig)()).
+                Where(Function(t) t IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(t.ToolName)).
+                Select(Function(t) t.ToolName.Trim()),
+            StringComparer.OrdinalIgnoreCase)
+
+                If selectedToolNames.Count > 0 Then
+                    Dim selectedSkills =
+                SharedLibrary.Agents.AgentResources.Skills.
+                    Where(Function(sk)
+                              Return sk IsNot Nothing AndAlso
+                                     Not String.IsNullOrWhiteSpace(sk.Name) AndAlso
+                                     selectedToolNames.Contains("skill_" & sk.Name.Trim())
+                          End Function)
+
+                    Dim selectedAgents =
+                SharedLibrary.Agents.AgentResources.Agents.
+                    Where(Function(ag)
+                              Return ag IsNot Nothing AndAlso
+                                     Not String.IsNullOrWhiteSpace(ag.Name) AndAlso
+                                     selectedToolNames.Contains("agent_" & ag.Name.Trim())
+                          End Function)
+
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddSkills(authoritativeRegistrySource, selectedSkills)
+                    SharedLibrary.Agents.ToolRegistryBuilder.AddAgents(authoritativeRegistrySource, selectedAgents)
+                End If
             Catch
             End Try
         End If
@@ -340,7 +370,12 @@ Partial Public Class ThisAddIn
         Dim initialSubAgentToolNames As HashSet(Of String) = Nothing
 
         If subAgentMode Then
-            initialSubAgentToolNames = BuildToolNameSet(subAgentAllowedToolNames)
+            Dim expandedSubAgentAllowedToolNames As List(Of String) =
+        ExpandAllowedToolNamesForRegistry(
+            subAgentAllowedToolNames,
+            context.AuthoritativeToolRegistrySnapshot)
+
+            initialSubAgentToolNames = BuildToolNameSet(expandedSubAgentAllowedToolNames)
             context.AllowedToolNames = New HashSet(Of String)(initialSubAgentToolNames, StringComparer.OrdinalIgnoreCase)
             context.AllowedToolRegistry =
         If(context.AuthoritativeToolRegistrySnapshot Is Nothing,
@@ -2436,6 +2471,126 @@ Partial Public Class ThisAddIn
         Return loaded
     End Function
 
+    Private Function ExpandAllowedToolNamesForRegistry(requestedToolNames As IEnumerable(Of String),
+                                                   registry As SharedLibrary.Agents.ToolRegistry) As List(Of String)
+        If requestedToolNames Is Nothing Then
+            Return Nothing
+        End If
+
+        Dim result As New List(Of String)()
+        Dim seen As New HashSet(Of String)(StringComparer.OrdinalIgnoreCase)
+
+        Dim availableNames As List(Of String) =
+        If(registry Is Nothing,
+           New List(Of String)(),
+           registry.ListManifests().
+               Where(Function(m) m IsNot Nothing AndAlso Not String.IsNullOrWhiteSpace(m.Name)).
+               Select(Function(m) m.Name.Trim()).
+               Distinct(StringComparer.OrdinalIgnoreCase).
+               ToList())
+
+        For Each rawName As String In requestedToolNames
+            Dim token As String = If(rawName, "").Trim()
+            If token = "" Then Continue For
+
+            Dim expandedNames As IEnumerable(Of String)
+
+            If token = "*" Then
+                expandedNames = availableNames
+
+            ElseIf IsSelectedOnlineSourcesAlias(token) Then
+                expandedNames =
+                availableNames.Where(Function(name) IsSelectedOnlineSourceToolName(name))
+
+            ElseIf ContainsWildcardPattern(token) Then
+                expandedNames =
+                availableNames.Where(Function(name) WildcardToolNameMatches(token, name))
+
+            Else
+                expandedNames = {token}
+            End If
+
+            For Each expandedName As String In expandedNames
+                Dim normalized As String = If(expandedName, "").Trim()
+                If normalized = "" Then Continue For
+
+                If seen.Add(normalized) Then
+                    result.Add(normalized)
+                End If
+            Next
+        Next
+
+        Return result
+    End Function
+
+    Private Shared Function IsSelectedOnlineSourcesAlias(token As String) As Boolean
+        Select Case If(token, "").Trim().ToLowerInvariant()
+            Case "selected_online_sources",
+             "@selected_online_sources",
+             "selected_sources",
+             "@selected_sources"
+                Return True
+            Case Else
+                Return False
+        End Select
+    End Function
+
+    Private Shared Function ContainsWildcardPattern(token As String) As Boolean
+        If String.IsNullOrWhiteSpace(token) Then Return False
+        Return token.IndexOf("*"c) >= 0 OrElse token.IndexOf("?"c) >= 0
+    End Function
+
+    Private Shared Function WildcardToolNameMatches(pattern As String, toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(pattern) OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        Dim regexPattern As String =
+        "^" &
+        Regex.Escape(pattern.Trim()).
+            Replace("\*", ".*").
+            Replace("\?", ".") &
+        "$"
+
+        Return Regex.IsMatch(
+        toolName.Trim(),
+        regexPattern,
+        RegexOptions.IgnoreCase Or RegexOptions.CultureInvariant)
+    End Function
+
+    Private Function IsSelectedOnlineSourceToolName(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then Return False
+
+        Dim name As String = toolName.Trim()
+
+        If name.StartsWith("skill_", StringComparison.OrdinalIgnoreCase) OrElse
+       name.StartsWith("agent_", StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        If name.Equals(InternalWebToolName, StringComparison.OrdinalIgnoreCase) OrElse
+       name.Equals(InternalDownloadWebFilesToolName, StringComparison.OrdinalIgnoreCase) OrElse
+       name.Equals(InternalSearchToolName, StringComparison.OrdinalIgnoreCase) OrElse
+       name.Equals(SharedLibrary.Agents.SkillInvokeTool.ToolName, StringComparison.OrdinalIgnoreCase) OrElse
+       name.Equals(SharedLibrary.Agents.ToolLoaderTool.LoaderToolName, StringComparison.OrdinalIgnoreCase) Then
+            Return False
+        End If
+
+        If IsInternalKnowledgeToolName(name) OrElse
+       SharedLibrary.Agents.WebGroundingTool.IsWebGroundingTool(name) OrElse
+       SharedLibrary.SharedLibrary.M365ToolService.IsM365ToolName(name) OrElse
+       SharedLibrary.Agents.MemoryTools.IsMemoryTool(name) OrElse
+       SharedLibrary.Agents.TextTools.IsTextTool(name) OrElse
+       SharedLibrary.Agents.WorkspaceTools.IsWorkspaceTool(name) OrElse
+       SharedLibrary.Agents.WordTools.IsWordTool(name) OrElse
+       SharedLibrary.Agents.WordDocTools.IsWordDocTool(name) OrElse
+       SharedLibrary.Agents.JsRunTool.IsJsTool(name) Then
+            Return False
+        End If
+
+        Return True
+    End Function
+
 
     Private Sub LoadSkillAllowedToolsFromResponse(skillResponse As String, context As ToolExecutionContext)
         If context Is Nothing OrElse String.IsNullOrWhiteSpace(skillResponse) Then
@@ -2450,9 +2605,20 @@ Partial Public Class ThisAddIn
                 Return
             End If
 
+            Dim requestedToolNames As New List(Of String)()
+
             For Each item As JToken In DirectCast(allowedToolsToken, JArray)
                 Dim toolName As String = item.ToString().Trim()
                 If toolName = "" Then Continue For
+                requestedToolNames.Add(toolName)
+            Next
+
+            Dim expandedToolNames As List(Of String) =
+            ExpandAllowedToolNamesForRegistry(
+                requestedToolNames,
+                context.AllowedToolRegistry)
+
+            For Each toolName As String In expandedToolNames
                 EnsureVisibleToolLoaded(toolName, context)
             Next
         Catch
