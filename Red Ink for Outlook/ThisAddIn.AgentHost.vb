@@ -165,14 +165,19 @@ Partial Public Class ThisAddIn
        0,
        authoritativeSnapshot.ListNames().Count)
 
+            Dim expandedAllowedToolNames As IReadOnlyList(Of String) =
+    ExpandAllowedToolNamesForRegistry(
+        request.AllowedToolNames,
+        authoritativeSnapshot)
+
             Dim preflight = SharedLibrary.Agents.SubAgentToolScopeInitializer.Initialize(
     authoritativeSnapshot,
-    request.AllowedToolNames)
+    expandedAllowedToolNames)
 
             Dim requestedNamesText As String =
-    If(preflight.RequestedToolNames Is Nothing OrElse preflight.RequestedToolNames.Count = 0,
+    If(expandedAllowedToolNames Is Nothing OrElse expandedAllowedToolNames.Count = 0,
        "(none)",
-       String.Join(", ", preflight.RequestedToolNames))
+       String.Join(", ", expandedAllowedToolNames))
 
             Dim resolvedNamesText As String =
     If(preflight.ResolvedToolNames.Count = 0,
@@ -258,7 +263,7 @@ Partial Public Class ThisAddIn
                 hideLogWindow:=True,
                 cancellationToken:=ct,
                 subAgentMode:=True,
-                subAgentAllowedToolNames:=request.AllowedToolNames,
+                subAgentAllowedToolNames:=expandedAllowedToolNames,
                 subAgentSpecialModelKey:=request.SpecialModelKey,
                 subAgentAuthoritativeRegistry:=authoritativeSnapshot,
                 subAgentRegistrySource:=registrySource,

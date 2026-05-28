@@ -807,6 +807,20 @@ Namespace SharedLibrary
                 Dim configUserIdExpanded = ExpandLicenseEnvironmentVariables(configUserIdRaw)
                 Dim configUserIdIsEmpty = String.IsNullOrWhiteSpace(configUserIdExpanded)
 
+                Dim isOfflineDomainLicense = IsOfflineDomainLicenseKey(configLicenseKey)
+
+                If String.IsNullOrWhiteSpace(configProductId) AndAlso isOfflineDomainLicense Then
+                    Dim extractedProductId As String = ""
+                    If TryExtractOfflineDomainLicenseProductId(configLicenseKey, extractedProductId) Then
+                        configProductId = extractedProductId
+                    End If
+                End If
+
+                If configUserIdIsEmpty AndAlso isOfflineDomainLicense Then
+                    configUserIdExpanded = GetOfflineDomainLicenseSyntheticUserId()
+                    configUserIdIsEmpty = False
+                End If
+
                 Dim licenseClearAll = ParseBoolean(configDict, "LicenseClearAll", False)
 
                 ' ═══════════════════════════════════════════════════════════════
@@ -1310,6 +1324,11 @@ Namespace SharedLibrary
 
                 LogLicenseEvent("Stored Pro", $"ProductID={productId}, ApiConfirmed={apiConfirmed}, LastCheck={lastCheck:d}")
 
+                If IsOfflineDomainLicenseKey(licenseKey) Then
+                    LogLicenseEvent("Stored Pro", "Offline-domain license path")
+                    Return VerifyAndProcessProLicense(context, productId, licenseKey, userId)
+                End If
+
                 ' Check if this is a Testing Pro License - requires compliance confirmation
                 If IsTestingProLicenseByProductId(productId) Then
                     If IsComplianceCheckDue(TestingProComplianceIntervalStartups) Then
@@ -1376,6 +1395,33 @@ Namespace SharedLibrary
         Private Shared Function VerifyAndProcessProLicense(context As ISharedContext, productId As String, licenseKey As String, userId As String) As Boolean
             Try
                 LogLicenseEvent("API Verify", "Starting verification")
+
+                If IsOfflineDomainLicenseKey(licenseKey) Then
+                    Dim offlineResponse As LicenseApiResponse = Nothing
+
+                    If TryCreateOfflineDomainLicenseResponse("status", productId, licenseKey, userId, offlineResponse) Then
+                        If offlineResponse.Success AndAlso offlineResponse.Activated Then
+                            RecordSuccessfulApiCheck()
+
+                            Dim resolvedProductName = If(String.IsNullOrWhiteSpace(My.Settings.License_ProductName),
+                                                         offlineResponse.ProductTitle,
+                                                         My.Settings.License_ProductName)
+
+                            If Not resolvedProductName.Equals(My.Settings.License_ProductName, StringComparison.Ordinal) Then
+                                My.Settings.License_ProductName = resolvedProductName
+                                My.Settings.Save()
+                            End If
+
+                            _currentLicenseState = If(IsTestingProLicenseByProductId(productId), LicenseState.TestingProActive, LicenseState.ProActive)
+                            LicenseStatus = resolvedProductName
+
+                            LogLicenseEvent("Offline Domain Verify", "License valid")
+                            Return True
+                        End If
+
+                        Return HandleInvalidLicenseCredentials(productId, licenseKey, userId, offlineResponse.ErrorMessage)
+                    End If
+                End If
 
                 Dim response = CallLicenseApi("status", productId, licenseKey, userId)
 

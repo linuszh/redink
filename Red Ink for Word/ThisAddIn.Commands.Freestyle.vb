@@ -1346,6 +1346,7 @@ Partial Public Class ThisAddIn
                 AddItem("switch", "Temporarily swap primary and secondary models.")
                 AddItem("clientname", "Copy and show this PC's client identifier (used for UpdateClients and CentralConfigClients).")
                 AddItem("license", "Show license information and access license manage dialog.")
+                AddItem("offlinelicense", "Create an offline license key using a private key.")
 
                 ' CONFIG / MENU
                 AddItem("settings", "Open the settings dialog.")
@@ -1876,6 +1877,11 @@ Partial Public Class ThisAddIn
 
             If String.Equals(OtherPrompt.Trim(), "pptxconvert", StringComparison.OrdinalIgnoreCase) Then
                 RetemplatePresentation_UI()
+                Return
+            End If
+
+            If String.Equals(OtherPrompt.Trim(), "offlinelicense", StringComparison.OrdinalIgnoreCase) Then
+                SharedMethods.ShowOfflineDomainLicenseGeneratorDialog()
                 Return
             End If
 
