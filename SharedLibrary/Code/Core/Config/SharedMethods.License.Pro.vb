@@ -364,6 +364,21 @@ Namespace SharedLibrary
                         lblStatus.ForeColor = color
                     End Sub
 
+                Dim buildActivationUsageText As Func(Of LicenseApiResponse, String, String) =
+                        Function(response As LicenseApiResponse, enteredKey As String) As String
+                            If response Is Nothing Then Return ""
+
+                            If response.TotalActivationsPurchased > 0 Then
+                                Return $"{vbCrLf}Activations: {response.TotalActivations} / {response.TotalActivationsPurchased}"
+                            End If
+
+                            If IsOfflineDomainLicenseKey(enteredKey) Then
+                                Return $"{vbCrLf}Activation Slots: not limited for offline-domain licenses"
+                            End If
+
+                            Return ""
+                        End Function
+
                 ' Helper: Load stored credentials
                 Dim loadStoredCredentials As Action =
                     Sub()
@@ -384,6 +399,38 @@ Namespace SharedLibrary
                                                      Dim key = txtKey.Text.Trim()
                                                      Dim productId = txtProductId.Text.Trim()
                                                      Dim userId = ExpandLicenseEnvironmentVariables(txtUserId.Text.Trim())
+
+                                                     If IsOfflineDomainLicenseKey(key) Then
+                                                         Dim confirmLocalResult = ShowCustomYesNoBox(
+                                                            "Are you sure you want to remove the offline-domain license from local storage?" & vbCrLf & vbCrLf &
+                                                            "No online deactivation is necessary.",
+                                                            "Remove License",
+                                                            "Cancel",
+                                                            $"{AN} - License Deactivation")
+
+                                                         If confirmLocalResult <> 1 Then Return
+
+                                                         ClearStoredLicense()
+                                                         licenseExplicitlyCleared = True
+                                                         dialogResult = False
+                                                         isCurrentlyActivated = False
+                                                         statusVerified = False
+
+                                                         txtKey.Text = ""
+                                                         txtProductId.Text = ""
+                                                         txtUserId.Text = ""
+
+                                                         lblActivationStatus.Text = "DEACTIVATED"
+                                                         lblActivationStatus.ForeColor = Color.DarkOrange
+                                                         lblProductInfo.Text = "Offline Domain License"
+                                                         showStatusMessage("Offline-domain license removed from local storage.", Color.DarkGreen)
+
+                                                         ShowCustomMessageBox(
+                                                            "Offline-domain license removed from local storage." & vbCrLf & vbCrLf &
+                                                            "No online deactivation was necessary.",
+                                                            $"{AN} - License Deactivated")
+                                                         Return
+                                                     End If
 
                                                      If String.IsNullOrWhiteSpace(key) OrElse String.IsNullOrWhiteSpace(productId) OrElse String.IsNullOrWhiteSpace(userId) Then
                                                          showStatusMessage("Please fill in all fields before checking status.", Color.DarkRed)
@@ -410,7 +457,11 @@ Namespace SharedLibrary
                                                              Dim statusMsg As New StringBuilder()
                                                              statusMsg.AppendLine($"Status: {response.StatusCheck}")
                                                              statusMsg.AppendLine($"Product: {response.ProductTitle}")
-                                                             statusMsg.AppendLine($"Activations: {response.TotalActivations} / {response.TotalActivationsPurchased}")
+                                                             If response.TotalActivationsPurchased > 0 Then
+                                                                 statusMsg.AppendLine($"Activations: {response.TotalActivations} / {response.TotalActivationsPurchased}")
+                                                             ElseIf IsOfflineDomainLicenseKey(key) Then
+                                                                 statusMsg.AppendLine("Activation Slots: not limited for offline-domain licenses")
+                                                             End If
                                                              If response.Activated Then
                                                                  statusMsg.AppendLine()
                                                                  statusMsg.AppendLine("✓ This User ID is ACTIVATED.")
@@ -484,7 +535,7 @@ Namespace SharedLibrary
                                                       If statusResponse.Success AndAlso statusResponse.Activated Then
                                                           SaveProLicenseToSettings(productId, key, userId, statusResponse.ProductTitle, True)
                                                           updateStatusDisplay(statusResponse, False)
-                                                          showStatusMessage($"✓ License is already activated for this User ID.{vbCrLf}{vbCrLf}Product: {statusResponse.ProductTitle}{vbCrLf}User ID: {userId}{vbCrLf}Activations: {statusResponse.TotalActivations} / {statusResponse.TotalActivationsPurchased}", Color.DarkGreen)
+                                                          showStatusMessage($"✓ License is already activated for this User ID.{vbCrLf}{vbCrLf}Product: {statusResponse.ProductTitle}{vbCrLf}User ID: {userId}{buildActivationUsageText(statusResponse, key)}", Color.DarkGreen)
 
                                                           statusVerified = True
                                                           lastVerifiedUserId = userId
@@ -521,7 +572,7 @@ Namespace SharedLibrary
                                                           LogLicenseEvent("Pro License", "Activated successfully", alwaysLog:=True)
 
                                                           updateStatusDisplay(activateResponse, False)
-                                                          showStatusMessage($"✓ License activated successfully!{vbCrLf}{vbCrLf}Product: {productTitle}{vbCrLf}User ID: {userId}{vbCrLf}Activations: {activateResponse.TotalActivations} / {activateResponse.TotalActivationsPurchased}", Color.DarkGreen)
+                                                          showStatusMessage($"✓ License activated successfully!{vbCrLf}{vbCrLf}Product: {productTitle}{vbCrLf}User ID: {userId}{buildActivationUsageText(activateResponse, key)}", Color.DarkGreen)
 
                                                           statusVerified = True
                                                           lastVerifiedUserId = userId
@@ -536,7 +587,7 @@ Namespace SharedLibrary
                                                           If recheckResponse.Success AndAlso recheckResponse.Activated Then
                                                               SaveProLicenseToSettings(productId, key, userId, recheckResponse.ProductTitle, True)
                                                               updateStatusDisplay(recheckResponse, False)
-                                                              showStatusMessage($"✓ License is activated for this User ID.{vbCrLf}{vbCrLf}Product: {recheckResponse.ProductTitle}{vbCrLf}User ID: {userId}{vbCrLf}Activations: {recheckResponse.TotalActivations} / {recheckResponse.TotalActivationsPurchased}", Color.DarkGreen)
+                                                              showStatusMessage($"✓ License is activated for this User ID.{vbCrLf}{vbCrLf}Product: {recheckResponse.ProductTitle}{vbCrLf}User ID: {userId}{buildActivationUsageText(recheckResponse, key)}", Color.DarkGreen)
 
                                                               statusVerified = True
                                                               lastVerifiedUserId = userId
@@ -798,6 +849,14 @@ Namespace SharedLibrary
         ''' <returns>A populated <see cref="LicenseApiResponse"/> instance.</returns>
         Private Shared Function CallLicenseApi(action As String, productId As String, licenseKey As String, userId As String) As LicenseApiResponse
             Dim result As New LicenseApiResponse()
+
+            If IsOfflineDomainLicenseKey(licenseKey) Then
+                Dim offlineResponse As LicenseApiResponse = Nothing
+
+                If TryCreateOfflineDomainLicenseResponse(action, productId, licenseKey, userId, offlineResponse) Then
+                    Return offlineResponse
+                End If
+            End If
 
             Try
                 ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 Or SecurityProtocolType.Tls13
@@ -1079,6 +1138,30 @@ Namespace SharedLibrary
                 Dim userId = My.Settings.License_UserID
                 Dim productName = My.Settings.License_ProductName
 
+                If IsOfflineDomainLicenseKey(licenseKey) Then
+                    Dim localResult = ShowCustomYesNoBox(
+                        "Are you sure you want to remove the offline-domain license from local storage?" & vbCrLf & vbCrLf &
+                        "No online deactivation is necessary.",
+                        "Remove License",
+                        "Cancel",
+                        $"{AN} - License Deactivation")
+
+                    If localResult <> 1 Then
+                        Return False
+                    End If
+
+                    ClearStoredLicense()
+
+                    LogLicenseEvent("License Deactivated", "Offline-domain license removed from local storage", alwaysLog:=True)
+
+                    ShowCustomMessageBox(
+                        "Offline-domain license removed from local storage." & vbCrLf & vbCrLf &
+                        "No online deactivation was necessary.",
+                        $"{AN} - License Deactivated")
+
+                    Return True
+                End If
+
                 Dim msg = $"Are you sure you want to deactivate your license?" & vbCrLf & vbCrLf &
                           $"Product: {productName}" & vbCrLf &
                           $"User ID: {userId}" & vbCrLf & vbCrLf &
@@ -1200,6 +1283,23 @@ Namespace SharedLibrary
                     sb.AppendLine($"Activated On: {My.Settings.License_ActivatedOn:d}")
                     sb.AppendLine($"Last Check: {My.Settings.License_LastCheck:d}")
                     sb.AppendLine($"API Confirmed: {My.Settings.License_ApiConfirmed}")
+
+                    If IsOfflineDomainLicenseKey(My.Settings.License_Key) Then
+                        Dim validUntilUtc As Date = Date.MinValue
+                        Dim allowedDomains As New List(Of String)()
+                        Dim offlineProductId As String = ""
+
+                        If TryReadOfflineDomainLicenseMetadata(My.Settings.License_Key, validUntilUtc, allowedDomains, offlineProductId) Then
+                            sb.AppendLine($"Valid Until: {validUntilUtc:yyyy-MM-dd} UTC")
+
+                            Dim daysRemaining = CInt((validUntilUtc.Date - Date.UtcNow.Date).TotalDays)
+                            sb.AppendLine($"Days Remaining: {daysRemaining}")
+
+                            If allowedDomains.Count > 0 Then
+                                sb.AppendLine($"Allowed Network IDs: {String.Join(", ", allowedDomains)}")
+                            End If
+                        End If
+                    End If
                 End If
 
             Catch ex As Exception
