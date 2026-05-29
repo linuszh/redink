@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Word"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 28.5.2026
+' 29.5.2026
 '
 ' The compiled version of Red Ink also ...
 '
