@@ -229,7 +229,7 @@ Public Class M365SearchTestForm
     '  UI construction
     ' ════════════════════════════════════════════════════════════════════
     Private Sub BuildUi()
-        Me.Text = Globals.ThisAddIn.AN & "- Search M365 Mails"
+        Me.Text = Globals.ThisAddIn.AN & "- Search Microsoft 365 Mails"
         Me.StartPosition = FormStartPosition.CenterScreen
         Me.MinimumSize = New Size(1100, 540)
         Me.ClientSize = New Size(1400, 700)
