@@ -55,6 +55,9 @@ Namespace Agents
 
         Public Const RequiredMemoryGetAllThreshold As Integer = 10
 
+        Public Const ToolNotExposedInCurrentTurnCode As String = "tool_not_exposed_in_current_turn"
+
+
         Public Enum TaskStatusKind
             None
             Complete
@@ -2389,6 +2392,37 @@ Namespace Agents
 
             Return False
         End Function
+
+        Public Shared Function HasBlockingUnresolvedToolFailure(runState As ToolingRunState) As Boolean
+            If runState Is Nothing OrElse Not runState.HasUnresolvedToolFailure Then
+                Return False
+            End If
+
+            Return Not String.Equals(
+                If(runState.LastErrorCode, "").Trim(),
+                ToolNotExposedInCurrentTurnCode,
+                StringComparison.OrdinalIgnoreCase)
+        End Function
+
+        Public Shared Sub ClearNonBlockingUnresolvedToolFailure(runState As ToolingRunState,
+                                                         recoveryLabel As String)
+            If runState Is Nothing OrElse Not runState.HasUnresolvedToolFailure Then
+                Return
+            End If
+
+            If Not String.Equals(
+                If(runState.LastErrorCode, "").Trim(),
+                ToolNotExposedInCurrentTurnCode,
+                StringComparison.OrdinalIgnoreCase) Then
+                Return
+            End If
+
+            runState.HasUnresolvedToolFailure = False
+            runState.LastFailureRecoveredByToolCall = True
+            runState.LastFailureHandledByBlockedFinal = False
+            runState.LastFailureUltimatelyFatal = False
+            runState.RecoveryToolName = If(recoveryLabel, "")
+        End Sub
 
     End Class
 

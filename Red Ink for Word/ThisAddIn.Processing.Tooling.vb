@@ -1026,6 +1026,7 @@ Partial Public Class ThisAddIn
                     Dim stopCurrentBatchAfterTool As Boolean = False
                     Dim restartForRequiredMemoryGrounding As Boolean = False
                     Dim restartAfterToolLoader As Boolean = False
+                    Dim restartAfterExposureMiss As Boolean = False
                     Dim turnVisibleToolNames As HashSet(Of String) =
                         BuildTurnVisibleToolNameSet(context.SelectedTools)
 
@@ -1093,6 +1094,9 @@ Partial Public Class ThisAddIn
                             turnVisibleToolNames.Contains(normalizedToolName)
 
                         If Not toolWasVisibleAtTurnStart Then
+                            Dim preparedForNextTurn As Boolean =
+                                TryPrepareToolForNextTurnAfterExposureMiss(tc.ToolName, context)
+
                             Dim hiddenResponse As ToolResponse =
                                 BuildToolNotExposedThisTurnResponse(tc, turnVisibleToolNames)
 
@@ -1101,21 +1105,23 @@ Partial Public Class ThisAddIn
                             If context.SequencingState IsNot Nothing Then
                                 context.SequencingState.NoteToolFailure(
                                     tc.ToolName,
-                                    If(hiddenResponse.ErrorCode, "tool_not_exposed_in_current_turn"),
+                                    If(hiddenResponse.ErrorCode, SharedLibrary.Agents.ToolCallSequencing.ToolNotExposedInCurrentTurnCode),
                                     If(hiddenResponse.ErrorMessage, "Tool schema was not exposed at the start of the turn."))
                             End If
 
-                            context.PendingContinuationGuardPrompt = BuildTurnExposureGuardPrompt(tc.ToolName)
+                            context.PendingContinuationGuardPrompt =
+                                BuildTurnExposureGuardPrompt(tc.ToolName, preparedForNextTurn)
                             context.PendingGuardTitle = "HOST TOOL EXPOSURE GUARD"
                             context.PendingRejectedTurnExplanation =
                                 "Your previous turn attempted to call a tool whose full schema was not exposed at the start of that turn."
                             context.PendingRejectedAssistantTurn = If(currentResponse, "")
                             context.PrematureTextRetryCount = 0
                             stopCurrentBatchAfterTool = True
+                            restartAfterExposureMiss = preparedForNextTurn
 
                             context.LogWarn(
                                 "Blocked tool because it was not exposed at turn start.",
-                                details:=$"host={context.HostKind}; tool={tc.ToolName}")
+                                details:=$"host={context.HostKind}; tool={tc.ToolName}; preparedForNextTurn={If(preparedForNextTurn, "true", "false")}")
 
                             Exit For
                         End If
@@ -1451,6 +1457,17 @@ Partial Public Class ThisAddIn
                         End If
                     Next
 
+                    If restartAfterExposureMiss Then
+                        Dim preparedToolResponsesAfterExposureMiss As String = BuildToolResponsesForModel(
+                            context.AllToolResponses,
+                            context.ToolingModel,
+                            compactForSubAgent:=subAgentMode)
+
+                        INI_APICall_ToolResponses_2 = preparedToolResponsesAfterExposureMiss
+                        context.Log("Tool was prepared after exposure miss; restarting next iteration with refreshed tool definitions.", "diag")
+                        Continue While
+                    End If
+
                     If restartAfterToolLoader Then
                         Dim preparedToolResponsesAfterLoader As String = BuildToolResponsesForModel(
                             context.AllToolResponses,
@@ -1506,7 +1523,7 @@ Partial Public Class ThisAddIn
                     Dim turnValidation = SharedLibrary.Agents.ToolCallSequencing.ValidateActiveToolingTurn(
                         currentResponse,
                         hasToolCalls:=False,
-                        hasUnresolvedToolFailure:=context.SequencingState IsNot Nothing AndAlso context.SequencingState.HasUnresolvedToolFailure,
+                        hasUnresolvedToolFailure:=SharedLibrary.Agents.ToolCallSequencing.HasBlockingUnresolvedToolFailure(context.SequencingState),
                         runState:=context.SequencingState)
 
                     If context.SequencingState IsNot Nothing Then
@@ -1603,6 +1620,10 @@ Partial Public Class ThisAddIn
                                         details:="reason=" & _ftGateEval_C.Reason)
                             End If
 
+                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                context.SequencingState,
+                                "host_exposure_recovery")
+
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "complete"
                             context.Log("Final complete response accepted.")
@@ -1652,6 +1673,10 @@ Partial Public Class ThisAddIn
                                         "Final-turn repair budget exhausted at 'blocked' branch; accepting candidate.",
                                         details:="reason=" & _ftGateEval_B.Reason)
                             End If
+
+                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                context.SequencingState,
+                                "host_exposure_recovery")
 
                             currentResponse = StripTaskStatus(currentResponse)
                             acceptedFinalStatus = "blocked"
@@ -1782,6 +1807,10 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.HasOpenToolWorkflow = False
                             End If
 
+                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                context.SequencingState,
+                                "host_exposure_recovery")
+
                             context.Log("Forced no-tool final response accepted as complete.")
 
                         Case SharedLibrary.Agents.ToolCallSequencing.ActiveToolingTurnKind.FinalBlockedTurn
@@ -1791,6 +1820,10 @@ Partial Public Class ThisAddIn
                                 context.SequencingState.FinalResponseOrigin = "model_provided"
                                 context.SequencingState.HasOpenToolWorkflow = False
                             End If
+
+                            SharedLibrary.Agents.ToolCallSequencing.ClearNonBlockingUnresolvedToolFailure(
+                                context.SequencingState,
+                                "host_exposure_recovery")
 
                             context.Log("Forced no-tool final response accepted as blocked.")
 
@@ -1899,9 +1932,9 @@ Partial Public Class ThisAddIn
             End If
 
             If Not context.FinalizationBlocked AndAlso
-                       context.SequencingState IsNot Nothing AndAlso
-                       context.SequencingState.HasUnresolvedToolFailure AndAlso
-                       Not context.SequencingState.RequiresParentRecovery Then
+               context.SequencingState IsNot Nothing AndAlso
+               SharedLibrary.Agents.ToolCallSequencing.HasBlockingUnresolvedToolFailure(context.SequencingState) AndAlso
+               Not context.SequencingState.RequiresParentRecovery Then
 
                 context.FinalizationBlocked = True
                 context.FinalizationBlockedReason = "unresolved_tool_failure"
@@ -2296,8 +2329,20 @@ Partial Public Class ThisAddIn
         }
     End Function
 
-    Private Function BuildTurnExposureGuardPrompt(toolName As String) As String
+    Private Function BuildTurnExposureGuardPrompt(toolName As String,
+                                                  Optional preparedForNextTurn As Boolean = False) As String
         Dim normalizedToolName As String = If(toolName, "").Trim()
+
+        If preparedForNextTurn Then
+            Return "HOST TOOL EXPOSURE GUARD: The tool '" &
+                   normalizedToolName &
+                   "' was not exposed with its full schema at the start of the previous assistant turn. " &
+                   "It has now been loaded and is exposed in THIS turn. " &
+                   "If you still need that tool, call '" & normalizedToolName & "' now through the native tool-calling mechanism. " &
+                   "Do NOT call tool_loader for this tool again. " &
+                   "Do NOT postpone this tool call to a later turn. " &
+                   "Do NOT produce final prose that merely announces a later audit, attestation, or follow-up step."
+        End If
 
         Return "HOST TOOL EXPOSURE GUARD: The tool '" &
                normalizedToolName &
@@ -4081,6 +4126,21 @@ Partial Public Class ThisAddIn
             context.LogError($"Error during forced no-tool finalization: {ex.Message}", ex:=ex)
             Return ""
         End Try
+    End Function
+
+
+    Private Function TryPrepareToolForNextTurnAfterExposureMiss(toolName As String,
+                                                            context As ToolExecutionContext) As Boolean
+        If context Is Nothing OrElse String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        If Not IsToolAllowedForCurrentContext(toolName, context) Then
+            Return False
+        End If
+
+        Dim loaded As ModelConfig = EnsureVisibleToolLoaded(toolName.Trim(), context)
+        Return loaded IsNot Nothing
     End Function
 
 
