@@ -702,10 +702,10 @@ Partial Class Ribbon2
         '
         'RI_M365
         '
-        Me.RI_M365.Label = "M365 Mail Search"
+        Me.RI_M365.Label = "Microsoft 365 Mail Search"
         Me.RI_M365.Name = "RI_M365"
         Me.RI_M365.OfficeImageId = "NewSearchFolder"
-        Me.RI_M365.ScreenTip = "Searches your M365 content with and without the help of AI"
+        Me.RI_M365.ScreenTip = "Searches your Microsoft 365 content with and without the help of AI"
         Me.RI_M365.ShowImage = True
         '
         'RI_MailMover

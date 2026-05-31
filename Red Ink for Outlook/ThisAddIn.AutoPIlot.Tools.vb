@@ -89,6 +89,7 @@
 '  - manage_scheduled_tasks
 '  - manage_user_memory
 '  - manage_user_files
+'  - complete_word_tables
 '  - report_inability
 '
 ' Notes:
@@ -156,6 +157,7 @@ Partial Public Class ThisAddIn
     Private Const AP_Tool_ManageUserMemory As String = "manage_user_memory"
     Private Const AP_Tool_ManageUserFiles As String = "manage_user_files"
     Private Const AP_Tool_ReportInability As String = "report_inability"
+    Private Const AP_Tool_CompleteWordTables As String = "complete_word_tables"
 
 
     ' ═══════════════════════════════════════════════════════════════════════════
@@ -172,62 +174,65 @@ Partial Public Class ThisAddIn
     Friend Function GetAutoPilotInternalTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
 
+        ' Deterministic helper for exact text/data computation inside AutoPilot.
+        tools.Add(SharedLibrary.Agents.JsRunTool.Build())
+
         ' ── process_word_document ──
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
-            .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
-            .ToolInstructionsPrompt =
-                AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments by applying a prompt/instruction. " &
-                "Use this for translation, correction, proofreading, anonymization, data updates, formula changes, or any text/data transformation. " &
-                "For Word documents, returns both a clean version and a compare document showing changes. " &
-                "For PowerPoint and Excel files, returns the processed version (no compare document). " &
-                "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
-                "CRITICAL — ONE OPERATION PER CALL: This tool applies exactly ONE instruction per call. " &
-                "If the user requests multiple distinct operations (e.g., 'correct and translate', 'anonymize and summarize', 'fix grammar then make more concise'), " &
-                "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
-                "Wait for the result. Second call: apply the second operation to the output file from the first call (the '_processed' file). " &
-                "Example for 'correct and translate to German': " &
-                "(1) Call process_word_document with task_type='correct', instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
-                "(2) Call process_word_document with task_type='translate', instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
-                "NEVER combine two distinct operations into a single instruction string. " &
-                "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
-                "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
-            .ToolDefinition =
-                "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
-                """description"":""Applies exactly ONE processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
-                "Supports translation, correction, anonymization, data updates, formula modifications, and freestyle operations. " &
-                "For Word documents, produces clean output plus a compare document with tracked changes. " &
-                "For PowerPoint and Excel, produces the processed file only. " &
-                "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
-                "make separate sequential calls — first correct, then translate the corrected output file. " &
-                "Output files are named '<original>_processed.<ext>' and can be used as input for the next call via attachment_names.""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
-                "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
-                "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
-                """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
-                """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
-                "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
-                "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
-                "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
-                """sheet_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional: for Excel files only, restrict processing to these sheet names. If omitted, all sheets are processed.""}" &
-                "},""required"":[""instruction""]}}"
-        })
+        .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ProcessWordDoc,
+        .ModelDescription = "Process Word/PowerPoint/Excel Document (built-in)",
+        .ToolInstructionsPrompt =
+            AP_Tool_ProcessWordDoc & ": Processes one or more Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments by applying a prompt/instruction. " &
+            "Use this for translation, correction, proofreading, anonymization, data updates, formula changes, or any text/data transformation. " &
+            "For Word documents, returns both a clean version and a compare document showing changes. " &
+            "For PowerPoint and Excel files, returns the processed version (no compare document). " &
+            "For Excel files, you can optionally restrict processing to specific sheet names using the sheet_names parameter. " &
+            "CRITICAL — ONE OPERATION PER CALL: This tool applies exactly ONE instruction per call. " &
+            "If the user requests multiple distinct operations (e.g., 'correct and translate', 'anonymize and summarize', 'fix grammar then make more concise'), " &
+            "you MUST split them into separate sequential calls. First call: apply the first operation to the original file. " &
+            "Wait for the result. Second call: apply the second operation to the output file from the first call (the '_processed' file). " &
+            "Example for 'correct and translate to German': " &
+            "(1) Call process_word_document with task_type='correct', instruction='Correct spelling, grammar and style' on 'Contract.docx'. Result: 'Contract_processed.docx'. " &
+            "(2) Call process_word_document with task_type='translate', instruction='Translate to German' on attachment_names=['Contract_processed.docx']. Result: 'Contract_processed_processed.docx'. " &
+            "NEVER combine two distinct operations into a single instruction string. " &
+            "However, a single coherent task counts as one operation (e.g., 'Translate to German' is one operation even though it involves reading and rewriting). " &
+            "Output files are named '<original>_processed.<ext>' and can be referenced in subsequent tool calls by that name.",
+        .ToolDefinition =
+            "{""name"":""" & AP_Tool_ProcessWordDoc & """," &
+            """description"":""Applies exactly ONE processing instruction to Word (.docx), PowerPoint (.pptx), or Excel (.xlsx) attachments. " &
+            "Supports translation, correction, anonymization, data updates, formula modifications, and freestyle operations. " &
+            "For Word documents, produces clean output plus a compare document with tracked changes. " &
+            "For PowerPoint and Excel, produces the processed file only. " &
+            "IMPORTANT: Apply only ONE operation per call. For multi-step requests (e.g. 'correct and translate'), " &
+            "make separate sequential calls — first correct, then translate the corrected output file. " &
+            "Output files are named '<original>_processed.<ext>' and can be used as input for the next call via attachment_names.""," &
+            """parameters"":{""type"":""object"",""properties"":{" &
+            """instruction"":{""type"":""string"",""description"":""A single, specific instruction to apply to the document. Must be ONE operation only — " &
+            "e.g. 'Translate to German' or 'Correct spelling and grammar' or 'Anonymize all personal names'. " &
+            "Do NOT combine multiple operations like 'Correct and translate'. Split those into separate calls.""}," &
+            """task_type"":{""type"":""string"",""enum"":[""translate"",""correct"",""other""]," &
+            """description"":""Classifies the operation: 'translate' for language translation, 'correct' for spelling/grammar/style correction or proofreading, " &
+            "'other' for everything else (anonymization, data transformation, restructuring, summarization, etc.). Default: 'other'""}," &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the attachments to process. " &
+            "Can include output files from previous tool calls (e.g. 'Contract_processed.docx'). " &
+            "If empty or omitted, processes all .docx, .pptx, and .xlsx attachments.""}," &
+            """sheet_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional: for Excel files only, restrict processing to these sheet names. If omitted, all sheets are processed.""}" &
+            "},""required"":[""instruction""]}}"
+    })
 
         ' ── extract_pdf_text ──
         tools.Add(New ModelConfig() With {
-            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
-            .ModelDescription = "Extract PDF Text (built-in)",
-            .ToolInstructionsPrompt =
-                AP_Tool_ExtractPdfText & ": Extracts the text content from one or more PDF attachments.",
-            .ToolDefinition =
-                "{""name"":""" & AP_Tool_ExtractPdfText & """," &
-                """description"":""Extracts text from PDF file attachments""," &
-                """parameters"":{""type"":""object"",""properties"":{" &
-                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}" &
-                "},""required"":[]}}"
-        })
+        .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_ExtractPdfText,
+        .ModelDescription = "Extract PDF Text (built-in)",
+        .ToolInstructionsPrompt =
+            AP_Tool_ExtractPdfText & ": Extracts the text content from one or more PDF attachments.",
+        .ToolDefinition =
+            "{""name"":""" & AP_Tool_ExtractPdfText & """," &
+            """description"":""Extracts text from PDF file attachments""," &
+            """parameters"":{""type"":""object"",""properties"":{" &
+            """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Filenames of the PDF attachments to extract text from. If empty, processes all PDFs.""}" &
+            "},""required"":[]}}"
+    })
 
         ' ── merge_pdfs ──
         tools.Add(New ModelConfig() With {
@@ -537,23 +542,59 @@ Partial Public Class ThisAddIn
         tools.Add(New ModelConfig() With {
             .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CreateWordDoc,
             .ModelDescription = "Create Word Document from Markdown (built-in)",
+                   .ToolInstructionsPrompt =
+            AP_Tool_CreateWordDoc & ": Creates a new formatted Word document (.docx) from Markdown content. " &
+            "Use this when the user asks you to create, generate, or produce a new Word document from any content " &
+            "(e.g., from a PDF extract, from research results, from your own generated text, from a summary, etc.). " &
+            "Provide the content as Markdown and it will be converted to a properly formatted .docx file. " &
+            "The tool supports richer document presentation options including document title metadata, base font, page orientation, " &
+            "professional table styling, vertical cell alignment, and a preferred Word table style name. " &
+            "When the content contains tables, you SHOULD use professional_layout=true unless the user explicitly asks for plain output. " &
+            "If the user asks for a specific look, pass base_font_name, base_font_size, table_style_name, and page_orientation when appropriate. " &
+            "The resulting file will be attached to the reply.",
+        .ToolDefinition =
+            "{""name"":""" & AP_Tool_CreateWordDoc & """," &
+            """description"":""Creates a new formatted Word document (.docx) from Markdown content. " &
+            "Supports headings, bold, italic, lists, and improved table rendering with consistent document font, " &
+            "professional table styling, vertical cell alignment, optional page orientation, and optional document metadata. " &
+            "Use when the user asks to create, generate, or produce a Word document from any content.""," &
+            """parameters"":{""type"":""object"",""properties"":{" &
+            """markdown_content"":{""type"":""string"",""description"":""The full document content in Markdown format. " &
+            "Use headings (#, ##, ###), bold (**text**), italic (*text*), lists (- or 1.), and Markdown tables when needed.""}," &
+            """file_name"":{""type"":""string"",""description"":""The desired filename for the output Word document " &
+            "(without .docx extension). Defaults to 'Document' if not specified.""}," &
+            """document_title"":{""type"":""string"",""description"":""Optional document title metadata stored in the Word file.""}," &
+            """base_font_name"":{""type"":""string"",""description"":""Optional base font for the document and generated tables, " &
+            "for example 'Calibri', 'Arial', 'Aptos', or 'Times New Roman'.""}," &
+            """base_font_size"":{""type"":""number"",""description"":""Optional base font size in points, for example 10, 11, or 12.""}," &
+            """page_orientation"":{""type"":""string"",""enum"":[""portrait"",""landscape""],""description"":""Optional page orientation. " &
+            "Use 'landscape' for wide tables or explicitly requested layouts.""}," &
+            """professional_layout"":{""type"":""boolean"",""description"":""Optional. Default true. " &
+            "When true, applies improved table formatting such as full-width layout, header styling, row banding, padding, and vertical centering.""}," &
+            """table_style_name"":{""type"":""string"",""description"":""Optional preferred Word table style name, for example 'Table Grid'. " &
+            "If omitted, the tool applies a safe built-in fallback style when available.""}" &
+            "},""required"":[""markdown_content""]}}"
+        })
+
+        tools.Add(New ModelConfig() With {
+            .ToolOnly = True, .Tool = True, .ToolName = AP_Tool_CompleteWordTables,
+            .ModelDescription = "Complete Word Tables (built-in)",
+            .ToolPriority = 950,
             .ToolInstructionsPrompt =
-                AP_Tool_CreateWordDoc & ": Creates a new formatted Word document (.docx) from Markdown content. " &
-                "Use this when the user asks you to create, generate, or produce a new Word document from any content " &
-                "(e.g., from a PDF extract, from research results, from your own generated text, from a summary, etc.). " &
-                "Provide the content as Markdown and it will be converted to a properly formatted .docx file with " &
-                "headings, bold, italic, lists, etc. The resulting file will be attached to the reply.",
-            .ToolDefinition =
-                "{""name"":""" & AP_Tool_CreateWordDoc & """," &
-                """description"":""Creates a new formatted Word document (.docx) from Markdown content. " &
-                "Use when the user asks to create, generate, or produce a Word document from any content. " &
-                "The Markdown is converted to a properly formatted .docx with headings, bold, italic, lists, etc.""," &
+                AP_Tool_CompleteWordTables & ": Use this to fill in an existing Word form or table-based document in place. " &
+                "Prefer this tool over process_word_document when the goal is to complete empty fields, content controls, checkboxes, dropdowns, or table cells. " &
+                "Do not use process_word_document for form filling when this tool applies.",
+                        .ToolDefinition =
+                "{""name"":""" & AP_Tool_CompleteWordTables & """," &
+                """description"":""Completes empty or incomplete tables, body placeholders, and form fields in Word documents " &
+                "(.docx or .doc) using AI while preserving the original structure and formatting as much as possible. " &
+                "Produces a completed .docx and optionally a compare document.""," &
                 """parameters"":{""type"":""object"",""properties"":{" &
-                """markdown_content"":{""type"":""string"",""description"":""The full document content in Markdown format. " &
-                "Use headings (#, ##, ###), bold (**text**), italic (*text*), lists (- or 1.), etc.""}," &
-                """file_name"":{""type"":""string"",""description"":""The desired filename for the output Word document " &
-                "(without .docx extension). Defaults to 'Document' if not specified.""}" &
-                "},""required"":[""markdown_content""]}}"
+                """instruction"":{""type"":""string"",""description"":""Instructions describing how the tables and placeholders should be completed.""}," &
+                """attachment_names"":{""type"":""array"",""items"":{""type"":""string""},""description"":""Optional list of Word files to process. If omitted, all .docx/.doc files in the current session are processed.""}," &
+                """use_second_api"":{""type"":""boolean"",""description"":""Optional. Use the secondary API/model for the completion run.""}," &
+                """create_compare_document"":{""type"":""boolean"",""description"":""Optional. Default true. If true, also creates a compare document with tracked changes.""}" &
+                "},""required"":[""instruction""]}}"
         })
 
         ' ── create_excel_spreadsheet ──
@@ -1271,6 +1312,8 @@ Partial Public Class ThisAddIn
                 response = Await ExecuteManageUserMemoryTool(toolCall, context, cancellationToken)
             Case AP_Tool_ManageUserFiles
                 response = Await ExecuteManageUserFilesTool(toolCall, context, cancellationToken)
+            Case AP_Tool_CompleteWordTables
+                response = Await ExecuteCompleteWordTablesTool(toolCall, context, cancellationToken)
             Case AP_Tool_ReportInability
                 response = Await ExecuteReportInabilityTool(toolCall, context, cancellationToken)
             Case Else
@@ -3432,6 +3475,178 @@ Partial Public Class ThisAddIn
     '  TOOL EXECUTION: create_word_document
     ' ═══════════════════════════════════════════════════════════════════════════
 
+    Private Shared Function GetArgSingleInvariant(args As Dictionary(Of String, Object),
+                                                  key As String,
+                                                  defaultVal As Single) As Single
+        Dim raw As String = GetArgString(args, key)
+        If String.IsNullOrWhiteSpace(raw) Then Return defaultVal
+
+        Dim parsed As Single
+        If Single.TryParse(raw, Globalization.NumberStyles.Any,
+                           Globalization.CultureInfo.InvariantCulture, parsed) Then
+            Return parsed
+        End If
+
+        If Single.TryParse(raw, parsed) Then
+            Return parsed
+        End If
+
+        Return defaultVal
+    End Function
+
+    Private Shared Function TryApplyPreferredWordTableStyle(tbl As Microsoft.Office.Interop.Word.Table,
+                                                       preferredStyleName As String) As Boolean
+        If tbl Is Nothing Then Return False
+
+        If Not String.IsNullOrWhiteSpace(preferredStyleName) Then
+            Try
+                tbl.Style = preferredStyleName.Trim()
+                Return True
+            Catch
+            End Try
+        End If
+
+        Try
+            tbl.Style = "Table Grid"
+            Return True
+        Catch
+        End Try
+
+        Return False
+    End Function
+
+    Private Shared Sub ApplyAutoPilotWordDocumentStyling(
+            doc As Microsoft.Office.Interop.Word.Document,
+            args As Dictionary(Of String, Object))
+
+        If doc Is Nothing Then Exit Sub
+
+        Dim documentTitle As String = GetArgString(args, "document_title")
+        Dim baseFontName As String = GetArgString(args, "base_font_name")
+        Dim tableStyleName As String = GetArgString(args, "table_style_name")
+        Dim pageOrientation As String = If(GetArgString(args, "page_orientation"), "").Trim().ToLowerInvariant()
+        Dim professionalLayout As Boolean = GetArgBool(args, "professional_layout", True)
+
+        Dim normalStyle As Microsoft.Office.Interop.Word.Style = Nothing
+        Dim effectiveFontName As String = "Calibri"
+        Dim effectiveFontSize As Single = 11.0F
+
+        Try
+            normalStyle = doc.Styles(Microsoft.Office.Interop.Word.WdBuiltinStyle.wdStyleNormal)
+
+            Try
+                If normalStyle.Font IsNot Nothing Then
+                    If Not String.IsNullOrWhiteSpace(normalStyle.Font.Name) Then
+                        effectiveFontName = normalStyle.Font.Name
+                    End If
+                    If CSng(normalStyle.Font.Size) > 0 Then
+                        effectiveFontSize = CSng(normalStyle.Font.Size)
+                    End If
+                End If
+            Catch
+            End Try
+
+            If Not String.IsNullOrWhiteSpace(baseFontName) Then
+                effectiveFontName = baseFontName.Trim()
+                Try : normalStyle.Font.Name = effectiveFontName : Catch : End Try
+            End If
+
+            Dim requestedFontSize As Single = GetArgSingleInvariant(args, "base_font_size", 0.0F)
+            If requestedFontSize > 0 Then
+                effectiveFontSize = requestedFontSize
+                Try : normalStyle.Font.Size = effectiveFontSize : Catch : End Try
+            End If
+
+            If Not String.IsNullOrWhiteSpace(documentTitle) Then
+                Try
+                    doc.BuiltInDocumentProperties("Title").Value = documentTitle.Trim()
+                Catch
+                End Try
+            End If
+
+            Select Case pageOrientation
+                Case "landscape"
+                    Try
+                        doc.PageSetup.Orientation = Microsoft.Office.Interop.Word.WdOrientation.wdOrientLandscape
+                    Catch
+                    End Try
+                Case "portrait"
+                    Try
+                        doc.PageSetup.Orientation = Microsoft.Office.Interop.Word.WdOrientation.wdOrientPortrait
+                    Catch
+                    End Try
+            End Select
+
+            For Each tbl As Microsoft.Office.Interop.Word.Table In doc.Tables
+                Dim headerRange As Microsoft.Office.Interop.Word.Range = Nothing
+
+                Try
+                    TryApplyPreferredWordTableStyle(tbl, tableStyleName)
+
+                    Try : tbl.Range.Font.Name = effectiveFontName : Catch : End Try
+                    Try : tbl.Range.Font.Size = effectiveFontSize : Catch : End Try
+                    Try : tbl.Range.Cells.VerticalAlignment = Microsoft.Office.Interop.Word.WdCellVerticalAlignment.wdCellAlignVerticalCenter : Catch : End Try
+                    Try : tbl.Rows.Alignment = Microsoft.Office.Interop.Word.WdRowAlignment.wdAlignRowLeft : Catch : End Try
+                    Try : tbl.Range.ParagraphFormat.SpaceBefore = 0 : Catch : End Try
+                    Try : tbl.Range.ParagraphFormat.SpaceAfter = 0 : Catch : End Try
+                    Try : tbl.Range.ParagraphFormat.LineSpacingRule = Microsoft.Office.Interop.Word.WdLineSpacing.wdLineSpaceSingle : Catch : End Try
+
+                    If professionalLayout Then
+                        Try : tbl.AllowAutoFit = True : Catch : End Try
+                        Try : tbl.AutoFitBehavior(Microsoft.Office.Interop.Word.WdAutoFitBehavior.wdAutoFitWindow) : Catch : End Try
+                        Try : tbl.PreferredWidthType = Microsoft.Office.Interop.Word.WdPreferredWidthType.wdPreferredWidthPercent : Catch : End Try
+                        Try : tbl.PreferredWidth = 100.0F : Catch : End Try
+                        Try : tbl.Borders.Enable = 1 : Catch : End Try
+                        Try : tbl.TopPadding = 4.0F : Catch : End Try
+                        Try : tbl.BottomPadding = 4.0F : Catch : End Try
+                        Try : tbl.LeftPadding = 5.0F : Catch : End Try
+                        Try : tbl.RightPadding = 5.0F : Catch : End Try
+                        Try : tbl.Spacing = 0.0F : Catch : End Try
+                        Try : tbl.ApplyStyleHeadingRows = True : Catch : End Try
+                        Try : tbl.ApplyStyleRowBands = True : Catch : End Try
+                        Try : tbl.ApplyStyleFirstColumn = False : Catch : End Try
+                        Try : tbl.ApplyStyleLastColumn = False : Catch : End Try
+                    End If
+
+                    If tbl.Rows.Count > 0 Then
+                        Try
+                            tbl.Rows(1).HeadingFormat = -1
+                        Catch
+                        End Try
+
+                        Try
+                            headerRange = tbl.Rows(1).Range
+                            headerRange.Font.Bold = True
+                            headerRange.Font.Name = effectiveFontName
+                            headerRange.Font.Size = effectiveFontSize
+                            headerRange.Cells.VerticalAlignment = Microsoft.Office.Interop.Word.WdCellVerticalAlignment.wdCellAlignVerticalCenter
+                            headerRange.ParagraphFormat.SpaceBefore = 0
+                            headerRange.ParagraphFormat.SpaceAfter = 0
+
+                            If professionalLayout Then
+                                headerRange.Shading.BackgroundPatternColor =
+                                    Microsoft.Office.Interop.Word.WdColor.wdColorGray15
+                            End If
+                        Catch
+                        End Try
+                    End If
+
+                Finally
+                    If headerRange IsNot Nothing Then
+                        Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(headerRange) : Catch : End Try
+                    End If
+                End Try
+            Next
+
+            Try : doc.Repaginate() : Catch : End Try
+
+        Finally
+            If normalStyle IsNot Nothing Then
+                Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(normalStyle) : Catch : End Try
+            End If
+        End Try
+    End Sub
+
     Private Async Function ExecuteCreateWordDocTool(
             toolCall As ToolCall, context As ToolExecutionContext, ct As CancellationToken) As Task(Of ToolResponse)
 
@@ -3450,7 +3665,6 @@ Partial Public Class ThisAddIn
             Dim fileName = GetArgString(toolCall.Arguments, "file_name")
             If String.IsNullOrWhiteSpace(fileName) Then fileName = "Document"
 
-            ' Sanitize filename
             For Each c In Path.GetInvalidFileNameChars()
                 fileName = fileName.Replace(c, "_"c)
             Next
@@ -3460,7 +3674,6 @@ Partial Public Class ThisAddIn
 
             Dim outputPath = Path.Combine(_apCurrentTempDir, fileName)
 
-            ' Prevent filename collision
             Dim counter = 1
             While File.Exists(outputPath)
                 Dim baseName = Path.GetFileNameWithoutExtension(fileName)
@@ -3476,6 +3689,8 @@ Partial Public Class ThisAddIn
                                                Dim wordApp As Microsoft.Office.Interop.Word.Application = Nothing
                                                Dim doc As Microsoft.Office.Interop.Word.Document = Nothing
                                                Dim weCreated As Boolean = False
+                                               Dim sel As Microsoft.Office.Interop.Word.Selection = Nothing
+
                                                Try
                                                    Try
                                                        wordApp = DirectCast(GetObject(, "Word.Application"), Microsoft.Office.Interop.Word.Application)
@@ -3484,30 +3699,42 @@ Partial Public Class ThisAddIn
                                                        wordApp.Visible = False
                                                        weCreated = True
                                                    End Try
-                                                   wordApp.ScreenUpdating = False
 
+                                                   wordApp.ScreenUpdating = False
                                                    doc = wordApp.Documents.Add()
                                                    doc.Activate()
 
-                                                   ' Use the existing shared library method to insert formatted Markdown
-                                                   Dim sel As Microsoft.Office.Interop.Word.Selection = wordApp.Selection
+                                                   sel = wordApp.Selection
                                                    SharedMethods.InsertTextWithMarkdown(sel, markdownContent, TrailingCR:=False)
+
+                                                   ApplyAutoPilotWordDocumentStyling(doc, toolCall.Arguments)
 
                                                    doc.SaveAs2(outputPath, Microsoft.Office.Interop.Word.WdSaveFormat.wdFormatXMLDocument)
                                                    Return True
+
                                                Catch ex As Exception
                                                    Debug.WriteLine($"CreateWordDoc error: {ex.Message}")
                                                    Return False
+
                                                Finally
+                                                   If sel IsNot Nothing Then
+                                                       Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(sel) : Catch : End Try
+                                                   End If
+
                                                    If doc IsNot Nothing Then
                                                        Try : doc.Close(False) : Catch : End Try
                                                        Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(doc) : Catch : End Try
                                                    End If
-                                                   Try : If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
-                                                   Catch : End Try
+
+                                                   Try
+                                                       If wordApp IsNot Nothing Then wordApp.ScreenUpdating = True
+                                                   Catch
+                                                   End Try
+
                                                    If weCreated AndAlso wordApp IsNot Nothing Then
                                                        Try : wordApp.Quit(False) : Catch : End Try
                                                    End If
+
                                                    If wordApp IsNot Nothing Then
                                                        Try : System.Runtime.InteropServices.Marshal.FinalReleaseComObject(wordApp) : Catch : End Try
                                                    End If
@@ -3515,7 +3742,6 @@ Partial Public Class ThisAddIn
                                            End Function)
 
             If success AndAlso File.Exists(outputPath) Then
-                ' Register as output on the first attachment, or create a standalone entry
                 If _apCurrentAttachments IsNot Nothing AndAlso _apCurrentAttachments.Count > 0 Then
                     _apCurrentAttachments(0).OutputFiles.Add(outputPath)
                 End If
@@ -3540,7 +3766,6 @@ Partial Public Class ThisAddIn
 
         Return response
     End Function
-
 
     ' ═══════════════════════════════════════════════════════════════════════════
     '  TOOL EXECUTION: comment_word_document
@@ -8296,6 +8521,7 @@ Partial Public Class ThisAddIn
                  AP_Tool_ManageScheduledTasks,
                  AP_Tool_ManageUserMemory,
                  AP_Tool_ManageUserFiles,
+                 AP_Tool_CompleteWordTables,
                  AP_Tool_ReportInability
                 Return True
             Case Else

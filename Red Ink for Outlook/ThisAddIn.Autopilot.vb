@@ -295,6 +295,7 @@ Partial Public Class ThisAddIn
         Catch : End Try
         Try : _apNotificationTimer?.Dispose() : Catch : End Try
         _apNotificationTimer = Nothing
+        StopAutoDeleteTimer()
         StopSchedulerTimer()
         StopSchedulerTimer()
         CloseSchedulerDashboard()
@@ -565,6 +566,14 @@ Partial Public Class ThisAddIn
         If config.EnableScheduler Then
             SchedulerCatchUp()
             StartSchedulerTimer()
+        End If
+
+        If config.AutoDeleteAfterHours > 0 Then
+            ApDashboardLog($"🗑 Auto-delete enabled after {config.AutoDeleteAfterHours}h (includes Deleted Items).", "info")
+            StartAutoDeleteTimer()
+            RunAutoDeleteCleanupAsync(_apCts.Token)
+        Else
+            ApDashboardLog("🗑 Auto-delete disabled.", "info")
         End If
 
         AddHandler Application.NewMailEx, AddressOf AutoPilot_NewMailEx
@@ -2126,18 +2135,26 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Tags the original incoming mail with the AP_CategoryName category so that
     ''' the catch-up scan can identify it as already processed.
+    ''' Also starts the auto-delete retention clock for the whole cleanup group.
     ''' </summary>
     Private Sub TagOriginalMailAsProcessed(mi As MailItem)
         Try
             Dim existing = mi.Categories
+            Dim needsSave As Boolean = False
+
             If String.IsNullOrWhiteSpace(existing) Then
                 mi.Categories = AP_CategoryName
+                needsSave = True
             ElseIf existing.IndexOf(AP_CategoryName, StringComparison.OrdinalIgnoreCase) < 0 Then
                 mi.Categories = existing & ", " & AP_CategoryName
-            Else
-                Return ' Already tagged
+                needsSave = True
             End If
-            mi.Save()
+
+            If needsSave Then
+                mi.Save()
+            End If
+
+            MarkMailGroupAsAnsweredAndEligible(mi)
         Catch ex As System.Exception
             Debug.WriteLine($"[AutoPilot] TagOriginalMailAsProcessed error: {ex.Message}")
         End Try
@@ -3348,6 +3365,24 @@ Partial Public Class ThisAddIn
                 Catch : End Try
             End If
             Try : reply.Categories = AP_CategoryName : Catch : End Try
+
+            Try
+                Dim cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
+                If Not String.IsNullOrWhiteSpace(cleanupGroupId) Then
+                    Dim deleteAfterUtc = If(isHoldingOnly, CType(Nothing, DateTime?), GetAutoDeleteCutoffUtc())
+                    Dim answeredUtc = If(isHoldingOnly, CType(Nothing, DateTime?), DateTime.UtcNow)
+
+                    StampCleanupMetadata(
+                        reply,
+                        cleanupGroupId,
+                        isEligible:=Not isHoldingOnly AndAlso deleteAfterUtc.HasValue,
+                        answeredUtc:=answeredUtc,
+                        deleteAfterUtc:=deleteAfterUtc,
+                        saveItem:=False)
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on reply: {ex.Message}")
+            End Try
 
             reply.Send()
             Try : MoveLastSentToInkyReplies() : Catch : End Try
@@ -4734,6 +4769,23 @@ Partial Public Class ThisAddIn
                 Catch
                 End Try
             End If
+
+            Try
+                Dim cleanupGroupId = GetOrCreateCleanupGroupId(originalMail)
+                If Not String.IsNullOrWhiteSpace(cleanupGroupId) Then
+                    Dim deleteAfterUtc = GetAutoDeleteCutoffUtc()
+
+                    StampCleanupMetadata(
+                        newMail,
+                        cleanupGroupId,
+                        isEligible:=deleteAfterUtc.HasValue,
+                        answeredUtc:=If(deleteAfterUtc.HasValue, CType(DateTime.UtcNow, DateTime?), CType(Nothing, DateTime?)),
+                        deleteAfterUtc:=deleteAfterUtc,
+                        saveItem:=False)
+                End If
+            Catch ex As System.Exception
+                Debug.WriteLine($"[AutoPilot] Failed to stamp cleanup metadata on voicemail reply: {ex.Message}")
+            End Try
 
             newMail.Send()
             Try : MoveLastSentToInkyReplies() : Catch : End Try
