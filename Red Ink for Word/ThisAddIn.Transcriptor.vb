@@ -1393,32 +1393,27 @@ deviceNames)
         ''' </summary>
         ''' <param name="language">ISO 639-1 language code or "auto" for automatic detection</param>
         Private Sub StartWhisper(Optional language As String = "auto")
-            Dim modelpath As String = System.IO.Path.Combine(ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath), Me.cultureComboBox.SelectedItem.ToString())
+            Dim modelpath As String = System.IO.Path.Combine(
+        ExpandEnvironmentVariables(Globals.ThisAddIn.INI_SpeechModelPath),
+        Me.cultureComboBox.SelectedItem.ToString())
 
-            ' Load the model using WhisperFactory with the specified runtime options
             Dim factory As WhisperFactory = WhisperFactory.FromPath(modelpath)
 
-            ' Configure the builder with language, threads, etc.
-            If Me.SpeakerIdent.Checked Then
-                Dim builder = factory.CreateBuilder() _
-            .WithLanguage(language) _
-            .WithThreads(Environment.ProcessorCount) _
-            .WithNoSpeechThreshold(Single.Parse(Me.SpeakerDistance.Text)) _
-            .WithTemperature(0.3) _
-            .WithTranslate()
-
-                ' Build the recognizer
-                WhisperRecognizer = builder.Build()
-            Else
-                Dim builder = factory.CreateBuilder() _
-            .WithLanguage(language) _
-            .WithThreads(Environment.ProcessorCount) _
-            .WithNoSpeechThreshold(Single.Parse(Me.SpeakerDistance.Text)) _
-            .WithTemperature(0.3)
-
-                ' Build the recognizer
-                WhisperRecognizer = builder.Build()
+            ' Clamp to a Whisper-valid range. Treat 1.0 (Vosk default) as "use Whisper default 0.6".
+            Dim vad As Single = 0.6F
+            Dim parsed As Single
+            If Single.TryParse(Me.SpeakerDistance.Text, parsed) Then
+                If parsed > 0F AndAlso parsed < 1.0F Then vad = parsed
             End If
+
+            Dim builder = factory.CreateBuilder() _
+        .WithLanguage(language) _
+        .WithThreads(Environment.ProcessorCount) _
+        .WithNoSpeechThreshold(vad) _
+        .WithTemperature(0.3)
+
+            If Me.SpeakerIdent.Checked Then builder = builder.WithTranslate()
+            WhisperRecognizer = builder.Build()
         End Sub
 
         ''' <summary>
@@ -2492,15 +2487,24 @@ deviceNames)
         ''' </summary>
         ''' <param name="samples">Float array of normalized audio samples from Whisper</param>
         Private Async Function ProcessWhisper(samples As Single()) As System.Threading.Tasks.Task
+            If STTCanceled Then Return
+
+            Dim enumerator As IAsyncEnumerator(Of SegmentData) = Nothing
             Try
-                If STTCanceled Then Return
-
                 Dim segments As IAsyncEnumerable(Of SegmentData) = WhisperRecognizer.ProcessAsync(samples)
+                enumerator = segments.GetAsyncEnumerator()
 
-                ' Iterate over the transcription results (only once)
-                Dim enumerator = segments.GetAsyncEnumerator()
+                Dim hasNext As Boolean = True
+                While hasNext
+                    Try
+                        hasNext = Await enumerator.MoveNextAsync()
+                    Catch ex As Exception
+                        Debug.WriteLine($"Error advancing Whisper enumerator: {ex.Message}")
+                        Exit While
+                    End Try
 
-                If Await enumerator.MoveNextAsync() Then ' Only process the first result batch
+                    If Not hasNext OrElse STTCanceled Then Exit While
+
                     Dim result As SegmentData = enumerator.Current
                     Dim text As String = result.Text
 
@@ -2508,19 +2512,26 @@ deviceNames)
                     text = Regex.Replace(text, "\[.*?\]", String.Empty)
                     text = Regex.Replace(text, "\*.*?\*", String.Empty)
 
-                    If Not String.IsNullOrWhiteSpace(text) And Not STTCanceled Then
+                    If Not String.IsNullOrWhiteSpace(text) Then
                         Me.Invoke(Sub()
                                       RichTextBox1.AppendText(text & vbCrLf)
                                       RichTextBox1.ScrollToCaret()
                                   End Sub)
                     End If
-                End If
-
-                Await enumerator.DisposeAsync()
+                End While
 
             Catch ex As Exception
                 Debug.WriteLine($"Error in ProcessWhisper: {ex.Message}")
             End Try
+
+            ' Dispose outside Try/Catch/Finally so Await is never in a handler block
+            If enumerator IsNot Nothing Then
+                Try
+                    Await enumerator.DisposeAsync()
+                Catch ex As Exception
+                    Debug.WriteLine($"Error disposing Whisper enumerator: {ex.Message}")
+                End Try
+            End If
         End Function
 
         ''' <summary>

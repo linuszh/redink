@@ -40,7 +40,7 @@ Namespace Agents
         Public Shared Function Build() As ModelConfig
             Dim def =
 "{""name"":""" & ToolName & """," &
-"""description"":""Run sandboxed JavaScript inside a hidden WebView2. The 'code' parameter is executed as the BODY of an async function. Therefore, do NOT wrap it in 'async function ... { }' and do NOT invent wrapper parameters such as browser_mode. Always produce the final value with an explicit top-level 'return'. console.log/console.warn/console.error output is captured. Network access is DISABLED by default; set allow_network=true to permit fetch or controlled page navigation. Browser mode: set navigate_url to load a page into the hidden browser before the code runs against the live DOM. Optional wait_for_selector and wait_after_load_ms may be used. Security: only absolute http/https URLs are allowed; localhost, loopback, and private-network destinations are blocked. Default timeout 15s.""," &
+"""description"":""Run sandboxed JavaScript inside a hidden WebView2. The 'code' parameter is executed as the BODY of an async function. Therefore, do NOT wrap it in 'async function ... { }' and do NOT invent wrapper parameters such as browser_mode. Always produce the final value with an explicit top-level 'return'. Use this tool for deterministic programmable operations such as exact word counts, character counts, line counts, regex extraction/counting, exact parsing, JSON reshaping, sorting, deduplication, and other rule-based text/data transformations. console.log/console.warn/console.error output is captured. Network access is DISABLED by default; set allow_network=true to permit fetch or controlled page navigation. Browser mode: set navigate_url to load a page into the hidden browser before the code runs against the live DOM. Optional wait_for_selector and wait_after_load_ms may be used. Security: only absolute http/https URLs are allowed; localhost, loopback, and private-network destinations are blocked. Default timeout 15s.""," &
 """parameters"":{""type"":""object""," &
 """properties"":{" &
 """code"":{""type"":""string"",""description"":""JavaScript source. IMPORTANT: this is already the BODY of an async function. Write statements directly and end with a top-level return of the final value.""}," &
@@ -52,19 +52,20 @@ Namespace Agents
 """required"":[""code""]}}"
 
             Return New ModelConfig() With {
-                .ToolName = ToolName,
-                .ToolDefinition = def,
-                .ToolInstructionsPrompt =
-                    ToolName & ": Run sandboxed JavaScript and receive {ok, result, logs} or {ok:false, error}. " &
-                    "IMPORTANT: 'code' is already the BODY of an async function. Do not declare 'async function ...'. " &
-                    "Always return the final value explicitly at top level, for example: " &
-                    "'const links = [...document.querySelectorAll(""a[href]"")].map(a => a.href); return links;'. " &
-                    "For page DOM access, use allow_network=true and navigate_url='https://...'. Do not invent browser_mode.",
-                .ModelDescription = "JS sandbox (WebView2)",
-                .Tool = True,
-                .ToolPriority = 860,
-                .ToolErrorHandling = "skip"
-            }
+        .ToolName = ToolName,
+        .ToolDefinition = def,
+        .ToolInstructionsPrompt =
+            ToolName & ": Run sandboxed JavaScript and receive {ok, result, logs} or {ok:false, error}. " &
+            "IMPORTANT: 'code' is already the BODY of an async function. Do not declare 'async function ...'. " &
+            "Prefer this tool for deterministic programmable operations such as exact counting, regex extraction, parsing, deduplication, sorting, and rule-based text/data transformations. " &
+            "Always return the final value explicitly at top level, for example: " &
+            "'const links = [...document.querySelectorAll(""a[href]"")].map(a => a.href); return links;'. " &
+            "For page DOM access, use allow_network=true and navigate_url='https://...'. Do not invent browser_mode.",
+        .ModelDescription = "JS sandbox (WebView2)",
+        .Tool = True,
+        .ToolPriority = 860,
+        .ToolErrorHandling = "skip"
+    }
         End Function
 
         Public Shared Async Function ExecuteAsync(arguments As IDictionary(Of String, Object),

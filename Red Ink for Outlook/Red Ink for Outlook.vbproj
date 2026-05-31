@@ -89,7 +89,7 @@
     <FriendlyName>Red Ink for Outlook %28Develop%29</FriendlyName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(RedInkEnvironment)' == 'Preview'">
-    <ApplicationVersion>1.5.2.200</ApplicationVersion>
+    <ApplicationVersion>1.5.3.200</ApplicationVersion>
     <PublishUrl>..\clickonce\apps\preview\outlook\</PublishUrl>
     <InstallUrl>https://redink.ai/apps/preview/outlook/</InstallUrl>
     <ProductName>Red Ink for Outlook %28Preview%29</ProductName>
@@ -490,11 +490,14 @@
     </Compile>
     <Compile Include="ThisAddIn.AgentHost.vb" />
     <Compile Include="ThisAddIn.AutoPilot.AudioBook.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.Cleanup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.CommentProcessor.vb" />
+    <Compile Include="ThisAddIn.Autopilot.CompleteTables.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Config.vb" />
     <Compile Include="ThisAddIn.AutoPilot.DocProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PDFCommentProcessor.vb" />
     <Compile Include="ThisAddIn.AutoPilot.PdfRedactor.vb" />
+    <Compile Include="ThisAddIn.AutoPilot.RegistryBackup.vb" />
     <Compile Include="ThisAddIn.AutoPilot.Scheduler.vb" />
     <Compile Include="ThisAddIn.AutoPIlot.Tools.vb" />
     <Compile Include="ThisAddIn.AutoPilot.UserStorage.vb" />

@@ -64,6 +64,8 @@ Partial Public Class ThisAddIn
     Private Const InkyApiRoute As String = "/inky/api"     ' POST (JSON) → commands
     Private Const InkyName As String = "Inky"              ' Fallback; AN6 preferred
 
+    Private Const LegacyWebExtensionRoute As String = "/redink"
+
     Private Const AllToolUse As String = "Advanced tools"
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
@@ -345,6 +347,81 @@ Partial Public Class ThisAddIn
                     requestId,
                     "inky-play",
                     addCors:=False)
+
+                Return
+            End If
+
+            If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim body As System.String = System.String.Empty
+                Dim cmd As System.String = ""
+
+                If req.HasEntityBody Then
+                    If debugEnabled Then
+                        AppendInkyServerLog("REQ " & requestId & " reading legacy POST body.")
+                    End If
+
+                    Using rdr As New System.IO.StreamReader(
+                        req.InputStream,
+                        System.Text.Encoding.UTF8,
+                        detectEncodingFromByteOrderMarks:=False,
+                        bufferSize:=8192,
+                        leaveOpen:=False)
+
+                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
+                    End Using
+                End If
+
+                If debugEnabled Then
+                    cmd = TryGetJsonCommandForInkyServerLog(body)
+
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " legacy body read complete. bodyLen=" &
+                        body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; cmd=" & cmd &
+                        "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
+
+                    AppendInkyServerLog("REQ " & requestId & " legacy ProcessRequestInAddIn begin. cmd=" & cmd)
+                End If
+
+                Dim responseText As System.String =
+                    Await ProcessRequestInAddIn(body, requestPath).ConfigureAwait(False)
+
+                If responseText Is Nothing Then responseText = System.String.Empty
+
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " legacy ProcessRequestInAddIn end. cmd=" & cmd &
+                        "; responseLen=" &
+                        responseText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; responsePrefix=" &
+                        ClipForInkyServerLog(responseText, 160))
+                End If
+
+                Dim contentType As System.String = "text/plain; charset=utf-8"
+
+                If responseText.StartsWith("CT:html" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "text/html; charset=utf-8"
+                    responseText = responseText.Substring(("CT:html" & vbLf).Length)
+                ElseIf responseText.StartsWith("CT:json" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "application/json; charset=utf-8"
+                    responseText = responseText.Substring(("CT:json" & vbLf).Length)
+                End If
+
+                Dim buf() As System.Byte = System.Text.Encoding.UTF8.GetBytes(responseText)
+
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    contentType,
+                    buf,
+                    requestId,
+                    "legacy-redink",
+                    addCors:=True)
 
                 Return
             End If
@@ -1799,7 +1876,7 @@ Partial Public Class ThisAddIn
 
         ' events
         html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});});")
-        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
+        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")

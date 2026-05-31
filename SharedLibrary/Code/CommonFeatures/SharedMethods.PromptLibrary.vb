@@ -1423,6 +1423,23 @@ Namespace SharedLibrary
             Return False
         End Function
 
+        Private Shared Sub WarnIfPromptContainsUnsupportedChatPlaceholders(prompt As String)
+            If String.IsNullOrEmpty(prompt) Then
+                Return
+            End If
+
+            If prompt.IndexOf("{doc}", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               prompt.IndexOf("{dir}", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               prompt.IndexOf("{[path]}", StringComparison.OrdinalIgnoreCase) >= 0 OrElse
+               prompt.IndexOf("(file)", StringComparison.OrdinalIgnoreCase) >= 0 Then
+
+                ShowCustomMessageBox(
+                    "This prompt contains placeholder text such as {doc}, {dir}, {[path]} or (file). " &
+                    "These placeholders are not supported when the prompt library is used within a chat, so they will be inserted and processed literally."
+                )
+            End If
+        End Sub
+
         ''' <summary>
         ''' Opens a prompt picker that can be filtered by prompt name and category and returns the selected prompt text.
         ''' Returns an empty string if the user cancels or no prompt is available.
@@ -1952,12 +1969,12 @@ Namespace SharedLibrary
                 result = pickerForm.ShowDialog()
             End If
 
-
-
             If result = System.Windows.Forms.DialogResult.OK Then
                 Dim selectedIndex As Integer = titleListBox.SelectedIndex
                 If selectedIndex >= 0 AndAlso selectedIndex < visibleEntries.Count Then
-                    Return visibleEntries(selectedIndex).Prompt
+                    Dim selectedPrompt As String = visibleEntries(selectedIndex).Prompt
+                    WarnIfPromptContainsUnsupportedChatPlaceholders(selectedPrompt)
+                    Return selectedPrompt
                 End If
             End If
 
