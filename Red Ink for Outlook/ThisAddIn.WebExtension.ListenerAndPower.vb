@@ -217,12 +217,13 @@ Partial Public Class ThisAddIn
 
                     ' Proactively cancel any in-flight LLM op (prevents wake-up on dead STA)
                     Try
-                        If llmOperationCts IsNot Nothing Then
-                            If Not llmOperationCts.IsCancellationRequested Then llmOperationCts.Cancel()
-                            llmOperationCts.Dispose()
+                        Dim inflight As System.Threading.CancellationTokenSource = llmOperationCts
+                        If inflight IsNot Nothing AndAlso Not inflight.IsCancellationRequested Then
+                            inflight.Cancel()
                         End If
                     Catch
                     Finally
+                        ' Do not Dispose here: the owning RunLlmAsync 'Using' disposes it.
                         llmOperationCts = Nothing
                     End Try
 
@@ -256,37 +257,49 @@ Partial Public Class ThisAddIn
     ''' <summary>
     ''' Asynchronously handles power resume: conditional listener restart and cooldown initialization.
     ''' </summary>
+    ''' <summary>
+    ''' Asynchronously handles power resume: conditional listener restart and cooldown initialization.
+    ''' </summary>
     Friend Sub HandlePowerResumeAsync(userPresent As Boolean)
         System.Threading.Tasks.Task.Run(
             Async Function() As System.Threading.Tasks.Task
-                ' Do not wait for gate - if acquisition fails immediately, skip
-                If Not suspendResumeGate.Wait(0) Then Return
+                ' Wait (bounded) for any in-flight suspend sequence to release the gate,
+                ' instead of dropping the resume and leaving powerChanging stuck at 1.
+                Dim gotGate As System.Boolean = False
+                Try
+                    gotGate = Await suspendResumeGate.WaitAsync(System.TimeSpan.FromSeconds(10)).ConfigureAwait(False)
+                Catch
+                    gotGate = False
+                End Try
 
                 Try
-                    ' Minimal delay before restart
-                    Await System.Threading.Tasks.Task.Delay(500).ConfigureAwait(False)
+                    If gotGate Then
+                        ' Minimal delay before restart
+                        Await System.Threading.Tasks.Task.Delay(500).ConfigureAwait(False)
 
-                    isShuttingDown = False
+                        isShuttingDown = False
 
-                    ' Clean up old listener reference
-                    httpListener = Nothing
+                        ' Clean up old listener reference
+                        httpListener = Nothing
 
-                    ' Restart only if user was present pre-suspend
-                    If userPresent AndAlso wasListenerRunningBeforeSleep Then
-                        Try
-                            StartupHttpListener()
-                        Catch
-                        End Try
+                        ' Restart only if user was present pre-suspend
+                        If userPresent AndAlso wasListenerRunningBeforeSleep Then
+                            Try
+                                StartupHttpListener()
+                            Catch
+                            End Try
+                        End If
+
+                        ' Set resume cooldown
+                        resumeCooldownUntilUtc = System.DateTime.UtcNow.AddSeconds(30)
                     End If
-
-                    ' Set resume cooldown
-                    resumeCooldownUntilUtc = System.DateTime.UtcNow.AddSeconds(30)
-
-                    ' UI not updated here
-
                 Finally
+                    ' CRITICAL: always clear the power-transition flag, even if the gate
+                    ' could not be acquired, so requests/LLM/watchdog are not blocked forever.
                     System.Threading.Interlocked.Exchange(powerChanging, 0)
-                    suspendResumeGate.Release()
+                    If gotGate Then
+                        suspendResumeGate.Release()
+                    End If
                 End Try
             End Function)
     End Sub
@@ -826,111 +839,9 @@ Partial Public Class ThisAddIn
         End Try
     End Sub
 
-    '-------------------------------------------------- Not used currently --------------------------------------------------
 
     Private lastSuccessfulOperationUtc As System.DateTime = System.DateTime.UtcNow
     Private Const StuckDetectionMinutes As Integer = 15  ' If no successful op for 15 min, consider stuck
-
-    ''' <summary>
-    ''' Performs recovery: cancels long-running jobs, resets listener if inactive, re-registers OLE message filter.
-    ''' </summary>
-    Private Sub PerformRecovery()
-        System.Diagnostics.Debug.WriteLine("Performing recovery actions...")
-
-        ' 1. Cancel all long-running jobs
-        Dim now = System.DateTime.UtcNow
-        Dim stuckJobs = jobMap.Values.Where(Function(j)
-                                                Return j IsNot Nothing AndAlso
-                   Not j.Tcs.Task.IsCompleted AndAlso
-                   (now - j.CreatedUtc).TotalMinutes > 10
-                                            End Function).ToList()
-
-        For Each job In stuckJobs
-            Try
-                System.Diagnostics.Debug.WriteLine($"Cancelling stuck job: {job.Id}")
-                If Not job.Cts.IsCancellationRequested Then
-                    job.Cts.Cancel()
-                End If
-                ' Force completion after a grace period
-                System.Threading.Tasks.Task.Run(Async Function()
-                                                    Await System.Threading.Tasks.Task.Delay(5000)
-                                                    If Not job.Tcs.Task.IsCompleted Then
-                                                        job.Tcs.TrySetResult("Operation timed out during recovery.")
-                                                    End If
-                                                End Function)
-            Catch
-            End Try
-        Next
-
-        ' 2. Reset the HTTP listener if needed
-        Dim listenerAge = (System.DateTime.UtcNow - lastListenerProgressUtc).TotalMinutes
-        If listenerAge > 10 Then
-            System.Diagnostics.Debug.WriteLine("Resetting HTTP listener due to inactivity")
-            System.Threading.Tasks.Task.Run(Async Function()
-                                                Try
-                                                    Await ShutdownHttpListener(stopUiThread:=False)
-                                                    Await System.Threading.Tasks.Task.Delay(2000)
-                                                    StartupHttpListener()
-                                                Catch
-                                                End Try
-                                            End Function)
-        End If
-
-        ' 3. Re-register OLE message filter (COM related)
-        Try
-            SwitchToUi(Sub()
-                           OleMessageFilter.Revoke()
-                           OleMessageFilter.Register()
-                           EnableOleFilterFor(30000)
-                       End Sub).Wait(5000) ' Do not wait indefinitely
-        Catch
-        End Try
-
-        ' Mark recovery as successful
-        lastSuccessfulOperationUtc = System.DateTime.UtcNow
-    End Sub
-
-    ''' <summary>
-    ''' Cleans up orphaned or expired jobs based on completion state and TTL.
-    ''' </summary>
-    Private Sub CleanupOrphanedJobs()
-        Dim now = System.DateTime.UtcNow
-        Dim toRemove As New List(Of String)()
-
-        For Each kv In jobMap
-            Dim job = kv.Value
-            If job Is Nothing Then
-                toRemove.Add(kv.Key)
-                Continue For
-            End If
-
-            ' Remove completed jobs older than 5 minutes
-            If job.Tcs.Task.IsCompleted AndAlso (now - job.CreatedUtc).TotalMinutes > 5 Then
-                toRemove.Add(kv.Key)
-                ' Force-remove jobs older than TTL regardless of state
-            ElseIf (now - job.CreatedUtc).TotalMinutes > JobTtlMinutes Then
-                toRemove.Add(kv.Key)
-                Try
-                    If Not job.Cts.IsCancellationRequested Then job.Cts.Cancel()
-                    If Not job.Tcs.Task.IsCompleted Then
-                        job.Tcs.TrySetResult("Job expired.")
-                    End If
-                Catch
-                End Try
-            End If
-        Next
-
-        For Each key In toRemove
-            Dim removed As LlmJob = Nothing
-            If jobMap.TryRemove(key, removed) Then
-                Try
-                    removed?.Cts?.Dispose()
-                Catch
-                End Try
-                System.Threading.Interlocked.Decrement(activeJobs)
-            End If
-        Next
-    End Sub
 
     Private ReadOnly inkyServerLogSync As New Object()
     Private inkyServerLogInitialized As Integer = 0

@@ -789,6 +789,10 @@ Partial Public Class ThisAddIn
     ''' Runs an LLM operation asynchronously on thread pool with timeout, cancellation propagation, and optional secondary model use.
     ''' Returns model output or status text.
     ''' </summary>
+    ''' <summary>
+    ''' Runs an LLM operation asynchronously on thread pool with timeout, cancellation propagation, and optional secondary model use.
+    ''' Returns model output or status text.
+    ''' </summary>
     Public Function RunLlmAsync(
         ByVal sysPrompt As System.String,
         ByVal userPrompt As System.String,
@@ -820,6 +824,17 @@ Partial Public Class ThisAddIn
 
                         Using combinedCts As System.Threading.CancellationTokenSource =
                             System.Threading.CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token, timeoutCts.Token)
+
+                            ' Publish this operation's CTS so HandlePowerSuspendAsync can cancel
+                            ' the in-flight LLM call before the system suspends. Capture any
+                            ' previously published CTS so we can restore it on completion.
+                            Dim previousLlmCts As System.Threading.CancellationTokenSource =
+                                System.Threading.Interlocked.Exchange(llmOperationCts, combinedCts)
+
+                            ' If a suspend already started while we were setting up, honor it now.
+                            If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
+                                Try : combinedCts.Cancel() : Catch : End Try
+                            End If
 
                             Try
                                 Dim llmTask = LLM(sysPrompt, userPrompt, "", "", 0, UseSecondAPI,
@@ -856,6 +871,11 @@ Partial Public Class ThisAddIn
                                 Return "An error occurred during processing."
 
                             Finally
+                                ' Stop publishing this operation's CTS, but only if it is still
+                                ' the current one (a concurrent op or a suspend may have replaced
+                                ' or cleared it already). Restore the previously published CTS.
+                                System.Threading.Interlocked.CompareExchange(llmOperationCts, previousLlmCts, combinedCts)
+
                                 ' Ensure cleanup happens even during power transitions
                                 Try
                                     If UseSecondAPI AndAlso originalConfigLoaded Then
@@ -871,7 +891,6 @@ Partial Public Class ThisAddIn
             End Function,
             cancellationToken)
     End Function
-
 
     ''' <summary>
     ''' Presents comparison UI and returns user acceptance Boolean (True accepted, False canceled).
@@ -2002,6 +2021,7 @@ Partial Public Class ThisAddIn
                         Dim playResult As String = Await ProcessInkyPlayCommand(cmd, j).ConfigureAwait(False)
                         If playResult IsNot Nothing Then Return playResult
 
+
                     Case "inky_setagent"
                         Try
                             If IsChatAgentBlocked() Then
@@ -2015,24 +2035,66 @@ Partial Public Class ThisAddIn
                                 Return JsonErr("The selected model does not support tool calling.")
                             End If
 
-                            If enabled AndAlso Not st.ToolingEnabled Then
-                                Return JsonErr("Enable Agents first.")
+                            If enabled Then
+                                Dim effectiveAgentTools =
+                GetLocalChatEffectiveTools(
+                    st.SelectedMainToolNames,
+                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                    True,
+                    includeInteractiveM365Tools:=True)
+
+                                If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                    Dim selectedMainToolNames As List(Of String) = Nothing
+                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
+
+                                    Await SwitchToUi(
+                    Sub()
+                        selectedMainToolNames =
+                            ShowLocalChatToolSelectionDialog(
+                                If(st.SelectedMainToolNames, New List(Of String)()),
+                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                selectedAdvancedToolNames,
+                                includeInteractiveM365Tools:=True)
+                    End Sub).ConfigureAwait(False)
+
+                                    If selectedMainToolNames Is Nothing Then
+                                        Return JsonOk(New With {.ok = True, .cancelled = True})
+                                    End If
+
+                                    st.SelectedMainToolNames = selectedMainToolNames
+                                    st.SelectedAdvancedToolNames =
+                    NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                Else
+                                    st.SelectedAdvancedToolNames =
+                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                End If
+
+                                st.ToolingEnabled = True
+                                _chatToolingEnabled = True
+                            Else
+                                ChatAgentClearFiles()
                             End If
 
                             st.AgentModeEnabled = enabled
                             _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
+                            If enabled AndAlso _selectedToolsForChat.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                st.AgentModeEnabled = False
+                                Return JsonErr("Agent mode requires at least one tool or a connected workspace.")
+                            End If
+
                             SaveInkyState(st)
 
                             Return JsonOk(New With {
-                                .ok = True,
-                                .advancedToolsEnabled = enabled,
-                                .agentWorkspace = GetAgentWorkspaceForBrowser(),
-                                .files = GetAgentFileListForBrowser()
-                            })
+                                    .ok = True,
+                                    .advancedToolsEnabled = enabled,
+                                    .agentWorkspace = GetAgentWorkspaceForBrowser(),
+                                    .files = GetAgentFileListForBrowser()
+                                })
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle advanced tools: " & ex.Message)
                         End Try
+
 
                     Case "inky_editmemory"
                         Try
@@ -2132,18 +2194,45 @@ Partial Public Class ThisAddIn
                                 st.AgentModeEnabled = False
                                 _chatAdvancedToolsEnabled = False
 
-                                ' Ensure sources are actually selected (prompt user if needed)
-                                If Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
-                                    Dim selectedTools As List(Of ModelConfig) = Nothing
+                                ' Ensure sources are actually selected (prompt user if necessary)
+                                Dim effectiveAgentTools =
+    GetLocalChatEffectiveTools(
+        st.SelectedMainToolNames,
+        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+        True,
+        includeInteractiveM365Tools:=True)
+
+                                If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                    Dim selectedMainToolNames As List(Of String) = Nothing
+                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
+
                                     Try
-                                        Await SwitchToUi(Sub()
-                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName, includeInteractiveM365Tools:=True)
-                                                         End Sub).ConfigureAwait(False)
+                                        Await SwitchToUi(
+                                            Sub()
+                                                selectedMainToolNames =
+                                                    ShowLocalChatToolSelectionDialog(
+                                                        If(st.SelectedMainToolNames, New List(Of String)()),
+                                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                                        selectedAdvancedToolNames,
+                                                        includeInteractiveM365Tools:=True)
+                                            End Sub).ConfigureAwait(False)
                                     Catch
                                     End Try
 
-                                    If selectedTools IsNot Nothing AndAlso selectedTools.Count > 0 Then
-                                        st.SelectedToolNames = selectedTools.Select(Function(tl) tl.ToolName).ToList()
+                                    If selectedMainToolNames IsNot Nothing Then
+                                        st.SelectedMainToolNames = selectedMainToolNames
+                                        st.SelectedAdvancedToolNames =
+                                            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+
+                                        st.SelectedToolNames =
+                                            GetLocalChatEffectiveTools(
+                                                st.SelectedMainToolNames,
+                                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                                True,
+                                                includeInteractiveM365Tools:=True).
+                                                Select(Function(tl) tl.ToolName).
+                                                Distinct(StringComparer.OrdinalIgnoreCase).
+                                                ToList()
                                     Else
                                         ' User cancelled — abort the toggle
                                         st.AgentModelActive = False
@@ -2156,6 +2245,9 @@ Partial Public Class ThisAddIn
                                         SaveInkyState(st)
                                         Return JsonErr($"Agent model requires {ToolFriendlyName.ToLower()} to be selected. Please select at least one source and try again.")
                                     End If
+                                Else
+                                    st.SelectedAdvancedToolNames =
+                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
                                 End If
 
                                 ' Only now is agent mode actually active.
