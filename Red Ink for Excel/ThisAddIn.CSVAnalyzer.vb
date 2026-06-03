@@ -126,7 +126,7 @@ Partial Public Class ThisAddIn
                 .MultilineHeight = 150
             }
             Dim p1 As New SLib.InputParameter("CSV separator", Separator)
-            Dim p2 As New SLib.InputParameter("Columns to process (empty = all; separate by same separator)", colsDefault)
+            Dim p2 As New SLib.InputParameter("Columns to process (empty = all; separate names by same separator)", colsDefault)
 
             Dim p3 As New SLib.InputParameter("Chunk size in lines", chunkDefault)
             Dim p4 As New SLib.InputParameter("Starting line in file (0 = entire file)", startSelDefault)
