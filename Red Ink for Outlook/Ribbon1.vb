@@ -425,4 +425,10 @@ Public Class Ribbon2
         Process.Start(startInfo)
     End Sub
 
+    Private Sub RI_PSTExport_Click(sender As Object, e As RibbonControlEventArgs) Handles RI_PSTExport.Click
+        SharedLogger.Log(ThisAddIn._context, ThisAddIn._context.RDV, "PSTExport_Outlook invoked")
+        Globals.ThisAddIn.ExportPstContentToText()
+    End Sub
+
+
 End Class
