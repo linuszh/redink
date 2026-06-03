@@ -122,3 +122,8 @@ This file lists the built-in internal tools registered in `SharedLibrary\Code\Ag
 | `word_doc_edit` | Edits the active Word document through the Word host bridge. | Word |
 | `word_doc_create` | Creates a new Word document through the Word host bridge. | Word |
 | `word_doc_export_pdf` | Exports a Word document to PDF through the Word host bridge. | Word |
+
+## Online Sources
+
+The selected online sources must also be included as "allowed tools" is they shall be available to a skill or agent.
+Wild cards (e.g., swiss-caselaw*) can be used as well as the universal placeholder "selected_online_sources".

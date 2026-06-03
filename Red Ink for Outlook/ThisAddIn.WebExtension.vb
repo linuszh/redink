@@ -64,6 +64,8 @@ Partial Public Class ThisAddIn
     Private Const InkyApiRoute As String = "/inky/api"     ' POST (JSON) → commands
     Private Const InkyName As String = "Inky"              ' Fallback; AN6 preferred
 
+    Private Const LegacyWebExtensionRoute As String = "/redink"
+
     Private Const AllToolUse As String = "Advanced tools"
     Private Const AllToolUseDescription As String =
         "Turns selected advanced tools on or off. Configure which advanced tools are callable through the Agents button."
@@ -125,211 +127,582 @@ Partial Public Class ThisAddIn
     ''' Handles a single HTTP request (routing: favicon, UI HTML, API POST, CORS preflight).
     ''' Dispatches commands to ProcessRequestInAddIn and writes response bytes.
     ''' </summary>
-    Private Async Function HandleHttpRequest(ByVal ctx As System.Net.HttpListenerContext) As System.Threading.Tasks.Task
+    Private Async Function HandleHttpRequest(
+        ByVal ctx As System.Net.HttpListenerContext,
+        Optional ByVal requestId As System.String = Nothing
+    ) As System.Threading.Tasks.Task
+
+        If System.String.IsNullOrWhiteSpace(requestId) Then
+            requestId = NewInkyRequestId()
+        End If
+
         Dim req As System.Net.HttpListenerRequest = ctx.Request
         Dim res As System.Net.HttpListenerResponse = ctx.Response
+        Dim requestPath As System.String = GetSafeRequestPath(req)
+        Dim requestMethod As System.String = If(req.HttpMethod, System.String.Empty)
+        Dim debugEnabled As System.Boolean = INI_APIDebug
 
-        ' Count in-flight requests
         System.Threading.Interlocked.Increment(activeRequests)
 
-        ' Heartbeat to keep watchdog calm during long processing
         Dim hb As System.Threading.Timer = Nothing
 
         Try
-            hb = New System.Threading.Timer(
-                    Sub(stateObj As System.Object)
-                        Try
-                            lastListenerProgressUtc = System.DateTime.UtcNow
-                        Catch
-                        End Try
-                    End Sub,
-                    state:=Nothing,
-                    dueTime:=System.TimeSpan.FromSeconds(5),
-                    period:=System.TimeSpan.FromSeconds(5))
+            If debugEnabled Then
+                Dim rawUrl As System.String = ""
+                Dim hostHeader As System.String = ""
+                Dim userHostName As System.String = ""
+                Dim userAgent As System.String = ""
+                Dim contentTypeReq As System.String = ""
+                Dim contentLengthReq As System.String = ""
+                Dim localEndPointText As System.String = ""
+                Dim remoteEndPointText As System.String = ""
 
-            If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
                 Try
-                    res = ctx.Response
-                    res.StatusCode = 503
-                    res.StatusDescription = "Service Unavailable (suspend/resume)"
-                    res.AddHeader("Retry-After", "2")
-                    res.KeepAlive = False
-                    res.Headers("Connection") = "close"
-                    res.SendChunked = False
-                    Using os = res.OutputStream
-                        Dim msgBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("Temporarily unavailable during power transition.")
-                        res.ContentType = "text/plain; charset=utf-8"
-                        res.ContentLength64 = msgBytes.LongLength
-                        os.Write(msgBytes, 0, msgBytes.Length)
-                    End Using
-                    res.Close()
+                    rawUrl = If(req.RawUrl, "")
+                    hostHeader = If(req.Headers("Host"), "")
+                    userHostName = If(req.UserHostName, "")
+                    userAgent = If(req.UserAgent, "")
+                    contentTypeReq = If(req.ContentType, "")
+                    contentLengthReq = req.ContentLength64.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    localEndPointText = GetSafeEndpointText(req.LocalEndPoint)
+                    remoteEndPointText = GetSafeEndpointText(req.RemoteEndPoint)
                 Catch
                 End Try
+
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " BEGIN Method=" & requestMethod &
+                    "; Path=" & requestPath &
+                    "; RawUrl=" & rawUrl &
+                    "; HostHeader=" & hostHeader &
+                    "; UserHostName=" & userHostName &
+                    "; UserAgent=" & ClipForInkyServerLog(userAgent, 400) &
+                    "; ContentType=" & contentTypeReq &
+                    "; ContentLength=" & contentLengthReq &
+                    "; LocalEndPoint=" & localEndPointText &
+                    "; RemoteEndPoint=" & remoteEndPointText)
+            End If
+
+            hb = New System.Threading.Timer(
+                Sub(stateObj As System.Object)
+                    Try
+                        lastListenerProgressUtc = System.DateTime.UtcNow
+                    Catch
+                    End Try
+                End Sub,
+                state:=Nothing,
+                dueTime:=System.TimeSpan.FromSeconds(5),
+                period:=System.TimeSpan.FromSeconds(5))
+
+            If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
+                Dim msgBytes() As System.Byte =
+                    System.Text.Encoding.UTF8.GetBytes("Temporarily unavailable during power transition.")
+
+                res.StatusDescription = "Service Unavailable (suspend/resume)"
+                res.AddHeader("Retry-After", "2")
+
+                SendBufferedHttpResponse(
+                    res,
+                    503,
+                    "text/plain; charset=utf-8",
+                    msgBytes,
+                    requestId,
+                    "powerChanging",
+                    addCors:=False)
+
                 Return
             End If
 
             If IsInResumeCooldown() Then
-                Try
-                    res = ctx.Response
-                    res.StatusCode = 503
-                    res.StatusDescription = "Service Unavailable (resume cooldown)"
-                    res.AddHeader("Retry-After", "5")
-                    res.AddHeader("Access-Control-Allow-Origin", "*")
-                    res.KeepAlive = False
-                    res.Headers("Connection") = "close"
-                    res.SendChunked = False
-                    Using os = res.OutputStream
-                        Dim msgBytes() As Byte = System.Text.Encoding.UTF8.GetBytes("Resuming from sleep; please retry in a few seconds.")
-                        res.ContentType = "text/plain; charset=utf-8"
-                        res.ContentLength64 = msgBytes.LongLength
-                        os.Write(msgBytes, 0, msgBytes.Length)
-                    End Using
-                    res.Close()
-                Catch
-                End Try
+                Dim msgBytes() As System.Byte =
+                    System.Text.Encoding.UTF8.GetBytes("Resuming from sleep; please retry in a few seconds.")
+
+                res.StatusDescription = "Service Unavailable (resume cooldown)"
+                res.AddHeader("Retry-After", "5")
+
+                SendBufferedHttpResponse(
+                    res,
+                    503,
+                    "text/plain; charset=utf-8",
+                    msgBytes,
+                    requestId,
+                    "resumeCooldown",
+                    addCors:=True)
+
                 Return
             End If
 
-            ' ---- CORS Preflight ---------------------------------------------------
-            If req.HttpMethod.Equals("OPTIONS", System.StringComparison.OrdinalIgnoreCase) Then
-                res.AddHeader("Access-Control-Allow-Origin", "*")
+            If requestMethod.Equals("OPTIONS", System.StringComparison.OrdinalIgnoreCase) Then
                 res.AddHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
                 res.AddHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
-                res.StatusCode = 204
-                res.KeepAlive = False
-                res.Headers("Connection") = "close"
-                res.SendChunked = False
-                res.Close()
+
+                SendBufferedHttpResponse(
+                    res,
+                    204,
+                    "text/plain; charset=utf-8",
+                    New System.Byte() {},
+                    requestId,
+                    "options",
+                    addCors:=True)
+
                 Return
             End If
 
-            ' ---- Favicon ----------------------------------------------------------
-            If req.HttpMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
-               req.RawUrl.Equals("/favicon.ico", System.StringComparison.OrdinalIgnoreCase) Then
+            If requestMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               System.String.Equals(requestPath, "/favicon.ico", System.StringComparison.OrdinalIgnoreCase) Then
+
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " favicon begin.")
+                End If
 
                 Dim png() As System.Byte = GetLogoPngBytes()
 
-                res.ContentType = "image/png"
-                res.AddHeader("Cache-Control", "public, max-age=86400")
-                res.KeepAlive = False
-                res.Headers("Connection") = "close"
-                res.SendChunked = False
-                res.ContentLength64 = png.LongLength
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    "image/png",
+                    png,
+                    requestId,
+                    "favicon",
+                    addCors:=False)
 
-                Using os As System.IO.Stream = res.OutputStream
-                    Await os.WriteAsync(png, 0, png.Length).ConfigureAwait(False)
-                End Using
-                res.Close()
                 Return
             End If
 
-            ' ---- Inky UI (GET /inky[/]) ------------------------------------------
-            If req.HttpMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
-               (req.RawUrl.Equals(InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
-                req.RawUrl.Equals(InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+            If requestMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               System.String.Equals(requestPath, "/inky/ping", System.StringComparison.OrdinalIgnoreCase) Then
+
+                Dim pingBytes() As System.Byte = System.Text.Encoding.UTF8.GetBytes("ok")
+
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    "text/plain; charset=utf-8",
+                    pingBytes,
+                    requestId,
+                    "ping",
+                    addCors:=True)
+
+                Return
+            End If
+
+            If requestMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (System.String.Equals(requestPath, "/", System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, InkyUiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, InkyUiRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " BuildInkyHtmlPage begin.")
+                End If
 
                 Dim html As System.String = BuildInkyHtmlPage()
                 Dim bufUi() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
-                res.ContentType = "text/html; charset=utf-8"
-                res.AddHeader("Cache-Control", "no-store")
-                res.KeepAlive = False
-                res.Headers("Connection") = "close"
-                res.SendChunked = False
-                res.ContentLength64 = bufUi.LongLength
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " BuildInkyHtmlPage end. htmlChars=" &
+                        html.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; htmlBytes=" &
+                        bufUi.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
 
-                Using os As System.IO.Stream = res.OutputStream
-                    Await os.WriteAsync(bufUi, 0, bufUi.Length).ConfigureAwait(False)
-                End Using
-                res.Close()
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    "text/html; charset=utf-8",
+                    bufUi,
+                    requestId,
+                    "inky-ui",
+                    addCors:=False)
+
                 Return
             End If
 
-            ' ---- InkyPlay (GET /inky/play[/]) ----------------------------------
-            If req.HttpMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
-               (req.RawUrl.Equals(InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
-                req.RawUrl.Equals(InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+            If requestMethod.Equals("GET", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (System.String.Equals(requestPath, InkyPlayRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, InkyPlayRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " BuildInkyPlayHtmlPage begin.")
+                End If
 
                 Dim html As System.String = BuildInkyPlayHtmlPage()
                 Dim bufPlay() As System.Byte = System.Text.Encoding.UTF8.GetBytes(html)
 
-                res.ContentType = "text/html; charset=utf-8"
-                res.AddHeader("Cache-Control", "no-store")
-                res.KeepAlive = False
-                res.Headers("Connection") = "close"
-                res.SendChunked = False
-                res.ContentLength64 = bufPlay.LongLength
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " BuildInkyPlayHtmlPage end. htmlChars=" &
+                        html.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; htmlBytes=" &
+                        bufPlay.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
 
-                Using os As System.IO.Stream = res.OutputStream
-                    Await os.WriteAsync(bufPlay, 0, bufPlay.Length).ConfigureAwait(False)
-                End Using
-                res.Close()
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    "text/html; charset=utf-8",
+                    bufPlay,
+                    requestId,
+                    "inky-play",
+                    addCors:=False)
+
                 Return
             End If
 
-            ' ---- Normal flow (POST JSON / API) -----------------------------------
-            Dim body As System.String = System.String.Empty
-            If req.HasEntityBody Then
-                Using rdr As New System.IO.StreamReader(req.InputStream, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks:=False, bufferSize:=8192, leaveOpen:=False)
-                    body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
-                End Using
+            If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (System.String.Equals(requestPath, LegacyWebExtensionRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, LegacyWebExtensionRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
+
+                Dim body As System.String = System.String.Empty
+                Dim cmd As System.String = ""
+
+                If req.HasEntityBody Then
+                    If debugEnabled Then
+                        AppendInkyServerLog("REQ " & requestId & " reading legacy POST body.")
+                    End If
+
+                    Using rdr As New System.IO.StreamReader(
+                        req.InputStream,
+                        System.Text.Encoding.UTF8,
+                        detectEncodingFromByteOrderMarks:=False,
+                        bufferSize:=8192,
+                        leaveOpen:=False)
+
+                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
+                    End Using
+                End If
+
+                If debugEnabled Then
+                    cmd = TryGetJsonCommandForInkyServerLog(body)
+
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " legacy body read complete. bodyLen=" &
+                        body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; cmd=" & cmd &
+                        "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
+
+                    AppendInkyServerLog("REQ " & requestId & " legacy ProcessRequestInAddIn begin. cmd=" & cmd)
+                End If
+
+                Dim responseText As System.String =
+                    Await ProcessRequestInAddIn(body, requestPath).ConfigureAwait(False)
+
+                If responseText Is Nothing Then responseText = System.String.Empty
+
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " legacy ProcessRequestInAddIn end. cmd=" & cmd &
+                        "; responseLen=" &
+                        responseText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; responsePrefix=" &
+                        ClipForInkyServerLog(responseText, 160))
+                End If
+
+                Dim contentType As System.String = "text/plain; charset=utf-8"
+
+                If responseText.StartsWith("CT:html" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "text/html; charset=utf-8"
+                    responseText = responseText.Substring(("CT:html" & vbLf).Length)
+                ElseIf responseText.StartsWith("CT:json" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "application/json; charset=utf-8"
+                    responseText = responseText.Substring(("CT:json" & vbLf).Length)
+                End If
+
+                Dim buf() As System.Byte = System.Text.Encoding.UTF8.GetBytes(responseText)
+
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    contentType,
+                    buf,
+                    requestId,
+                    "legacy-redink",
+                    addCors:=True)
+
+                Return
             End If
 
-            Dim responseText As System.String = Await ProcessRequestInAddIn(body, req.RawUrl).ConfigureAwait(False)
-            If responseText Is Nothing Then responseText = System.String.Empty
+            If requestMethod.Equals("POST", System.StringComparison.OrdinalIgnoreCase) AndAlso
+               (System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+                System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase)) Then
 
-            ' Content-Type Hints
-            Dim contentType As System.String = "text/plain; charset=utf-8"
-            If responseText.StartsWith("CT:html" & vbLf, System.StringComparison.Ordinal) Then
-                contentType = "text/html; charset=utf-8"
-                responseText = responseText.Substring(("CT:html" & vbLf).Length)
-            ElseIf responseText.StartsWith("CT:json" & vbLf, System.StringComparison.Ordinal) Then
-                contentType = "application/json; charset=utf-8"
-                responseText = responseText.Substring(("CT:json" & vbLf).Length)
+                Dim body As System.String = System.String.Empty
+                Dim cmd As System.String = ""
+
+                If req.HasEntityBody Then
+                    If debugEnabled Then
+                        AppendInkyServerLog("REQ " & requestId & " reading POST body.")
+                    End If
+
+                    Using rdr As New System.IO.StreamReader(
+                        req.InputStream,
+                        System.Text.Encoding.UTF8,
+                        detectEncodingFromByteOrderMarks:=False,
+                        bufferSize:=8192,
+                        leaveOpen:=False)
+
+                        body = Await rdr.ReadToEndAsync().ConfigureAwait(False)
+                    End Using
+                End If
+
+                If debugEnabled Then
+                    cmd = TryGetJsonCommandForInkyServerLog(body)
+
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " body read complete. bodyLen=" &
+                        body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; cmd=" & cmd &
+                        "; bodyExcerpt=" & ClipForInkyServerLog(body, 1200))
+
+                    AppendInkyServerLog("REQ " & requestId & " ProcessRequestInAddIn begin. cmd=" & cmd)
+                End If
+
+                Dim responseText As System.String =
+                    Await ProcessRequestInAddIn(body, requestPath).ConfigureAwait(False)
+
+                If responseText Is Nothing Then responseText = System.String.Empty
+
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " ProcessRequestInAddIn end. cmd=" & cmd &
+                        "; responseLen=" &
+                        responseText.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; responsePrefix=" &
+                        ClipForInkyServerLog(responseText, 160))
+                End If
+
+                Dim contentType As System.String = "text/plain; charset=utf-8"
+
+                If responseText.StartsWith("CT:html" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "text/html; charset=utf-8"
+                    responseText = responseText.Substring(("CT:html" & vbLf).Length)
+                ElseIf responseText.StartsWith("CT:json" & vbLf, System.StringComparison.Ordinal) Then
+                    contentType = "application/json; charset=utf-8"
+                    responseText = responseText.Substring(("CT:json" & vbLf).Length)
+                End If
+
+                Dim buf() As System.Byte = System.Text.Encoding.UTF8.GetBytes(responseText)
+
+                SendBufferedHttpResponse(
+                    res,
+                    200,
+                    contentType,
+                    buf,
+                    requestId,
+                    "inky-api",
+                    addCors:=True)
+
+                Return
             End If
 
-            Dim buf() As System.Byte = System.Text.Encoding.UTF8.GetBytes(responseText)
+            If System.String.Equals(requestPath, InkyApiRoute, System.StringComparison.OrdinalIgnoreCase) OrElse
+               System.String.Equals(requestPath, InkyApiRoute & "/", System.StringComparison.OrdinalIgnoreCase) Then
 
-            res.AddHeader("Access-Control-Allow-Origin", "*")
-            res.ContentType = contentType
-            res.KeepAlive = False
-            res.Headers("Connection") = "close"
-            res.SendChunked = False
-            res.ContentLength64 = buf.LongLength
+                Dim msg405 As System.String = "Method not allowed."
+                Dim buf405() As System.Byte = System.Text.Encoding.UTF8.GetBytes(msg405)
 
-            Using os As System.IO.Stream = res.OutputStream
-                Await os.WriteAsync(buf, 0, buf.Length).ConfigureAwait(False)
-            End Using
-            res.Close()
+                SendBufferedHttpResponse(
+                    res,
+                    405,
+                    "text/plain; charset=utf-8",
+                    buf405,
+                    requestId,
+                    "405",
+                    addCors:=True)
+
+                Return
+            End If
+
+            Dim msg404 As System.String = "Not found."
+            Dim buf404() As System.Byte = System.Text.Encoding.UTF8.GetBytes(msg404)
+
+            SendBufferedHttpResponse(
+                res,
+                404,
+                "text/plain; charset=utf-8",
+                buf404,
+                requestId,
+                "404",
+                addCors:=True)
+
+            Return
 
         Catch ex As System.Exception
-            Try
-                Dim err As System.String = "Internal server error: " & ex.Message
-                Dim bufErr() As System.Byte = System.Text.Encoding.UTF8.GetBytes(err)
+            If debugEnabled Then
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " HandleHttpRequest failed for " &
+                    requestMethod & " " & requestPath & ".",
+                    ex)
+            End If
 
-                res.StatusCode = 500
-                res.AddHeader("Access-Control-Allow-Origin", "*")
-                res.ContentType = "text/plain; charset=utf-8"
-                res.KeepAlive = False
-                res.Headers("Connection") = "close"
-                res.SendChunked = False
-                res.ContentLength64 = bufErr.LongLength
-                Using os As System.IO.Stream = res.OutputStream
-                    os.Write(bufErr, 0, bufErr.Length)
-                End Using
-                res.Close()
-            Catch
+            If IsInkyTransportWriteFailure(ex) Then
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " transport-level response failure detected. Skipping fallback 500.")
+                End If
+                Return
+            End If
+
+            Try
+                Dim json As System.String = "{""ok"":false,""error"":""Internal server error.""}"
+                Dim bufErr() As System.Byte = System.Text.Encoding.UTF8.GetBytes(json)
+
+                SendBufferedHttpResponse(
+                    res,
+                    500,
+                    "application/json; charset=utf-8",
+                    bufErr,
+                    requestId,
+                    "fallback-500",
+                    addCors:=True)
+
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " fallback 500 written from HandleHttpRequest catch.")
+                End If
+            Catch exWrite As System.Exception
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " fallback 500 write failed in HandleHttpRequest catch.", exWrite)
+                End If
             End Try
         Finally
             Try
                 If hb IsNot Nothing Then hb.Dispose()
-            Catch
+            Catch exDispose As System.Exception
+                If debugEnabled Then
+                    AppendInkyServerLog("REQ " & requestId & " heartbeat timer dispose failed.", exDispose)
+                End If
             End Try
+
             System.Threading.Interlocked.Decrement(activeRequests)
-            ' Mark progress at the end of a handled request too
             lastListenerProgressUtc = System.DateTime.UtcNow
+
+            If debugEnabled Then
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " END. activeRequests=" &
+                    System.Threading.Interlocked.CompareExchange(activeRequests, 0, 0).ToString(System.Globalization.CultureInfo.InvariantCulture))
+            End If
         End Try
     End Function
+
+
+    Private Function IsInkyTransportWriteFailure(ByVal ex As System.Exception) As System.Boolean
+        Dim current As System.Exception = ex
+
+        While current IsNot Nothing
+            If TypeOf current Is System.Net.HttpListenerException Then Return True
+            If TypeOf current Is System.IO.IOException Then Return True
+            If TypeOf current Is System.ObjectDisposedException Then Return True
+            current = current.InnerException
+        End While
+
+        Return False
+    End Function
+
+    Private Sub SendBufferedHttpResponse(
+        ByVal res As System.Net.HttpListenerResponse,
+        ByVal statusCode As System.Int32,
+        ByVal contentType As System.String,
+        ByVal payload As System.Byte(),
+        ByVal requestId As System.String,
+        ByVal label As System.String,
+        Optional ByVal addCors As System.Boolean = False
+    )
+        If payload Is Nothing Then
+            payload = New System.Byte() {}
+        End If
+
+        Dim closeAttempted As System.Boolean = False
+        Dim debugEnabled As System.Boolean = INI_APIDebug
+
+        Try
+            res.StatusCode = statusCode
+
+            If addCors Then
+                res.AddHeader("Access-Control-Allow-Origin", "*")
+            End If
+
+            If Not System.String.IsNullOrWhiteSpace(contentType) Then
+                res.ContentType = contentType
+            End If
+
+            res.SendChunked = False
+            res.ContentLength64 = payload.LongLength
+
+            If debugEnabled Then
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " response write begin. label=" & label &
+                    "; status=" & statusCode.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; contentType=" & If(contentType, "") &
+                    "; bytes=" & payload.LongLength.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                    "; writer=OutputStreamWrite-v2")
+            End If
+
+            If payload.Length > 0 Then
+                res.OutputStream.Write(payload, 0, payload.Length)
+            End If
+
+            res.OutputStream.Flush()
+
+            If debugEnabled Then
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " response write flushed. label=" & label &
+                    "; writer=OutputStreamWrite-v2")
+            End If
+
+        Catch ex As System.Exception
+            If debugEnabled Then
+                AppendInkyServerLog(
+                    "REQ " & requestId &
+                    " response write failed. label=" & label &
+                    "; writer=OutputStreamWrite-v2",
+                    ex)
+            End If
+
+            Throw
+
+        Finally
+            Try
+                closeAttempted = True
+                res.Close()
+
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " response close complete. label=" & label &
+                        "; writer=OutputStreamWrite-v2")
+                End If
+
+            Catch exClose As System.Exception
+                If debugEnabled Then
+                    AppendInkyServerLog(
+                        "REQ " & requestId &
+                        " response close failed/ignored. label=" & label &
+                        "; closeAttempted=" & closeAttempted.ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                        "; writer=OutputStreamWrite-v2",
+                        exClose)
+                End If
+            End Try
+        End Try
+
+        If debugEnabled Then
+            AppendInkyServerLog(
+                "REQ " & requestId &
+                " response write complete. label=" & label &
+                "; writer=OutputStreamWrite-v2")
+        End If
+    End Sub
+
 
     ''' <summary>
     ''' Returns logo PNG bytes; falls back to 1x1 transparent if resource load fails.
@@ -416,6 +789,10 @@ Partial Public Class ThisAddIn
     ''' Runs an LLM operation asynchronously on thread pool with timeout, cancellation propagation, and optional secondary model use.
     ''' Returns model output or status text.
     ''' </summary>
+    ''' <summary>
+    ''' Runs an LLM operation asynchronously on thread pool with timeout, cancellation propagation, and optional secondary model use.
+    ''' Returns model output or status text.
+    ''' </summary>
     Public Function RunLlmAsync(
         ByVal sysPrompt As System.String,
         ByVal userPrompt As System.String,
@@ -447,6 +824,17 @@ Partial Public Class ThisAddIn
 
                         Using combinedCts As System.Threading.CancellationTokenSource =
                             System.Threading.CancellationTokenSource.CreateLinkedTokenSource(linkedCts.Token, timeoutCts.Token)
+
+                            ' Publish this operation's CTS so HandlePowerSuspendAsync can cancel
+                            ' the in-flight LLM call before the system suspends. Capture any
+                            ' previously published CTS so we can restore it on completion.
+                            Dim previousLlmCts As System.Threading.CancellationTokenSource =
+                                System.Threading.Interlocked.Exchange(llmOperationCts, combinedCts)
+
+                            ' If a suspend already started while we were setting up, honor it now.
+                            If System.Threading.Interlocked.CompareExchange(powerChanging, 0, 0) <> 0 Then
+                                Try : combinedCts.Cancel() : Catch : End Try
+                            End If
 
                             Try
                                 Dim llmTask = LLM(sysPrompt, userPrompt, "", "", 0, UseSecondAPI,
@@ -483,6 +871,11 @@ Partial Public Class ThisAddIn
                                 Return "An error occurred during processing."
 
                             Finally
+                                ' Stop publishing this operation's CTS, but only if it is still
+                                ' the current one (a concurrent op or a suspend may have replaced
+                                ' or cleared it already). Restore the previously published CTS.
+                                System.Threading.Interlocked.CompareExchange(llmOperationCts, previousLlmCts, combinedCts)
+
                                 ' Ensure cleanup happens even during power transitions
                                 Try
                                     If UseSecondAPI AndAlso originalConfigLoaded Then
@@ -498,7 +891,6 @@ Partial Public Class ThisAddIn
             End Function,
             cancellationToken)
     End Function
-
 
     ''' <summary>
     ''' Presents comparison UI and returns user acceptance Boolean (True accepted, False canceled).
@@ -1503,7 +1895,7 @@ Partial Public Class ThisAddIn
 
         ' events
         html.AppendLine("modelSel.addEventListener('change',async()=>{if(__currentJobId)return;const opt=modelSel.options[modelSel.selectedIndex];if(!opt||opt.disabled||!opt.value){const fe=[...modelSel.options].find(o=>!o.disabled&&o.value);if(fe)fe.selected=true;}const r=await api('inky_setmodel',{Key:opt.value});updateModelTooltip();adjustModelSel();if(!r.ok){alert(r.error||'Failed to set model');return;}if(typeof r.supportsFiles==='boolean')__supportsFiles=r.supportsFiles;if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;}if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;}toolingChk.checked=__toolingEnabled;syncAdvancedToolsUi({advancedToolsEnabled:typeof r.advancedToolsEnabled==='boolean'?r.advancedToolsEnabled:false,agentWorkspace:Object.prototype.hasOwnProperty.call(r,'agentWorkspace')?r.agentWorkspace:null,agentFiles:Array.isArray(r.agentFiles)?r.agentFiles:[],agentModelAvailable:typeof r.agentModelAvailable==='boolean'?r.agentModelAvailable:__agentModelAvailable,agentModelActive:typeof r.agentModelActive==='boolean'?r.agentModelActive:false});});")
-        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
+        html.AppendLine("clearBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_clear');if(r.ok){render([]);__pendingFilePath='';if(r.greeting)msgEl.placeholder=r.greeting;if(typeof r.toolingEnabled==='boolean'){__toolingEnabled=!!r.toolingEnabled;toolingChk.checked=__toolingEnabled;}if(typeof r.supportsTooling==='boolean'){__modelSupportsTooling=!!r.supportsTooling;updateToolingVisibility();}const st=await api('inky_getstate');if(st&&st.ok){syncAdvancedToolsUi({advancedToolsEnabled:st.advancedToolsEnabled===true,agentWorkspace:st.agentWorkspace,agentFiles:st.agentFiles||[],agentModelAvailable:st.agentModelAvailable===true,agentModelActive:st.agentModelActive===true});if(st.greeting)msgEl.placeholder=st.greeting;}else{updateAgentFilesDisplay([]);}applyCoupling();}else{alert(r.error||'Failed to clear');}adjustModelSel();});")
         html.AppendLine("copyBtn.addEventListener('click',async()=>{const r=await api('inky_copylast');if(!r.ok){alert(r.error||'Nothing to copy')}});")
         html.AppendLine("toWordBtn.addEventListener('click',async()=>{if(__currentJobId)return;const r=await api('inky_toword');if(!r.ok){alert(r.error||'Failed to create Word document')}});")
         html.AppendLine("playBtn.addEventListener('click',()=>{if(__currentJobId)return;const w=window.open('/inky/play','_blank');if(w){w.opener=null;}});")
@@ -1579,6 +1971,18 @@ Partial Public Class ThisAddIn
         Return JsonOk(New With {.ok = False, .error = msg})
     End Function
 
+    Private Function TryGetJsonCommandForInkyServerLog(ByVal body As System.String) As System.String
+        If System.String.IsNullOrWhiteSpace(body) Then Return ""
+
+        Try
+            Dim j As Newtonsoft.Json.Linq.JObject = Newtonsoft.Json.Linq.JObject.Parse(body)
+            Return If(j("Command")?.ToString(), "")
+        Catch ex As System.Exception
+            AppendInkyServerLog("TryGetJsonCommandForInkyServerLog failed.", ex)
+            Return ""
+        End Try
+    End Function
+
     ' ===== (D) EXTEND ProcessRequestInAddIn with the Inky commands =====
 
     Private Shared ReadOnly AlternateModelLock As New Object
@@ -1600,12 +2004,23 @@ Partial Public Class ThisAddIn
                     New Newtonsoft.Json.Linq.JObject())
                 Dim cmd As System.String = j("Command")?.ToString()
 
+                If INI_APIDebug Then
+                    AppendInkyServerLog(
+                        "ProcessRequestInAddIn begin. rawUrl=" &
+                        If(rawUrl, "") &
+                        "; cmd=" &
+                        If(cmd, "") &
+                        "; bodyLen=" &
+                        If(body, "").Length.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                End If
+
                 Select Case cmd
 
                                         ' ---- InkyPlay commands ----
                     Case "inkyplay_generate", "inkyplay_gethighscores", "inkyplay_savescore", "inkyplay_clearhighscores"
                         Dim playResult As String = Await ProcessInkyPlayCommand(cmd, j).ConfigureAwait(False)
                         If playResult IsNot Nothing Then Return playResult
+
 
                     Case "inky_setagent"
                         Try
@@ -1620,24 +2035,66 @@ Partial Public Class ThisAddIn
                                 Return JsonErr("The selected model does not support tool calling.")
                             End If
 
-                            If enabled AndAlso Not st.ToolingEnabled Then
-                                Return JsonErr("Enable Agents first.")
+                            If enabled Then
+                                Dim effectiveAgentTools =
+                GetLocalChatEffectiveTools(
+                    st.SelectedMainToolNames,
+                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                    True,
+                    includeInteractiveM365Tools:=True)
+
+                                If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                    Dim selectedMainToolNames As List(Of String) = Nothing
+                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
+
+                                    Await SwitchToUi(
+                    Sub()
+                        selectedMainToolNames =
+                            ShowLocalChatToolSelectionDialog(
+                                If(st.SelectedMainToolNames, New List(Of String)()),
+                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                selectedAdvancedToolNames,
+                                includeInteractiveM365Tools:=True)
+                    End Sub).ConfigureAwait(False)
+
+                                    If selectedMainToolNames Is Nothing Then
+                                        Return JsonOk(New With {.ok = True, .cancelled = True})
+                                    End If
+
+                                    st.SelectedMainToolNames = selectedMainToolNames
+                                    st.SelectedAdvancedToolNames =
+                    NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                Else
+                                    st.SelectedAdvancedToolNames =
+                    ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+                                End If
+
+                                st.ToolingEnabled = True
+                                _chatToolingEnabled = True
+                            Else
+                                ChatAgentClearFiles()
                             End If
 
                             st.AgentModeEnabled = enabled
                             _selectedToolsForChat = GetLocalChatEffectiveSelection(st, includeInteractiveM365Tools:=True)
 
+                            If enabled AndAlso _selectedToolsForChat.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                st.AgentModeEnabled = False
+                                Return JsonErr("Agent mode requires at least one tool or a connected workspace.")
+                            End If
+
                             SaveInkyState(st)
 
                             Return JsonOk(New With {
-                                .ok = True,
-                                .advancedToolsEnabled = enabled,
-                                .agentWorkspace = GetAgentWorkspaceForBrowser(),
-                                .files = GetAgentFileListForBrowser()
-                            })
+                                    .ok = True,
+                                    .advancedToolsEnabled = enabled,
+                                    .agentWorkspace = GetAgentWorkspaceForBrowser(),
+                                    .files = GetAgentFileListForBrowser()
+                                })
                         Catch ex As Exception
                             Return JsonErr("Failed to toggle advanced tools: " & ex.Message)
                         End Try
+
 
                     Case "inky_editmemory"
                         Try
@@ -1737,18 +2194,45 @@ Partial Public Class ThisAddIn
                                 st.AgentModeEnabled = False
                                 _chatAdvancedToolsEnabled = False
 
-                                ' Ensure sources are actually selected (prompt user if needed)
-                                If Not EnsureToolsSelected(st, includeInteractiveM365Tools:=True) Then
-                                    Dim selectedTools As List(Of ModelConfig) = Nothing
+                                ' Ensure sources are actually selected (prompt user if necessary)
+                                Dim effectiveAgentTools =
+    GetLocalChatEffectiveTools(
+        st.SelectedMainToolNames,
+        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+        True,
+        includeInteractiveM365Tools:=True)
+
+                                If effectiveAgentTools.Count = 0 AndAlso Not IsChatAgentWorkspaceConnected() Then
+                                    Dim selectedMainToolNames As List(Of String) = Nothing
+                                    Dim selectedAdvancedToolNames As List(Of String) = Nothing
+
                                     Try
-                                        Await SwitchToUi(Sub()
-                                                             selectedTools = SelectToolsForSession(True, ToolFriendlyName, includeInteractiveM365Tools:=True)
-                                                         End Sub).ConfigureAwait(False)
+                                        Await SwitchToUi(
+                                            Sub()
+                                                selectedMainToolNames =
+                                                    ShowLocalChatToolSelectionDialog(
+                                                        If(st.SelectedMainToolNames, New List(Of String)()),
+                                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                                        selectedAdvancedToolNames,
+                                                        includeInteractiveM365Tools:=True)
+                                            End Sub).ConfigureAwait(False)
                                     Catch
                                     End Try
 
-                                    If selectedTools IsNot Nothing AndAlso selectedTools.Count > 0 Then
-                                        st.SelectedToolNames = selectedTools.Select(Function(tl) tl.ToolName).ToList()
+                                    If selectedMainToolNames IsNot Nothing Then
+                                        st.SelectedMainToolNames = selectedMainToolNames
+                                        st.SelectedAdvancedToolNames =
+                                            NormalizeLocalChatAdvancedToolNames(selectedAdvancedToolNames, includeInteractiveM365Tools:=True)
+
+                                        st.SelectedToolNames =
+                                            GetLocalChatEffectiveTools(
+                                                st.SelectedMainToolNames,
+                                                ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True),
+                                                True,
+                                                includeInteractiveM365Tools:=True).
+                                                Select(Function(tl) tl.ToolName).
+                                                Distinct(StringComparer.OrdinalIgnoreCase).
+                                                ToList()
                                     Else
                                         ' User cancelled — abort the toggle
                                         st.AgentModelActive = False
@@ -1761,6 +2245,9 @@ Partial Public Class ThisAddIn
                                         SaveInkyState(st)
                                         Return JsonErr($"Agent model requires {ToolFriendlyName.ToLower()} to be selected. Please select at least one source and try again.")
                                     End If
+                                Else
+                                    st.SelectedAdvancedToolNames =
+                                        ResolveLocalChatAdvancedToolNamesForEnabledState(st.SelectedAdvancedToolNames, includeInteractiveM365Tools:=True)
                                 End If
 
                                 ' Only now is agent mode actually active.
@@ -2100,51 +2587,108 @@ Partial Public Class ThisAddIn
                         End Try
 
                     Case "inky_getstate"
-                        Dim st As InkyState = LoadInkyState()
-                        _chatAdvancedToolsEnabled = st.AgentModeEnabled
-
                         Try
-                            st.DarkMode = My.Settings.Inky_DarkMode
-                        Catch
+                            Dim debugEnabled As System.Boolean = INI_APIDebug
+
+                            If debugEnabled Then
+                                AppendInkyServerLog("CMD inky_getstate begin.")
+                            End If
+
+                            Dim st As InkyState = LoadInkyState()
+                            _chatAdvancedToolsEnabled = st.AgentModeEnabled
+
+                            If debugEnabled Then
+                                AppendInkyServerLog(
+                                    "CMD inky_getstate state loaded. HistoryCount=" &
+                                    If(st?.History?.Count, 0).ToString(System.Globalization.CultureInfo.InvariantCulture) &
+                                    "; UseSecondApi=" &
+                                    st.UseSecondApi.ToString() &
+                                    "; SelectedModelKey=" &
+                                    If(st.SelectedModelKey, "") &
+                                    "; AgentModeEnabled=" &
+                                    st.AgentModeEnabled.ToString())
+                            End If
+
+                            Try
+                                st.DarkMode = My.Settings.Inky_DarkMode
+                            Catch exDark As System.Exception
+                                If debugEnabled Then
+                                    AppendInkyServerLog("CMD inky_getstate failed while reading My.Settings.Inky_DarkMode.", exDark)
+                                End If
+                            End Try
+
+                            Try
+                                st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
+                                SaveInkyState(st)
+                            Catch exSupports As System.Exception
+                                st.SupportsFileUploads = False
+                                If debugEnabled Then
+                                    AppendInkyServerLog("CMD inky_getstate ComputeSupportsFiles/SaveInkyState failed.", exSupports)
+                                End If
+                            End Try
+
+                            Dim greeting As System.String = Nothing
+                            If st.History.Count = 0 Then greeting = GetFriendlyGreeting()
+
+                            If debugEnabled Then
+                                AppendInkyServerLog("CMD inky_getstate before GetModelListForBrowserAsync.")
+                            End If
+
+                            Dim models As System.Collections.Generic.List(Of System.Object) =
+                                Await GetModelListForBrowserAsync(st)
+
+                            If debugEnabled Then
+                                AppendInkyServerLog(
+                                    "CMD inky_getstate after GetModelListForBrowserAsync. ModelCount=" &
+                                    If(models?.Count, 0).ToString(System.Globalization.CultureInfo.InvariantCulture))
+                            End If
+
+                            Dim supportsTooling As Boolean = False
+                            Dim toolingEnabled As Boolean = SyncToolingState(st, supportsTooling)
+
+                            If debugEnabled Then
+                                AppendInkyServerLog(
+                                    "CMD inky_getstate after SyncToolingState. toolingEnabled=" &
+                                    toolingEnabled.ToString() &
+                                    "; supportsTooling=" &
+                                    supportsTooling.ToString())
+                            End If
+
+                            Dim result As System.String =
+                                JsonOk(New With {
+                                    .ok = True,
+                                    .history = ToBrowserTurns(st.History),
+                                    .greeting = greeting,
+                                    .models = models,
+                                    .modelLabel = GetSelectedModelLabel(st.UseSecondApi, st.SelectedModelKey),
+                                    .darkMode = st.DarkMode,
+                                    .supportsFiles = st.SupportsFileUploads,
+                                    .activeChat = activeChatId,
+                                    .toolingEnabled = toolingEnabled,
+                                    .supportsTooling = supportsTooling,
+                                    .toolingLogEnabled = INI_ToolingLogWindow,
+                                    .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
+                                    .advancedToolsEnabled = st.AgentModeEnabled,
+                                    .agentFiles = GetAgentFileListForBrowser(),
+                                    .agentWorkspace = GetAgentWorkspaceForBrowser(),
+                                    .agentModelActive = st.AgentModelActive,
+                                    .agentModelAvailable = IsAgentDefaultModelAvailable(),
+                                    .inkyMemoryEnabled = My.Settings.Inky_InkyMemory
+                                })
+
+                            If debugEnabled Then
+                                AppendInkyServerLog(
+                                    "CMD inky_getstate end. ResultLen=" &
+                                    result.Length.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                            End If
+
+                            Return result
+                        Catch ex As System.Exception
+                            If INI_APIDebug Then
+                                AppendInkyServerLog("CMD inky_getstate failed.", ex)
+                            End If
+                            Throw
                         End Try
-
-                        ' Re-compute per current selection on every getstate
-                        Try
-                            st.SupportsFileUploads = ComputeSupportsFiles(st.UseSecondApi, st.SelectedModelKey)
-                            SaveInkyState(st)
-                        Catch
-                            st.SupportsFileUploads = False
-                        End Try
-
-                        Dim greeting As System.String = Nothing
-                        If st.History.Count = 0 Then greeting = GetFriendlyGreeting()
-
-                        Dim models As System.Collections.Generic.List(Of System.Object) =
-                            Await GetModelListForBrowserAsync(st)
-
-                        Dim supportsTooling As Boolean = False
-                        Dim toolingEnabled As Boolean = SyncToolingState(st, supportsTooling)
-
-                        Return JsonOk(New With {
-                            .ok = True,
-                            .history = ToBrowserTurns(st.History),
-                            .greeting = greeting,
-                            .models = models,
-                            .modelLabel = GetSelectedModelLabel(st.UseSecondApi, st.SelectedModelKey),
-                            .darkMode = st.DarkMode,
-                            .supportsFiles = st.SupportsFileUploads,
-                            .activeChat = activeChatId,
-                            .toolingEnabled = toolingEnabled,
-                            .supportsTooling = supportsTooling,
-                            .toolingLogEnabled = INI_ToolingLogWindow,
-                            .tools = GetToolListForBrowser(includeInteractiveM365Tools:=True),
-                            .advancedToolsEnabled = st.AgentModeEnabled,
-                            .agentFiles = GetAgentFileListForBrowser(),
-                            .agentWorkspace = GetAgentWorkspaceForBrowser(),
-                            .agentModelActive = st.AgentModelActive,
-                            .agentModelAvailable = IsAgentDefaultModelAvailable(),
-                            .inkyMemoryEnabled = My.Settings.Inky_InkyMemory
-                        })
 
                     ' Remaining cases kept intact (command-specific logic)
                     ' ------------------------------------------------------------------
@@ -3261,6 +3805,15 @@ Partial Public Class ThisAddIn
                 End Select
 
             Catch ex As System.Exception
+                If INI_APIDebug Then
+                    AppendInkyServerLog(
+                        "ProcessRequestInAddIn failed. rawUrl=" &
+                        If(rawUrl, "") &
+                        "; bodyLen=" &
+                        If(body, "").Length.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        ex)
+                End If
+
                 Return JsonErr("Bad request: " & ex.Message)
             End Try
         End If

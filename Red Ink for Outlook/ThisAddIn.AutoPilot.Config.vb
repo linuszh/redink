@@ -92,6 +92,13 @@ Partial Public Class ThisAddIn
         Public Property ReprocessLookbackHours As Integer = 0
 
         ''' <summary>
+        ''' Number of hours after which answered incoming mails and all AutoPilot replies
+        ''' in the same cleanup group are automatically deleted. 0 = disabled.
+        ''' Deletion also covers items already moved to Deleted Items.
+        ''' </summary>
+        Public Property AutoDeleteAfterHours As Integer = 0
+
+        ''' <summary>
         ''' When True, the system prompt tells the model it has built-in web search / grounding capability.
         ''' Only meaningful when the model natively supports web search (e.g. Gemini with grounding).
         ''' </summary>
@@ -327,43 +334,59 @@ Partial Public Class ThisAddIn
         config.RequireApprovalForNonWhitelisted = True
 
         ' ── Step 5: Rate limits ──
-        Dim paramsList As New List(Of InputParameter)()
-        paramsList.Add(New InputParameter() With {
+        Dim pCooldown As New InputParameter() With {
             .Name = $"Cooldown per sender (seconds, default {AP_DefaultCooldownSeconds})",
             .Value = saved.CooldownSeconds.ToString()
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pMaxReplies As New InputParameter() With {
             .Name = $"Max replies per session (default {AP_DefaultMaxRepliesPerSession}; 0 = unlimited)",
             .Value = saved.MaxRepliesPerSession.ToString()
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pMaxAttachmentMb As New InputParameter() With {
             .Name = "Max attachment size (MB, default 10)",
             .Value = CInt(saved.MaxAttachmentBytes / 1024 / 1024).ToString()
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pReprocessLookback As New InputParameter() With {
             .Name = "Reprocess lookback (hours, 0 = only new mails)",
             .Value = saved.ReprocessLookbackHours.ToString()
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pAutoDeleteAfterHours As New InputParameter() With {
+            .Name = "Auto-delete answered mails after N hours (0 = disabled; also empties Deleted Items for tagged mails)",
+            .Value = saved.AutoDeleteAfterHours.ToString()
+        }
+        Dim pEnableWebGrounding As New InputParameter() With {
             .Name = "Add web grounding (if models are configured)",
             .Value = saved.EnableWebGrounding
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pEnableScheduler As New InputParameter() With {
             .Name = "Enable task scheduler (create && run scheduled tasks)",
             .Value = saved.EnableScheduler
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pEnableUserMemory As New InputParameter() With {
             .Name = "Enable per-user memory (learn user preferences)",
             .Value = saved.EnableUserMemory
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pEnableUserFiles As New InputParameter() With {
             .Name = "Enable per-user file storage (home directory)",
             .Value = saved.EnableUserFiles
-        })
-        paramsList.Add(New InputParameter() With {
+        }
+        Dim pEnablePrivacyProtection As New InputParameter() With {
             .Name = "Enable privacy protection for web/search queries (restrict personal data in queries)",
             .Value = saved.EnablePrivacyProtection
-        })
+        }
+
+        Dim paramsList As New List(Of InputParameter) From {
+            pCooldown,
+            pMaxReplies,
+            pMaxAttachmentMb,
+            pReprocessLookback,
+            pAutoDeleteAfterHours,
+            pEnableWebGrounding,
+            pEnableScheduler,
+            pEnableUserMemory,
+            pEnableUserFiles,
+            pEnablePrivacyProtection
+        }
 
         ' ── Voicemail processing (only if audio transcription is available) ──
         Dim audioTranscriptionAvailable As Boolean = IsAudioTranscriptionAvailable(_context)
@@ -376,11 +399,13 @@ Partial Public Class ThisAddIn
                 .Value = saved.EnableVoicemailProcessing
             }
             paramsList.Add(pVoicemail)
+
             pVoicemailSender = New InputParameter() With {
                 .Name = "Voicemail sender address (e.g. comboxmailer@swisscom.com)",
                 .Value = If(saved.VoicemailSenderAddress, "")
             }
             paramsList.Add(pVoicemailSender)
+
             pVoicemailMapPath = New InputParameter() With {
                 .Name = "Caller ID → Email map file (CSV path)",
                 .Value = If(saved.VoicemailCallerIdMapPath, "")
@@ -388,49 +413,43 @@ Partial Public Class ThisAddIn
             paramsList.Add(pVoicemailMapPath)
         End If
 
-        Dim params = paramsList.ToArray()
-
         Dim limitsOk = ShowCustomVariableInputForm(
             "Configure rate limits, restrictions, and optional features:",
             $"{AN6} AutoPilot — Limits & Features",
-            params)
+            paramsList.ToArray())
 
         If Not limitsOk Then Return Nothing
 
         Dim cooldown As Integer
-        If Integer.TryParse(paramsList(0).Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
+        If Integer.TryParse(pCooldown.Value?.ToString(), cooldown) AndAlso cooldown >= 0 Then
             config.CooldownSeconds = cooldown
         End If
 
         Dim maxReplies As Integer
-        If Integer.TryParse(paramsList(1).Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
+        If Integer.TryParse(pMaxReplies.Value?.ToString(), maxReplies) AndAlso maxReplies >= 0 Then
             config.MaxRepliesPerSession = maxReplies
         End If
 
         Dim maxMb As Integer
-        If Integer.TryParse(paramsList(2).Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
+        If Integer.TryParse(pMaxAttachmentMb.Value?.ToString(), maxMb) AndAlso maxMb > 0 Then
             config.MaxAttachmentBytes = CLng(maxMb) * 1024 * 1024
         End If
 
         Dim reprocessHours As Integer
-        If Integer.TryParse(paramsList(3).Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
+        If Integer.TryParse(pReprocessLookback.Value?.ToString(), reprocessHours) AndAlso reprocessHours >= 0 Then
             config.ReprocessLookbackHours = reprocessHours
         End If
 
-        ' Web grounding checkbox
-        config.EnableWebGrounding = CBool(If(paramsList(4).Value, False))
+        Dim autoDeleteHours As Integer
+        If Integer.TryParse(pAutoDeleteAfterHours.Value?.ToString(), autoDeleteHours) AndAlso autoDeleteHours >= 0 Then
+            config.AutoDeleteAfterHours = autoDeleteHours
+        End If
 
-        ' Scheduler checkbox
-        config.EnableScheduler = CBool(If(paramsList(5).Value, False))
-
-        ' User memory checkbox
-        config.EnableUserMemory = CBool(If(paramsList(6).Value, False))
-
-        ' User files checkbox
-        config.EnableUserFiles = CBool(If(paramsList(7).Value, False))
-
-        ' Privacy protection checkbox
-        config.EnablePrivacyProtection = CBool(If(paramsList(8).Value, False))
+        config.EnableWebGrounding = CBool(If(pEnableWebGrounding.Value, False))
+        config.EnableScheduler = CBool(If(pEnableScheduler.Value, False))
+        config.EnableUserMemory = CBool(If(pEnableUserMemory.Value, False))
+        config.EnableUserFiles = CBool(If(pEnableUserFiles.Value, False))
+        config.EnablePrivacyProtection = CBool(If(pEnablePrivacyProtection.Value, False))
 
         ' Voicemail settings
         If audioTranscriptionAvailable AndAlso pVoicemail IsNot Nothing Then
@@ -438,7 +457,6 @@ Partial Public Class ThisAddIn
             config.VoicemailSenderAddress = If(pVoicemailSender?.Value?.ToString()?.Trim(), "")
             config.VoicemailCallerIdMapPath = If(pVoicemailMapPath?.Value?.ToString()?.Trim(), "").Trim(""""c)
 
-            ' Validate voicemail config
             If config.EnableVoicemailProcessing Then
                 If String.IsNullOrWhiteSpace(config.VoicemailSenderAddress) Then
                     ShowCustomMessageBox("Voicemail processing requires a voicemail sender address.", AN)
@@ -513,6 +531,7 @@ Partial Public Class ThisAddIn
         summaryBuilder.AppendLine($"Cooldown: {config.CooldownSeconds}s per sender")
         summaryBuilder.AppendLine($"Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())} per session")
         summaryBuilder.AppendLine($"Max attachment: {config.MaxAttachmentBytes / 1024 / 1024:F0} MB")
+        summaryBuilder.AppendLine($"Auto-delete: {If(config.AutoDeleteAfterHours > 0, $"enabled after {config.AutoDeleteAfterHours}h", "disabled")}")
         summaryBuilder.AppendLine($"Web grounding: {If(config.EnableWebGrounding, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"Task scheduler: {If(config.EnableScheduler, "enabled", "disabled")}")
         summaryBuilder.AppendLine($"User memory: {If(config.EnableUserMemory, "enabled", "disabled")}")
@@ -583,6 +602,7 @@ Partial Public Class ThisAddIn
     End Function
 
     ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
+    ''' <summary>Persists the AutoPilot config to My.Settings.</summary>
     Private Sub SaveAutoPilotConfigToSettings(config As AutoPilotConfig)
         My.Settings.AP_FilterRules = String.Join(vbLf, config.FilterRules.Select(
             Function(r) $"{If(r.IsNegative, "EXCLUDE ", "")}{If(r.RuleType = AutoPilotFilterRuleType.Folder, "FOLDER ", "")}{r.Pattern}"))
@@ -605,6 +625,7 @@ Partial Public Class ThisAddIn
         My.Settings.AP_EnableUserMemory = config.EnableUserMemory
         My.Settings.AP_EnableUserFiles = config.EnableUserFiles
         My.Settings.AP_EnablePrivacyProtection = config.EnablePrivacyProtection
+        My.Settings.AP_AutoDeleteAfterHours = config.AutoDeleteAfterHours
 
         ' Persist external tool selection by ToolName/ModelDescription
         If config.SelectedExternalTools IsNot Nothing AndAlso config.SelectedExternalTools.Count > 0 Then
@@ -618,6 +639,7 @@ Partial Public Class ThisAddIn
         End If
 
         My.Settings.Save()
+        BackupAutoPilotSettingsToRegistry()
     End Sub
 
     ''' <summary>Loads previously saved config as defaults for the dialog.</summary>
@@ -641,6 +663,7 @@ Partial Public Class ThisAddIn
         config.EnableUserMemory = My.Settings.AP_EnableUserMemory
         config.EnableUserFiles = My.Settings.AP_EnableUserFiles
         config.EnablePrivacyProtection = My.Settings.AP_EnablePrivacyProtection
+        config.AutoDeleteAfterHours = If(My.Settings.AP_AutoDeleteAfterHours >= 0, My.Settings.AP_AutoDeleteAfterHours, 0)
 
         ' Restore filter rules using the shared parser
         If Not String.IsNullOrWhiteSpace(My.Settings.AP_FilterRules) Then
@@ -701,6 +724,12 @@ Partial Public Class ThisAddIn
             If Not IsAutoPilotLicenseValid() Then Return
             If Not IsAutoPilotPermitted() Then Return
             If _apActive Then Return
+
+            ' If My.Settings was deleted/reset, attempt silent recovery from the registry backup.
+            If Not HasSavedAutoPilotConfig() Then
+                TryRestoreAutoPilotSettingsFromRegistry()
+            End If
+
             If Not HasSavedAutoPilotConfig() Then Return
 
             ' Load the last saved configuration
@@ -723,6 +752,7 @@ Partial Public Class ThisAddIn
             summary.AppendLine($"Filters: {config.FilterRules.Count} rule(s)")
             summary.AppendLine($"Whitelisted senders: {config.WhitelistedSenders.Count}")
             summary.AppendLine($"Cooldown: {config.CooldownSeconds}s | Max replies: {If(config.MaxRepliesPerSession = 0, "unlimited", config.MaxRepliesPerSession.ToString())}")
+            summary.AppendLine($"Auto-delete: {If(config.AutoDeleteAfterHours > 0, $"{config.AutoDeleteAfterHours}h", "disabled")}")
             If Not String.IsNullOrWhiteSpace(config.MonitoredMailbox) Then
                 summary.AppendLine($"Mailbox: {config.MonitoredMailbox}")
             End If

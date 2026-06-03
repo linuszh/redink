@@ -79,6 +79,8 @@ Partial Public Class ThisAddIn
         Public Property ModelReplayContent As String
         Public Property ModelReplaySummary As String
         Public Property WasCompactedForModelReplay As Boolean
+        Public Property NormalizedCallSignature As String
+        Public Property WasDuplicateReplay As Boolean
 
         ''' <summary>
         ''' Initializes a new tool response instance with default success state.

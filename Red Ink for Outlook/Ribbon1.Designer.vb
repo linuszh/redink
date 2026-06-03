@@ -491,7 +491,9 @@ Partial Class Ribbon2
         Me.RI_MailMover = Me.Factory.CreateRibbonButton
         Me.RI_InboxBoard = Me.Factory.CreateRibbonButton
         Me.RI_DefineMyStyle = Me.Factory.CreateRibbonButton
+        Me.SearchTools = Me.Factory.CreateRibbonMenu
         Me.RI_KnowledgeStores = Me.Factory.CreateRibbonButton
+        Me.RI_PSTExport = Me.Factory.CreateRibbonButton
         Me.RI_AutoPilot = Me.Factory.CreateRibbonButton
         Me.RI_OpenChat = Me.Factory.CreateRibbonButton
         Me.RI_HelpMe = Me.Factory.CreateRibbonButton
@@ -542,7 +544,7 @@ Partial Class Ribbon2
         Me.Menu1.Items.Add(Me.RI_MailMover)
         Me.Menu1.Items.Add(Me.RI_InboxBoard)
         Me.Menu1.Items.Add(Me.RI_DefineMyStyle)
-        Me.Menu1.Items.Add(Me.RI_KnowledgeStores)
+        Me.Menu1.Items.Add(Me.SearchTools)
         Me.Menu1.Items.Add(Me.RI_AutoPilot)
         Me.Menu1.Items.Add(Me.RI_OpenChat)
         Me.Menu1.Items.Add(Me.RI_HelpMe)
@@ -702,10 +704,10 @@ Partial Class Ribbon2
         '
         'RI_M365
         '
-        Me.RI_M365.Label = "M365 Mail Search"
+        Me.RI_M365.Label = "Microsoft 365 Mail Search"
         Me.RI_M365.Name = "RI_M365"
         Me.RI_M365.OfficeImageId = "NewSearchFolder"
-        Me.RI_M365.ScreenTip = "Searches your M365 content with and without the help of AI"
+        Me.RI_M365.ScreenTip = "Searches your Microsoft 365 content with and without the help of AI"
         Me.RI_M365.ShowImage = True
         '
         'RI_MailMover
@@ -732,6 +734,16 @@ Partial Class Ribbon2
         Me.RI_DefineMyStyle.ScreenTip = "Analyze your writing style and create a MyStyle prompt based on it"
         Me.RI_DefineMyStyle.ShowImage = True
         '
+        'SearchTools
+        '
+        Me.SearchTools.Items.Add(Me.RI_KnowledgeStores)
+        Me.SearchTools.Items.Add(Me.RI_PSTExport)
+        Me.SearchTools.Label = "Expert Tools"
+        Me.SearchTools.Name = "SearchTools"
+        Me.SearchTools.OfficeImageId = "DatabaseCopyDatabaseFile"
+        Me.SearchTools.ScreenTip = "Access expert tools"
+        Me.SearchTools.ShowImage = True
+        '
         'RI_KnowledgeStores
         '
         Me.RI_KnowledgeStores.Label = "Knowledge Stores Admin"
@@ -739,6 +751,14 @@ Partial Class Ribbon2
         Me.RI_KnowledgeStores.OfficeImageId = "DatabaseCopyDatabaseFile"
         Me.RI_KnowledgeStores.ScreenTip = "Configure and manage Knowledge Stores"
         Me.RI_KnowledgeStores.ShowImage = True
+        '
+        'RI_PSTExport
+        '
+        Me.RI_PSTExport.Label = "Export Mails to TXT"
+        Me.RI_PSTExport.Name = "RI_PSTExport"
+        Me.RI_PSTExport.OfficeImageId = "FileCheckOut"
+        Me.RI_PSTExport.ScreenTip = "Export the content of mails and their attachments of a folder or PST file to TXT files for analysis"
+        Me.RI_PSTExport.ShowImage = True
         '
         'RI_AutoPilot
         '
@@ -908,7 +928,9 @@ Partial Class Ribbon2
     Friend WithEvents RI_Convincing As RibbonButton
     Friend WithEvents RI_ApplyMyStyle As RibbonButton
     Friend WithEvents RI_DefineMyStyle As RibbonButton
+    Friend WithEvents SearchTools As RibbonMenu
     Friend WithEvents RI_KnowledgeStores As RibbonButton
+    Friend WithEvents RI_PSTExport As RibbonButton
     Friend WithEvents RI_AutoPilot As RibbonButton
     Friend WithEvents RI_OpenChat As RibbonButton
     Friend WithEvents RI_HelpMe As RibbonButton

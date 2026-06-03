@@ -160,6 +160,215 @@ Partial Public Class ThisAddIn
         Return values
     End Function
 
+    Private Function ToolSchemaDisallowsAdditionalProperties(toolConfig As ModelConfig) As Boolean
+        If toolConfig Is Nothing OrElse String.IsNullOrWhiteSpace(toolConfig.ToolDefinition) Then
+            Return False
+        End If
+
+        Try
+            Dim toolDefinition As JObject = JObject.Parse(toolConfig.ToolDefinition)
+            Dim additionalPropertiesToken As JToken = toolDefinition.SelectToken("parameters.additionalProperties")
+
+            If additionalPropertiesToken Is Nothing Then
+                Return False
+            End If
+
+            If additionalPropertiesToken.Type = JTokenType.Boolean Then
+                Return Not additionalPropertiesToken.Value(Of Boolean)()
+            End If
+
+            Dim parsed As Boolean = False
+            If Boolean.TryParse(additionalPropertiesToken.ToString(), parsed) Then
+                Return Not parsed
+            End If
+        Catch ex As Exception
+            ToolingFileLogger.LogWarn(
+                "Failed to parse tool additionalProperties setting.",
+                details:=$"ToolName='{If(toolConfig.ToolName, "")}'",
+                ex:=ex)
+        End Try
+
+        Return False
+    End Function
+
+    Private Function TryValidateToolArgumentValueAgainstSchema(argumentName As String,
+                                                               value As Object,
+                                                               schemaToken As JToken,
+                                                               ByRef validationError As String) As Boolean
+        validationError = ""
+
+        If schemaToken Is Nothing Then
+            Return True
+        End If
+
+        Dim token As JToken = Nothing
+
+        Try
+            If value Is Nothing Then
+                Return True
+            End If
+
+            If TypeOf value Is JToken Then
+                token = DirectCast(value, JToken)
+            Else
+                token = JToken.FromObject(value)
+            End If
+        Catch
+            validationError = $"Parameter '{argumentName}' could not be converted for schema validation."
+            Return False
+        End Try
+
+        If token Is Nothing OrElse
+           token.Type = JTokenType.Null OrElse
+           token.Type = JTokenType.Undefined Then
+            Return True
+        End If
+
+        Dim parameterType As String = GetToolParameterType(schemaToken)
+        Dim typeMatches As Boolean = True
+
+        Select Case parameterType
+            Case "string"
+                typeMatches = (token.Type = JTokenType.String)
+
+            Case "integer"
+                typeMatches = (token.Type = JTokenType.Integer)
+
+            Case "number"
+                typeMatches = (token.Type = JTokenType.Integer OrElse token.Type = JTokenType.Float)
+
+            Case "boolean"
+                typeMatches = (token.Type = JTokenType.Boolean)
+
+            Case "array"
+                typeMatches = (token.Type = JTokenType.Array)
+
+            Case "object"
+                typeMatches = (token.Type = JTokenType.Object)
+
+            Case Else
+                typeMatches = True
+        End Select
+
+        If Not typeMatches Then
+            validationError = $"Parameter '{argumentName}' must be of type '{parameterType}'."
+            Return False
+        End If
+
+        Dim enumValues As List(Of String) = GetToolParameterEnumValues(schemaToken)
+        If enumValues.Count > 0 Then
+            Dim actualValue As String =
+                If(token.Type = JTokenType.String,
+                   token.Value(Of String)(),
+                   token.ToString(Formatting.None))
+
+            Dim matchesEnum As Boolean =
+                enumValues.Any(Function(v) String.Equals(v, actualValue, StringComparison.OrdinalIgnoreCase))
+
+            If Not matchesEnum Then
+                validationError = $"Parameter '{argumentName}' must be one of: {String.Join(", ", enumValues)}."
+                Return False
+            End If
+        End If
+
+        If token.Type = JTokenType.Array Then
+            Dim itemSchema As JToken = schemaToken("items")
+
+            If itemSchema IsNot Nothing Then
+                Dim index As Integer = 0
+
+                For Each item As JToken In DirectCast(token, JArray)
+                    Dim itemError As String = ""
+
+                    If Not TryValidateToolArgumentValueAgainstSchema(
+                        $"{argumentName}[{index}]",
+                        item,
+                        itemSchema,
+                        itemError) Then
+
+                        validationError = itemError
+                        Return False
+                    End If
+
+                    index += 1
+                Next
+            End If
+        End If
+
+        Return True
+    End Function
+
+    Private Function TryValidateToolCallArguments(toolCall As ToolCall,
+                                                  toolConfig As ModelConfig,
+                                                  ByRef validationError As String) As Boolean
+        validationError = ""
+
+        If toolCall Is Nothing OrElse toolConfig Is Nothing Then
+            Return True
+        End If
+
+        If String.IsNullOrWhiteSpace(toolConfig.ToolDefinition) Then
+            Return True
+        End If
+
+        Dim parameterSchemas As Dictionary(Of String, JToken) = GetToolParameterSchemas(toolConfig)
+        Dim requiredParameters As HashSet(Of String) = GetToolRequiredParameters(toolConfig)
+
+        If parameterSchemas.Count = 0 AndAlso requiredParameters.Count = 0 Then
+            Return True
+        End If
+
+        Dim arguments As Dictionary(Of String, Object) =
+            If(toolCall.Arguments, New Dictionary(Of String, Object)(StringComparer.OrdinalIgnoreCase))
+
+        For Each requiredParameter As String In requiredParameters
+            If Not arguments.ContainsKey(requiredParameter) OrElse arguments(requiredParameter) Is Nothing Then
+                validationError = $"Missing required parameter '{requiredParameter}'."
+                Return False
+            End If
+
+            If TypeOf arguments(requiredParameter) Is JToken AndAlso
+               DirectCast(arguments(requiredParameter), JToken).Type = JTokenType.Null Then
+
+                validationError = $"Required parameter '{requiredParameter}' must not be null."
+                Return False
+            End If
+        Next
+
+        If ToolSchemaDisallowsAdditionalProperties(toolConfig) Then
+            For Each argumentName As String In arguments.Keys
+                If Not parameterSchemas.ContainsKey(argumentName) Then
+                    validationError = $"Unknown parameter '{argumentName}'."
+                    Return False
+                End If
+            Next
+        End If
+
+        For Each kvp As KeyValuePair(Of String, Object) In arguments
+            If Not parameterSchemas.ContainsKey(kvp.Key) Then Continue For
+            If kvp.Value Is Nothing Then Continue For
+
+            If TypeOf kvp.Value Is JToken AndAlso
+               DirectCast(kvp.Value, JToken).Type = JTokenType.Null Then
+                Continue For
+            End If
+
+            Dim argumentError As String = ""
+
+            If Not TryValidateToolArgumentValueAgainstSchema(
+                kvp.Key,
+                kvp.Value,
+                parameterSchemas(kvp.Key),
+                argumentError) Then
+
+                validationError = argumentError
+                Return False
+            End If
+        Next
+
+        Return True
+    End Function
+
     Private Function TryParseBooleanLiteral(value As String, ByRef result As Boolean) As Boolean
         Dim normalized As String = If(value, "").Trim()
 
@@ -399,7 +608,112 @@ Partial Public Class ThisAddIn
         End Try
     End Function
 
+    Private Function BuildNormalizedToolCallSignature(toolCall As ToolCall) As String
+        If toolCall Is Nothing Then Return ""
 
+        Dim toolName As String = If(toolCall.ToolName, "").Trim()
+        If toolName = "" Then Return ""
+
+        Return toolName.ToLowerInvariant() & "|" & BuildToolArgumentsSignature(toolCall.Arguments)
+    End Function
+
+    Private Function IsDuplicateSuccessGuardedTool(toolName As String) As Boolean
+        If String.IsNullOrWhiteSpace(toolName) Then
+            Return False
+        End If
+
+        Dim normalizedToolName As String = toolName.Trim()
+
+        For Each deliverableToolName As String In SharedLibrary.Agents.HostToolRegistration.GetDeliverableCapableToolNames(
+            SharedLibrary.Agents.ToolingHostKind.Outlook)
+
+            If normalizedToolName.Equals(deliverableToolName, StringComparison.OrdinalIgnoreCase) Then
+                Return True
+            End If
+        Next
+
+        Select Case normalizedToolName.ToLowerInvariant()
+            Case "complete_word_tables",
+                 "process_word_document",
+                 "word_write",
+                 "word_markup"
+                Return True
+        End Select
+
+        Return False
+    End Function
+
+    Private Function CloneToolResponseForDuplicateReplay(source As ToolResponse,
+                                                         toolCall As ToolCall) As ToolResponse
+        Return New ToolResponse() With {
+            .CallId = toolCall.CallId,
+            .ToolName = toolCall.ToolName,
+            .Response = source.Response,
+            .Success = source.Success,
+            .ErrorMessage = source.ErrorMessage,
+            .Timestamp = DateTime.Now,
+            .OriginalCallJson = toolCall.RawJson,
+            .ResultKind = source.ResultKind,
+            .ErrorCode = source.ErrorCode,
+            .ModelReplayContent = source.ModelReplayContent,
+            .ModelReplaySummary = source.ModelReplaySummary,
+            .WasCompactedForModelReplay = source.WasCompactedForModelReplay,
+            .NormalizedCallSignature = source.NormalizedCallSignature,
+            .WasDuplicateReplay = True
+        }
+    End Function
+
+    Private Function TryBuildDuplicateSuccessfulToolReplay(toolCall As ToolCall,
+                                                           normalizedCallSignature As String,
+                                                           context As ToolExecutionContext,
+                                                           ByRef replayResponse As ToolResponse) As Boolean
+        replayResponse = Nothing
+
+        If toolCall Is Nothing OrElse context Is Nothing Then
+            Return False
+        End If
+
+        If String.IsNullOrWhiteSpace(normalizedCallSignature) Then
+            Return False
+        End If
+
+        If Not IsDuplicateSuccessGuardedTool(toolCall.ToolName) Then
+            Return False
+        End If
+
+        If context.AllToolResponses Is Nothing OrElse context.AllToolResponses.Count = 0 Then
+            Return False
+        End If
+
+        For i As Integer = context.AllToolResponses.Count - 1 To 0 Step -1
+            Dim prior As ToolResponse = context.AllToolResponses(i)
+
+            If prior Is Nothing OrElse Not prior.Success Then Continue For
+            If prior.WasDuplicateReplay Then Continue For
+
+            If String.Equals(prior.NormalizedCallSignature, normalizedCallSignature, StringComparison.Ordinal) Then
+                replayResponse = CloneToolResponseForDuplicateReplay(prior, toolCall)
+                Return True
+            End If
+        Next
+
+        Return False
+    End Function
+
+    Private Function BuildDuplicateSuccessfulToolCallGuardPrompt(toolName As String) As String
+        Dim normalizedToolName As String = If(toolName, "").Trim()
+        Dim toolLabel As String =
+            If(normalizedToolName = "",
+               "The previous tool call",
+               "The tool '" & normalizedToolName & "'")
+
+        Return "HOST DUPLICATE TOOL CALL GUARD: " &
+               toolLabel &
+               " already completed successfully earlier in this same run with the same arguments. " &
+               "Do NOT call it again. Reuse that result. " &
+               "If the task is now finished, provide the final answer. " &
+               "Otherwise choose the next distinct tool step."
+    End Function
 
 
 End Class

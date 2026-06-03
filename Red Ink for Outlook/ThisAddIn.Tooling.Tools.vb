@@ -1724,15 +1724,21 @@ Partial Public Class ThisAddIn
         sb.AppendLine("- If the request applies to a folder, directory, workspace path, or a collection of files, discover or stage the collection first and then continue processing the returned items until the collection has actually been searched or analyzed.")
         sb.AppendLine("- Before giving a final answer, explicitly check whether any requested next step, remaining file, or reasonable fallback tool is still outstanding.")
 
+        If HasToolName(selectedTools, SharedLibrary.Agents.JsRunTool.ToolName) Then
+            sb.AppendLine("- For deterministic text or data operations, prefer js_run over estimating in prose.")
+            sb.AppendLine("- Use js_run for exact word counts, character counts, line counts, regex extraction/counting, delimiter-based splitting, deduplication, sorting, JSON reshaping, and similar programmable transformations.")
+            sb.AppendLine("- When the user asks to count, enumerate, classify by exact rule, or transform text mechanically, compute the result with js_run and return the computed value explicitly.")
+        End If
+
         If HasToolName(selectedTools, "extract_pdf_text") Then
             sb.AppendLine("- extract_pdf_text is for a single PDF or staged/session file at a time. Never pass a directory or folder path to extract_pdf_text.")
         End If
 
         If HasToolName(selectedTools, "agent_workspace_find_files") OrElse
-           HasToolName(selectedTools, "agent_workspace_stage") OrElse
-           HasToolName(selectedTools, "agent_workspace_read") OrElse
-           HasToolName(selectedTools, "workspace_inventory") OrElse
-           HasToolName(selectedTools, "workspace_read") Then
+       HasToolName(selectedTools, "agent_workspace_stage") OrElse
+       HasToolName(selectedTools, "agent_workspace_read") OrElse
+       HasToolName(selectedTools, "workspace_inventory") OrElse
+       HasToolName(selectedTools, "workspace_read") Then
             sb.AppendLine("- For local/workspace PDF collections, prefer the workspace workflow: find files, stage them if required, then read/search/extract them. Do not stop after file discovery.")
         End If
 
