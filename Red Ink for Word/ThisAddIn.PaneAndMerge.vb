@@ -140,16 +140,18 @@ Partial Public Class ThisAddIn
             If sel.StoryType = WdStoryType.wdCommentsStory Then
                 For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
                     If sel.Range.Start >= c.Range.Start AndAlso
-                   sel.Range.End <= c.Range.End Then
-                        activeComment = c : Exit For
+                       sel.Range.End <= c.Range.End Then
+                        activeComment = c
+                        Exit For
                     End If
                 Next
             Else
                 For Each c As Microsoft.Office.Interop.Word.Comment In doc.Comments
                     Dim anchor As Range = c.Scope
                     If sel.Range.End > anchor.Start AndAlso
-                   sel.Range.Start < anchor.End Then
-                        activeComment = c : Exit For
+                       sel.Range.Start < anchor.End Then
+                        activeComment = c
+                        Exit For
                     End If
                 Next
             End If
@@ -157,8 +159,8 @@ Partial Public Class ThisAddIn
             ' Validate cursor is in or on a comment
             If activeComment Is Nothing Then
                 ShowCustomMessageBox(
-                "This command only works when the cursor is inside a comment " &
-                "balloon or on text that has a comment.")
+                    "This command only works when the cursor is inside a comment " &
+                    "balloon or on text that has a comment.")
                 Return
             End If
 
@@ -168,17 +170,16 @@ Partial Public Class ThisAddIn
             If sel.StoryType = WdStoryType.wdCommentsStory Then
                 ' Inside balloon
                 If selectedText.Trim().Length = 0 Then
-                    newtext = SafeRangeText(activeComment.Range)      ' whole balloon
-                    sel.SetRange(activeComment.Range.Start, activeComment.Range.End)
+                    newtext = SafeRangeText(activeComment.Range)
                 Else
-                    newtext = selectedText                            ' user selection
+                    newtext = selectedText
                 End If
             Else
                 ' On anchor in main story
                 If selectedText.Trim().Length = 0 Then
-                    newtext = SafeRangeText(activeComment.Range)      ' whole balloon
+                    newtext = SafeRangeText(activeComment.Range)
                 Else
-                    newtext = selectedText                            ' user selection
+                    newtext = selectedText
                 End If
             End If
 
@@ -198,17 +199,19 @@ Partial Public Class ThisAddIn
                 End If
             Else
                 ' Only the exact anchor text
-                targetRange = anchorRange
+                targetRange = anchorRange.Duplicate
             End If
 
-            targetRange.Select()
+            Await EnsureUIThread()
+            ActivateProcessingContext(targetRange)
 
             ' Get merge prompt from user or cached value
             If Not Silent Or String.IsNullOrWhiteSpace(SP_MergePrompt2) Then
                 OtherPrompt = SLib.ShowCustomInputBox(
-                "If you want, you can amend the prompt that will be used to " &
-                "intelligently merge your comment into your document:",
-                $"{AN} Intelligent Merge", False, SP_MergePrompt2).Trim()
+                    "If you want, you can amend the prompt that will be used to " &
+                    "intelligently merge your comment into your document:",
+                    $"{AN} Intelligent Merge", False, SP_MergePrompt2).Trim()
+
                 If String.IsNullOrEmpty(OtherPrompt) OrElse OtherPrompt = "ESC" Then Return
             Else
                 OtherPrompt = SP_MergePrompt2
@@ -222,26 +225,37 @@ Partial Public Class ThisAddIn
                 New SelectionItem("Regex", 4),
                 New SelectionItem("Diff Classic", 5),
                 New SelectionItem("None", 6)
-                }
+            }
 
             Dim DefaultItem As Integer = 6
-            If INI_DoMarkupWord Then DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
-            Dim picked As Integer = SelectValue(items, DefaultItem, "Choose markup method ...")
+            If INI_DoMarkupWord Then
+                DefaultItem = Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)
+            End If
 
+            Dim picked As Integer = SelectValue(items, DefaultItem, "Choose markup method ...")
             If picked < 1 Then Return
 
-            ' Process merge with LLM
-            Dim result As String = Await ProcessSelectedText(
-            OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
-            newtext & "</INSERT> ",
-            True, INI_KeepFormat2, INI_KeepParaFormatInline,
-            Override(INI_ReplaceText2, INI_ReplaceText2Override), If(picked < 6, True, False), If(picked < 6, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
-            False, False, True, False, INI_KeepFormatCap)
+            ' Process merge with LLM against the main document selection.
+            ' Call TrueProcessSelectedText directly to avoid the comment-bubble reroute in ProcessSelectedText.
+            Dim result As String = Await TrueProcessSelectedText(
+                OtherPrompt & " " & SP_Add_MergePrompt & " <INSERT>" &
+                newtext & "</INSERT> ",
+                True,
+                INI_KeepFormat2,
+                INI_KeepParaFormatInline,
+                Override(INI_ReplaceText2, INI_ReplaceText2Override),
+                If(picked < 6, True, False),
+                If(picked < 6, picked, Override(INI_MarkupMethodWord, INI_MarkupMethodWordOverride)),
+                False,
+                False,
+                True,
+                False,
+                INI_KeepFormatCap)
 
         Catch ex As System.Exception
             MessageBox.Show(
-            $"Error in BalloonMerge:{Environment.NewLine}{ex.Message}",
-            "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                $"Error in BalloonMerge:{Environment.NewLine}{ex.Message}",
+                "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
         End Try
     End Function
 
