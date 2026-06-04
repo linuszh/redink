@@ -597,7 +597,7 @@ Namespace SharedLibrary
 
                 ' Alternate model path
                 If Not String.IsNullOrWhiteSpace(_context.INI_AlternateModelPath) Then
-                    Dim alt = Environment.ExpandEnvironmentVariables(_context.INI_AlternateModelPath)
+                    Dim alt = ExpandEnvironmentVariables(_context.INI_AlternateModelPath)
                     If File.Exists(alt) AndAlso Not String.Equals(alt, mainPath, StringComparison.OrdinalIgnoreCase) Then
                         sb.AppendLine("<Alternate Model Configuration>")
                         sb.AppendLine($"Path: {alt}")
@@ -613,7 +613,7 @@ Namespace SharedLibrary
 
                 ' Special service path
                 If Not String.IsNullOrWhiteSpace(_context.INI_SpecialServicePath) Then
-                    Dim sp = Environment.ExpandEnvironmentVariables(_context.INI_SpecialServicePath)
+                    Dim sp = ExpandEnvironmentVariables(_context.INI_SpecialServicePath)
                     If File.Exists(sp) AndAlso Not String.Equals(sp, mainPath, StringComparison.OrdinalIgnoreCase) Then
                         sb.AppendLine("<Special Service Configuration>")
                         sb.AppendLine($"Path: {sp}")

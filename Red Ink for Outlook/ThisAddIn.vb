@@ -1,7 +1,7 @@
 ﻿' Part of "Red Ink for Outlook"
 ' Copyright (c) LawDigital Ltd., Switzerland. All rights reserved. For license to use see https://redink.ai.
 '
-' 3.6.2026
+' 4.6.2026
 '
 ' The compiled version of Red Ink also ...
 '
