@@ -60,7 +60,7 @@ Partial Public Class ThisAddIn
     Public Const AN6 As String = "Inky"
     Public Const AN4 As String = "redink_"
 
-    Public Shared Version As String = "V.030626" & SharedMethods.VersionQualifier
+    Public Shared Version As String = "V.040626" & SharedMethods.VersionQualifier
 
     Public Const ShortenPercent As Integer = 20
     Public Const SummaryPercent As Integer = 20
