@@ -461,11 +461,15 @@ Namespace SharedLibrary
         ''' <param name="pTerm">XOR key term used for decoding.</param>
         ''' <returns>Decoded text, or the literal string <c>"Error: Invalid Base64 input"</c> if Base64 decoding fails.</returns>
         Public Shared Function DecodeString(ByVal encodedText As String, ByVal pTerm As String) As String
-            ' Remove literal "\n" if present
+            encodedText = If(encodedText, "")
+            pTerm = If(pTerm, "")
+
+            If String.IsNullOrEmpty(pTerm) Then
+                Return "Error: Missing CodeBasis"
+            End If
+
             encodedText = encodedText.Replace("\n", "")
-            ' Also ensure actual newline characters are removed
             encodedText = encodedText.Replace(vbCr, "").Replace(vbLf, "")
-            ' Remove spaces if any
             encodedText = encodedText.Replace(" ", "")
 
             Dim encryptedBytes As Byte() = DecodeBase64(encodedText)
@@ -474,14 +478,16 @@ Namespace SharedLibrary
             End If
 
             Dim pTermBytes() As Byte = System.Text.Encoding.UTF8.GetBytes(pTerm)
+            If pTermBytes.Length = 0 Then
+                Return "Error: Missing CodeBasis"
+            End If
+
             Dim decryptedBytes(encryptedBytes.Length - 1) As Byte
 
             For i As Integer = 0 To encryptedBytes.Length - 1
                 decryptedBytes(i) = encryptedBytes(i) Xor pTermBytes(i Mod pTermBytes.Length)
             Next
 
-            ' Convert decrypted bytes to string
-            ' If UTF8 fails due to unexpected characters, try ASCII or verify the original encoding.
             Try
                 Return System.Text.Encoding.UTF8.GetString(decryptedBytes)
             Catch

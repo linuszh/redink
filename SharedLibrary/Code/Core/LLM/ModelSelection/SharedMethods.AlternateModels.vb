@@ -48,85 +48,120 @@ Namespace SharedLibrary
         ''' <returns>A populated <see cref="ModelConfig"/> instance.</returns>
         Public Shared Function CreateModelConfigFromDict(ByVal configDict As Dictionary(Of String, String), context As ISharedContext, Description As String) As ModelConfig
             Dim mc As New ModelConfig()
+
             Try
-                mc.APIKey = If(configDict.ContainsKey("APIKey"), configDict("APIKey"), "")
-                mc.Endpoint = If(configDict.ContainsKey("Endpoint"), configDict("Endpoint"), "")
-                mc.HeaderA = If(configDict.ContainsKey("HeaderA"), configDict("HeaderA"), "")
-                mc.HeaderB = If(configDict.ContainsKey("HeaderB"), configDict("HeaderB"), "")
-                mc.Response = If(configDict.ContainsKey("Response"), configDict("Response"), "")
-                mc.APICall = If(configDict.ContainsKey("APICall"), configDict("APICall"), "")
-                mc.APICall_Object = If(configDict.ContainsKey("APICall_Object"), configDict("APICall_Object"), "")
-                mc.Timeout = If(configDict.ContainsKey("Timeout"), CLng(configDict("Timeout")), 0)
-                mc.MaxOutputToken = If(configDict.ContainsKey("MaxOutputToken"), CInt(configDict("MaxOutputToken")), 0)
-                mc.Temperature = If(configDict.ContainsKey("Temperature"), configDict("Temperature"), "")
-                mc.Model = If(configDict.ContainsKey("Model"), configDict("Model"), "")
+                Dim defaultMergePrompt As String = ""
+                If context IsNot Nothing AndAlso context.SP_MergePrompt IsNot Nothing Then
+                    defaultMergePrompt = context.SP_MergePrompt
+                End If
+
+                mc.APIKey = GetConfigString(configDict, "APIKey")
+                mc.Endpoint = GetConfigString(configDict, "Endpoint")
+                mc.HeaderA = GetConfigString(configDict, "HeaderA")
+                mc.HeaderB = GetConfigString(configDict, "HeaderB")
+                mc.Response = GetConfigString(configDict, "Response")
+                mc.APICall = GetConfigString(configDict, "APICall")
+                mc.APICall_Object = GetConfigString(configDict, "APICall_Object")
+                mc.Timeout = GetConfigLong(configDict, "Timeout", 0)
+                mc.MaxOutputToken = GetConfigInt(configDict, "MaxOutputToken", 0)
+                mc.Temperature = GetConfigString(configDict, "Temperature")
+                mc.Model = GetConfigString(configDict, "Model")
                 mc.APIEncrypted = ParseBoolean(configDict, "APIKeyEncrypted")
-                mc.APIKeyPrefix = If(configDict.ContainsKey("APIKeyPrefix"), configDict("APIKeyPrefix"), "")
+                mc.APIKeyPrefix = GetConfigString(configDict, "APIKeyPrefix")
                 mc.OAuth2 = ParseBoolean(configDict, "OAuth2")
-                mc.OAuth2ClientMail = If(configDict.ContainsKey("OAuth2ClientMail"), configDict("OAuth2ClientMail"), "")
-                mc.OAuth2Scopes = If(configDict.ContainsKey("OAuth2Scopes"), configDict("OAuth2Scopes"), "")
-                mc.OAuth2Endpoint = If(configDict.ContainsKey("OAuth2Endpoint"), configDict("OAuth2Endpoint"), "")
-                mc.OAuth2ATExpiry = If(configDict.ContainsKey("OAuth2ATExpiry"), CLng(configDict("OAuth2ATExpiry")), 3600)
-                mc.Parameter1 = If(configDict.ContainsKey("Parameter1"), configDict("Parameter1"), "")
-                mc.Parameter2 = If(configDict.ContainsKey("Parameter2"), configDict("Parameter2"), "")
-                mc.Parameter3 = If(configDict.ContainsKey("Parameter3"), configDict("Parameter3"), "")
-                mc.Parameter4 = If(configDict.ContainsKey("Parameter4"), configDict("Parameter4"), "")
-                mc.MergePrompt = If(configDict.ContainsKey("MergePrompt"), configDict("MergePrompt"), context.SP_MergePrompt)
-                mc.QueryPrompt = If(configDict.ContainsKey("QueryPrompt"), configDict("QueryPrompt"), "")
-                mc.ModelDescription = Description
+                mc.OAuth2ClientMail = GetConfigString(configDict, "OAuth2ClientMail")
+                mc.OAuth2Scopes = GetConfigString(configDict, "OAuth2Scopes")
+                mc.OAuth2Endpoint = GetConfigString(configDict, "OAuth2Endpoint")
+                mc.OAuth2ATExpiry = GetConfigLong(configDict, "OAuth2ATExpiry", 3600)
+                mc.Parameter1 = GetConfigString(configDict, "Parameter1")
+                mc.Parameter2 = GetConfigString(configDict, "Parameter2")
+                mc.Parameter3 = GetConfigString(configDict, "Parameter3")
+                mc.Parameter4 = GetConfigString(configDict, "Parameter4")
+                mc.MergePrompt = GetConfigString(configDict, "MergePrompt", defaultMergePrompt)
+                mc.QueryPrompt = GetConfigString(configDict, "QueryPrompt")
+                mc.ModelDescription = If(Description, "")
 
                 mc.APIKeyBack = mc.APIKey
 
-                ' OAuth2-related runtime fields (default values for later refresh/usage).
                 mc.TokenExpiry = Microsoft.VisualBasic.DateAndTime.DateAdd(Microsoft.VisualBasic.DateInterval.Year, -1, DateTime.Now)
                 mc.DecodedAPI = ""
 
-                ' API key resolution:
-                ' - OAuth2: use RealAPIKeyMC(...) as returned and strip literal "\n" sequences.
-                ' - Non-OAuth2: store decoded key material in DecodedAPI; APIKey remains the original configured value.
                 If mc.OAuth2 Then
-                    mc.APIKey = Trim(Replace(RealAPIKeyMC(mc.APIKey, True, mc, context), "\n", ""))
+                    Dim resolvedApiKey As String = RealAPIKeyMC(mc.APIKey, True, mc, context)
+                    mc.APIKey = If(resolvedApiKey, "").Replace("\n", "").Trim()
                 Else
-                    mc.DecodedAPI = RealAPIKeyMC(mc.APIKey, False, mc, context)
+                    mc.DecodedAPI = If(RealAPIKeyMC(mc.APIKey, False, mc, context), "")
                 End If
 
-                ' === TOOLING PROPERTIES ===
-                ' Tooling configuration used by LLM/tool-call related features.
                 mc.Tool = ParseBoolean(configDict, "Tool")
                 mc.ToolOnly = ParseBoolean(configDict, "ToolOnly")
                 mc.Deprecated = ParseBoolean(configDict, "Off") OrElse ParseBoolean(configDict, "Deprecated")
 
-                mc.APICall_ToolInstructions = If(configDict.ContainsKey("APICall_ToolInstructions"), configDict("APICall_ToolInstructions"), "")
-                mc.APICall_ToolInstructions_Template = If(configDict.ContainsKey("APICall_ToolInstructions_Template"), configDict("APICall_ToolInstructions_Template"), "")
-                mc.APICall_ToolResponses = If(configDict.ContainsKey("APICall_ToolResponses"), configDict("APICall_ToolResponses"), "")
-                mc.APICall_ToolResponses_Template = If(configDict.ContainsKey("APICall_ToolResponses_Template"), configDict("APICall_ToolResponses_Template"), "")
-                mc.APICall_ToolCallPart_Template = If(configDict.ContainsKey("APICall_ToolCallPart_Template"), configDict("APICall_ToolCallPart_Template"), "")
-                mc.ToolCallDetectionPattern = If(configDict.ContainsKey("ToolCallDetectionPattern"), configDict("ToolCallDetectionPattern"), "")
-                mc.ToolCallExtractionMap = If(configDict.ContainsKey("ToolCallExtractionMap"), configDict("ToolCallExtractionMap"), "")
+                mc.APICall_ToolInstructions = GetConfigString(configDict, "APICall_ToolInstructions")
+                mc.APICall_ToolInstructions_Template = GetConfigString(configDict, "APICall_ToolInstructions_Template")
+                mc.APICall_ToolResponses = GetConfigString(configDict, "APICall_ToolResponses")
+                mc.APICall_ToolResponses_Template = GetConfigString(configDict, "APICall_ToolResponses_Template")
+                mc.APICall_ToolCallPart_Template = GetConfigString(configDict, "APICall_ToolCallPart_Template")
+                mc.ToolCallDetectionPattern = GetConfigString(configDict, "ToolCallDetectionPattern")
+                mc.ToolCallExtractionMap = GetConfigString(configDict, "ToolCallExtractionMap")
 
-                mc.ToolName = If(configDict.ContainsKey("ToolName"), configDict("ToolName"), "")
-                mc.ToolInstructionsPrompt = If(configDict.ContainsKey("ToolInstructionsPrompt"), configDict("ToolInstructionsPrompt"), "")
-                mc.ToolDefinition = If(configDict.ContainsKey("ToolDefinition"), configDict("ToolDefinition"), "")
-                mc.ToolAPICall = If(configDict.ContainsKey("ToolAPICall"), configDict("ToolAPICall"), "")
-                mc.ToolErrorHandling = If(configDict.ContainsKey("ToolErrorHandling"), configDict("ToolErrorHandling"), "skip")
-                mc.ToolParameterDefaults = If(configDict.ContainsKey("ToolParameterDefaults"), configDict("ToolParameterDefaults"), "")
+                mc.ToolName = GetConfigString(configDict, "ToolName")
+                mc.ToolInstructionsPrompt = GetConfigString(configDict, "ToolInstructionsPrompt")
+                mc.ToolDefinition = GetConfigString(configDict, "ToolDefinition")
+                mc.ToolAPICall = GetConfigString(configDict, "ToolAPICall")
+                mc.ToolErrorHandling = GetConfigString(configDict, "ToolErrorHandling", "skip")
+                mc.ToolParameterDefaults = GetConfigString(configDict, "ToolParameterDefaults")
 
-                If configDict.ContainsKey("ToolPriority") Then
-                    Dim priorityVal As Integer
-                    If Integer.TryParse(configDict("ToolPriority"), priorityVal) Then
-                        mc.ToolPriority = priorityVal
-                    Else
-                        mc.ToolPriority = 100
-                    End If
-                Else
-                    mc.ToolPriority = 100
-                End If
+                mc.ToolPriority = GetConfigInt(configDict, "ToolPriority", 100)
 
             Catch ex As System.Exception
-                MessageBox.Show("Error in CreateModelConfigFromDict: " & ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error)
+                ShowCustomMessageBox("Error in CreateModelConfigFromDict: " & ex.Message)
             End Try
 
             Return mc
+        End Function
+
+        Private Shared Function GetConfigString(ByVal configDict As Dictionary(Of String, String), ByVal key As String, Optional ByVal defaultValue As String = "") As String
+            If configDict Is Nothing Then
+                Return defaultValue
+            End If
+
+            Dim value As String = Nothing
+            If configDict.TryGetValue(key, value) AndAlso value IsNot Nothing Then
+                Return value
+            End If
+
+            Return defaultValue
+        End Function
+
+        Private Shared Function GetConfigLong(ByVal configDict As Dictionary(Of String, String), ByVal key As String, ByVal defaultValue As Long) As Long
+            Dim rawValue As String = GetConfigString(configDict, key, "")
+
+            If String.IsNullOrWhiteSpace(rawValue) Then
+                Return defaultValue
+            End If
+
+            Dim parsedValue As Long
+            If Long.TryParse(rawValue, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture, parsedValue) Then
+                Return parsedValue
+            End If
+
+            Return defaultValue
+        End Function
+
+        Private Shared Function GetConfigInt(ByVal configDict As Dictionary(Of String, String), ByVal key As String, ByVal defaultValue As Integer) As Integer
+            Dim rawValue As String = GetConfigString(configDict, key, "")
+
+            If String.IsNullOrWhiteSpace(rawValue) Then
+                Return defaultValue
+            End If
+
+            Dim parsedValue As Integer
+            If Integer.TryParse(rawValue, Globalization.NumberStyles.Integer, Globalization.CultureInfo.InvariantCulture, parsedValue) Then
+                Return parsedValue
+            End If
+
+            Return defaultValue
         End Function
 
         ''' <summary>

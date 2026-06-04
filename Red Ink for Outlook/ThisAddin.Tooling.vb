@@ -4561,6 +4561,8 @@ __AfterDispatch:
         ' to carry an APICall template. Anything not registered cannot be advertised.
         Agents.HostToolRegistration.RegisterOutlookInternals()
 
+        iniPath = ExpandEnvironmentVariables(iniPath)
+
         If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
             Return tools
         End If
@@ -4573,7 +4575,7 @@ __AfterDispatch:
 
                 If toolsOnly Then
                     If String.IsNullOrWhiteSpace(mc.ToolInstructionsPrompt) AndAlso
-                    String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
+                String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
                         Continue For
                     End If
                 End If
@@ -4586,11 +4588,11 @@ __AfterDispatch:
                 ' here; that prevents it from being advertised and forces the
                 ' deliverable-fallback gate to look elsewhere.
                 Dim apiTemplate As String =
-                 If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
+             If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
                 If Not String.IsNullOrWhiteSpace(apiTemplate) AndAlso
-                Not String.IsNullOrWhiteSpace(mc.ToolName) Then
+            Not String.IsNullOrWhiteSpace(mc.ToolName) Then
                     Agents.ToolExecutorRegistry.RegisterExternal(
-                     Agents.ToolingHostKind.Outlook, mc.ToolName)
+                 Agents.ToolingHostKind.Outlook, mc.ToolName)
                 End If
             Next
 
@@ -4662,9 +4664,10 @@ __AfterDispatch:
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools(Optional includeInteractiveM365Tools As Boolean = False) As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
-        If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
-            Dim externalTools = LoadToolingServices(INI_SpecialServicePath, True)
+        If Not String.IsNullOrWhiteSpace(specialServicePath) Then
+            Dim externalTools = LoadToolingServices(specialServicePath, True)
             tools.AddRange(externalTools)
         End If
 
@@ -4672,11 +4675,11 @@ __AfterDispatch:
         tools.Add(GetInternalDownloadWebFilesTool())
 
         Dim webGroundingTool =
-        SharedLibrary.Agents.WebGroundingTool.Build(
-            _context,
-            enforcePrivacy:=INI_EnablePrivacyForSearch,
-            toolPriority:=997,
-            displaySuffix:=InternalToolSuffix)
+    SharedLibrary.Agents.WebGroundingTool.Build(
+        _context,
+        enforcePrivacy:=INI_EnablePrivacyForSearch,
+        toolPriority:=997,
+        displaySuffix:=InternalToolSuffix)
 
         If webGroundingTool IsNot Nothing Then
             tools.Add(webGroundingTool)
@@ -4842,9 +4845,10 @@ __AfterDispatch:
 
     Public Function GetAvailableToolsForAutoPilotSelection() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
-        If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
-            tools.AddRange(LoadToolingServices(INI_SpecialServicePath, True))
+        If Not String.IsNullOrWhiteSpace(specialServicePath) Then
+            tools.AddRange(LoadToolingServices(specialServicePath, True))
         End If
 
         tools.Add(GetInternalWebTool())

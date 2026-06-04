@@ -68,6 +68,8 @@ Partial Public Class ThisAddIn
         ' Register host-internal tool names in the executor registry (idempotent).
         Agents.HostToolRegistration.RegisterWordInternals()
 
+        iniPath = ExpandEnvironmentVariables(iniPath)
+
         If String.IsNullOrWhiteSpace(iniPath) OrElse Not File.Exists(iniPath) Then
             Return tools
         End If
@@ -80,7 +82,7 @@ Partial Public Class ThisAddIn
 
                 If toolsOnly Then
                     If String.IsNullOrWhiteSpace(mc.ToolInstructionsPrompt) AndAlso
-                    String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
+                String.IsNullOrWhiteSpace(mc.ToolDefinition) Then
                         Continue For
                     End If
                 End If
@@ -90,11 +92,11 @@ Partial Public Class ThisAddIn
 
                 ' Register transport-backed external tools that have an APICall template.
                 Dim apiTemplate As String =
-                 If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
+             If(Not String.IsNullOrWhiteSpace(mc.ToolAPICall), mc.ToolAPICall, mc.APICall)
                 If Not String.IsNullOrWhiteSpace(apiTemplate) AndAlso
-                Not String.IsNullOrWhiteSpace(mc.ToolName) Then
+            Not String.IsNullOrWhiteSpace(mc.ToolName) Then
                     Agents.ToolExecutorRegistry.RegisterExternal(
-                     Agents.ToolingHostKind.Word, mc.ToolName)
+                 Agents.ToolingHostKind.Word, mc.ToolName)
                 End If
             Next
 
@@ -146,9 +148,10 @@ Partial Public Class ThisAddIn
     ''' <returns>List of available tools.</returns>
     Public Function GetAvailableTools() As List(Of ModelConfig)
         Dim tools As New List(Of ModelConfig)()
+        Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
-        If Not String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
-            Dim externalTools = LoadToolingServices(INI_SpecialServicePath, True)
+        If Not String.IsNullOrWhiteSpace(specialServicePath) Then
+            Dim externalTools = LoadToolingServices(specialServicePath, True)
             tools.AddRange(externalTools)
         End If
 
@@ -156,11 +159,11 @@ Partial Public Class ThisAddIn
         tools.Add(GetInternalDownloadWebFilesTool())
 
         Dim webGroundingTool =
-        SharedLibrary.Agents.WebGroundingTool.Build(
-            _context,
-            enforcePrivacy:=INI_EnablePrivacyForSearch,
-            toolPriority:=997,
-            displaySuffix:=InternalToolSuffix)
+    SharedLibrary.Agents.WebGroundingTool.Build(
+        _context,
+        enforcePrivacy:=INI_EnablePrivacyForSearch,
+        toolPriority:=997,
+        displaySuffix:=InternalToolSuffix)
 
         If webGroundingTool IsNot Nothing Then
             tools.Add(webGroundingTool)

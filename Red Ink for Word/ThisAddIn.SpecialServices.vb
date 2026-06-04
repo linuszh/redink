@@ -32,6 +32,7 @@ Option Explicit On
 Option Strict On
 
 Imports System.Data
+Imports System.Diagnostics
 Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Windows.Forms
@@ -52,6 +53,7 @@ Partial Public Class ThisAddIn
             Dim DoPane As Boolean = True
             Dim NoSelectedText As Boolean = False
             Dim AlternateText As String = ""
+            Dim specialServicePath As String = ExpandEnvironmentVariables(INI_SpecialServicePath)
 
             If String.IsNullOrWhiteSpace(INI_SpecialServicePath) Then
                 ShowCustomMessageBox("No special service path is configured.")
@@ -64,7 +66,9 @@ Partial Public Class ThisAddIn
 
             OptionChecked = False
 
-            If Not ShowModelSelection(_context, INI_SpecialServicePath, "Special Service", "Select the special service you want To query:", "Output in a pane (not directly in the document)", 2) Then
+            Debug.WriteLine($"SpecialModel invoked. Service path: '{specialServicePath}'")
+
+            If Not ShowModelSelection(_context, specialServicePath, "Special Service", "Select the special service you want To query:", "Output in a pane (not directly in the document)", 2) Then
                 originalConfigLoaded = False
                 Return
             End If

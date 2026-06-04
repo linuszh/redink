@@ -569,11 +569,12 @@ Namespace SharedLibrary
         ''' <param name="defaultvalue">Value to return when the key does not exist.</param>
         ''' <returns>The parsed boolean value, or <paramref name="defaultvalue"/> when missing.</returns>
         Public Shared Function ParseBoolean(configDict As Dictionary(Of String, String), key As String, Optional defaultvalue As Boolean = False) As Boolean
-            If configDict.ContainsKey(key) Then
-                Dim value = configDict(key).Trim().ToLower()
-                Return value = "yes" OrElse value = "true" OrElse value = "ja" OrElse value = "wahr"
+            If configDict Is Nothing OrElse Not configDict.ContainsKey(key) Then
+                Return defaultvalue
             End If
-            Return defaultvalue
+
+            Dim value As String = If(configDict(key), "").Trim().ToLowerInvariant()
+            Return value = "yes" OrElse value = "true" OrElse value = "ja" OrElse value = "wahr"
         End Function
 
 
@@ -883,18 +884,15 @@ Namespace SharedLibrary
         ''' <returns>The final API key value (with prefix applied) after optional decoding.</returns>
         Public Shared Function RealAPIKeyMC(ByVal APIInput As String, ByVal IgnorePrefix As Boolean, ByVal context As ModelConfig, context2 As ISharedContext) As String
 
-            APIInput = Trim(RemoveCR(APIInput))
+            APIInput = Trim(RemoveCR(If(APIInput, "")))
 
             Dim Prefix As String = ""
             Dim Result As String = APIInput
 
-            ' Determine the prefix based on whether it's the second API and IgnorePrefix is false.
-
             If Not IgnorePrefix Then
-                Prefix = context.APIKeyPrefix
+                Prefix = If(context.APIKeyPrefix, "")
 
                 If Not String.IsNullOrWhiteSpace(Prefix) Then
-                    ' Remove the prefix if present.
                     If APIInput.StartsWith(Prefix) Then
                         APIInput = APIInput.Substring(Prefix.Length)
                     End If
@@ -903,15 +901,33 @@ Namespace SharedLibrary
 
             Result = APIInput
 
-            ' Decode the API key if encryption is enabled for the main API.
             If context.APIEncrypted Then
-                Result = DecodeString(APIInput, context2.Codebasis)
+                Dim codeBasis As String = ""
+
+                If context2 IsNot Nothing Then
+                    codeBasis = If(context2.Codebasis, "")
+                End If
+
+                If String.IsNullOrWhiteSpace(codeBasis) Then
+                    If IsEmptyOrBlank(Int_CodeBasis) Then
+                        codeBasis = GetFromRegistry(RegPath_Base, RegPath_CodeBasis, False)
+                    Else
+                        codeBasis = Int_CodeBasis
+                    End If
+
+                    If context2 IsNot Nothing Then
+                        context2.Codebasis = codeBasis
+                    End If
+                End If
+
+                If String.IsNullOrWhiteSpace(codeBasis) Then
+                    Throw New InvalidOperationException("Missing CodeBasis for encrypted alternate model API key.")
+                End If
+
+                Result = DecodeString(APIInput, codeBasis)
             End If
 
-            ' Remove any carriage return characters.
             Result = RemoveCR(Result)
-
-            ' Add the prefix back and return the final result.
             Result = Prefix & Result
 
             Return Result
